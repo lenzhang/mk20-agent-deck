@@ -1,0 +1,2 @@
+2026-10-18 ~03:16–03:31 SGT (read-only connections API :9090)
+cursor.sh / api2.cursor.sh / api3.cursor.sh → chains US-Exit-Hy2|AI

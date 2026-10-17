@@ -1,0 +1,17 @@
+You are doing an independent READ-ONLY review of the MK20 (Allwinner T113) P2 computer-use overnight work. Do NOT edit files, do NOT run write/destructive commands, do NOT flash anything. Only read and analyze.
+
+Review these three areas and produce a structured report with: (1) Blockers (must fix before morning power-cycle), (2) Risks (non-blocking), (3) What looks sound, (4) Suggested morning user steps if any change.
+
+Focus files:
+- deck/m2-scripts/lunch-m2test.sh
+- deck/m2-scripts/mk20-add-adb.sh
+- deck/m2-scripts/DIAGNOSIS-adb-enum.md
+- deck/NOTES-computer-use-spike.md (especially overnight addendum Wi-Fi excluded + ranked design)
+- deck/RECOVERY.md §4–§5 if present
+
+Questions:
+A) SAFETY: Can the morning hook brick the device or leave it unrecoverable across power-cycles? Is one-shot self-delete + serial restore + watchdog sufficient? Any path that leaves setusbconfig wrapper stuck, qt_app2 permanently stopped, or wrong UDC state after reboot?
+B) ADB FAILURE DIAGNOSIS: Is the qt_app2/KeyboardDevice race the correct root cause for ACM returning without adb at ~02:47? Any holes in the FunctionFS order analysis? Does the new fix actually address it?
+C) RANKED DESIGN (Wi-Fi excluded): Critique ranks #1–#4 in NOTES. Any unsafe assumptions? Does #1 (ADB+HID + pty bridge) depend on proving adb first?
+
+Be concrete; cite script lines/behaviors. Keep the report under ~800 lines; prioritize blockers.

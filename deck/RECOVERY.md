@@ -147,8 +147,8 @@ PY
 If the device is in an **adb** window instead of ACM:
 
 ```bash
-adb shell 'rm -f /mnt/SDCARD/lunch.sh /mnt/SDCARD/mk20-add-adb.sh /data/mk20-add-adb.sh; /data/setusbconfig serial; killall adbd'
-# then power-cycle once
+adb shell 'rm -f /mnt/SDCARD/lunch.sh /mnt/SDCARD/mk20-add-adb.sh /data/mk20-add-adb.sh /mnt/SDCARD/m2-window.flag;   if [ -f /data/setusbconfig.real ]; then rm -f /data/setusbconfig; mv /data/setusbconfig.real /data/setusbconfig; chmod +x /data/setusbconfig; fi;   /data/setusbconfig serial; killall adbd; /etc/init.d/qt_app2 start'
+# then power-cycle once; confirm ACM getInfo + no setusbconfig.real
 ```
 
 ### 4.3 Soft-disable without deleting (future persistent hooks)

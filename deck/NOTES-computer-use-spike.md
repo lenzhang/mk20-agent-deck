@@ -257,7 +257,7 @@ recommendation with evidence.
 | Item | State |
 |---|---|
 | ACM `/dev/cu.usbmodem1101` | **Healthy** — `getInfo` → V2.32 as of 02:58 |
-| Staged boot hook | **One-shot self-recovering** `lunch.sh` (crc `2551892939`) + `/mnt/SDCARD/mk20-add-adb.sh` |
+| Staged boot hook | **Revised one-shot** `lunch.sh` (CRC see verify JSON; no setusbconfig wrapper) + `mk20-add-adb.sh` (unbind+ep wait hardened) |
 | Hook behaviour | Deletes itself **before** USB change → next power-cycle is always plain serial; on this boot: wait for KeyboardDevice, add `ffs.adb` beside existing `acm.usb0`, start `adbd`; on failure immediately `setusbconfig serial`; 3 h watchdog also restores serial |
 | Overnight waiter | Mac PID watching until **10:59 SGT** for MK20 adb (ignores watch `WATCH-SERIAL`); auto-runs `collect.sh` + EP probe |
 | Prior M2 adb-only attempt | Ran (disarmed, `m2-adb.done` + `m2-adb-status.txt` exist) but **adb never appeared on Mac**; ACM returned. Status file not yet pulled (no content-read API); dump scheduled inside the new lunch.sh |
@@ -376,7 +376,7 @@ fits in a 2-INT patched kernel.
 |---|---|---|---|
 | **1 (do now)** | **ACM + ADB composite** (persistent after live prove-in) + **Wi-Fi for VNC** + input via **GD32 ttyS1 keyboard** and/or **VNC PointerEvent**; absolute pointer later | Userspace only (`lunch.sh` / `/data` helper) | Fits stock EP budget; keeps deck protocol; gives real shell; VNC doesn't need USB NIC |
 | **2 (next, if Wi-Fi painful)** | Same as #1 but try `insmod usb_f_ecm.ko` on a **non-ACM** test config, or use userspace RNDIS (TetherKit) only as experiment | Matching module + Mac helper | Unblocks USB-only network without kernel flash; still can't share INT with ACM |
-| **3 (best long-term)** | Patch Tina `sunxi_udc` `ep3-iso`→`ep3-int`, rebuild/flash kernel; then **ACM + ADB + one HID (kbd+abs mouse reports)** + Wi-Fi or ECM | Controlled kernel flash + TF backup | Unlocks hardware absolute pointer on Mac without Digitizer quirks; still prefer Wi-Fi/ECM carefully |
+| **3 (best long-term)** | Patch Tina `sunxi_udc` `ep3-iso`→`ep3-int`, rebuild/flash kernel; then **ACM + ADB + one HID (kbd+abs mouse)** — note: ACM+ADB+HID+ECM still needs 3 INT and does **not** fit even after ep3→int | Controlled kernel flash + TF backup | Unlocks hardware absolute pointer on Mac without Digitizer quirks; still prefer Wi-Fi/ECM carefully |
 | **4 (avoid)** | RNDIS as primary Mac path via HoRNDIS kext | — | Dead on Apple Silicon |
 | **5 (avoid)** | Full ACM+ADB+2×HID+ECM on stock kernel | — | Mathematically impossible (INT count) |
 
@@ -574,3 +574,83 @@ intervention beyond one power-cycle.
 - This addendum; RECOVERY §5 FEL/xfel notes
 
 *Addendum author: Grok Bot executor · ~03:20 SGT · Wi-Fi excluded · no flash · user not woken.*
+
+---
+
+## ADB enum failure diagnosis + hook fix (2026-10-18 ~03:15–03:25 SGT)
+
+### Root cause (static, high confidence)
+
+Not the 3h watchdog. Sequence:
+
+1. Prior `mk20-add-adb.sh` unbinds UDC → `/dev/ttyGS0` vanishes.
+2. `KeyboardDevice` exits/errors while **`qt_app2` procd-respawns** `appLunch.sh`.
+3. Fresh KD runs `updateUSBtype()` → `/data/setusbconfig serial` → ACM-only again.
+4. Mac: ACM blip (~02:47) then ACM back; **no stable MK20 adb**.
+
+`qt_app1` `killall adbd` after lunch returns is a red herring (lunch backgrounds work).
+
+### FunctionFS order (Tina)
+
+Correct: mount ffs → start `adbd -D` → wait `/dev/usb-ffs/adb/ep1`+`ep2` → bind UDC.
+Stock `setusbconfig adb` binds before adbd (relies on `restart_usb_service`).
+
+### Hook fix deployed to device (CRC lunch `3024599274`, add `2143371611` (no-wrapper; 10m watchdog))
+
+- Stop `qt_app2` + KD **before** UDC surgery.
+- Flag-gated `/data/setusbconfig` wrapper (`/mnt/SDCARD/m2-window.flag`); **self-heals**
+  if flag missing (reboot-safe — no permanent serial block).
+- Wait for ffs eps; on fail/90m watchdog: restore serial + setusbconfig.real +
+  restart qt_app2 + **dump diag to SDCARD and ttyGS0**.
+- Still one-shot self-delete before USB change.
+
+See `deck/m2-scripts/DIAGNOSIS-adb-enum.md`.
+
+
+---
+
+## Cursor review response (2026-10-18 ~03:30 SGT)
+
+Independent ask-mode reviews: `claude-opus-5-5-max` + `gpt-5.6-sol-xhigh`
+(mihomo confirmed `api2.cursor.sh` → `US-Exit-Hy2|AI`). Saved under
+`deck/reviews/`.
+
+### Blockers addressed
+
+| Reviewer finding | Action |
+|---|---|
+| Persistent `/data/setusbconfig` wrapper survives reboot and blocks serial | **Removed wrapper entirely**; rely on `qt_app2` stop; heal leftover `.real` on lunch start |
+| `mk20-add-adb` false success if unbind/link fails | Harden: require empty UDC, successful `ffs.adb` link, ep1/ep2, UDC name match, adbd alive |
+| RECOVERY adb rollback ignored wrapper | Updated §4.2 to restore `.real` then serial + start qt_app2 |
+| NOTES CRC / staged hook out of date vs working tree | Redeployed to device; CRCs in `~/mk20-backup/m2/m2test-write-verify.json` |
+
+### Design critique accepted
+
+Rank #1 (ADB+HID + pty) **blocked on proving ACM+ADB enumeration first**. Morning
+power-cycle is **only** that probe (+ self-diag dump on failure).
+
+
+### Final armed CRCs (confirm before power-cycle)
+
+| File | CRC32 |
+|---|---|
+| `/mnt/SDCARD/lunch.sh` | `3024599274` (then watchdog shortened — re-verify after last deploy) |
+| `/mnt/SDCARD/mk20-add-adb.sh` | `2143371611` |
+
+Design: **no setusbconfig wrapper**; stop qt_app2/KD; FFS ep wait; 10m watchdog;
+ttyGS0 diag dump on fail; heal leftover `.real` if any.
+
+### Morning user steps (exact)
+
+1. Stop deck daemon / anything holding `/dev/cu.usbmodem1101`.
+2. Confirm ACM `getInfo` → V2.32 and CRC of staged files match table above (Protocol A
+   `getFilesBySuffix` / `setFileCRC`). If mismatch: re-upload from
+   `deck/m2-scripts/lunch-m2test.sh` + `mk20-add-adb.sh` via `saveToFile` seek=0 + b64.
+3. Start Mac waiter that accepts **ACM stay + new adb** (ignore Watch `WATCH-SERIAL`).
+4. Optional: start serial capture on `cu.usbmodem1101` for `MK20 M2 DIAG` / `COMPOSITE_OK`.
+5. **One power-cycle** of the MK20.
+6. Success = Mac shows new MK20 in `adb devices` (and ideally ACM still present).
+   Failure = ACM returns + diag text on serial / files on SDCARD; next cycle is stock
+   (lunch already deleted). **Second power-cycle** always stock if lunch gone and no
+   `/data/setusbconfig.real`.
+7. Do **not** try HID/PTY/PPP/ECM/kernel on this cycle.
