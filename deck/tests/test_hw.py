@@ -180,3 +180,16 @@ def test_power_monitor_detects_sleep_and_display():
     wall[0] += 600; mono[0] += 1  # suspended: monotonic stood still
     disp[0] = False
     assert pm.poll() == ["system_wake", "display_wake"] and pm.last_sleep_s == pytest.approx(599)
+
+
+def test_via_detects_matrix_when_layer0_is_all_kc_no():
+    """Real MK20: layer 0 sanitized to KC_NO, layers 1-3 KC_TRNS, 4x5 matrix."""
+    from mk20deck.hw.via import MockViaKeyboard, ViaClient, backup, KC_NO, KC_TRNS
+    kb = MockViaKeyboard(rows=4, cols=5, encoder_support=False)
+    for l in range(kb.layers):
+        for r in range(4):
+            for c in range(5):
+                kb._set(l, r, c, KC_NO if l == 0 else KC_TRNS)
+    b = backup(ViaClient(kb), encoders=2)
+    assert (b.rows, b.cols) == (4, 5) and b.data["matrix"]["detected"]
+    assert not kb.writes

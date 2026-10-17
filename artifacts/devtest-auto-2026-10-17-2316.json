@@ -1,0 +1,128 @@
+{
+ "format": "mk20deck-devtest/1",
+ "started": "2026-10-17T23:15:58+08:00",
+ "options": {
+  "interactive": false,
+  "port": "/dev/cu.usbmodem1101",
+  "fps_seconds": 5.0,
+  "ack_frames": 20,
+  "probe_reject": true,
+  "keys": true,
+  "knobs": true,
+  "timing": true,
+  "reconnect": true,
+  "sleep": false,
+  "via": true,
+  "allow_device_writes": false,
+  "backlight_level": null,
+  "step_timeout": 20.0,
+  "quiet_s": 1.5
+ },
+ "sections": {
+  "usb": {
+   "status": "pass",
+   "source": "ioreg",
+   "notes": [],
+   "t113_cdc": true,
+   "gd32_via": true,
+   "gd32_dfu": false,
+   "t113_fel": false,
+   "devices": [
+    {
+     "vid": "0x05e3",
+     "pid": "0x0610",
+     "name": "USB2.0 Hub@00100000",
+     "serial": "",
+     "location": "0x100000",
+     "role": "GL852G hub"
+    },
+    {
+     "vid": "0x4250",
+     "pid": "0x426f",
+     "name": "syk_keyboards@00120000",
+     "serial": "",
+     "location": "0x120000",
+     "role": "GD32 QMK/VIA keyboard (HID)"
+    },
+    {
+     "vid": "0x1d6b",
+     "pid": "0x0104",
+     "name": "Serial@00110000",
+     "serial": "",
+     "location": "0x110000",
+     "role": "T113 gadget (CDC-ECM + CDC-ACM, Protocol A)"
+    }
+   ]
+  },
+  "port": {
+   "status": "pass",
+   "ports": [
+    "/dev/cu.usbmodem1101"
+   ],
+   "usb_ids": [
+    "1d6b:0104",
+    "1234:5678"
+   ],
+   "users": {
+    "pids": [],
+    "screenkey": []
+   },
+   "note": ""
+  },
+  "getinfo": {
+   "status": "error",
+   "error": "ConnectionError: getInfo failed: timeout"
+  },
+  "methods": {
+   "status": "skip",
+   "reason": "未连接设备"
+  },
+  "files": {
+   "status": "skip",
+   "reason": "未连接设备"
+  },
+  "display": {
+   "status": "skip",
+   "reason": "未连接设备"
+  },
+  "backlight": {
+   "status": "skip",
+   "reason": "未请求（--allow-device-writes --backlight N）"
+  },
+  "keys": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "knobs": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "hid_leak": {
+   "status": "skip",
+   "reason": "未执行按键/旋钮引导"
+  },
+  "ptt": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "timing": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "reconnect": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "sleep": {
+   "status": "skip",
+   "reason": "未启用（--with-sleep）"
+  },
+  "via": {
+   "status": "error",
+   "error": "ViaError: cannot detect matrix size; pass --rows/--cols"
+  }
+ },
+ "finished": "2026-10-17T23:16:00+08:00",
+ "suggested_config": {},
+ "raw_events": []
+}

@@ -223,8 +223,18 @@ class ViaClient:
 
 # ------------------------------------------------------------------ matrix detection
 def detect_matrix(client: ViaClient, raw: bytes, max_rows: int = 8, max_cols: int = 24,
-                  min_keys: int = 20, max_keys: int = 64) -> tuple[int, int] | None:
-    """Find (rows, cols) such that get_keycode(0, r, c) == raw[(r*cols+c)*2] for every cell.
+                  min_keys: int = 20, max_keys: int = 64, layers: int = 1) -> tuple[int, int] | None:
+    """Try layer 0 first, then later layers (a sanitized layer 0 may be all KC_NO)."""
+    for layer in range(max(1, layers)):
+        hit = _detect_matrix_on_layer(client, raw, layer, max_rows, max_cols, min_keys, max_keys)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _detect_matrix_on_layer(client: ViaClient, raw: bytes, layer: int, max_rows: int, max_cols: int,
+                            min_keys: int, max_keys: int) -> tuple[int, int] | None:
+    """Find (rows, cols) such that get_keycode(L, r, c) == raw[((L*rows+r)*cols+c)*2] for every cell.
 
     QMK's get_keycode returns KC_NO outside the matrix while the raw buffer
     continues with the next row, so wrong sizes disagree unless the keymap is
@@ -234,7 +244,7 @@ def detect_matrix(client: ViaClient, raw: bytes, max_rows: int = 8, max_cols: in
 
     def kc(r: int, c: int) -> int:
         if (r, c) not in cache:
-            cache[(r, c)] = client.keycode(0, r, c)
+            cache[(r, c)] = client.keycode(layer, r, c)
         return cache[(r, c)]
 
     def raw_kc(i: int) -> int:
@@ -249,7 +259,7 @@ def detect_matrix(client: ViaClient, raw: bytes, max_rows: int = 8, max_cols: in
             ok = True
             for r in range(rows):
                 for c in range(cols):
-                    if kc(r, c) != raw_kc(r * cols + c):
+                    if kc(r, c) != raw_kc((layer * rows + r) * cols + c):
                         ok = False
                         break
                 if not ok:
@@ -303,7 +313,7 @@ def backup(client: ViaClient, rows: int | None = None, cols: int | None = None, 
     raw = client.get_buffer(0, layers * raw_bytes_per_layer)
     detected = None
     if rows is None or cols is None:
-        detected = detect_matrix(client, raw)
+        detected = detect_matrix(client, raw, layers=layers)
         if detected is None:
             raise ViaError("cannot detect matrix size; pass --rows/--cols")
         rows, cols = detected
