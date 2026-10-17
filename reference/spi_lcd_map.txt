@@ -1,0 +1,27 @@
+== spi0 spi@4025000 max-freq 0x4c4b400 pinctrl 0x28
+  gc9107   reg= 0 compat=syk,gc9107   CS=PC6   DC=PC5   rotate=0
+  gc9107   reg= 1 compat=syk,gc9107   CS=PG11  DC=PC7   rotate=0
+  gc9107   reg= 2 compat=syk,gc9107   CS=PE2   DC=PE3   rotate=0
+  gc9107   reg= 3 compat=syk,gc9107   CS=PE8   DC=PE9   rotate=0
+  gc9107   reg= 4 compat=syk,gc9107   CS=PE6   DC=PE7   rotate=0
+  gc9107   reg= 5 compat=syk,gc9107   CS=PE4   DC=PE5   rotate=0
+  gc9107   reg= 6 compat=syk,gc9107   CS=PE1   DC=PE0   rotate=0
+  gc9107   reg= 7 compat=syk,gc9107   CS=PD20  DC=PD21  rotate=0
+  gc9107   reg= 8 compat=syk,gc9107   CS=PD1   DC=PD0   rotate=0
+  nv3007   reg= 9 compat=syk,nv3007   CS=PG9   DC=PG8   rotate=0
+== spi1 spi@4026000 max-freq 0x4c4b400 pinctrl 0x2a
+  gc9107   reg= 0 compat=syk,gc9107   CS=PD3   DC=PD2   rotate=0
+  gc9107   reg= 1 compat=syk,gc9107   CS=PD5   DC=PD4   rotate=0
+  gc9107   reg= 2 compat=syk,gc9107   CS=PD7   DC=PD6   rotate=0
+  gc9107   reg= 3 compat=syk,gc9107   CS=PD9   DC=PD8   rotate=0
+  gc9107   reg= 4 compat=syk,gc9107   CS=PD13  DC=PD10  rotate=0
+  gc9107   reg= 5 compat=syk,gc9107   CS=PD15  DC=PD14  rotate=0
+  gc9107   reg= 6 compat=syk,gc9107   CS=PD17  DC=PD16  rotate=0
+  gc9107   reg= 7 compat=syk,gc9107   CS=PD19  DC=PD18  rotate=0
+  gc9107   reg= 8 compat=syk,gc9107   CS=PB4   DC=PB5   rotate=0
+  gc9107   reg= 9 compat=syk,gc9107   CS=PB2   DC=PB3   rotate=0
+  gc9107   reg=10 compat=syk,gc9107   CS=PG0   DC=PG2   rotate=0
+spi0@0  pins = "PC2", "PC4"; function = "spi0"; drive-strength = <0x28>; phandle = <0x28>; 
+spi0@2  pins = "PC2", "PC4"; function = "gpio_in"; drive-strength = <0x28>; phandle = <0x29>; 
+spi1@0  pins = "PD11", "PD12"; function = "spi1"; drive-strength = <0x28>; phandle = <0x2a>; 
+spi1@2  pins = "PD11", "PD12"; allwinner,function = "gpio_in"; allwinner,muxsel = <0x00>; drive-strength = <0x28>; phandle = <0x2b>; 
