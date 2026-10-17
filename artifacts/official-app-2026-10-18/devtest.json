@@ -1,0 +1,466 @@
+{
+ "format": "mk20deck-devtest/1",
+ "started": "2026-10-18T00:06:28+08:00",
+ "options": {
+  "interactive": false,
+  "port": "/dev/cu.usbmodem1101",
+  "fps_seconds": 5.0,
+  "ack_frames": 20,
+  "probe_reject": true,
+  "keys": true,
+  "knobs": true,
+  "timing": true,
+  "reconnect": true,
+  "sleep": false,
+  "via": true,
+  "allow_device_writes": false,
+  "backlight_level": null,
+  "step_timeout": 20.0,
+  "quiet_s": 1.5
+ },
+ "sections": {
+  "usb": {
+   "status": "pass",
+   "source": "ioreg",
+   "notes": [],
+   "t113_cdc": true,
+   "gd32_via": true,
+   "gd32_dfu": false,
+   "t113_fel": false,
+   "devices": [
+    {
+     "vid": "0x05e3",
+     "pid": "0x0610",
+     "name": "USB2.0 Hub@00100000",
+     "serial": "",
+     "location": "0x100000",
+     "role": "GL852G hub"
+    },
+    {
+     "vid": "0x4250",
+     "pid": "0x426f",
+     "name": "syk_keyboards@00120000",
+     "serial": "",
+     "location": "0x120000",
+     "role": "GD32 QMK/VIA keyboard (HID)"
+    },
+    {
+     "vid": "0x1d6b",
+     "pid": "0x0104",
+     "name": "Serial@00110000",
+     "serial": "",
+     "location": "0x110000",
+     "role": "T113 gadget (CDC-ECM + CDC-ACM, Protocol A)"
+    }
+   ]
+  },
+  "port": {
+   "status": "pass",
+   "ports": [
+    "/dev/cu.usbmodem1101"
+   ],
+   "usb_ids": [
+    "1d6b:0104",
+    "1234:5678"
+   ],
+   "users": {
+    "pids": [],
+    "screenkey": []
+   },
+   "note": ""
+  },
+  "getinfo": {
+   "status": "pass",
+   "handshake_ms": 142.3,
+   "canvas": [
+    640,
+    656
+   ],
+   "matches_default_guess": true,
+   "key_rects": 20,
+   "fw_base_inferred": 0,
+   "cols": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "rows": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "subscreen": [
+    106,
+    0,
+    428,
+    142
+   ],
+   "model": "MK20",
+   "version": "V2.32",
+   "problems": [],
+   "raw": {
+    "deviceHeight": 656,
+    "deviceModel": "MK20",
+    "devicePanel": {
+     "rectCols": 5,
+     "rectRows": 4,
+     "rects": [
+      {
+       "col": 0,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 0,
+       "y": 144
+      },
+      {
+       "col": 1,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 128,
+       "y": 144
+      },
+      {
+       "col": 2,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 256,
+       "y": 144
+      },
+      {
+       "col": 3,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 384,
+       "y": 144
+      },
+      {
+       "col": 4,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 512,
+       "y": 144
+      },
+      {
+       "col": 0,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 0,
+       "y": 272
+      },
+      {
+       "col": 1,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 128,
+       "y": 272
+      },
+      {
+       "col": 2,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 256,
+       "y": 272
+      },
+      {
+       "col": 3,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 384,
+       "y": 272
+      },
+      {
+       "col": 4,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 512,
+       "y": 272
+      },
+      {
+       "col": 0,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 0,
+       "y": 400
+      },
+      {
+       "col": 1,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 128,
+       "y": 400
+      },
+      {
+       "col": 2,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 256,
+       "y": 400
+      },
+      {
+       "col": 3,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 384,
+       "y": 400
+      },
+      {
+       "col": 4,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 512,
+       "y": 400
+      },
+      {
+       "col": 0,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 0,
+       "y": 528
+      },
+      {
+       "col": 1,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 128,
+       "y": 528
+      },
+      {
+       "col": 2,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 256,
+       "y": 528
+      },
+      {
+       "col": 3,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 384,
+       "y": 528
+      },
+      {
+       "col": 4,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 512,
+       "y": 528
+      },
+      {
+       "height": 142,
+       "isKey": false,
+       "width": 428,
+       "x": 106,
+       "y": 0
+      }
+     ],
+     "screenHeight": 656,
+     "screenWidth": 640
+    },
+    "deviceVersion": "V2.32",
+    "deviceWidth": 640
+   }
+  },
+  "methods": {
+   "status": "pass",
+   "available": [
+    "deleteFiles",
+    "getFilesBySuffix",
+    "getInfo",
+    "keyboardInput",
+    "playAudio",
+    "saveToFile",
+    "setBacklight",
+    "setFileCRC",
+    "setVolume",
+    "stopAudio"
+   ],
+   "new_vs_known": [],
+   "raw": {
+    "ack_method": "mk20deckProbe",
+    "errorString": "Unknown method: mk20deckProbe. Available methods: [deleteFiles, getFilesBySuffix, getInfo, keyboardInput, playAudio, saveToFile, setBacklight, setFileCRC, setVolume, stopAudio]",
+    "success": false
+   }
+  },
+  "files": {
+   "status": "pass",
+   "suffixes": [
+    ".jpg",
+    ".png",
+    ".gif",
+    ".wav",
+    ".mp3",
+    ".json",
+    ".txt",
+    ".ini",
+    ".conf",
+    ".bin",
+    ".sh",
+    ".zip"
+   ],
+   "count": 0,
+   "files": [],
+   "error": null,
+   "note": "协议只有列表/写入/删除，没有读文件方法 → 设备文件无法经 CDC 备份；P0 不写 T113 文件"
+  },
+  "display": {
+   "status": "pass",
+   "jpeg": {
+    "60": {
+     "pattern_bytes": 39607,
+     "noise_bytes": 176378
+    },
+    "85": {
+     "pattern_bytes": 54169,
+     "noise_bytes": 281347
+    },
+    "95": {
+     "pattern_bytes": 74891,
+     "noise_bytes": 434376
+    }
+   },
+   "ack": {
+    "n": 20,
+    "p50_ms": 15.2,
+    "p95_ms": 17.7,
+    "mean_ms": 16.2,
+    "timeouts": 0
+   },
+   "full_screen": {
+    "pattern_q85": {
+     "frames": 336,
+     "seconds": 5.01,
+     "fps": 67.01,
+     "ack_p50_ms": 15.1,
+     "ack_p95_ms": 17.8,
+     "bytes": 56265
+    },
+    "noise_q85": {
+     "frames": 94,
+     "seconds": 5.02,
+     "fps": 18.74,
+     "ack_p50_ms": 52.4,
+     "ack_p95_ms": 65.1,
+     "bytes": 283008
+    }
+   },
+   "wrong_resolution": {
+    "acked": false,
+    "device_errors": [
+     "Incorrect resolution, the device requires the resolution to be 640x656"
+    ]
+   },
+   "visual_ok": null,
+   "recommended_max_fps": 8.0
+  },
+  "backlight": {
+   "status": "skip",
+   "reason": "未请求（--allow-device-writes --backlight N）"
+  },
+  "keys": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "knobs": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "hid_leak": {
+   "status": "skip",
+   "reason": "未执行按键/旋钮引导"
+  },
+  "ptt": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "timing": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "reconnect": {
+   "status": "skip",
+   "reason": "非交互模式（--auto）"
+  },
+  "sleep": {
+   "status": "skip",
+   "reason": "未启用（--with-sleep）"
+  },
+  "via": {
+   "status": "pass",
+   "backup": "/Users/dev/mk20-backup/2026-10-17/devtest-auto-2/via-backup.json",
+   "protocol_version": 12,
+   "layers": 4,
+   "matrix": {
+    "rows": 4,
+    "cols": 5,
+    "detected": true
+   },
+   "layer0_side_effect_keys": 0,
+   "layer0_has_ralt": false,
+   "encoders_layer0": [
+    {
+     "error": "VIA command 0x14 unhandled by firmware"
+    },
+    {
+     "error": "VIA command 0x14 unhandled by firmware"
+    }
+   ],
+   "note": "只读导出；KC_NO 净化/PTT KC_RALT 需另行批准后用 via-restore 写入"
+  }
+ },
+ "finished": "2026-10-18T00:06:43+08:00",
+ "suggested_config": {
+  "fw_coord_base": 0,
+  "max_fps": 8.0
+ },
+ "raw_events": [
+  {
+   "t": 45122.07,
+   "id": 4294967295,
+   "errorString": "Incorrect resolution, the device requires the resolution to be 640x656",
+   "requestId": 454
+  }
+ ]
+}

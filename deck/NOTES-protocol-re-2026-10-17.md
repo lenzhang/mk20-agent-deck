@@ -130,3 +130,38 @@ So the "offline default mode" is simply V1, which is the boot default. It doesn'
   - the consumer of ttyGS0 is not KeyboardDevice's SerialPort, or
   - its reply path (`RemoteCommandExecutor` → `writeData`) is not running.
   This needs a device-side view: the ttyS3 console (`ttyS3::askfirst:/bin/ash --login` in inittab; UART pads, 3.3 V) or a read-only image of the TF card (`log.txt`, `lunch.sh`, `overlayDir`).
+
+## Official app test (2026-10-18, 00:00–00:08 SGT)
+
+**Setup**
+- Installed `ScreenKeyMacOS_v1_1.dmg` from the GitHub release (sha256 863ccc9b…b17f, verified).
+- App copied to `~/Applications`; quarantine removed for that app only.
+- Rosetta 2 was missing, so I installed it.
+- Launched via `open` with stdout/stderr going to a log.
+
+**Observation limits**
+- Screen capture fails ("could not create image from display"): Terminal has no Screen Recording permission.
+- System Events returned nothing, so there was no Accessibility access.
+- So the app's UI was not observed. I used lsof, `fs_usage` (passwordless sudo) and C920 photos instead.
+
+**Timeline** (`artifacts/official-app-2026-10-18/`)
+- 00:00:12: instance 1 (pid 40322) opens `/dev/tty.usbmodem1101` and holds the lock file. Its port offset only reaches about 8 KB.
+- 00:01:43: instance 2 (pid 40967) starts and instance 1 is gone. There was no crash report; who restarted it is unknown.
+  - Instance 2's tty offset reached **3,989,555 B**. That is the size of the app's `static/deviceResources/data/KeyboardDevice` (**3,980,864 B**, manifest version V2.32) plus about 8.7 KB of protocol traffic. So the app pushed daemon V2.32 to the device.
+- 00:03:07: instance 3 (pid 41625) starts. It never opens the port (lsof and fs_usage show no open).
+- 00:03:30: the whole MK20 re-enumerates: hub, GD32, and then the T113 CDC at 00:04:04. Unclear whether that was a replug or the device rebooting.
+- 00:05:5x: app quit (SIGTERM).
+
+**Our client afterwards**
+- **getInfo answers at once:** `deviceVersion "V2.32"` (was V2.31), MK20, 640×656, 20 keys plus a 428×142 subscreen at (106,0). Saved as `getinfo-0006.json`.
+- **devtest --auto** (00:06:28): usb, port, getinfo, methods, files, display and via all **pass**.
+  - Handshake 142 ms.
+  - ACK p50/p95 15.2/17.7 ms.
+  - Pattern frames at 67 fps, noise frames at 18.7 fps; suggested `max_fps` 8.
+  - `fw_coord_base` = 0.
+- **Backlight is 0 after the switch to host mode:** the screens were dark even though JPEG ACKs came back. After `setBacklight(80)` (acked, success) the test pattern is visible: `artifacts/device-testimage-2026-10-18-0008.jpg`.
+
+**Implications**
+- With V2.31 the device never replied on `/dev/ttyGS0`. With V2.32 plus a re-enumeration it replies at once. The root cause was device-side: the old daemon or its state. It was not our codec.
+- Our client must call `setBacklight` after the handshake. Otherwise the deck stays dark in host mode.
+- Once a host sends getInfo, the device is in V2 and offline typing stops until the next reboot or replug. That is expected for P0, but worth stating in the docs.
