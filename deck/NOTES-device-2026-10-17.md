@@ -48,3 +48,30 @@ Gated run order: usb-list → via-backup → devtest --auto → photo. Nothing w
   - The T113 UART0 pads are internal; reaching them means opening the case and using a 3.3 V USB-UART at 115200 8N1.
   - FEL mode (1f3a:efe8) needs the FEL/uboot button or an SD card removal.
   - `/dev/cu.debug-console` is the Mac's own console, not the MK20.
+
+## Headless devtest run 1 (2026-10-18 00:14–00:21 SGT)
+Results are in `artifacts/devtest-headless-20261018-001433/`.
+
+- **Start gate:** nobody pressed within 180 s, so the run continued on its own at 00:17:58.
+- **Keys:**
+  - 17 of 20 keys were detected over CDC as `{"method":"keyStateChanged","parameters":{"col":C,"row":R,"pressed":bool}}`.
+  - Coordinates are firmware-native and **0-based**: document (c,r) → fw (c-1,r-1). There is no transposition.
+  - Holds were 108–168 ms.
+- **Keys 1,1 / 2,1 / 3,1 were never tested.** The step advanced on a stray `systemDefined` HID sample, which macOS also posts for every mouse click, before the user had reached the deck. Two fixes:
+  - Key steps now wait for the CDC press only.
+  - `systemDefined` samples that coincide with a mouse-down or mouse-up are dropped.
+- **Knobs:**
+  - K2 press → `keyStateChanged` col=103 row=103 (pressed true/false).
+  - K1 cw/ccw/press and K2 cw/ccw produced **no CDC event**.
+  - The only HID sample during the knob steps was a single keyDown during K2 cw, not correlated with any press.
+  - The daemon decompile shows `STM32CommunicationObject::keyStateChanged` connected straight to `SerialPort::device_keyState_Changed` (which sends `keyStateChanged` cmd 101) in `main()`, so anything the GD32 reports over ttyS1 reaches the host. Rotation apparently isn't reported over ttyS1 in V2.
+  - Knob re-run pending.
+- **PTT:** CDC visible at fw (0,3). The press was 160 ms (a tap, not the requested 2 s hold). No `flagsChanged` was seen, so no Right Option reached the Mac (consistent with VIA layer 0 = KC_NO).
+- **Timing:**
+  - tap 54–109 ms
+  - double-tap gaps 158–218 ms
+  - long presses 657 / 865 / 927 ms
+  - The 600 ms long-press and 350 ms double-tap thresholds both fit, though the 657 ms long press is close to the limit.
+- **HID leak:** 0 samples correlated with MK20 presses. Leftovers: 3 keyDown and 6 systemDefined (mouse clicks or Mac typing while waiting).
+- **Reconnect:** the unplug was detected after 9.1 s. The port did not come back within the 40 s window, so the window is now 90 s in headless mode.
+- **Cold boot answers (critical):** at 00:25:17 SGT the freshly replugged device (booted 00:21, no host access since) answered our very first `getInfo` (no preamble) in 15 ms with V2.32. The earlier silence was specific to V2.31.

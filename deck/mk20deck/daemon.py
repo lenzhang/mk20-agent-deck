@@ -80,6 +80,10 @@ class Daemon:
                 self.events.put(InputEvent("knob", knob, action, t=now))
             return
         lay = self.renderer.layout
+        if lay.keys and not any(r.col == ev.col and r.row == ev.row for r in lay.keys):
+            # knobs report col/row >= 100; never let an unmapped one reach the key grid
+            log.info("unmapped non-key event %d,%d (add it to [knobs])", ev.col, ev.row)
+            return
         col, row = lay.fw_to_doc(ev.col, ev.row)
         self.events.put(InputEvent("key", col, row, ev.pressed, t=now))
 

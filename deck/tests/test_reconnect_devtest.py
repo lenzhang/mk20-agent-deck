@@ -423,3 +423,71 @@ def test_hid_activity_monitor_detects_idle_resets():
     c = correlate(m.samples, [10.8, 50.0])
     assert c["correlated"] == 1 and c["uncorrelated"] == 0
     assert correlate(m.samples, [20.0])["uncorrelated"] == 1
+
+
+def test_mouse_click_systemdefined_is_not_hid_activity():
+    from mk20deck.hw.hidwatch import drop_mouse_aux
+    s = [(1.0, "leftMouseDown"), (1.01, "systemDefined"), (2.0, "systemDefined"), (3.0, "keyDown")]
+    assert drop_mouse_aux(s) == [(1.0, "leftMouseDown"), (2.0, "systemDefined"), (3.0, "keyDown")]
+
+
+def test_headless_key_step_does_not_advance_on_hid_alone(tmp_path):
+    state = {"dev": MockDevice(), "present": True}
+    hid = FakeHid()
+
+    def late_press():
+        hid.add("systemDefined")  # e.g. a media key / click on the Mac before the user reaches the deck
+        time.sleep(0.3)
+        state["dev"].press(0, 0, True)
+        time.sleep(0.05)
+        state["dev"].press(0, 0, False)
+
+    acts = {"start": lambda: (state["dev"].press(4, 3, True), state["dev"].press(4, 3, False)), "key:1,1": late_press}
+    rep = _headless(tmp_path, state, acts, hid, only=("keys",)).run()
+    r = rep["sections"]["keys"]["results"]["1,1"]
+    assert r["ok"] and r["fw"] == [0, 0]
+    assert rep["sections"]["display"]["status"] == "skip" and rep["sections"]["via"]["status"] == "skip"
+
+
+def test_headless_only_knobs_rerun_and_knob_coords(tmp_path):
+    from mk20deck.hw.devtest import step_plan
+    state = {"dev": MockDevice(), "present": True}
+    hid = FakeHid()
+
+    def tap(c, r):
+        state["dev"].press(c, r, True)
+        time.sleep(0.03)
+        state["dev"].press(c, r, False)
+
+    acts = {"start": lambda: tap(1, 1), "knob:K2:press": lambda: tap(103, 103),
+            "knob:K1:cw": lambda: hid.add("systemDefined")}  # rotation arriving only as a Mac media key
+    opts_only = ("knobs", "hid_leak")
+    rep = _headless(tmp_path, state, acts, hid, only=opts_only).run()
+    s = rep["sections"]
+    assert rep["step_plan"] == step_plan(DevTestOptions(headless=True, only=opts_only))
+    assert len(rep["step_plan"]) == 7
+    assert s["keys"]["status"] == "skip" and s["ptt"]["status"] == "skip"
+    assert s["knobs"]["suggested_knob_map"] == {"103,103": "K2:press"}
+    assert s["knobs"]["results"]["knob:K1:cw"]["hid_activity"] == ["systemDefined"]
+    assert s["hid_leak"]["status"] == "warn" and s["hid_leak"]["knob_steps_with_hid"] == ["knob:K1:cw"]
+    assert rep["hid_samples"] and rep["step_log"][0]["step"] == "start"
+
+
+def test_daemon_maps_k2_press_and_drops_unmapped_knob_coords():
+    from mk20deck import protocol as P
+    clk = FakeClock()
+    cfg = DeckConfig()
+    assert cfg.knob_map == {"103,103": "K2:press"}
+    d = Daemon(_ctl(clk), Renderer(DeviceLayout.default()), None, clock=clk, knob_map=cfg.knob_map)
+    d.on_device_key(P.KeyEvent(103, 103, True))
+    d.on_device_key(P.KeyEvent(101, 101, True))  # unknown knob event: must not become a grid key
+    d.on_device_key(P.KeyEvent(0, 3, True))
+    got = [d.events.get_nowait() for _ in range(d.events.qsize())]
+    assert [(e.kind, e.a, e.b) for e in got] == [("knob", 2, "down"), ("key", 1, 4)]
+
+
+def test_step_plan_key_subset():
+    from mk20deck.hw.devtest import step_plan
+    p = step_plan(DevTestOptions(headless=True, only=("keys", "knobs", "ptt", "hid_leak", "reconnect"),
+                                 key_subset=("1,1", "2,1", "3,1")))
+    assert len(p) == 1 + 3 + 6 + 1 + 1 and "第1行 第3列" in p[3]

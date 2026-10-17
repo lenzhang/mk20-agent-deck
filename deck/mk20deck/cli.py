@@ -125,7 +125,9 @@ def cmd_devtest(args) -> int:
                           probe_reject=not args.no_reject_probe, allow_device_writes=args.allow_device_writes,
                           backlight_level=args.backlight, step_timeout=args.step_timeout,
                           headless=args.headless, start_timeout=args.start_timeout,
-                          overall_timeout=args.overall_timeout if args.headless else None)
+                          overall_timeout=args.overall_timeout if args.headless else None,
+                          key_subset=tuple(k.strip() for k in args.keys.split(";") if k.strip()) if args.keys else (),
+                          only=tuple(x.strip() for x in args.only.split(",") if x.strip()) if args.only else ())
     via_open = None
     if opts.via:
         via_open = _via_open_factory(allow_writes=False)
@@ -265,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
     dt.add_argument("--backlight", type=int, default=None)
     dt.add_argument("--headless", action="store_true",
                     help="no terminal input: guided on the device screens, auto-advance/skip, automatic HID-leak check")
+    dt.add_argument("--keys", default="", help='subset of keys, document col,row separated by ";" e.g. "1,1;2,1"')
+    dt.add_argument("--only", default="", help="comma list of sections, e.g. knobs,ptt,reconnect")
     dt.add_argument("--start-timeout", type=float, default=180.0, help="headless: wait for the first key press")
     dt.add_argument("--overall-timeout", type=float, default=300.0, help="headless: guided-phase budget after start")
     dt.set_defaults(fn=cmd_devtest)

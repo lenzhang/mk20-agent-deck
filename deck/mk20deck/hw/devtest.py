@@ -239,6 +239,8 @@ class DevTestOptions:
     headless: bool = False
     start_timeout: float = 180.0  # headless: wait this long for the first key press ("press any key")
     overall_timeout: float | None = None  # guided-phase budget (s) after the start gate; then skip+record
+    key_subset: tuple = ()  # document "col,row" keys to test (default: all 20)
+    only: tuple = ()  # restrict to these sections (+ usb/port/getinfo/backlight), e.g. ("knobs", "ptt")
 
 
 @dataclass
@@ -262,6 +264,7 @@ class DevTest:
     step_no: int = 0
     done_keys: set = field(default_factory=set)
     progress_path: str | None = None
+    step_log: list = field(default_factory=list)
 
     # -------------------------------------------------- plumbing
     def _sec(self, name: str, status: str, **kw) -> dict:
@@ -295,6 +298,7 @@ class DevTest:
     def _step(self, name: str, text: str, highlight=None) -> float:
         """Announce one guided step (device + log + progress file); returns its start time."""
         self.step_no += 1
+        self.step_log.append({"t": round(self.clock(), 3), "step": name})
         self._show(text, highlight)
         self.prompter.instruct(name, text)
         self._progress(name, text)
@@ -314,7 +318,8 @@ class DevTest:
     def _hid_since(self, t0: float, t1: float | None = None) -> list:
         if self.hid_monitor is None:
             return []
-        return [x for x in self.hid_monitor.between(t0, t1 if t1 is not None else self.clock() + 1)
+        from .hidwatch import drop_mouse_aux
+        return [x for x in drop_mouse_aux(self.hid_monitor.between(t0, t1 if t1 is not None else self.clock() + 1))
                 if x[1] in LEAK_TYPES]
 
     def connect(self) -> DeviceLayout:
@@ -360,6 +365,9 @@ class DevTest:
                  ("reconnect", self.t_reconnect),
                  ("sleep", self.t_sleep), ("via", self.t_via)]
         for name, fn in steps:
+            if self.opts.only and name not in self.opts.only and name not in ALWAYS:
+                self._sec(name, "skip", reason="不在本次 --only 范围内")
+                continue
             try:
                 fn()
             except Exception as e:  # noqa: BLE001
@@ -376,6 +384,10 @@ class DevTest:
         self.report["finished"] = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
         self.report["suggested_config"] = self.suggest()
         self.report["raw_events"] = [{"t": round(t, 3), **o} for t, o in _events(self.rec.items)][:2000]
+        if self.hid_monitor is not None:
+            self.report["hid_samples"] = [{"t": round(t, 3), "type": n}
+                                          for t, n in getattr(self.hid_monitor, "samples", [])][:2000]
+        self.report["step_log"] = self.step_log
         with open(os.path.join(self.out_dir, "devtest.json"), "w", encoding="utf-8") as f:
             json.dump(self.report, f, ensure_ascii=False, indent=1)
         with open(os.path.join(self.out_dir, "devtest.md"), "w", encoding="utf-8") as f:
@@ -396,6 +408,10 @@ class DevTest:
             self._sec(name, "skip", reason="超出总时限（overall timeout）")
             return False
         return self._need_link(name)
+
+    def _ensure_gate(self) -> None:
+        if self.opts.headless and "start_gate" not in self.report and self.link is not None:
+            self.start_gate()
 
     def start_gate(self) -> bool:
         """Headless: wait for any key press, then start the guided-phase budget."""
@@ -561,7 +577,9 @@ class DevTest:
             return first is not None and any(not k[3] and k[1:3] == first[1:3] for k in ks)
 
         tmo = self._tmo(self.opts.step_timeout)
-        got = self.rec.wait(done, t0, tmo) if not self.opts.headless else self._wait_or_hid(done, t0, tmo)
+        # Key steps wait for the CDC press only: HID activity alone (mouse clicks show up as
+        # systemDefined, typing on the Mac as keyDown) skipped 3 keys in the 00:14 run.
+        got = self.rec.wait(done, t0, tmo)
         xs = self.rec.since(t0)
         ks = _keys(xs)
         down = next((k for k in ks if k[3]), None)
@@ -575,7 +593,7 @@ class DevTest:
             if not got:
                 out["timed_out_s"] = round(tmo, 1)
                 if hid:
-                    out["hid_only"] = True
+                    out["hid_only"] = True  # recorded, not used to advance
         if got and highlight is not None:
             self.done_keys.add(tuple(highlight))
         return out
@@ -595,14 +613,15 @@ class DevTest:
         if not self.opts.keys or not self._guided("keys"):
             return
         if self.opts.headless:
-            if "start_gate" not in self.report:
-                self.start_gate()
+            self._ensure_gate()
         else:
             self.prompter.wait_enter("keys_intro", "按键测试：请先打开并聚焦一个空白文本窗口（用于观察 HID 泄漏），"
                                      "然后按设备副屏/黄色高亮提示逐个按键；无需回到终端")
         results = {}
         for row in range(1, 5):
             for col in range(1, 6):
+                if self.opts.key_subset and f"{col},{row}" not in self.opts.key_subset:
+                    continue
                 results[f"{col},{row}"] = self._press_release(
                     f"key:{col},{row}", f"按下并松开 黄色高亮键（第{row}行 第{col}列）"
                     + ("；不按则 20 秒后自动跳过" if self.opts.headless else ""), (col, row))
@@ -633,6 +652,7 @@ class DevTest:
     def t_knobs(self) -> None:
         if not self.opts.knobs or not self._guided("knobs"):
             return
+        self._ensure_gate()
         out = {}
         key_cells = {(r.col, r.row) for r in self.link.layout.keys}
         for knob in ("K1", "K2"):
@@ -694,17 +714,18 @@ class DevTest:
             return
         ptt = self.report["sections"].get("ptt", {}).get("window")
         key_times = [t for t, *_ in _keys(self.rec.since(win[0]))]
-        samples = [x for x in self.hid_monitor.between(*win) if x[1] in LEAK_TYPES]
+        from .hidwatch import drop_mouse_aux
+        samples = [x for x in drop_mouse_aux(self.hid_monitor.between(*win)) if x[1] in LEAK_TYPES]
         non_ptt = [x for x in samples if not (ptt and ptt[0] - 0.3 <= x[0] <= ptt[1] + 0.3)]
         c = correlate(non_ptt, key_times)
         hid_only = [k for k, r in self.report["sections"].get("keys", {}).get("results", {}).items()
                     if r.get("hid_only")]
         knob_hid = [k for k, r in self.report["sections"].get("knobs", {}).get("results", {}).items()
                     if r.get("hid_activity")]
-        if c["correlated"] or hid_only or knob_hid:
+        if c["correlated"]:
             st = "fail"
-        elif c["uncorrelated"]:
-            st = "warn"
+        elif c["uncorrelated"] or hid_only or knob_hid:
+            st = "warn"  # activity not tied to an MK20 press (Mac keyboard/mouse?) — check samples
         else:
             st = "pass"
         self._sec("hid_leak", st, auto=True, monitor=self.hid_monitor.info(), guided_window_s=round(win[1] - win[0], 1),
@@ -716,6 +737,7 @@ class DevTest:
     def t_ptt(self) -> None:
         if not self._guided("ptt"):
             return
+        self._ensure_gate()
         text = "按住黄色高亮的 PTT 键（左下角）约 2 秒后松开"
         t0 = self.clock()
         r = self._press_release("ptt", text, PTT_DOC)
@@ -742,6 +764,7 @@ class DevTest:
     def t_timing(self) -> None:
         if not self.opts.timing or not self._guided("timing"):
             return
+        self._ensure_gate()
         taps = self._collect_presses("timing:tap", "用正常速度单击 高亮键 5 次", 5)
         dbl = self._collect_presses("timing:double", "双击 高亮键 3 次（共 6 下）", 6)
         lng = self._collect_presses("timing:long", "长按 高亮键 约 1 秒，重复 3 次", 3)
@@ -760,6 +783,7 @@ class DevTest:
     def t_reconnect(self) -> None:
         if not self.opts.reconnect or not self._guided("reconnect"):
             return
+        self._ensure_gate()
         port = self.port
         t0 = self._step("unplug", "最后一步：拔掉 MK20 的 USB 线，等 3 秒再插回（屏幕会黑，正常）"
                         if self.opts.headless else "重连测试：请拔掉 MK20 的 USB 线")
@@ -778,7 +802,9 @@ class DevTest:
         self._progress("replug", "waiting for replug + handshake")
         port_back = ready = None
         err = ""
-        while self.clock() - t1 < self.opts.step_timeout + 20:
+        # T113 cold boot takes ~35-40 s (00:03:30 hub -> 00:04:04 CDC on 10-18); allow 90 s headless.
+        while self.clock() - t1 < (max(90.0, self.opts.step_timeout + 20) if self.opts.headless
+                                   else self.opts.step_timeout + 20):
             if port_back is None and self.find_ports():
                 port_back = self.clock() - t1
             if port_back is not None:
@@ -866,18 +892,24 @@ class DevTest:
 LEAK_TYPES = ("keyDown", "flagsChanged", "systemDefined", "scrollWheel")
 
 
+ALWAYS = ("usb", "port", "getinfo", "backlight")
+
+
 def step_plan(opts: DevTestOptions) -> list[str]:
     """Guided steps as the user sees them on the device (headless numbering)."""
     out = ["按任意键开始"] if opts.headless else []
-    if opts.keys:
-        out += [f"按下并松开 黄色高亮键（第{r}行 第{c}列）" for r in range(1, 5) for c in range(1, 6)]
-    if opts.knobs:
+    on = lambda n: not opts.only or n in opts.only  # noqa: E731
+    if opts.keys and on("keys"):
+        out += [f"按下并松开 黄色高亮键（第{r}行 第{c}列）" for r in range(1, 5) for c in range(1, 6)
+                if not opts.key_subset or f"{c},{r}" in opts.key_subset]
+    if opts.knobs and on("knobs"):
         for knob, side in (("K1", "左"), ("K2", "右")):
             out += [f"顺时针转 {side}旋钮 {knob} 三格", f"逆时针转 {side}旋钮 {knob} 三格", f"按下并松开 {side}旋钮 {knob}"]
-    out.append("按住 PTT 键（左下角）约 2 秒后松开")
-    if opts.timing:
+    if on("ptt"):
+        out.append("按住 PTT 键（左下角）约 2 秒后松开")
+    if opts.timing and on("timing"):
         out += ["用正常速度单击 高亮键 5 次", "双击 高亮键 3 次（共 6 下）", "长按 高亮键 约 1 秒，重复 3 次"]
-    if opts.reconnect:
+    if opts.reconnect and on("reconnect"):
         out.append("拔掉 USB 线，等 3 秒再插回")
     return out
 

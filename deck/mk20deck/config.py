@@ -29,6 +29,9 @@ class Skill:
     prompt: str
 
 
+DEFAULT_KNOB_MAP = {"103,103": "K2:press"}
+
+
 @dataclass
 class DeckConfig:
     default_mode: Mode = Mode.DESKTOP
@@ -50,10 +53,11 @@ class DeckConfig:
     codex: CodexDesktopConfig = field(default_factory=CodexDesktopConfig)
     tmux: TmuxConfig = field(default_factory=TmuxConfig)
     herdr: HerdrConfig = field(default_factory=HerdrConfig)
-    # Knob event mapping (CDC vs HID path unverified, PRD §6.4).  Keys are
-    # "col,row" firmware coordinates reported by keyStateChanged, values like
-    # "K1:press".  Empty until measured on the device.
-    knob_map: dict[str, str] = field(default_factory=dict)
+    # Knob event mapping (PRD §6.4).  Keys are "col,row" firmware coordinates reported
+    # by keyStateChanged (knobs report col/row >= 100), values like "K1:press".
+    # Measured 2026-10-18 (V2.32): K2 press -> (103,103).  Rotation and K1 press
+    # produced no CDC event in the first headless run (re-run pending).
+    knob_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_KNOB_MAP))
     # keycode-form key events (keyCodeH/L): "0x00e6" -> "1,4" (document col,row) or "K1:cw"
     keycode_map: dict[str, str] = field(default_factory=dict)
     state_path: str = os.path.join(CONFIG_DIR, "state.json")
@@ -112,7 +116,8 @@ def load_config(path: str | None = None) -> DeckConfig:
         new_session_cmd=tm.get("new_session_cmd", ""),
     )
     cfg.herdr = HerdrConfig(binary=d.get("herdr", {}).get("binary", "herdr"))
-    cfg.knob_map = {str(k): str(v) for k, v in d.get("knobs", {}).items()}
+    if "knobs" in d:  # a [knobs] table replaces the measured defaults
+        cfg.knob_map = {str(k): str(v) for k, v in d["knobs"].items()}
     cfg.keycode_map = {str(k).lower(): str(v) for k, v in d.get("keycodes", {}).items()}
     return cfg
 

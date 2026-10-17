@@ -16,7 +16,8 @@ import time
 from typing import Callable
 
 # CGEventType values
-TYPES = {"keyDown": 10, "flagsChanged": 12, "systemDefined": 14, "leftMouseDown": 1, "scrollWheel": 22}
+TYPES = {"keyDown": 10, "flagsChanged": 12, "systemDefined": 14, "leftMouseDown": 1, "leftMouseUp": 2, "rightMouseDown": 3,
+         "rightMouseUp": 4, "otherMouseDown": 25, "otherMouseUp": 26, "scrollWheel": 22}
 HID_STATE = 1  # kCGEventSourceStateHIDSystemState
 
 
@@ -103,3 +104,14 @@ def correlate(samples: list[tuple[float, str]], key_times: list[float], window: 
     by = lambda xs: {n: sum(1 for _, m in xs if m == n) for n in sorted({m for _, m in xs})}  # noqa: E731
     return {"correlated": len(near), "uncorrelated": len(far), "correlated_by_type": by(near),
             "uncorrelated_by_type": by(far), "window_s": window}
+
+
+MOUSE_TYPES = ("leftMouseDown", "leftMouseUp", "rightMouseDown", "rightMouseUp", "otherMouseDown", "otherMouseUp")
+
+
+def drop_mouse_aux(samples: list[tuple[float, str]], window: float = 0.08) -> list[tuple[float, str]]:
+    """macOS posts a systemDefined (NX_SUBTYPE_AUX_MOUSE_BUTTONS) event with every mouse click;
+    drop systemDefined samples that coincide with a mouse-down so they don't look like media keys."""
+    mice = [t for t, n in samples if n in MOUSE_TYPES]
+    return [(t, n) for t, n in samples
+            if not (n == "systemDefined" and any(abs(t - m) <= window for m in mice))]
