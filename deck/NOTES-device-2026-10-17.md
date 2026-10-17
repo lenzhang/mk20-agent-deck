@@ -99,3 +99,16 @@ Results are in `artifacts/devtest-headless-20261018-002838-rerun/`; every sectio
   - Port back after 32.6 s.
   - getInfo ready 32.8 s after the replug, with backlight re-applied.
   - This shows a cold-booted V2.32 answers automatically.
+
+## PTT as KC_RALT through VIA: no effect in host mode, rolled back (2026-10-18 00:41–00:43 SGT)
+- **Write:** `via-set 0 3 0 KC_RALT --yes-write-keymap`. The tool took a fresh backup first; that backup's raw keymap is identical to the 10-17 backup. Read-back verified the write.
+- **Test (`artifacts/devtest-headless-20261018-004200-ptt/`):**
+  - PTT was held for **3297 ms**, seen over CDC as fw (0,3).
+  - **No `flagsChanged`/HID activity reached the Mac.** Keys 1,1 / 1,3 / 2,4 / 5,4 produced no HID either.
+  - Conclusion: in host mode (V2) the GD32 dynamic keymap is not what produces HID. Keys go GD32 → ttyS1 → T113, and the T113 decides what to type (V1: `request_upload_key`/`request_upload_string`).
+- **Rollback:** `via-restore via-pre-set-20261018-004154.json --yes-write-keymap` reported verification passed. A fresh backup afterwards matches the 10-17 raw sha256.
+  - The restore planned 2 ops, (0,3,0) and (0,3,4). Cell L0 r3 c4 had also changed from KC_NO, by an unknown writer: possibly the T113 (`dynamic_keymap_set_keycode`). Now restored.
+- **Host-callable typing path:** JSON `keyboardInput {"inputString": str}`. It calls `request_upload_string`, a one-shot string, so a modifier cannot be held for PTT.
+  - Right Option for IME voice therefore needs a host-side synthesized event (PRD fallback B).
+  - That requires Accessibility "post event" permission: `CGPreflightPostEventAccess()` is currently false.
+  - It also needs verification that the IME accepts synthetic flagsChanged.
