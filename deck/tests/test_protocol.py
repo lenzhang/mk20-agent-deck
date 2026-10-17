@@ -106,3 +106,16 @@ def test_ack_classification():
 def test_id_counter_wraps_skipping_zero():
     c = P.FrameIdCounter(0xFFFFFFFF)
     assert c.next() == 0xFFFFFFFF and c.next() == 1
+
+
+# Golden vectors produced by compiling the vendor's CRC32.cpp verbatim with a
+# byte-for-byte reimplementation of packet_cmd_ack (demo) / packet_cmd_new
+# (device KeyboardDevice V2.32, Ghidra-decompiled).  See
+# NOTES-protocol-re-2026-10-17.md.
+def test_frame_matches_vendor_golden_vectors():
+    from mk20deck import protocol as P
+    assert P.encode_frame(P.CMD_JSON, P.json_bytes(P.get_info()), 1).hex() == (
+        "a1a55a5e010000006500000014000000d41f3ffe"
+        "7b226d6574686f64223a22676574496e666f227d8fa441b6")
+    assert P.encode_frame(P.CMD_SHOW_JPG, b"abc", 7).hex() == (
+        "a1a55a5e070000006400000003000000f270f133616263c2412435")
