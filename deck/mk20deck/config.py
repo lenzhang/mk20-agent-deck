@@ -51,6 +51,8 @@ class DeckConfig:
     # "col,row" firmware coordinates reported by keyStateChanged, values like
     # "K1:press".  Empty until measured on the device.
     knob_map: dict[str, str] = field(default_factory=dict)
+    # keycode-form key events (keyCodeH/L): "0x00e6" -> "1,4" (document col,row) or "K1:cw"
+    keycode_map: dict[str, str] = field(default_factory=dict)
     state_path: str = os.path.join(CONFIG_DIR, "state.json")
 
 
@@ -97,6 +99,7 @@ def load_config(path: str | None = None) -> DeckConfig:
     )
     cfg.herdr = HerdrConfig(binary=d.get("herdr", {}).get("binary", "herdr"))
     cfg.knob_map = {str(k): str(v) for k, v in d.get("knobs", {}).items()}
+    cfg.keycode_map = {str(k).lower(): str(v) for k, v in d.get("keycodes", {}).items()}
     return cfg
 
 

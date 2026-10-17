@@ -130,12 +130,14 @@ def _events(xs):
 
 
 def _keys(xs, pressed=None):
+    """(t, a, b, pressed): a,b = firmware col,row; for keycode-form events a="kc", b=keycode."""
     out = []
     for t, o in xs:
-        if o.get("method") == "keyStateChanged":
-            p = o.get("parameters") or {}
-            if pressed is None or bool(p.get("pressed")) == pressed:
-                out.append((t, int(p.get("col", -1)), int(p.get("row", -1)), bool(p.get("pressed"))))
+        ev = P.classify_json(o)
+        if isinstance(ev, P.KeyEvent):
+            if pressed is None or ev.pressed == pressed:
+                a, b = (ev.col, ev.row) if ev.col >= 0 else ("kc", ev.keycode)
+                out.append((t, a, b, ev.pressed))
     return out
 
 
@@ -263,7 +265,8 @@ class DevTest:
         self.report = {"format": "mk20deck-devtest/1",
                        "started": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                        "options": asdict(self.opts), "sections": {}}
-        steps = [("usb", self.t_usb), ("port", self.t_port), ("getinfo", self.t_getinfo),
+        steps = [("usb", self.t_usb), ("port", self.t_port), ("getinfo", self.t_getinfo), ("methods", self.t_methods),
+                 ("files", self.t_files),
                  ("display", self.t_display), ("backlight", self.t_backlight),
                  ("keys", self.t_keys), ("knobs", self.t_knobs), ("hid_leak", self.t_leak),
                  ("ptt", self.t_ptt), ("timing", self.t_timing), ("reconnect", self.t_reconnect),
@@ -342,6 +345,32 @@ class DevTest:
                   cols=sorted({r.col for r in keys}), rows=sorted({r.row for r in keys}),
                   subscreen=[sub.x, sub.y, sub.w, sub.h] if sub else None, model=lay.model,
                   version=lay.extra.get("deviceVersion"), problems=problems, raw=raw)
+
+    def t_methods(self) -> None:
+        """Ask the firmware for its method list via a deliberately unknown method (no side effects)."""
+        if not self._need_link("methods"):
+            return
+        fr = self.link._send(P.CMD_JSON, P.json_bytes(P.unknown_method_probe()), wait=True)
+        obj = (fr.json() if fr else None) or {}
+        err = str(obj.get("errorString", ""))
+        avail = []
+        if "Available methods:" in err:
+            avail = [m.strip(" []'\"") for m in err.split("Available methods:", 1)[1].split(",") if m.strip(" []")]
+        unknown = sorted(set(avail) - set(P.KNOWN_METHODS))
+        self._sec("methods", "pass" if avail else "warn", available=avail, new_vs_known=unknown, raw=obj)
+
+    def t_files(self) -> None:
+        """Read-only inventory of device files the firmware exposes (getFilesBySuffix)."""
+        if not self._need_link("files"):
+            return
+        sufs = [".jpg", ".png", ".gif", ".wav", ".mp3", ".json", ".txt", ".ini", ".conf", ".bin", ".sh", ".zip"]
+        ack = self.link.call(P.get_files_by_suffix(sufs))
+        res = ack.result if ack else {}
+        files = res.get("filePaths") if isinstance(res, dict) else None
+        self._sec("files", "pass" if ack and ack.success else "warn", suffixes=sufs,
+                  count=len(files) if isinstance(files, list) else None, files=(files or [])[:500],
+                  error=ack.error if ack else "timeout",
+                  note="协议只有列表/写入/删除，没有读文件方法 → 设备文件无法经 CDC 备份；P0 不写 T113 文件")
 
     def t_display(self) -> None:
         if not self._need_link("display"):
@@ -430,6 +459,16 @@ class DevTest:
             for col in range(1, 6):
                 results[f"{col},{row}"] = self._press_release(f"key:{col},{row}", f"按下并松开 第{row}行 第{col}列 键",
                                                               (col, row))
+        kc_form = {k: r["fw"][1] for k, r in results.items() if r["fw"] and r["fw"][0] == "kc"}
+        if kc_form:
+            missing = [k for k, r in results.items() if not r["ok"]]
+            dup = len(set(kc_form.values())) != len(kc_form)
+            self._sec("keys", "warn" if missing or dup else "pass", event_form="keycode", missing=missing,
+                      duplicate_keycodes=dup, getinfo_fw_base=self.link.layout.fw_base,
+                      suggested_keycode_map={f"0x{v:04x}": k for k, v in kc_form.items()},
+                      note="键事件只带 keyCode：同 keycode 的键无法区分（KC_NO 净化会让所有键变 0）" if dup else "",
+                      results=results)
+            return
         offs = {(r["fw"][0] - (int(k.split(',')[0]) - 1), r["fw"][1] - (int(k.split(',')[1]) - 1))
                 for k, r in results.items() if r["fw"]}
         missing = [k for k, r in results.items() if not r["ok"]]
@@ -460,8 +499,9 @@ class DevTest:
                 xs = self.rec.wait_quiet(t0, self.opts.step_timeout, self.opts.quiet_s, self.opts.step_timeout)
                 ks = _keys(xs)
                 out[step] = {"events": len(xs), "methods": sorted({o.get("method", "?") for _, o in xs}),
-                             "key_cells": sorted({(k[1], k[2]) for k in ks}),
-                             "outside_key_grid": sorted({(k[1], k[2]) for k in ks if (k[1], k[2]) not in key_cells}),
+                             "key_cells": sorted({(k[1], k[2]) for k in ks}, key=str),
+                             "outside_key_grid": sorted({(k[1], k[2]) for k in ks if (k[1], k[2]) not in key_cells},
+                                                        key=str),
                              "raw": [o for _, o in xs][:12]}
         silent = [k for k, v in out.items() if not v["events"]]
         self._sec("knobs", "warn" if silent else "pass", silent_steps=silent,
@@ -630,7 +670,8 @@ def _suggest_knob_map(results: dict) -> dict:
         _, knob, act = step.split(":")
         cells = v["outside_key_grid"]
         if len(cells) == 1:
-            m[f"{cells[0][0]},{cells[0][1]}"] = f"{knob}:{act}"
+            a, b = cells[0]
+            m[f"0x{b:04x}" if a == "kc" else f"{a},{b}"] = f"{knob}:{act}"
     return m
 
 

@@ -43,7 +43,10 @@ KNOWN_METHODS = (
 # Methods the deck is allowed to send.  ``keyboardInput`` types text on the host
 # through the device HID and therefore violates the P0 "no side-effect input"
 # rule (PRD §4/§6.5, G20); file management methods are not needed in P0.
-ALLOWED_METHODS = frozenset({"getInfo", "setBacklight", "setVolume", "playAudio", "stopAudio"})
+ALLOWED_METHODS = frozenset({"getInfo", "setBacklight", "setVolume", "playAudio", "stopAudio",
+                             "getFilesBySuffix"})  # read-only listing (devtest inventory)
+# Methods that change device state (need explicit opt-in in tools); getInfo/getFilesBySuffix are reads.
+WRITE_METHODS = frozenset({"setBacklight", "setVolume", "playAudio", "stopAudio"})
 
 
 def crc32(data: bytes) -> int:
@@ -163,7 +166,18 @@ def set_backlight(level: int) -> dict[str, Any]:
 
 
 def set_volume(level: int) -> dict[str, Any]:
-    return request("setVolume", {"level": int(max(0, min(100, level)))})
+    # KeyboardDevice V2.31/V2.32: "Volume level must be between 0 and 7"
+    return request("setVolume", {"level": int(max(0, min(7, level)))})
+
+
+def get_files_by_suffix(suffixes: list[str]) -> dict[str, Any]:
+    return request("getFilesBySuffix", {"suffixs": list(suffixes)})  # sic: firmware spelling
+
+
+def unknown_method_probe() -> dict[str, Any]:
+    """Deliberately unknown method: firmware answers 'Unknown method: … Available methods: […]'.
+    Built by hand (bypasses the allow-list) because it cannot have side effects."""
+    return {"method": "mk20deckProbe"}
 
 
 def play_audio(file_path: str) -> dict[str, Any]:
@@ -172,11 +186,18 @@ def play_audio(file_path: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class KeyEvent:
-    """Raw ``keyStateChanged`` event; ``col``/``row`` are as reported by firmware."""
+    """Raw ``keyStateChanged`` event; ``col``/``row`` are as reported by firmware.
+
+    Firmware strings also show a keycode form (``keyCodeH``/``keyCodeL``, plus a
+    ``requestId``); then col/row are -1 and ``keycode`` is set.  Mapped through
+    the ``[keycodes]`` config table measured by devtest.
+    """
 
     col: int
     row: int
     pressed: bool
+    keycode: int | None = None
+    request_id: Any = None
 
 
 @dataclass(frozen=True)
@@ -197,9 +218,18 @@ def classify_json(obj: dict[str, Any]) -> KeyEvent | Ack | dict[str, Any]:
             error=obj.get("errorString"),
         )
     if obj.get("method") == "keyStateChanged":
-        p = obj.get("parameters") or {}
+        p = obj.get("parameters") or obj
+        rid = p.get("requestId", obj.get("requestId"))
         try:
-            return KeyEvent(int(p.get("col")), int(p.get("row")), bool(p.get("pressed")))
+            if "col" in p and "row" in p:
+                kc = None
+                if "keyCodeH" in p:
+                    kc = (int(p["keyCodeH"]) << 8) | int(p.get("keyCodeL", 0))
+                return KeyEvent(int(p["col"]), int(p["row"]), bool(p.get("pressed")), kc, rid)
+            if "keyCodeH" in p or "keyCodeL" in p:
+                kc = (int(p.get("keyCodeH", 0)) << 8) | int(p.get("keyCodeL", 0))
+                return KeyEvent(-1, -1, bool(p.get("pressed")), kc, rid)
         except (TypeError, ValueError):
             return obj
+        return obj
     return obj

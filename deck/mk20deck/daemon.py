@@ -37,6 +37,7 @@ class Daemon:
     poll_interval: float = 2.0
     heartbeat: float = 2.0
     knob_map: dict[str, str] = field(default_factory=dict)
+    keycode_map: dict[str, str] = field(default_factory=dict)  # "0x00e6" -> "1,4" (doc) or "K1:cw"
     clock: Callable[[], float] = time.monotonic
     sink: Callable[[bytes], None] | None = None  # extra frame consumer (simulator)
     events: "queue.Queue[InputEvent]" = field(default_factory=queue.Queue)
@@ -57,8 +58,19 @@ class Daemon:
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
         """Called from the link reader thread (firmware coordinates)."""
-        tag = self.knob_map.get(f"{ev.col},{ev.row}")
         now = self.clock()
+        if ev.col < 0 and ev.keycode is not None:  # keycode-form event
+            target = self.keycode_map.get(f"0x{ev.keycode:04x}")
+            if target is None:
+                log.info("unmapped keycode event 0x%04x (add it to [keycodes])", ev.keycode)
+                return
+            if ":" not in target:
+                c, r = (int(x) for x in target.split(","))
+                self.events.put(InputEvent("key", c, r, ev.pressed, t=now))
+                return
+            tag = target
+        else:
+            tag = self.knob_map.get(f"{ev.col},{ev.row}")
         if tag:  # e.g. "K1:press" → down/up from pressed
             knob = 1 if tag.startswith("K1") else 2
             action = tag.split(":", 1)[1] if ":" in tag else "press"

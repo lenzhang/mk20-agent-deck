@@ -64,7 +64,7 @@ class Supervisor:
                 continue
             renderer = self.make_renderer()
             d = Daemon(self.controller, renderer, None, cfg.poll_interval_s, cfg.heartbeat_s, cfg.knob_map,
-                       power=self.power)
+                       keycode_map=getattr(cfg, "keycode_map", {}), power=self.power)
             link = DeviceLink(tr, on_key=d.on_device_key, ack_timeout=cfg.ack_timeout_s,
                               preamble_flush=cfg.preamble_flush)
             d.link = link

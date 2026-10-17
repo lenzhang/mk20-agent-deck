@@ -231,7 +231,9 @@ def test_devtest_full_run_against_mock(tmp_path, fw_base):
     md = (tmp_path / "devtest.md").read_text()
     assert "建议配置" in md and "[knobs]" in md
     # read-only by default: only getInfo JSON requests reached the device
-    assert {r["method"] for r in state["dev"].json_requests} == {"getInfo"}
+    from mk20deck import protocol as P
+    assert not {r["method"] for r in state["dev"].json_requests} & P.WRITE_METHODS
+    assert s["methods"]["available"][0] == "getInfo" and s["files"]["count"] == 1
 
 
 def test_devtest_auto_mode_skips_guided_and_gates_writes(tmp_path):
@@ -241,9 +243,31 @@ def test_devtest_auto_mode_skips_guided_and_gates_writes(tmp_path):
     st = {k: v["status"] for k, v in rep["sections"].items()}
     assert st["keys"] == st["knobs"] == st["timing"] == st["reconnect"] == "skip"
     assert st["backlight"] == "skip" and "allow-device-writes" in rep["sections"]["backlight"]["reason"]
-    assert {r["method"] for r in dev.json_requests} == {"getInfo"}
+    assert {r["method"] for r in dev.json_requests} == {"getInfo", "getFilesBySuffix", "mk20deckProbe"}
     opts.allow_device_writes = True
     dev2 = MockDevice()
     rep = DevTest(opts, ScriptedPrompter(), str(tmp_path / "w"), lambda: ["/dev/mock"], lambda p: dev2).run()
     assert rep["sections"]["backlight"]["status"] == "pass"
     assert any(r["method"] == "setBacklight" for r in dev2.json_requests)
+
+
+def test_keycode_form_events_are_parsed_and_mapped():
+    from mk20deck import protocol as P
+    ev = P.classify_json({"method": "keyStateChanged", "parameters": {"pressed": True, "keyCodeH": 0, "keyCodeL": 0xE6},
+                          "requestId": 7})
+    assert ev.col == -1 and ev.keycode == 0xE6 and ev.request_id == 7
+    ev2 = P.classify_json({"method": "keyStateChanged", "parameters": {"col": 1, "row": 2, "pressed": False}})
+    assert (ev2.col, ev2.row, ev2.keycode) == (1, 2, None)
+    clk = FakeClock()
+    d = Daemon(_ctl(clk), Renderer(DeviceLayout.default()), None, clock=clk,
+               keycode_map={"0x00e6": "1,4", "0x0080": "K1:cw"})
+    d.on_device_key(ev)
+    d.on_device_key(P.KeyEvent(-1, -1, True, 0x80))
+    d.on_device_key(P.KeyEvent(-1, -1, True, 0x99))  # unmapped -> ignored
+    got = [d.events.get_nowait() for _ in range(d.events.qsize())]
+    assert [(e.kind, e.a, e.b) for e in got] == [("key", 1, 4), ("knob", 1, "cw")]
+
+
+def test_set_volume_range_matches_firmware():
+    from mk20deck import protocol as P
+    assert P.set_volume(50)["parameters"]["level"] == 7

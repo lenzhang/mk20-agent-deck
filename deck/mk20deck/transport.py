@@ -146,10 +146,13 @@ class MockDevice:
         method = obj.get("method")
         if method == "getInfo":
             ack = {"ack_method": "getInfo", "success": True, "result": self.layout.to_get_info()}
+        elif method == "getFilesBySuffix":
+            ack = {"ack_method": method, "success": True, "result": {"filePaths": ["/data/theme/a.jpg"]}}
         elif method in P.KNOWN_METHODS:
             ack = {"ack_method": method, "success": True, "result": {}}
         else:
-            ack = {"ack_method": method, "success": False, "errorString": f"Unknown method: {method}"}
+            ack = {"ack_method": method, "success": False,
+                   "errorString": f"Unknown method: {method}. Available methods: [{', '.join(P.KNOWN_METHODS)}]"}
         self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(ack), fr.frame_id))
 
     def emit_json(self, obj: dict) -> None:
