@@ -200,6 +200,25 @@ def cmd_via_restore(args) -> int:
     return 1 if errors else 0
 
 
+def cmd_via_set(args) -> int:
+    """Set one keymap cell (e.g. PTT = KC_RALT at L0 r3 c0) after a fresh backup; prints the rollback."""
+    from .hw.via import backup, keycode_name, parse_keycode, set_one
+    kc = parse_keycode(args.keycode)
+    pre = backup(_via_open_factory(False)(), rows=args.rows, cols=args.cols)
+    out = os.path.join(CONFIG_DIR, "backups", f"via-pre-set-{time.strftime('%Y%m%d-%H%M%S')}.json")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    pre.save(out)
+    cur = pre.data["keymap"][args.layer][args.row][args.col]
+    print(f"L{args.layer} r{args.row} c{args.col}: {keycode_name(cur)} -> {keycode_name(kc)}；备份 {out}")
+    if not args.yes_write_keymap:
+        print("演练模式：未写入。确认后加 --yes-write-keymap。")
+        return 0
+    old, new = set_one(_via_open_factory(True)(), args.layer, args.row, args.col, kc)
+    print(f"已写入并回读校验：0x{old:04X} -> 0x{new:04X}")
+    print(f"回滚：python3 -m mk20deck via-restore {out} --yes-write-keymap")
+    return 0
+
+
 def cmd_gd32_flash(args) -> int:
     from .hw import gd32dfu
     plan = gd32dfu.plan_flash(args.image, allow_unknown=args.allow_unknown_image)
@@ -280,6 +299,15 @@ def main(argv: list[str] | None = None) -> int:
     vb.add_argument("--cols", type=int, default=None)
     vb.add_argument("--encoders", type=int, default=2)
     vb.set_defaults(fn=cmd_via_backup)
+    vs = sub.add_parser("via-set", help="set one VIA keymap cell (fresh backup first; dry-run unless --yes-write-keymap)")
+    vs.add_argument("layer", type=int)
+    vs.add_argument("row", type=int)
+    vs.add_argument("col", type=int)
+    vs.add_argument("keycode", help="KC_RALT / RALT / 0xE6")
+    vs.add_argument("--rows", type=int, default=4)
+    vs.add_argument("--cols", type=int, default=5)
+    vs.add_argument("--yes-write-keymap", action="store_true")
+    vs.set_defaults(fn=cmd_via_set)
     vr = sub.add_parser("via-restore", help="restore a VIA backup (dry-run unless --yes-write-keymap)")
     vr.add_argument("file")
     vr.add_argument("--macros", action="store_true")

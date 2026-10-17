@@ -1,0 +1,1156 @@
+{
+ "format": "mk20deck-devtest/1",
+ "started": "2026-10-18T00:28:39+08:00",
+ "options": {
+  "interactive": true,
+  "port": "/dev/cu.usbmodem1101",
+  "fps_seconds": 5.0,
+  "ack_frames": 20,
+  "probe_reject": true,
+  "keys": true,
+  "knobs": true,
+  "timing": true,
+  "reconnect": true,
+  "sleep": false,
+  "via": false,
+  "allow_device_writes": true,
+  "backlight_level": 80,
+  "step_timeout": 40.0,
+  "quiet_s": 1.5,
+  "headless": true,
+  "start_timeout": 180.0,
+  "overall_timeout": 420.0,
+  "key_subset": [
+   "1,1",
+   "2,1",
+   "3,1"
+  ],
+  "only": [
+   "keys",
+   "knobs",
+   "ptt",
+   "hid_leak",
+   "reconnect"
+  ]
+ },
+ "sections": {
+  "usb": {
+   "status": "pass",
+   "source": "ioreg",
+   "notes": [],
+   "t113_cdc": true,
+   "gd32_via": true,
+   "gd32_dfu": false,
+   "t113_fel": false,
+   "devices": [
+    {
+     "vid": "0x05e3",
+     "pid": "0x0610",
+     "name": "USB2.0 Hub@00100000",
+     "serial": "",
+     "location": "0x100000",
+     "role": "GL852G hub"
+    },
+    {
+     "vid": "0x4250",
+     "pid": "0x426f",
+     "name": "syk_keyboards@00120000",
+     "serial": "",
+     "location": "0x120000",
+     "role": "GD32 QMK/VIA keyboard (HID)"
+    },
+    {
+     "vid": "0x1d6b",
+     "pid": "0x0104",
+     "name": "Serial@00110000",
+     "serial": "",
+     "location": "0x110000",
+     "role": "T113 gadget (CDC-ECM + CDC-ACM, Protocol A)"
+    }
+   ]
+  },
+  "port": {
+   "status": "pass",
+   "ports": [
+    "/dev/cu.usbmodem1101"
+   ],
+   "usb_ids": [
+    "1d6b:0104",
+    "1234:5678"
+   ],
+   "users": {
+    "pids": [],
+    "screenkey": []
+   },
+   "note": ""
+  },
+  "getinfo": {
+   "status": "pass",
+   "handshake_ms": 156.0,
+   "canvas": [
+    640,
+    656
+   ],
+   "matches_default_guess": true,
+   "key_rects": 20,
+   "fw_base_inferred": 0,
+   "cols": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "rows": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "subscreen": [
+    106,
+    0,
+    428,
+    142
+   ],
+   "model": "MK20",
+   "version": "V2.32",
+   "problems": [],
+   "raw": {
+    "deviceHeight": 656,
+    "deviceModel": "MK20",
+    "devicePanel": {
+     "rectCols": 5,
+     "rectRows": 4,
+     "rects": [
+      {
+       "col": 0,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 0,
+       "y": 144
+      },
+      {
+       "col": 1,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 128,
+       "y": 144
+      },
+      {
+       "col": 2,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 256,
+       "y": 144
+      },
+      {
+       "col": 3,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 384,
+       "y": 144
+      },
+      {
+       "col": 4,
+       "height": 128,
+       "isKey": true,
+       "row": 0,
+       "width": 128,
+       "x": 512,
+       "y": 144
+      },
+      {
+       "col": 0,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 0,
+       "y": 272
+      },
+      {
+       "col": 1,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 128,
+       "y": 272
+      },
+      {
+       "col": 2,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 256,
+       "y": 272
+      },
+      {
+       "col": 3,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 384,
+       "y": 272
+      },
+      {
+       "col": 4,
+       "height": 128,
+       "isKey": true,
+       "row": 1,
+       "width": 128,
+       "x": 512,
+       "y": 272
+      },
+      {
+       "col": 0,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 0,
+       "y": 400
+      },
+      {
+       "col": 1,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 128,
+       "y": 400
+      },
+      {
+       "col": 2,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 256,
+       "y": 400
+      },
+      {
+       "col": 3,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 384,
+       "y": 400
+      },
+      {
+       "col": 4,
+       "height": 128,
+       "isKey": true,
+       "row": 2,
+       "width": 128,
+       "x": 512,
+       "y": 400
+      },
+      {
+       "col": 0,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 0,
+       "y": 528
+      },
+      {
+       "col": 1,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 128,
+       "y": 528
+      },
+      {
+       "col": 2,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 256,
+       "y": 528
+      },
+      {
+       "col": 3,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 384,
+       "y": 528
+      },
+      {
+       "col": 4,
+       "height": 128,
+       "isKey": true,
+       "row": 3,
+       "width": 128,
+       "x": 512,
+       "y": 528
+      },
+      {
+       "height": 142,
+       "isKey": false,
+       "width": 428,
+       "x": 106,
+       "y": 0
+      }
+     ],
+     "screenHeight": 656,
+     "screenWidth": 640
+    },
+    "deviceVersion": "V2.32",
+    "deviceWidth": 640
+   }
+  },
+  "methods": {
+   "status": "skip",
+   "reason": "不在本次 --only 范围内"
+  },
+  "files": {
+   "status": "skip",
+   "reason": "不在本次 --only 范围内"
+  },
+  "display": {
+   "status": "skip",
+   "reason": "不在本次 --only 范围内"
+  },
+  "backlight": {
+   "status": "pass",
+   "level": 80,
+   "ack": {
+    "method": "setBacklight",
+    "success": true,
+    "result": {},
+    "error": null
+   },
+   "note": "原背光值不可读，结束后请手动调回"
+  },
+  "keys": {
+   "status": "pass",
+   "event_fw_base": 0,
+   "getinfo_fw_base": 0,
+   "offsets": [
+    [
+     0,
+     0
+    ]
+   ],
+   "missing": [],
+   "transposed_suspect": false,
+   "results": {
+    "1,1": {
+     "ok": true,
+     "fw": [
+      0,
+      0
+     ],
+     "hold_ms": 105.3,
+     "raw": [
+      {
+       "id": 4294967292,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 0,
+        "pressed": true,
+        "row": 0
+       }
+      },
+      {
+       "id": 4294967291,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 0,
+        "pressed": false,
+        "row": 0
+       }
+      }
+     ],
+     "hid_activity": []
+    },
+    "2,1": {
+     "ok": true,
+     "fw": [
+      1,
+      0
+     ],
+     "hold_ms": 57.6,
+     "raw": [
+      {
+       "id": 4294967290,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 1,
+        "pressed": true,
+        "row": 0
+       }
+      },
+      {
+       "id": 4294967289,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 1,
+        "pressed": false,
+        "row": 0
+       }
+      }
+     ],
+     "hid_activity": []
+    },
+    "3,1": {
+     "ok": true,
+     "fw": [
+      2,
+      0
+     ],
+     "hold_ms": 111.1,
+     "raw": [
+      {
+       "id": 4294967288,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 2,
+        "pressed": true,
+        "row": 0
+       }
+      },
+      {
+       "id": 4294967287,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 2,
+        "pressed": false,
+        "row": 0
+       }
+      }
+     ],
+     "hid_activity": []
+    }
+   }
+  },
+  "knobs": {
+   "status": "pass",
+   "silent_steps": [],
+   "note": "",
+   "results": {
+    "knob:K1:cw": {
+     "events": 3,
+     "methods": [
+      "keyStateChanged"
+     ],
+     "key_cells": [
+      [
+       102,
+       102
+      ]
+     ],
+     "outside_key_grid": [
+      [
+       102,
+       102
+      ]
+     ],
+     "raw": [
+      {
+       "id": 4294967286,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 102,
+        "pressed": true,
+        "row": 102
+       }
+      },
+      {
+       "id": 4294967285,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 102,
+        "pressed": true,
+        "row": 102
+       }
+      },
+      {
+       "id": 4294967284,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 102,
+        "pressed": true,
+        "row": 102
+       }
+      }
+     ],
+     "hid_activity": []
+    },
+    "knob:K1:ccw": {
+     "events": 3,
+     "methods": [
+      "keyStateChanged"
+     ],
+     "key_cells": [
+      [
+       101,
+       101
+      ]
+     ],
+     "outside_key_grid": [
+      [
+       101,
+       101
+      ]
+     ],
+     "raw": [
+      {
+       "id": 4294967283,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 101,
+        "pressed": true,
+        "row": 101
+       }
+      },
+      {
+       "id": 4294967282,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 101,
+        "pressed": true,
+        "row": 101
+       }
+      },
+      {
+       "id": 4294967281,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 101,
+        "pressed": true,
+        "row": 101
+       }
+      }
+     ],
+     "hid_activity": []
+    },
+    "knob:K1:press": {
+     "events": 2,
+     "methods": [
+      "keyStateChanged"
+     ],
+     "key_cells": [
+      [
+       100,
+       100
+      ]
+     ],
+     "outside_key_grid": [
+      [
+       100,
+       100
+      ]
+     ],
+     "raw": [
+      {
+       "id": 4294967280,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 100,
+        "pressed": true,
+        "row": 100
+       }
+      },
+      {
+       "id": 4294967279,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 100,
+        "pressed": false,
+        "row": 100
+       }
+      }
+     ],
+     "hid_activity": []
+    },
+    "knob:K2:cw": {
+     "events": 3,
+     "methods": [
+      "keyStateChanged"
+     ],
+     "key_cells": [
+      [
+       105,
+       105
+      ]
+     ],
+     "outside_key_grid": [
+      [
+       105,
+       105
+      ]
+     ],
+     "raw": [
+      {
+       "id": 4294967278,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 105,
+        "pressed": true,
+        "row": 105
+       }
+      },
+      {
+       "id": 4294967277,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 105,
+        "pressed": true,
+        "row": 105
+       }
+      },
+      {
+       "id": 4294967276,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 105,
+        "pressed": true,
+        "row": 105
+       }
+      }
+     ],
+     "hid_activity": []
+    },
+    "knob:K2:ccw": {
+     "events": 3,
+     "methods": [
+      "keyStateChanged"
+     ],
+     "key_cells": [
+      [
+       104,
+       104
+      ]
+     ],
+     "outside_key_grid": [
+      [
+       104,
+       104
+      ]
+     ],
+     "raw": [
+      {
+       "id": 4294967275,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 104,
+        "pressed": true,
+        "row": 104
+       }
+      },
+      {
+       "id": 4294967274,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 104,
+        "pressed": true,
+        "row": 104
+       }
+      },
+      {
+       "id": 4294967273,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 104,
+        "pressed": true,
+        "row": 104
+       }
+      }
+     ],
+     "hid_activity": []
+    },
+    "knob:K2:press": {
+     "events": 2,
+     "methods": [
+      "keyStateChanged"
+     ],
+     "key_cells": [
+      [
+       103,
+       103
+      ]
+     ],
+     "outside_key_grid": [
+      [
+       103,
+       103
+      ]
+     ],
+     "raw": [
+      {
+       "id": 4294967272,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 103,
+        "pressed": true,
+        "row": 103
+       }
+      },
+      {
+       "id": 4294967271,
+       "method": "keyStateChanged",
+       "parameters": {
+        "col": 103,
+        "pressed": false,
+        "row": 103
+       }
+      }
+     ],
+     "hid_activity": []
+    }
+   },
+   "suggested_knob_map": {
+    "102,102": "K1:cw",
+    "101,101": "K1:ccw",
+    "100,100": "K1:press",
+    "105,105": "K2:cw",
+    "104,104": "K2:ccw",
+    "103,103": "K2:press"
+   }
+  },
+  "ptt": {
+   "status": "pass",
+   "cdc_observed": true,
+   "hold_ms": 108.7,
+   "fw": [
+    0,
+    3
+   ],
+   "ime_triggered": null,
+   "note": "",
+   "window": [
+    46503.507085583,
+    46505.049406625
+   ],
+   "hid_activity": [],
+   "right_option_seen": false,
+   "needs_manual_confirmation": "IME 语音是否被触发需目视确认（无头模式只能看到 flagsChanged）"
+  },
+  "timing": {
+   "status": "skip",
+   "reason": "不在本次 --only 范围内"
+  },
+  "hid_leak": {
+   "status": "pass",
+   "auto": true,
+   "monitor": {
+    "source": "CGEventSourceSecondsSinceLastEventType",
+    "listen_access": false,
+    "types": [
+     "keyDown",
+     "flagsChanged",
+     "systemDefined",
+     "leftMouseDown",
+     "leftMouseUp",
+     "rightMouseDown",
+     "rightMouseUp",
+     "otherMouseDown",
+     "otherMouseUp",
+     "scrollWheel"
+    ]
+   },
+   "guided_window_s": 57.5,
+   "correlated": 0,
+   "uncorrelated": 0,
+   "correlated_by_type": {},
+   "uncorrelated_by_type": {},
+   "window_s": 0.35,
+   "hid_only_keys": [],
+   "knob_steps_with_hid": [],
+   "limitation": "只能看到“有无 HID 事件及类型”，看不到字符与来源设备；与 MK20 键事件时间相关(±0.35 s)即判泄漏；期间若有人用 Mac 键盘会产生不相关样本(→warn)",
+   "note": "P0 硬门槛：19 个非 PTT 键与两旋钮不得产生副作用 HID；泄漏→按 VIA KC_NO→现有配置→hidutil 顺序处理"
+  },
+  "reconnect": {
+   "status": "pass",
+   "unplug_detect_ms": 3904.0,
+   "port_back_ms": 32577.5,
+   "handshake_ready_ms": 32773.1,
+   "same_port": true,
+   "last_error": ""
+  },
+  "sleep": {
+   "status": "skip",
+   "reason": "不在本次 --only 范围内"
+  },
+  "via": {
+   "status": "skip",
+   "reason": "不在本次 --only 范围内"
+  }
+ },
+ "step_plan": [
+  "按任意键开始",
+  "按下并松开 黄色高亮键（第1行 第1列）",
+  "按下并松开 黄色高亮键（第1行 第2列）",
+  "按下并松开 黄色高亮键（第1行 第3列）",
+  "顺时针转 左旋钮 K1 三格",
+  "逆时针转 左旋钮 K1 三格",
+  "按下并松开 左旋钮 K1",
+  "顺时针转 右旋钮 K2 三格",
+  "逆时针转 右旋钮 K2 三格",
+  "按下并松开 右旋钮 K2",
+  "按住 PTT 键（左下角）约 2 秒后松开",
+  "拔掉 USB 线，等 3 秒再插回"
+ ],
+ "backlight_applied": [
+  {
+   "level": 80,
+   "success": true,
+   "error": null
+  },
+  {
+   "level": 80,
+   "success": true,
+   "error": null
+  }
+ ],
+ "start_gate": {
+  "pressed": true,
+  "waited_s": 6.2,
+  "via": "cdc"
+ },
+ "finished": "2026-10-18T00:30:19+08:00",
+ "suggested_config": {
+  "fw_coord_base": 0,
+  "knob_map": {
+   "102,102": "K1:cw",
+   "101,101": "K1:ccw",
+   "100,100": "K1:press",
+   "105,105": "K2:cw",
+   "104,104": "K2:ccw",
+   "103,103": "K2:press"
+  }
+ },
+ "raw_events": [
+  {
+   "t": 46448.555,
+   "id": 4294967294,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 0,
+    "pressed": true,
+    "row": 0
+   }
+  },
+  {
+   "t": 46448.728,
+   "id": 4294967293,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 0,
+    "pressed": false,
+    "row": 0
+   }
+  },
+  {
+   "t": 46450.689,
+   "id": 4294967292,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 0,
+    "pressed": true,
+    "row": 0
+   }
+  },
+  {
+   "t": 46450.794,
+   "id": 4294967291,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 0,
+    "pressed": false,
+    "row": 0
+   }
+  },
+  {
+   "t": 46451.907,
+   "id": 4294967290,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 1,
+    "pressed": true,
+    "row": 0
+   }
+  },
+  {
+   "t": 46451.965,
+   "id": 4294967289,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 1,
+    "pressed": false,
+    "row": 0
+   }
+  },
+  {
+   "t": 46452.895,
+   "id": 4294967288,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 2,
+    "pressed": true,
+    "row": 0
+   }
+  },
+  {
+   "t": 46453.006,
+   "id": 4294967287,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 2,
+    "pressed": false,
+    "row": 0
+   }
+  },
+  {
+   "t": 46462.14,
+   "id": 4294967286,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 102,
+    "pressed": true,
+    "row": 102
+   }
+  },
+  {
+   "t": 46462.678,
+   "id": 4294967285,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 102,
+    "pressed": true,
+    "row": 102
+   }
+  },
+  {
+   "t": 46463.386,
+   "id": 4294967284,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 102,
+    "pressed": true,
+    "row": 102
+   }
+  },
+  {
+   "t": 46466.532,
+   "id": 4294967283,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 101,
+    "pressed": true,
+    "row": 101
+   }
+  },
+  {
+   "t": 46466.953,
+   "id": 4294967282,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 101,
+    "pressed": true,
+    "row": 101
+   }
+  },
+  {
+   "t": 46467.781,
+   "id": 4294967281,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 101,
+    "pressed": true,
+    "row": 101
+   }
+  },
+  {
+   "t": 46484.42,
+   "id": 4294967280,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 100,
+    "pressed": true,
+    "row": 100
+   }
+  },
+  {
+   "t": 46484.586,
+   "id": 4294967279,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 100,
+    "pressed": false,
+    "row": 100
+   }
+  },
+  {
+   "t": 46489.76,
+   "id": 4294967278,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 105,
+    "pressed": true,
+    "row": 105
+   }
+  },
+  {
+   "t": 46489.982,
+   "id": 4294967277,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 105,
+    "pressed": true,
+    "row": 105
+   }
+  },
+  {
+   "t": 46490.528,
+   "id": 4294967276,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 105,
+    "pressed": true,
+    "row": 105
+   }
+  },
+  {
+   "t": 46494.983,
+   "id": 4294967275,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 104,
+    "pressed": true,
+    "row": 104
+   }
+  },
+  {
+   "t": 46495.245,
+   "id": 4294967274,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 104,
+    "pressed": true,
+    "row": 104
+   }
+  },
+  {
+   "t": 46495.63,
+   "id": 4294967273,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 104,
+    "pressed": true,
+    "row": 104
+   }
+  },
+  {
+   "t": 46501.847,
+   "id": 4294967272,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 103,
+    "pressed": true,
+    "row": 103
+   }
+  },
+  {
+   "t": 46501.963,
+   "id": 4294967271,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 103,
+    "pressed": false,
+    "row": 103
+   }
+  },
+  {
+   "t": 46504.94,
+   "id": 4294967270,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 0,
+    "pressed": true,
+    "row": 3
+   }
+  },
+  {
+   "t": 46505.049,
+   "id": 4294967269,
+   "method": "keyStateChanged",
+   "parameters": {
+    "col": 0,
+    "pressed": false,
+    "row": 3
+   }
+  }
+ ],
+ "hid_samples": [],
+ "step_log": [
+  {
+   "t": 46442.34,
+   "step": "start"
+  },
+  {
+   "t": 46449.16,
+   "step": "key:1,1"
+  },
+  {
+   "t": 46450.794,
+   "step": "key:2,1"
+  },
+  {
+   "t": 46451.965,
+   "step": "key:3,1"
+  },
+  {
+   "t": 46453.006,
+   "step": "knob:K1:cw"
+  },
+  {
+   "t": 46464.94,
+   "step": "knob:K1:ccw"
+  },
+  {
+   "t": 46469.321,
+   "step": "knob:K1:press"
+  },
+  {
+   "t": 46486.094,
+   "step": "knob:K2:cw"
+  },
+  {
+   "t": 46492.071,
+   "step": "knob:K2:ccw"
+  },
+  {
+   "t": 46497.159,
+   "step": "knob:K2:press"
+  },
+  {
+   "t": 46503.507,
+   "step": "ptt"
+  },
+  {
+   "t": 46505.05,
+   "step": "unplug"
+  }
+ ]
+}

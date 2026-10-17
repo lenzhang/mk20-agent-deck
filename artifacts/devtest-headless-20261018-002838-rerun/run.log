@@ -1,0 +1,46 @@
+无头模式：按设备屏幕提示操作；开始门限 180s，之后总时限 420s，每步 40s；HID 监视=on；输出 /Users/dev/.config/mk20-agent-deck/devtest/20261018-002838-rerun
+   1. 按任意键开始
+   2. 按下并松开 黄色高亮键（第1行 第1列）
+   3. 按下并松开 黄色高亮键（第1行 第2列）
+   4. 按下并松开 黄色高亮键（第1行 第3列）
+   5. 顺时针转 左旋钮 K1 三格
+   6. 逆时针转 左旋钮 K1 三格
+   7. 按下并松开 左旋钮 K1
+   8. 顺时针转 右旋钮 K2 三格
+   9. 逆时针转 右旋钮 K2 三格
+  10. 按下并松开 右旋钮 K2
+  11. 按住 PTT 键（左下角）约 2 秒后松开
+  12. 拔掉 USB 线，等 3 秒再插回
+00:28:40 ▶ [start] 设备自检开始：请按 任意一个键 开始（之后按屏幕提示操作，无需碰电脑）
+00:28:46 ▶ [key:1,1] 按下并松开 黄色高亮键（第1行 第1列）；不按则 20 秒后自动跳过
+00:28:48 ▶ [key:2,1] 按下并松开 黄色高亮键（第1行 第2列）；不按则 20 秒后自动跳过
+00:28:49 ▶ [key:3,1] 按下并松开 黄色高亮键（第1行 第3列）；不按则 20 秒后自动跳过
+00:28:50 ▶ [knob:K1:cw] 顺时针转 左旋钮 K1 三格（不动则 20 秒后自动跳过）
+00:29:02 ▶ [knob:K1:ccw] 逆时针转 左旋钮 K1 三格（不动则 20 秒后自动跳过）
+00:29:06 ▶ [knob:K1:press] 按下并松开 左旋钮 K1（不动则 20 秒后自动跳过）
+00:29:23 ▶ [knob:K2:cw] 顺时针转 右旋钮 K2 三格（不动则 20 秒后自动跳过）
+00:29:29 ▶ [knob:K2:ccw] 逆时针转 右旋钮 K2 三格（不动则 20 秒后自动跳过）
+00:29:34 ▶ [knob:K2:press] 按下并松开 右旋钮 K2（不动则 20 秒后自动跳过）
+00:29:41 ▶ [ptt] 按住黄色高亮的 PTT 键（左下角）约 2 秒后松开
+00:29:42 ▶ [unplug] 最后一步：拔掉 MK20 的 USB 线，等 3 秒再插回（屏幕会黑，正常）
+2026-10-18 00:29:46,619 WARNING mk20deck.link: transport read failed: [Errno 6] Device not configured
+00:29:46 ▶ [replug] 请重新插上 MK20（等待重新握手）
+2026-10-18 00:30:19,457 WARNING mk20deck.link: transport read failed: argument must be an int, or have a fileno() method.
+usb        pass
+port       pass
+getinfo    pass
+methods    skip
+files      skip
+display    skip
+backlight  pass
+keys       pass
+knobs      pass
+ptt        pass
+timing     skip
+hid_leak   pass
+reconnect  pass
+sleep      skip
+via        skip
+
+报告：/Users/dev/.config/mk20-agent-deck/devtest/20261018-002838-rerun/devtest.md
+      /Users/dev/.config/mk20-agent-deck/devtest/20261018-002838-rerun/devtest.json

@@ -70,6 +70,32 @@ def keycode_name(kc: int) -> str:
     return _BASIC.get(kc, f"0x{kc:04X}")
 
 
+def parse_keycode(text: str) -> int:
+    """``KC_RALT`` / ``RALT`` / ``0xE6`` / ``230`` -> keycode (basic names only)."""
+    t = text.strip().upper()
+    if t.startswith("0X"):
+        return int(t, 16)
+    if t.isdigit():
+        return int(t)
+    if not t.startswith("KC_"):
+        t = "KC_" + t
+    for code, name in _BASIC.items():
+        if name == t:
+            return code
+    raise ValueError(f"unknown keycode name {text!r}")
+
+
+def set_one(client: "ViaClient", layer: int, row: int, col: int, kc: int) -> tuple[int, int]:
+    """Write one dynamic-keymap cell and verify by read-back; returns (old, new)."""
+    old = client.keycode(layer, row, col)
+    if old != kc:
+        client.set_keycode(layer, row, col, kc)
+    new = client.keycode(layer, row, col)
+    if new != kc:
+        raise ViaError(f"verify failed L{layer} r{row} c{col}: wrote 0x{kc:04X}, read 0x{new:04X}")
+    return old, new
+
+
 def has_side_effect(kc: int) -> bool:
     """True unless the code is KC_NO / KC_TRNS (used for the P0 HID-sanitisation audit)."""
     return kc not in (KC_NO, KC_TRNS)

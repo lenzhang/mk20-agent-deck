@@ -75,3 +75,27 @@ Results are in `artifacts/devtest-headless-20261018-001433/`.
 - **HID leak:** 0 samples correlated with MK20 presses. Leftovers: 3 keyDown and 6 systemDefined (mouse clicks or Mac typing while waiting).
 - **Reconnect:** the unplug was detected after 9.1 s. The port did not come back within the 40 s window, so the window is now 90 s in headless mode.
 - **Cold boot answers (critical):** at 00:25:17 SGT the freshly replugged device (booted 00:21, no host access since) answered our very first `getInfo` (no preamble) in 15 ms with V2.32. The earlier silence was specific to V2.31.
+
+## Headless re-run (2026-10-18 00:28–00:30 SGT, 40 s per step)
+Results are in `artifacts/devtest-headless-20261018-002838-rerun/`; every section passed.
+
+- **Keys 1,1 / 2,1 / 3,1:** fw (0,0) / (1,0) / (2,0), all OK. All 20 keys are now verified.
+- **Knobs:** they report CDC `keyStateChanged` with col == row:
+
+  | Knob | Press | ccw (per detent) | cw (per detent) |
+  |---|---|---|---|
+  | K1 | 100 | 101 | 102 |
+  | K2 | 103 | 104 | 105 |
+
+  - A press sends pressed true then false.
+  - Rotation sends one `pressed:true` per detent and no release. Three detents gave three events, 0.2–0.7 s apart.
+  - No HID activity reached the Mac.
+  - Run 1's silent knob steps were user timing, not a device limitation.
+- **Default knob map:** `DEFAULT_KNOB_MAP` now holds all six coordinates.
+- **PTT:** CDC fw (0,3). The press lasted 108.7 ms (again a tap). No `flagsChanged` was seen: layer 0 is KC_NO, so nothing reaches the Mac.
+- **HID leak:** zero samples, so pass.
+- **Reconnect:**
+  - Unplug detected in 3.9 s.
+  - Port back after 32.6 s.
+  - getInfo ready 32.8 s after the replug, with backlight re-applied.
+  - This shows a cold-booted V2.32 answers automatically.

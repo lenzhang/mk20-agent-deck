@@ -193,3 +193,13 @@ def test_via_detects_matrix_when_layer0_is_all_kc_no():
     b = backup(ViaClient(kb), encoders=2)
     assert (b.rows, b.cols) == (4, 5) and b.data["matrix"]["detected"]
     assert not kb.writes
+
+
+def test_via_set_one_and_parse_keycode():
+    from mk20deck.hw.via import KC_RALT, MockViaKeyboard, ViaClient, ViaError, parse_keycode, set_one
+    assert parse_keycode("KC_RALT") == parse_keycode("ralt") == parse_keycode("0xE6") == KC_RALT
+    kb = MockViaKeyboard(rows=4, cols=5)
+    with pytest.raises((ViaError, PermissionError)):
+        set_one(ViaClient(kb), 0, 3, 0, KC_RALT)  # read-only client refuses writes
+    old, new = set_one(ViaClient(kb, allow_writes=True), 0, 3, 0, KC_RALT)
+    assert new == KC_RALT and ViaClient(kb).keycode(0, 3, 0) == KC_RALT

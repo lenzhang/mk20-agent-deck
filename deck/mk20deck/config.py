@@ -29,7 +29,10 @@ class Skill:
     prompt: str
 
 
-DEFAULT_KNOB_MAP = {"103,103": "K2:press"}
+# Measured on V2.32 (devtest re-run 2026-10-18 00:28): knobs report keyStateChanged with
+# col == row >= 100; rotation = one pressed:true per detent (no release).
+DEFAULT_KNOB_MAP = {"100,100": "K1:press", "101,101": "K1:ccw", "102,102": "K1:cw",
+                    "103,103": "K2:press", "104,104": "K2:ccw", "105,105": "K2:cw"}
 
 
 @dataclass
@@ -55,8 +58,6 @@ class DeckConfig:
     herdr: HerdrConfig = field(default_factory=HerdrConfig)
     # Knob event mapping (PRD §6.4).  Keys are "col,row" firmware coordinates reported
     # by keyStateChanged (knobs report col/row >= 100), values like "K1:press".
-    # Measured 2026-10-18 (V2.32): K2 press -> (103,103).  Rotation and K1 press
-    # produced no CDC event in the first headless run (re-run pending).
     knob_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_KNOB_MAP))
     # keycode-form key events (keyCodeH/L): "0x00e6" -> "1,4" (document col,row) or "K1:cw"
     keycode_map: dict[str, str] = field(default_factory=dict)

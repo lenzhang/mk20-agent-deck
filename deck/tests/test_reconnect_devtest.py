@@ -477,13 +477,14 @@ def test_daemon_maps_k2_press_and_drops_unmapped_knob_coords():
     from mk20deck import protocol as P
     clk = FakeClock()
     cfg = DeckConfig()
-    assert cfg.knob_map == {"103,103": "K2:press"}
+    assert cfg.knob_map["103,103"] == "K2:press" and cfg.knob_map["102,102"] == "K1:cw"
     d = Daemon(_ctl(clk), Renderer(DeviceLayout.default()), None, clock=clk, knob_map=cfg.knob_map)
     d.on_device_key(P.KeyEvent(103, 103, True))
-    d.on_device_key(P.KeyEvent(101, 101, True))  # unknown knob event: must not become a grid key
+    d.on_device_key(P.KeyEvent(102, 102, True))
+    d.on_device_key(P.KeyEvent(109, 109, True))  # unknown knob event: must not become a grid key
     d.on_device_key(P.KeyEvent(0, 3, True))
     got = [d.events.get_nowait() for _ in range(d.events.qsize())]
-    assert [(e.kind, e.a, e.b) for e in got] == [("knob", 2, "down"), ("key", 1, 4)]
+    assert [(e.kind, e.a, e.b) for e in got] == [("knob", 2, "down"), ("knob", 1, "cw"), ("key", 1, 4)]
 
 
 def test_step_plan_key_subset():

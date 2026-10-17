@@ -624,7 +624,7 @@ class DevTest:
                     continue
                 results[f"{col},{row}"] = self._press_release(
                     f"key:{col},{row}", f"按下并松开 黄色高亮键（第{row}行 第{col}列）"
-                    + ("；不按则 20 秒后自动跳过" if self.opts.headless else ""), (col, row))
+                    + (f"；不按则 {self.opts.step_timeout:.0f} 秒后自动跳过" if self.opts.headless else ""), (col, row))
         kc_form = {k: r["fw"][1] for k, r in results.items() if r["fw"] and r["fw"][0] == "kc"}
         if kc_form:
             missing = [k for k, r in results.items() if not r["ok"]]
@@ -664,7 +664,7 @@ class DevTest:
                     out[step] = {"events": 0, "methods": [], "key_cells": [], "outside_key_grid": [], "raw": [],
                                  "skipped": "overall timeout"}
                     continue
-                t0 = self._step(step, text + ("（不动则 20 秒后自动跳过）" if self.opts.headless else ""))
+                t0 = self._step(step, text + (f"（不动则 {self.opts.step_timeout:.0f} 秒后自动跳过）" if self.opts.headless else ""))
                 tmo = self._tmo(self.opts.step_timeout)
                 if self.opts.headless:
                     self._wait_or_hid(lambda xs: bool(_events(xs)), t0, tmo)
@@ -738,7 +738,7 @@ class DevTest:
         if not self._guided("ptt"):
             return
         self._ensure_gate()
-        text = "按住黄色高亮的 PTT 键（左下角）约 2 秒后松开"
+        text = "PTT：按住黄色高亮键（左下角）不放，心里数 1、2、3 再松开"
         t0 = self.clock()
         r = self._press_release("ptt", text, PTT_DOC)
         extra = {}
@@ -906,7 +906,7 @@ def step_plan(opts: DevTestOptions) -> list[str]:
         for knob, side in (("K1", "左"), ("K2", "右")):
             out += [f"顺时针转 {side}旋钮 {knob} 三格", f"逆时针转 {side}旋钮 {knob} 三格", f"按下并松开 {side}旋钮 {knob}"]
     if on("ptt"):
-        out.append("按住 PTT 键（左下角）约 2 秒后松开")
+        out.append("PTT：按住左下角键不放，数 1、2、3 再松开")
     if opts.timing and on("timing"):
         out += ["用正常速度单击 高亮键 5 次", "双击 高亮键 3 次（共 6 下）", "长按 高亮键 约 1 秒，重复 3 次"]
     if opts.reconnect and on("reconnect"):
