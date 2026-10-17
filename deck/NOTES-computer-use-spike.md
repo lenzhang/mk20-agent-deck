@@ -242,3 +242,162 @@ AA 55 | sum8 | len | (~len) | payload[len] | F5 5F
 ---
 
 *Spike author: Grok Bot executor · 2026-10-18 ~01:25 SGT · device not modified.*
+
+---
+
+## Morning report — overnight research (2026-10-18 02:52–03:03 SGT → ready for morning)
+
+User went to sleep ~02:52 and asked for overnight deep research: best USB gadget design
+(ACM + adb + HID kbd + abs pointer + virtual NIC for VNC), real EP budget, live composite
+tests with failsafe, ECM cross-build, RNDIS-on-Mac reality, Wi-Fi fallback. Ranked
+recommendation with evidence.
+
+### Device state left for morning
+
+| Item | State |
+|---|---|
+| ACM `/dev/cu.usbmodem1101` | **Healthy** — `getInfo` → V2.32 as of 02:58 |
+| Staged boot hook | **One-shot self-recovering** `lunch.sh` (crc `2551892939`) + `/mnt/SDCARD/mk20-add-adb.sh` |
+| Hook behaviour | Deletes itself **before** USB change → next power-cycle is always plain serial; on this boot: wait for KeyboardDevice, add `ffs.adb` beside existing `acm.usb0`, start `adbd`; on failure immediately `setusbconfig serial`; 3 h watchdog also restores serial |
+| Overnight waiter | Mac PID watching until **10:59 SGT** for MK20 adb (ignores watch `WATCH-SERIAL`); auto-runs `collect.sh` + EP probe |
+| Prior M2 adb-only attempt | Ran (disarmed, `m2-adb.done` + `m2-adb-status.txt` exist) but **adb never appeared on Mac**; ACM returned. Status file not yet pulled (no content-read API); dump scheduled inside the new lunch.sh |
+
+**Morning action for user:** one power-cycle. Expect either (a) ACM stays + new `adb devices` entry (composite success) with auto-collect, or (b) brief blip then plain serial (failsafe). A second power-cycle always restores stock serial (hook already gone).
+
+### Rollback (one command)
+
+Via ACM (device answering getInfo):
+```bash
+# from deck venv
+python - <<'PY'
+from mk20deck.transport import SerialTransport
+from mk20deck.link import DeviceLink
+t=SerialTransport("/dev/cu.usbmodem1101"); l=DeviceLink(t,ack_timeout=5,preamble_flush=0); l.start()
+print(l.call({"method":"deleteFiles","parameters":{"filePaths":[
+  "/mnt/SDCARD/lunch.sh","/mnt/SDCARD/mk20-add-adb.sh","/data/mk20-add-adb.sh",
+  "/mnt/SDCARD/lunch.sh.m2test","/mnt/SDCARD/mk20-no-adb"]}}))
+l.close()
+PY
+```
+Or create disable flag (if a future *persistent* hook checks it):
+`saveToFile /mnt/SDCARD/mk20-no-adb` with body `1`.
+Via adb (if composite is up): `adb shell 'rm -f /mnt/SDCARD/lunch.sh /mnt/SDCARD/mk20-add-adb.sh; /data/setusbconfig serial; killall adbd'`
+
+---
+
+### Evidence: sunxi UDC endpoint budget (hard gate)
+
+**Hardware (T113 datasheet):** EP0 + EP1..EP5 bidirectional = 10 user EPs; shared **8 KB + 64 B FIFO**.
+
+**Tina `sunxi_udc` driver default** (matches our `kernel_strings.txt` *and* Allwinner
+`sunxi_udc.h` + Tina USB 开发指南 PDF saved at
+`/workspace/mk20-research/docs/tina-usb-guide.pdf`):
+
+| EP name (driver) | Type | Notes |
+|---|---|---|
+| ep0 | control | always |
+| ep1in-bulk / ep1out-bulk | bulk pair | |
+| ep2in-bulk / ep2out-bulk | bulk pair | |
+| **ep3-iso** | **isochronous only** | not usable as INT/bulk without source patch |
+| **ep4-int** | **interrupt (ONE)** | the only INT EP in stock driver |
+| ep5in-bulk / ep5out-bulk | bulk pair | |
+
+So stock software budget = **3 bulk pairs + 1 INT + 1 ISO**.
+
+**Function costs (Linux gadget):**
+
+| Function | INT | Bulk pairs |
+|---|---|---|
+| CDC-ACM | 1 (notification) | 1 |
+| ADB (FunctionFS) | 0 (typical) | 1 |
+| HID (one report stream) | 1 | 0 |
+| CDC-ECM / RNDIS / NCM | 1 (notification) | 1 |
+
+**Direct consequences (no kernel reflash):**
+
+| Composite | Fits? |
+|---|---|
+| ACM alone (today) | ✓ |
+| **ACM + ADB** | **✓** (ADB takes a bulk pair; ACM keeps the sole INT) |
+| ACM + HID | ✗ (2× INT needed, only 1 exists) |
+| ACM + ECM/RNDIS | ✗ (2× INT) |
+| ACM + ADB + HID | ✗ (2× INT) |
+| ADB + HID (no ACM) | ✓ but breaks deck protocol |
+| Full dream: ACM+ADB+HID kbd+abs mouse+ECM | ✗✗ (3–4× INT) |
+
+Allwinner's own guide documents the fix for "need 2 INT": rewrite `ep3-iso` → `ep3-int` in
+`sunxi_udc.h` / `sunxi_udc.c` and rebuild the kernel. That is a **flash**, outside current
+no-brick spike rules, but is the clean path to ACM+HID or ACM+ECM.
+
+**Bonus HID trick (after ep3→int patch):** one `f_hid` can carry **keyboard + absolute
+pointer** as two report IDs on a **single INT EP** → ACM(INT)+HID_combo(INT)+ADB(bulk)
+fits in a 2-INT patched kernel.
+
+---
+
+### Evidence: network path to Mac for VNC
+
+| Option | Mac native? | On device today? | EP cost | Verdict |
+|---|---|---|---|---|
+| **CDC-ECM** | Yes (cdc_ncm/ecm) | **No** — only `usb_f_rndis` in kernel; `u_ether` *is* built-in | 1 INT + 1 bulk | Blocked by INT budget *and* missing module |
+| **CDC-NCM** | Yes | No | 1 INT + 1 bulk | Same |
+| **RNDIS** | **No** on Apple Silicon | Yes (`usb_f_rndis`) | 1 INT + 1 bulk | HoRNDIS kext is x86_64-only / dead (github.com/jwise/horndis#174). Userspace TetherKit/muta exist but add Mac agents we don't want as the primary path |
+| **Wi-Fi (RTL8188GU)** | Yes | Hardware present; `qt_app1` **stops wpa_supplicant** at boot | 0 USB EPs | **Recommended VNC transport** while USB INT is scarce |
+| RFB over ACM framing | n/a | Possible | 0 extra | Last resort; fights Protocol A bandwidth |
+
+**ECM cross-build overnight (box):**
+- Vanilla `linux-5.4.61` + `arm-linux-gnueabihf-gcc 14.2` + `CONFIG_PREEMPT=y`
+- Produced `artifacts/m2-ecm-modules/usb_f_ecm.ko` (13160 B)
+- **Vermagic string matches device exactly:** `5.4.61 SMP preempt mod_unload ARMv7 p2v8`
+- Depends on `u_ether` (present built-in on device)
+- **Not live-tested** — no Tina `Module.symvers`; if `CONFIG_MODVERSIONS=y` on device,
+  `insmod` will still fail. Morning: `adb push` + `insmod` + `dmesg`. Even if it loads,
+  ACM+ECM remains EP-impossible without the ep3→int kernel patch.
+
+---
+
+### Evidence: shell / M1 / M2 attempts tonight
+
+- **M1 PASS:** `lunch.sh` code-exec proven; probe log captured (≈111 MB RAM, UDC
+  `4100000.udc-controller`, `adbd`+`setusbconfig` present). See earlier sections +
+  `artifacts/m1-probe-final-20261018.tgz`.
+- **M2 adb-only window:** armed; device disarmed hook and wrote `m2-adb-status.txt`;
+  Mac never saw an `18d1:*` / new adb serial (ACM returned). Likely causes to verify from
+  status log in the morning: `qt_app2` respawn racing `setusbconfig adb`, functionfs mount
+  failure, or adbd exiting. The new **add-adb-beside-ACM** approach avoids tearing down
+  ACM (better for KeyboardDevice) and is what is staged now.
+- Wrong-device footgun fixed: waiter ignores CD Watch `WATCH-SERIAL`.
+
+---
+
+### Ranked recommendation
+
+| Rank | Design | Needs | Why |
+|---|---|---|---|
+| **1 (do now)** | **ACM + ADB composite** (persistent after live prove-in) + **Wi-Fi for VNC** + input via **GD32 ttyS1 keyboard** and/or **VNC PointerEvent**; absolute pointer later | Userspace only (`lunch.sh` / `/data` helper) | Fits stock EP budget; keeps deck protocol; gives real shell; VNC doesn't need USB NIC |
+| **2 (next, if Wi-Fi painful)** | Same as #1 but try `insmod usb_f_ecm.ko` on a **non-ACM** test config, or use userspace RNDIS (TetherKit) only as experiment | Matching module + Mac helper | Unblocks USB-only network without kernel flash; still can't share INT with ACM |
+| **3 (best long-term)** | Patch Tina `sunxi_udc` `ep3-iso`→`ep3-int`, rebuild/flash kernel; then **ACM + ADB + one HID (kbd+abs mouse reports)** + Wi-Fi or ECM | Controlled kernel flash + TF backup | Unlocks hardware absolute pointer on Mac without Digitizer quirks; still prefer Wi-Fi/ECM carefully |
+| **4 (avoid)** | RNDIS as primary Mac path via HoRNDIS kext | — | Dead on Apple Silicon |
+| **5 (avoid)** | Full ACM+ADB+2×HID+ECM on stock kernel | — | Mathematically impossible (INT count) |
+
+### Morning checklist (for resumed agent / user)
+
+1. Power-cycle once (hook is armed and self-disarming).
+2. Confirm waiter collected (`~/mk20-backup/m2/collect-*/` + `DEVICE_ONLINE`).
+3. Read `/mnt/SDCARD/mk20-gadget.log` + `m2test-status.txt` (+ dumped `m2-adb-status.txt`).
+4. If composite OK: verify **both** `cu.usbmodem*` getInfo **and** `adb shell true` on MK20 serial.
+5. Optional: `adb push artifacts/m2-ecm-modules/usb_f_ecm.ko /tmp && insmod` — record dmesg.
+6. If composite OK and stable: convert one-shot lunch into a **persistent** idempotent hook
+   (keep disarm-flag `/mnt/SDCARD/mk20-no-adb` as kill switch); update RECOVERY.
+7. If composite fails: leave serial (already failsafe); fall back to Wi-Fi plan for VNC;
+   debug from status logs; do **not** leave a sticky broken hook (already one-shot).
+
+### Artifacts
+
+- `~/mk20-backup/m2/` — scripts, waiter, verify JSON
+- `artifacts/m2-scripts/` — `mk20-add-adb.sh`, `lunch-m2test.sh`
+- `artifacts/m2-ecm-modules/usb_f_ecm.ko` + README (vermagic-matched scaffold)
+- `mk20-research/docs/tina-usb-guide.pdf` — Allwinner USB 开发指南 (ep_fifo docs)
+- `mk20-research/ecm-build/linux-5.4.61/` — vanilla tree used for the module build
+
+*Overnight author: Grok Bot executor · report finalized ~03:03 SGT · device left on healthy ACM with one-shot self-recovering ACM+adb test armed for morning power-cycle.*
