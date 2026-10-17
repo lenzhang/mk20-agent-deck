@@ -146,3 +146,16 @@ def test_capabilities_p0():
                             app_alive=lambda: True).capabilities()
     assert c.focus is None and c.skill_new_thread is None
     assert c.approve and c.send and c.stop and c.effort_set == "此会话不支持"
+
+
+def test_compressed_rollout_is_cold_idle(codex_home):
+    """Codex compresses inactive rollouts to <path>.zst (observed on the Mac)."""
+    import glob
+    rp3 = glob.glob(str(codex_home / "sessions/**/*000000000003.jsonl"), recursive=True)[0]
+    rp2 = glob.glob(str(codex_home / "sessions/**/*000000000002.jsonl"), recursive=True)[0]
+    for rp in (rp3, rp2):
+        os.rename(rp, rp + ".zst")
+    ss = by_id(mk(codex_home).poll())
+    assert ss["3"].state == State.IDLE and "历史" in ss["3"].state_reason
+    assert ss["2"].state == State.DONE_UNREAD        # still in the App unread set
+    assert ss["a"].state == State.UNKNOWN            # neither .jsonl nor .zst

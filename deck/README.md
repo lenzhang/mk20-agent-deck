@@ -20,7 +20,7 @@ is **not** implemented (not approved).
 ## Dev
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e . pytest
-.venv/bin/python -m pytest -q                 # 72 tests, Linux-safe
+.venv/bin/python -m pytest -q                 # 73 tests, Linux-safe
 .venv/bin/python -m mk20deck sim-shots --out ../artifacts
 .venv/bin/python -m mk20deck sim-serve        # http://127.0.0.1:8765 (--source real on the Mac)
 python3 -m mk20deck probe-codex [--json]      # read-only Codex Desktop snapshot (Mac)
@@ -43,7 +43,9 @@ be trusted (App: Settings → Hooks) before they run in Desktop sessions.
 ## P0 deviations / known limits
 - Canvas geometry is a guess until `getInfo` on the real device.
 - Desktop states: `error` from rollout `event_msg:error`; `turn_aborted` → idle;
-  running older than 600 s without completion → unknown. All Desktop sessions are
+  running older than 600 s without completion → unknown; rollout compressed to
+  `.jsonl.zst` (Codex does this for inactive threads) → idle (or done-unread if in
+  the App unread set). All Desktop sessions are
   tagged 来源推定 (source=vscode + originator heuristic; codex-tui also writes vscode).
 - Desktop send / stop / effort disabled; accept/decline only explain (no approve via deck).
 - Skills prefill a new thread via `codex://threads/new?path=&prompt=` — never submit; long prompts fail, not truncated.

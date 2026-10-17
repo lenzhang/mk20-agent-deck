@@ -206,7 +206,13 @@ class CodexDesktopAdapter(ModeAdapter):
         try:
             st = os.stat(rollout_path)
         except OSError:
-            return Lifecycle(None, reason="rollout 缺失"), None
+            # Codex compresses inactive rollouts to ``<path>.zst`` (observed on the
+            # Mac 2026-10-17).  A compressed rollout is not being written -> cold.
+            try:
+                zst = os.stat(rollout_path + ".zst")
+            except OSError:
+                return Lifecycle(None, reason="rollout 缺失"), None
+            return Lifecycle("cold", reason="rollout 已压缩"), zst.st_mtime
         cached = self._tail_cache.get(rollout_path)
         if cached and cached[0] == st.st_size and cached[1] == st.st_mtime:
             return cached[2], st.st_mtime
@@ -306,6 +312,10 @@ class CodexDesktopAdapter(ModeAdapter):
             return State.IDLE, "空闲", marker
         if lc.kind == "turn_aborted":
             return State.IDLE, "已中断", ""
+        if lc.kind == "cold":
+            if unread:
+                return State.DONE_UNREAD, "完成未读（App 未读集合）", f"cold:{int(mtime or 0)}"
+            return State.IDLE, "空闲（历史）", ""
         return State.UNKNOWN, "未知事件", ""
 
     # ------------------------------------------------------------------ actions
