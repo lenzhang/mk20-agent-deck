@@ -112,3 +112,16 @@ Results are in `artifacts/devtest-headless-20261018-002838-rerun/`; every sectio
   - Right Option for IME voice therefore needs a host-side synthesized event (PRD fallback B).
   - That requires Accessibility "post event" permission: `CGPreflightPostEventAccess()` is currently false.
   - It also needs verification that the IME accepts synthetic flagsChanged.
+
+## PTT decision (2026-10-18 01:00 SGT)
+The user put PTT **on hold**: no Accessibility permission and no fallback B for now.
+- The daemon shows "PTT 不可用，请使用 Mac 原语音键" when the PTT key is pressed.
+- The CDC hold events are still recorded.
+- PRD §6.5 has a dated status note.
+
+## Daemon run with Codex Desktop (2026-10-18 00:43–)
+- **Connection:** `mk20deck run` connected at 00:43:46 and set backlight 80. It rendered the L1 page with real Codex sessions: `artifacts/daemon-codex-2026-10-18-0043.jpg`.
+- **Double-press focus test:** not observed.
+  - The frontmost-app watcher saw only "Grok Bot" and then `loginwindow` from 00:58:59 (screen lock or screensaver).
+  - The daemon did not log input events at the time, so it is unknown whether a press happened.
+  - Input events and focus actions are now logged at INFO.

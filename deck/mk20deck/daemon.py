@@ -95,6 +95,7 @@ class Daemon:
         self.events.put(InputEvent("knob", knob, kind, t=self.clock()))
 
     def _apply(self, ev: InputEvent) -> None:
+        log.info("input %s %s %s%s", ev.kind, ev.a, ev.b, "" if ev.kind != "key" else (" down" if ev.pressed else " up"))
         if ev.kind == "key":
             self.controller.on_key(ev.a, int(ev.b), ev.pressed)
         else:

@@ -20,6 +20,11 @@ from .slots import N_SLOTS, SlotManager
 
 log = logging.getLogger(__name__)
 
+# PRD §6.5 status (2026-10-18): path A (VIA KC_RALT) has no effect in host mode (keys are
+# routed GD32 → T113, the GD32 keymap does not emit HID); path B (synthesized Right
+# Option) is on hold by user decision.  PTT therefore only shows this hint.
+PTT_UNAVAILABLE = "PTT 不可用，请使用 Mac 原语音键"
+
 LONG_PRESS = 0.600   # D14
 DOUBLE_TAP = 0.350   # §6.3
 TOAST_S = 1.5
@@ -302,6 +307,8 @@ class Controller:
         if r == Role.PTT:
             self.ptt_held = True
             self.ptt_observed = True
+            if PTT_UNAVAILABLE:
+                self._say(PTT_UNAVAILABLE)
             return
         if r == Role.AGENT:
             mgr = self.mgr
@@ -449,6 +456,8 @@ class Controller:
             self._say(cap)
             return
         res = self.adapter.focus(s)
+        log.info("focus %s (%s): ok=%s %s", s.sid.key(), s.title[:24] if getattr(s, "title", None) else "",
+                 res.ok, getattr(res, "message", ""))
         if res.ok and s.state == State.DONE_UNREAD:
             self.local_cleared[s.sid.key()] = s.done_marker
             s.state, s.state_reason = State.IDLE, "已聚焦（本地清提醒）"
