@@ -7,6 +7,7 @@ dependencies = ["Pillow>=10.1", "pyserial>=3.5"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+via = ["hidapi>=0.14"]
 
 [project.scripts]
 mk20deck = "mk20deck.cli:main"

@@ -16,11 +16,16 @@ is **not** implemented (not approved).
 | `render/` | key & sub-screen renderer, ≤8 fps global cap, single attention animation |
 | `daemon.py`, `cli.py` | daemon loop, heartbeat, offline frame on exit, CLI |
 | `sim.py` | headless screenshots + interactive web sim |
+| `supervisor.py` | find port → open → handshake → run; reconnect on unplug / ACK loss / wake; busy-port hint (never kills) |
+| `hw/devtest.py` | on-device validation harness (`devtest`), markdown + JSON report |
+| `hw/via.py` | VIA raw-HID client: read-only backup, diff-only verified restore, mock keyboard |
+| `hw/gd32dfu.py` | GD32 DFU (`1eaf:0003`) re-flash wrapper, dry-run by default |
+| `hw/usbenum.py`, `hw/power.py` | read-only USB enumeration; sleep/wake (clock jump + `CGDisplayIsAsleep`) |
 
 ## Dev
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e . pytest
-.venv/bin/python -m pytest -q                 # 73 tests, Linux-safe
+.venv/bin/python -m pytest -q                 # 95 tests, Linux-safe
 .venv/bin/python -m mk20deck sim-shots --out ../artifacts
 .venv/bin/python -m mk20deck sim-serve        # http://127.0.0.1:8765 (--source real on the Mac)
 python3 -m mk20deck probe-codex [--json]      # read-only Codex Desktop snapshot (Mac)
@@ -41,7 +46,7 @@ with the vendor `CRC32.cpp`; output is `tests/fixtures/golden_frames.txt`.
 be trusted (App: Settings → Hooks) before they run in Desktop sessions.
 
 ## P0 deviations / known limits
-- Canvas geometry is a guess until `getInfo` on the real device.
+- Canvas geometry is a guess until `getInfo`; firmware 0/1-based coords are inferred from getInfo rects (`fw_coord_base = "auto"`).
 - Desktop states: `error` from rollout `event_msg:error`; `turn_aborted` → idle;
   running older than 600 s without completion → unknown; rollout compressed to
   `.jsonl.zst` (Codex does this for inactive threads) → idle (or done-unread if in
@@ -50,11 +55,24 @@ be trusted (App: Settings → Hooks) before they run in Desktop sessions.
 - Desktop send / stop / effort disabled; accept/decline only explain (no approve via deck).
 - Skills prefill a new thread via `codex://threads/new?path=&prompt=` — never submit; long prompts fail, not truncated.
 - Knob event mapping unverified (`knob_map` in config). PTT path B not implemented (PTT = device-side KC_RALT).
-- Sleep detection not implemented (offline frame on SIGTERM/exit only). tmux new-session off unless configured. herdr stub. L2/L3 are P1.
+- Sleep: display sleep → "Mac 已休眠" frame + pause; wake (clock jump) → reconnect + re-handshake, gestures dropped. tmux new-session off unless configured. herdr stub. L2/L3 are P1.
+- Knob events that arrive as a non-`keyStateChanged` JSON method are recorded by devtest but not yet mapped by the daemon.
 
-## On-device checklist
-1. `getInfo` → real canvas & rect coordinates (0- vs 1-based), resolution reject behaviour.
-2. SHOW_JPG ack timing / max sustainable fps at full canvas; JPEG size vs quality.
-3. Key / knob event JSON shape (`keyStateChanged`, knob rotate/press) → `knob_map`.
-4. PTT KC_RALT hold/release while deck owns display; anti-misfire timing (600 ms long press, 350 ms double tap).
-5. Sleep/wake & USB re-enumeration → reconnect + offline frame.
+## On-device checklist → `devtest`
+Stop the daemon first (only one process may own the CDC port). Then on the Mac:
+```bash
+python3 -m mk20deck usb-list                 # read-only enumeration
+python3 -m mk20deck via-backup               # read-only VIA keymap backup (pip install hidapi)
+python3 -m mk20deck devtest                  # guided, ~5 min; add --with-sleep for the sleep/wake step
+python3 -m mk20deck devtest --auto           # non-interactive subset (USB, port, getInfo, display timing, VIA)
+```
+Covers PRD §10.1: USB roles (T113 CDC / GD32 VIA / DFU / FEL), CDC port + ScreenKey contention
+(read-only lsof/pgrep), getInfo canvas + 0/1-based coords, SHOW_JPG ACK P50/P95 + full-screen fps
+(pattern vs noise JPEG, q60/85/95 sizes), wrong-resolution reject, visual check, 20 keys with on-screen
+highlight (offset/transposition analysis), knobs (raw JSON, suggested `[knobs]` map), HID-leak question
+(P0 hard gate), PTT CDC visibility + hold time + IME, tap/double/long timing vs 600/350 ms,
+unplug/replug latency, optional sleep/wake, VIA read-only audit (+ backup copy).
+Writes beyond images need `--allow-device-writes` (only `--backlight N` today).
+Report: `~/.config/mk20-agent-deck/devtest/<time>/devtest.{md,json}` with a suggested config block.
+
+Backup / recovery (VIA restore, GD32 DFU, T113 TF image): see `RECOVERY.md`.

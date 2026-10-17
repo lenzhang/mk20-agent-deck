@@ -75,7 +75,8 @@ class DeviceLayout:
         return cls(640, 656, rects)
 
     @classmethod
-    def from_get_info(cls, result: dict[str, Any], fw_base: int = 0) -> "DeviceLayout":
+    def from_get_info(cls, result: dict[str, Any], fw_base: int | None = None) -> "DeviceLayout":
+        """``fw_base=None`` infers 0/1-based coordinates from the key rects."""
         panel = result.get("devicePanel") or {}
         rects = []
         for o in panel.get("rects") or []:
@@ -90,8 +91,17 @@ class DeviceLayout:
             lay = cls.default()
             lay.extra["getInfo_incomplete"] = True
             return lay
-        return cls(w, h, rects, model=str(result.get("deviceModel", "?")), guessed=False, fw_base=fw_base,
-                   extra={"deviceVersion": result.get("deviceVersion")})
+        inferred = infer_fw_base(rects)
+        base = inferred if fw_base is None else fw_base
+        return cls(w, h, rects, model=str(result.get("deviceModel", "?")), guessed=False, fw_base=base,
+                   extra={"deviceVersion": result.get("deviceVersion"), "fw_base_inferred": inferred})
+
+    def with_base(self, base: int) -> "DeviceLayout":
+        """Same geometry with firmware coordinates shifted to ``base`` (mock 1-based firmware)."""
+        d = base - self.fw_base
+        rects = [Rect(r.x, r.y, r.w, r.h, r.col + d if r.is_key else r.col, r.row + d if r.is_key else r.row,
+                      r.is_key) for r in self.rects]
+        return DeviceLayout(self.width, self.height, rects, self.model, self.guessed, base, dict(self.extra))
 
     def to_get_info(self) -> dict[str, Any]:
         """Inverse of from_get_info (used by the mock device)."""
@@ -108,3 +118,11 @@ class DeviceLayout:
                 ],
             },
         }
+
+
+def infer_fw_base(rects: list[Rect]) -> int | None:
+    keys = [r for r in rects if r.is_key and r.col >= 0 and r.row >= 0]
+    if not keys:
+        return None
+    m = min(min(r.col for r in keys), min(r.row for r in keys))
+    return m if m in (0, 1) else None

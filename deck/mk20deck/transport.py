@@ -83,14 +83,22 @@ class MockDevice:
         self.json_requests: list[dict] = []
         self.rejected: list[str] = []
         self.closed = False
+        self.unplugged = False  # read/write raise OSError like a vanished tty
+        self.hung = False  # swallow everything (T113 stuck)
         self._ids = P.FrameIdCounter(1000)
 
     # --- Transport side -------------------------------------------------
     def write(self, data: bytes) -> None:
+        if self.unplugged:
+            raise OSError(6, "Device not configured")
+        if self.hung:
+            return
         for fr in self._parser.feed(data):
             self._handle(fr)
 
     def read(self, timeout: float) -> bytes:
+        if self.unplugged:
+            raise OSError(6, "Device not configured")
         with self._cv:
             if not self._out:
                 self._cv.wait(timeout)
@@ -143,6 +151,10 @@ class MockDevice:
         else:
             ack = {"ack_method": method, "success": False, "errorString": f"Unknown method: {method}"}
         self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(ack), fr.frame_id))
+
+    def emit_json(self, obj: dict) -> None:
+        """Inject an arbitrary device JSON event (unknown knob formats etc.)."""
+        self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(obj), self._ids.next()))
 
     def press(self, col: int, row: int, pressed: bool) -> None:
         """Inject a firmware-coordinate key event."""

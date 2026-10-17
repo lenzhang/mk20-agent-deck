@@ -33,7 +33,7 @@ class Skill:
 class DeckConfig:
     default_mode: Mode = Mode.DESKTOP
     port: str = "auto"
-    fw_coord_base: int = 0
+    fw_coord_base: int | None = None  # None/"auto" = infer from getInfo rects
     max_fps: float = 8.0
     animations: bool = True
     jpeg_quality: int = 85
@@ -68,6 +68,8 @@ def load_config(path: str | None = None) -> DeckConfig:
               "heartbeat_s", "ack_timeout_s", "preamble_flush", "backlight", "state_path"):
         if k in deck:
             setattr(cfg, k, deck[k])
+    if cfg.fw_coord_base == "auto":
+        cfg.fw_coord_base = None
     cfg.max_fps = min(float(cfg.max_fps), 8.0)  # PRD §7.4 hard ceiling
     cfg.state_path = os.path.expanduser(cfg.state_path)
     if "skills" in d:

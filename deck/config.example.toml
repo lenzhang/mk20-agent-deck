@@ -2,7 +2,7 @@
 [deck]
 default_mode = "codex_desktop"   # first run only; afterwards the last used mode is remembered
 port = "auto"                    # or "/dev/cu.usbmodemXXXX"
-fw_coord_base = 0                # firmware col/row base — verify on device (PRD D12)
+fw_coord_base = "auto"           # firmware col/row base: "auto" (infer from getInfo rects), 0 or 1 (PRD D12)
 max_fps = 8                      # global ceiling (PRD §7.4); clamped to <= 8
 animations = true
 jpeg_quality = 85

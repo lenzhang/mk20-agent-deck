@@ -25,6 +25,10 @@ class InputEvent:
     t: float = 0.0
 
 
+class WakeReconnect(ConnectionError):
+    """Raised after system/display wake so the caller re-opens the port and re-handshakes."""
+
+
 @dataclass
 class Daemon:
     controller: Controller
@@ -44,6 +48,11 @@ class Daemon:
     _last_frame: float = -1e9
     _next_poll: float = 0.0
     _pending_t: float | None = None
+    power: object | None = None  # hw.power.PowerMonitor
+    power_interval: float = 1.0
+    paused: bool = False  # display asleep: no frames, no heartbeat
+    _next_power: float = 0.0
+    power_log: list = field(default_factory=list)
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -128,10 +137,38 @@ class Daemon:
             waits.append(self._last_frame + 1.0 / view_fps - now)
         if self.controller.presses:
             waits.append(LONG_PRESS / 8)
+        if self.power is not None:
+            waits.append(self._next_power - now)
         return max(0.005, min(waits))
+
+    def check_power(self) -> None:
+        """Display sleep → offline frame + pause; wake → WakeReconnect (PRD §7.5, G24)."""
+        if self.power is None:
+            return
+        now = self.clock()
+        if now < self._next_power:
+            return
+        self._next_power = now + self.power_interval
+        for ev in self.power.poll():
+            self.power_log.append((time.time(), ev))
+            log.info("power event: %s", ev)
+            if ev == "display_sleep" and not self.paused:
+                self.offline_frame("Mac 已休眠")
+                self.paused = True
+            elif ev in ("display_wake", "system_wake"):
+                was_paused, self.paused = self.paused, False
+                self.controller.presses.clear()  # never replay gestures across sleep
+                if ev == "system_wake" or was_paused:
+                    raise WakeReconnect(ev)
 
     def run(self, stop: threading.Event) -> None:
         while not stop.is_set():
+            self.check_power()
+            if self.paused:
+                stop.wait(self.power_interval)
+                while not self.events.empty():  # drop input while the Mac sleeps
+                    self.events.get_nowait()
+                continue
             self.step()
             try:
                 ev = self.events.get(timeout=self.next_wait())
@@ -139,7 +176,7 @@ class Daemon:
             except queue.Empty:
                 pass
             if self.link is not None and not self.link.connected:
-                raise ConnectionError("device disconnected")
+                raise ConnectionError(self.link.lost_reason or "device disconnected")
 
     def offline_frame(self, reason: str) -> None:
         """Best effort on normal exit / sleep (PRD §7.5, AC12)."""

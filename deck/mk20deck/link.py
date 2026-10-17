@@ -50,7 +50,8 @@ class DeviceLink:
     """
 
     def __init__(self, transport: Transport, on_key: Callable[[P.KeyEvent], None] | None = None,
-                 ack_timeout: float = 1.0, preamble_flush: int = 1024 * 1024) -> None:
+                 ack_timeout: float = 1.0, preamble_flush: int = 1024 * 1024,
+                 max_ack_misses: int = 3, on_json: Callable[[dict], None] | None = None) -> None:
         self.t = transport
         self.on_key = on_key
         self.ack_timeout = ack_timeout
@@ -65,6 +66,10 @@ class DeviceLink:
         self._stop = threading.Event()
         self._reader = threading.Thread(target=self._read_loop, name="mk20-reader", daemon=True)
         self.connected = False
+        self.lost_reason: str | None = None
+        self.max_ack_misses = max_ack_misses
+        self.on_json = on_json  # raw tap of every device JSON frame (devtest event recorder)
+        self.ack_misses = 0  # consecutive SHOW_JPG ack timeouts
 
     def start(self) -> None:
         self._reader.start()
@@ -80,18 +85,34 @@ class DeviceLink:
                 chunk = self.t.read(0.05)
             except Exception as e:  # device unplugged
                 log.warning("transport read failed: %s", e)
-                self.connected = False
+                self._lost(f"读取失败（拔线？）: {e}")
                 return
             if not chunk:
                 continue
             for fr in self.parser.feed(chunk):
                 self._dispatch(fr)
 
+    def _lost(self, reason: str) -> None:
+        self.connected = False
+        self.lost_reason = reason
+        with self._lock:
+            pending, self._pending = self._pending, {}
+        for q in pending.values():  # wake waiters immediately instead of after ack_timeout
+            try:
+                q.put_nowait(P.Frame(0, -1, b""))
+            except queue.Full:
+                pass
+
     def _dispatch(self, fr: P.Frame) -> None:
         with self._lock:
             waiter = self._pending.pop(fr.frame_id, None)
         if fr.cmd == P.CMD_JSON:
             obj = fr.json() or {}
+            if self.on_json is not None:
+                try:
+                    self.on_json({"id": fr.frame_id, **obj})
+                except Exception:  # noqa: BLE001
+                    log.exception("on_json hook failed")
             item = P.classify_json(obj)
             if isinstance(item, P.KeyEvent):
                 if self.on_key:
@@ -109,7 +130,13 @@ class DeviceLink:
         if wait:
             with self._lock:
                 self._pending[fid] = q
-        self.t.write(P.encode_frame(cmd, data, fid))
+        try:
+            self.t.write(P.encode_frame(cmd, data, fid))
+        except Exception as e:  # noqa: BLE001 — serial write error == unplugged
+            with self._lock:
+                self._pending.pop(fid, None)
+            self._lost(f"写入失败（拔线？）: {e}")
+            raise ConnectionError(self.lost_reason) from e
         if not wait:
             return None
         try:
@@ -120,7 +147,7 @@ class DeviceLink:
             return None
 
     # ------------------------------------------------------------------
-    def handshake(self, fw_base: int = 0) -> DeviceLayout:
+    def handshake(self, fw_base: int | None = None) -> DeviceLayout:
         if self.preamble_flush:
             # The vendor demo writes 1 MiB of '0' before getInfo, presumably to
             # flush/abort any half-received frame on the device side.
@@ -129,6 +156,8 @@ class DeviceLink:
         if ack is None or not ack.success:
             raise ConnectionError(f"getInfo failed: {ack.error if ack else 'timeout'}")
         self.layout = DeviceLayout.from_get_info(ack.result, fw_base=fw_base)
+        if self.layout.fw_base is None:  # could not infer: keep the documented 0-based assumption
+            self.layout.fw_base = 0
         self.connected = True
         return self.layout
 
@@ -144,6 +173,12 @@ class DeviceLink:
         t0 = time.monotonic()
         fr = self._send(P.CMD_SHOW_JPG, jpeg, wait=True)
         if fr is None or fr.cmd != P.CMD_SHOW_JPG:
+            if fr is None and self.connected:
+                self.ack_misses += 1
+                if self.ack_misses >= self.max_ack_misses:
+                    # Port still open but the T113 stopped answering (hung / rebooting / slept).
+                    self._lost(f"连续 {self.ack_misses} 帧无 ACK")
             return False
+        self.ack_misses = 0
         self.frame_ack.add(time.monotonic() - t0)
         return True

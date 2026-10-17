@@ -36,9 +36,8 @@ def build_controller(cfg: DeckConfig, adapters, sim: bool = False) -> Controller
 
 
 def cmd_run(args) -> int:
-    from .daemon import Daemon
-    from .link import DeviceLink
-    from .render.canvas import Renderer
+    from .hw.power import PowerMonitor
+    from .supervisor import Supervisor, default_renderer_factory
     from .transport import SerialTransport, find_ports
 
     cfg = load_config(args.config)
@@ -48,41 +47,8 @@ def cmd_run(args) -> int:
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    while not stop.is_set():
-        ports = [cfg.port] if cfg.port != "auto" else find_ports()
-        if not ports:
-            log.info("MK20 CDC port not found; retrying")
-            stop.wait(2)
-            continue
-        try:
-            tr = SerialTransport(ports[0])
-        except Exception as e:  # noqa: BLE001 — e.g. port busy (ScreenKey); never kill it (PRD §8)
-            log.warning("cannot open %s: %s — if ScreenKey is running, quit it and retry", ports[0], e)
-            stop.wait(3)
-            continue
-        renderer = Renderer(DeviceLayout.default(), animations=cfg.animations, max_fps=cfg.max_fps,
-                            jpeg_quality=cfg.jpeg_quality)
-        d = Daemon(ctl, renderer, None, cfg.poll_interval_s, cfg.heartbeat_s, cfg.knob_map)
-        link = DeviceLink(tr, on_key=d.on_device_key, ack_timeout=cfg.ack_timeout_s,
-                          preamble_flush=cfg.preamble_flush)
-        d.link = link
-        try:
-            link.start()
-            renderer.layout = link.handshake(cfg.fw_coord_base)
-            log.info("connected %s layout=%sx%s guessed=%s", ports[0], renderer.layout.width,
-                     renderer.layout.height, renderer.layout.guessed)
-            if cfg.backlight is not None:
-                from . import protocol as P
-                link.call(P.set_backlight(cfg.backlight))
-            ctl.presses.clear()  # never replay gestures across reconnects
-            d.run(stop)
-        except Exception as e:  # noqa: BLE001
-            log.warning("link error: %s", e)
-        finally:
-            if stop.is_set():
-                d.offline_frame("守护进程已退出")
-            link.close()
-        stop.wait(1)
+    Supervisor(ctl, find_ports, SerialTransport, default_renderer_factory(cfg), cfg,
+               power=PowerMonitor.default()).run(stop)
     return 0
 
 
@@ -128,13 +94,119 @@ def cmd_probe(args) -> int:
     return 0
 
 
+def _port_users(port: str) -> dict:
+    """Read-only: who holds the CDC port (lsof) and whether ScreenKey runs (pgrep). Never kills."""
+    from .adapters.base import SubprocessRunner
+    r = SubprocessRunner()
+    pids = [p for p in r.run(["lsof", "-t", port], timeout=5).stdout.split() if p.strip()]
+    sk = r.run(["pgrep", "-lif", "screenkey"], timeout=5).stdout.strip().splitlines()
+    return {"pids": pids, "screenkey": sk}
+
+
+def cmd_devtest(args) -> int:
+    from .hw.devtest import ConsolePrompter, DevTest, DevTestOptions
+    from .hw.power import PowerMonitor
+    from .hw.usbenum import enumerate_usb
+    from .transport import SerialTransport, find_ports
+
+    if args.backlight is not None and not args.allow_device_writes:
+        print("--backlight 需要同时给出 --allow-device-writes")
+        return 2
+    out = args.out or os.path.join(CONFIG_DIR, "devtest", time.strftime("%Y%m%d-%H%M%S"))
+    opts = DevTestOptions(interactive=not args.auto, port=args.port or "auto", fps_seconds=args.fps_seconds,
+                          keys=not args.skip_keys, knobs=not args.skip_knobs, timing=not args.skip_timing,
+                          reconnect=not args.skip_reconnect, sleep=args.with_sleep, via=not args.skip_via,
+                          probe_reject=not args.no_reject_probe, allow_device_writes=args.allow_device_writes,
+                          backlight_level=args.backlight, step_timeout=args.step_timeout)
+    via_open = None
+    if opts.via:
+        via_open = _via_open_factory(allow_writes=False)
+    t = DevTest(opts, ConsolePrompter(), out, find_ports, SerialTransport, enumerate_usb=enumerate_usb,
+                port_users=_port_users, via_open=via_open, power=PowerMonitor.default())
+    rep = t.run()
+    for name, s in rep["sections"].items():
+        print(f"{name:10} {s['status']}")
+    print(f"\n报告：{os.path.join(out, 'devtest.md')}\n      {os.path.join(out, 'devtest.json')}")
+    return 0 if all(s["status"] in ("pass", "skip") for s in rep["sections"].values()) else 1
+
+
+def _via_open_factory(allow_writes: bool):
+    def open_():
+        from .hw.via import HidapiLink, ViaClient, ViaError, find_via_devices
+        devs = find_via_devices()
+        if not devs:
+            raise ViaError("未找到 VIA raw HID 接口（4250:426f usage 0xFF60/0x61）")
+        return ViaClient(HidapiLink(devs[0]["path"]), allow_writes=allow_writes)
+    return open_
+
+
+def cmd_usb(args) -> int:
+    from .hw.usbenum import enumerate_usb, mk20_summary
+    devs, src = enumerate_usb()
+    print(json.dumps({"source": src, **mk20_summary(devs)}, ensure_ascii=False, indent=1))
+    return 0
+
+
+def cmd_via_backup(args) -> int:
+    from .hw.via import backup
+    client = _via_open_factory(False)()
+    b = backup(client, rows=args.rows, cols=args.cols, encoders=args.encoders)
+    out = args.out or os.path.join(CONFIG_DIR, "backups", f"via-{time.strftime('%Y%m%d-%H%M%S')}.json")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    b.save(out)
+    d = b.data
+    print(f"VIA v{d['protocol_version']} · {d['layers']} 层 · 矩阵 {d['matrix']['rows']}×{d['matrix']['cols']}"
+          f"（{'自动' if d['matrix']['detected'] else '手动'}）· 宏 {d['macros']['size']} B · sha256 {d['raw_keymap_sha256'][:12]}")
+    if d["keymap_vs_raw_mismatch"]:
+        print(f"⚠ 逐键读值与原始缓冲不一致 {len(d['keymap_vs_raw_mismatch'])} 处，矩阵尺寸可能不对")
+    print(f"已保存：{out}")
+    return 0
+
+
+def cmd_via_restore(args) -> int:
+    from .hw.via import Backup, apply_restore, plan_restore
+    b = Backup.load(args.file)
+    client = _via_open_factory(args.yes_write_keymap)()
+    ops = plan_restore(client, b, include_macros=args.macros)
+    print(f"需要写入 {len(ops)} 项（键位/旋钮{'/宏' if args.macros else ''}）")
+    for op in ops[:40]:
+        print("  ", op[:4] if op[0] != "macros" else ("macros", f"{len(op[1])} B"))
+    if not ops:
+        return 0
+    if not args.yes_write_keymap:
+        print("演练模式：未写入。确认后加 --yes-write-keymap 执行（写入后逐项回读校验）。")
+        return 0
+    errors = apply_restore(client, ops)
+    print("校验失败：" + "; ".join(errors) if errors else "已恢复并回读校验通过")
+    return 1 if errors else 0
+
+
+def cmd_gd32_flash(args) -> int:
+    from .hw import gd32dfu
+    plan = gd32dfu.plan_flash(args.image, allow_unknown=args.allow_unknown_image)
+    print(f"镜像 {plan.image}\n  sha256 {plan.sha256}\n  {plan.known or '未知镜像'} · {plan.size} B · "
+          f"SP 0x{plan.sp:08x} · reset 0x{plan.reset:08x}")
+    print("  dfu-util -l:", "\n    ".join(["", *[l for l in plan.dfu_listing.splitlines() if "Found DFU" in l]]) or " -")
+    for p in plan.problems:
+        print("  ✗", p)
+    print("命令：" + " ".join(plan.argv))
+    if not args.i_understand_this_reflashes_gd32:
+        print("演练模式：未刷写。确认后加 --i-understand-this-reflashes-gd32（见 deck/RECOVERY.md）。")
+        return 0 if plan.ok else 2
+    rc, out = gd32dfu.execute(plan)
+    print(out)
+    return rc
+
+
 def cmd_launchd(args) -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     tpl = os.path.join(here, "..", "packaging", "com.leo.mk20-agent-deck.plist.template")
     with open(tpl, encoding="utf-8") as f:
         s = f.read()
     s = s.replace("@PYTHON@", sys.executable).replace("@WORKDIR@", os.path.abspath(os.path.join(here, "..")))
-    s = s.replace("@LOGDIR@", os.path.join(CONFIG_DIR, "logs"))
+    logdir = os.path.join(CONFIG_DIR, "logs")
+    os.makedirs(logdir, exist_ok=True)  # launchd will not create StandardOutPath's directory
+    s = s.replace("@LOGDIR@", logdir)
     print(s)
     return 0
 
@@ -159,6 +231,40 @@ def main(argv: list[str] | None = None) -> int:
     pr = sub.add_parser("probe-codex", help="read-only dump of Codex Desktop thread states")
     pr.add_argument("--json", action="store_true")
     pr.set_defaults(fn=cmd_probe)
+    dt = sub.add_parser("devtest", help="on-device validation harness (read-only by default)")
+    dt.add_argument("--port", default=None)
+    dt.add_argument("--out", default=None)
+    dt.add_argument("--auto", action="store_true", help="non-interactive: skip guided steps")
+    dt.add_argument("--fps-seconds", type=float, default=5.0)
+    dt.add_argument("--step-timeout", type=float, default=20.0)
+    dt.add_argument("--skip-keys", action="store_true")
+    dt.add_argument("--skip-knobs", action="store_true")
+    dt.add_argument("--skip-timing", action="store_true")
+    dt.add_argument("--skip-reconnect", action="store_true")
+    dt.add_argument("--skip-via", action="store_true")
+    dt.add_argument("--with-sleep", action="store_true")
+    dt.add_argument("--no-reject-probe", action="store_true")
+    dt.add_argument("--allow-device-writes", action="store_true", help="permit non-display writes (backlight)")
+    dt.add_argument("--backlight", type=int, default=None)
+    dt.set_defaults(fn=cmd_devtest)
+    ub = sub.add_parser("usb-list", help="read-only USB enumeration with MK20 roles")
+    ub.set_defaults(fn=cmd_usb)
+    vb = sub.add_parser("via-backup", help="read-only export of the GD32 VIA keymap/encoders/macros")
+    vb.add_argument("--out", default=None)
+    vb.add_argument("--rows", type=int, default=None)
+    vb.add_argument("--cols", type=int, default=None)
+    vb.add_argument("--encoders", type=int, default=2)
+    vb.set_defaults(fn=cmd_via_backup)
+    vr = sub.add_parser("via-restore", help="restore a VIA backup (dry-run unless --yes-write-keymap)")
+    vr.add_argument("file")
+    vr.add_argument("--macros", action="store_true")
+    vr.add_argument("--yes-write-keymap", action="store_true")
+    vr.set_defaults(fn=cmd_via_restore)
+    gf = sub.add_parser("gd32-flash", help="GD32 DFU re-flash (dry-run unless --i-understand-this-reflashes-gd32)")
+    gf.add_argument("--image", required=True)
+    gf.add_argument("--allow-unknown-image", action="store_true")
+    gf.add_argument("--i-understand-this-reflashes-gd32", action="store_true")
+    gf.set_defaults(fn=cmd_gd32_flash)
     ld = sub.add_parser("launchd-plist", help="print the LaunchAgent plist for this install")
     ld.set_defaults(fn=cmd_launchd)
     a = p.parse_args(argv)
