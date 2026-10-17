@@ -166,3 +166,55 @@ saveToFile /mnt/SDCARD/mk20-no-adb   (any content)
 
 See `deck/NOTES-computer-use-spike.md` (morning report) for EP-budget rationale and
 why ACM+ADB is the stock-kernel target while ACM+HID/ECM needs a kernel patch.
+
+## 5. T113 FEL / xfel recovery research (P2 — read-only tonight)
+
+**Do not flash.** This section is the verified-research checklist to complete
+**before** any `ep3-iso→ep3-int` kernel flash.
+
+### 5.1 Entering FEL (generic T113-S3)
+
+- USB enumerates as Allwinner FEL: **`1f3a:efe8`** (already noted in §3).
+- Common board method: short **SPI flash pins 1–4** while connecting USB (or boot
+  with empty/corrupt boot0 so ROM falls through to FEL).
+- **MK20-specific FEL button / test pads: not identified on this unit overnight.**
+  Do not assume a user-facing key enters FEL. Confirm on schematic/OSHW photos or
+  UART boot log before relying on it.
+
+### 5.2 Tools
+
+| Tool | T113-S3 | Notes |
+|---|---|---|
+| **xfel** ([xboot/xfel](https://github.com/xboot/xfel/)) | Yes (`xfel ddr t113-s3`) | Preferred for DRAM init + spinor/spinand R/W |
+| **sunxi-fel** (sunxi-tools) | SoC support merged; SPI flash historically incomplete | OK for version/SID; prefer xfel for flash I/O |
+| PhoenixSuit / PhoenixCard | Official packed `.img` | Required for Tina IMAGEWTY images — raw xfel write of `.img` will **not** boot |
+
+Community reports: writing a Tina packed `.img` with `xfel spinand write` stores
+bytes that differ from a PhoenixSuit burn — image has tool headers / remapping.
+
+### 5.3 Backup order (before any kernel flash)
+
+1. **Whole TF card `dd`** on Mac (§3) — primary rollback.
+2. With working **adb shell** (after ACM+ADB prove-in):
+   ```text
+   ls -l /dev/by-name /dev/mmcblk* /dev/mtd* /dev/ubi*
+   cat /proc/mtd /proc/partitions /proc/cmdline
+   # then dd partitions to /mnt/SDCARD/backup/ or adb pull
+   ```
+3. Save `fw_printenv` output and `/mnt/UDISK/swupdate.log` if any.
+4. Keep vendor `MK20_V1.0.img` + sha256 as last-resort PhoenixCard image (§3).
+
+### 5.4 swupdate / OTA (do not invoke casually)
+
+- Init: `S99swupdate_autorun` → `/sbin/swupdate_cmd.sh`
+- U-Boot env keys: `swu_param`, `swu_software`, `swu_mode`, `swu_version`, `swu_next`
+- Invocation shape: `swupdate -v [-N version] $swu_param -e "$swu_software,$swu_mode"`
+- Log: `/mnt/UDISK/swupdate.log`
+- Only use with a **known-good `.swu`**, TF backup in hand, and explicit user OK.
+
+### 5.5 If a gadget experiment leaves USB silent
+
+1. Power-cycle (one-shot lunch.sh already self-deleted).
+2. Pull TF, delete `lunch.sh` / `mk20-*.sh` on SDCARD partition (§4.4).
+3. FEL + xfel only after steps 1–2 fail **and** user approves — still prefer TF image
+   restore over experimental FEL writes.

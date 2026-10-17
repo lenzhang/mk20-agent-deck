@@ -401,3 +401,176 @@ fits in a 2-INT patched kernel.
 - `mk20-research/ecm-build/linux-5.4.61/` — vanilla tree used for the module build
 
 *Overnight author: Grok Bot executor · report finalized ~03:03 SGT · device left on healthy ACM with one-shot self-recovering ACM+adb test armed for morning power-cycle.*
+
+---
+
+## Overnight addendum — Wi-Fi excluded (2026-10-18 03:05–03:20 SGT)
+
+User steering @ 03:05: thorough night research; **Wi-Fi REJECTED** (T113 has no
+built-in Wi-Fi; USB dongle undesirable). Re-rank and evidence below. **Do not wake
+the user.**
+
+### Clarification: did the 02:50 M2 adb window collect?
+
+**No.** Hard evidence as of 03:05 SGT:
+
+| Check | Result |
+|---|---|
+| `~/mk20-backup/m2/DEVICE_ONLINE` | **Missing** |
+| `~/mk20-backup/m2/collect-*` | **None** |
+| Overnight waiter | `02:47:29 ACM port gone (gadget likely switched)` then ACM returned; deadline was 10:59 but **no MK20 adb ever appeared** |
+| `adb devices` | Only CD Watch `WATCH-SERIAL` (ignored) |
+| On-device markers (via `setFileCRC`) | `m2-adb.done` **YES**, `m2-adb-status.txt` **YES**, `m2test-status.txt` **no**, `mk20-gadget.log` **no** |
+| Status file **content** | **Not readable** — Protocol A has no file-content read API; pull requires adb, TF reader, or ACM dump race |
+
+**Interpretation:** the device hook ran far enough to create status/done markers and
+briefly disrupted ACM (~02:47), but the Mac **never** enumerated an MK20 adb
+interface. **Nothing was collected** (no EP dump, no `getprop`, no module list).
+Prior wrong collect at ~02:40 hit the Watch and was quarantined.
+
+ACM at 03:05: healthy `getInfo` → V2.32; staged one-shot `lunch.sh` still present.
+
+---
+
+### 1) Network without a USB NIC
+
+#### 1a. `adb reverse tcp:5900 tcp:5900` (device VNC client → Mac Screen Sharing)
+
+| Layer | Finding |
+|---|---|
+| Host `adb` (Mac 37.0.1) | Supports `reverse` / `forward` |
+| **Device `/bin/adbd` (firmware dump)** | **`reverse` count = 0** in binary; services include `tcp:`, `local:`, `localabstract:`, `killforward:` — **forward only**, no `killreverse` / reverse service |
+| Implication | Stock Tina adbd **cannot** implement device→host reverse tunnels |
+
+**Workarounds (no Wi-Fi, no USB NIC):**
+
+1. **Replace userspace `adbd`** with a modern AOSP adbd that includes reverse (drop via
+   SDCARD/`overlayDir` once a shell exists). Risk: medium; reversible by restoring
+   stock `/bin/adbd`. Not done tonight.
+2. **Invert the RFB path:** host-side capture (ScreenCaptureKit / `screencapture`) +
+   push tiles to a tiny device display client over **`adb forward`** (host→device).
+   Stock forward **is** supported. Fits EP budget; changes architecture vs “VNC client
+   on T113”.
+3. **PPP over ACM** (below) then TCP to Mac’s PPP peer IP → Screen Sharing :5900.
+
+#### Throughput estimate (ADB bulk over USB HS)
+
+- USB2 HS theoretical bulk ~35–40 MB/s; shared hub + FunctionFS + ADB framing typically
+  yields **~5–15 MB/s** practical for `adb sync`/`adb push` class transfers on similar
+  boards; interactive tunnels often land **~1–5 Mb/s** usable after protocol overhead.
+- RFB at 1280×720 ZRLE/Hextile 1–2 fps dirty-region is in-budget; Raw Retina is not.
+- Protocol A JSON over the same ADB link is tiny vs framebuffer.
+
+#### 1b. PPP / SLIP over bulk or ACM serial
+
+| Item | Evidence (Mac read-only, 03:07 SGT) |
+|---|---|
+| **`/usr/sbin/pppd`** | **Present** — Mach-O universal `x86_64` + `arm64e`, macOS 26.6.2 |
+| `com.apple.nke.ppp` | Loaded (`kextstat`) |
+| **SLIP** | **No** `*slip*` kext / no SLIP in pppd man page — **PPP only**, not SLIP |
+| Device rootfs | **`nc` present**; **no `pppd`** found under `/usr/sbin` / `/sbin` in dump |
+
+**Verdict:** Mac can terminate PPP on `/dev/cu.usbmodem*` (classic `pppd
+/dev/cu.usbmodem1101 115200 noauth local …`). Device needs a PPP peer binary we do
+**not** ship today → would need a static `pppd`/lwIP PPP or a trivial custom framing.
+Useful as a research path once shell exists; **not** morning’s first lever.
+Prefer ADB tunnels (forward now; reverse after adbd upgrade) over inventing PPP
+tonight.
+
+---
+
+### 2) Free the INT endpoint for HID **without** flashing
+
+**Goal composite on stock UDC:** `ADB (bulk) + one HID (kbd + abs pointer, report IDs)
+on ep4-int`. Fits budget (0 INT from ADB + 1 INT from HID). **Drop ACM.**
+
+**Move Protocol A onto adb-forwarded socket:**
+
+1. KeyboardDevice hardcodes **`/dev/ttyGS0`** when enabling serial:
+   - String at VA **`0x20e424`** (`/dev/ttyGS0`).
+   - `SerialPort::device_set_serial_state(true)` @ `0x10819c`: PC-relative load
+     `0x1081d8 + 0x10624c = 0x20e424`, then `openPort` via `QSerialPort`.
+   - Also `system("/data/setusbconfig serial")` from USB-type path (existing notes).
+2. **Bridge approach (no binary patch):** before KD opens the port, provide a PTY
+   whose slave is linked/bind-mounted at `/dev/ttyGS0`, peer bridged to TCP
+   `127.0.0.1:17890`. Host: `adb forward tcp:17890 tcp:17890`. Deck daemon talks to
+   `localhost:17890` instead of `cu.usbmodem*`.
+3. **Gadget:** stock script already has **`adb,hid`** (`setusbconfig adb,hid`,
+   VID/PID `0x18d1:0xD002`) — keyboard-only descriptor today; replace report_desc with
+   **combined** kbd+abs-pointer report IDs (still one INT).
+4. **Race:** `qt_app2` respawns KeyboardDevice which calls `setusbconfig serial` —
+   must wrap `/data/setusbconfig` (overlayDir) to map `serial` → `adb,hid` + ensure
+   bridge is up, **or** kill/replace after KD starts (fragile). Prefer setusbconfig
+   wrapper.
+
+**Built tonight (box):** static armhf `artifacts/m2-pty-bridge/ttygs_tcp_bridge`
+(~399 KiB stripped) + source. Host smoke showed PTY→TCP path; TCP→PTY needs the
+slave held open (KD will). **Not deployed to device** (no working adb yet).
+
+**Caveat:** QSerialPort may set termios/baud on the PTY; usually fine. If KD refuses
+non-ACM tty, fallback is LD_PRELOAD `open()` redirect or tiny wrapper — heavier.
+
+---
+
+### 3) Kernel patch recovery research (**no flash tonight**)
+
+Only if we still need ACM+HID or ACM+ECM simultaneously (2× INT → patch `ep3-iso`→
+`ep3-int`).
+
+| Topic | Finding |
+|---|---|
+| **Storage** | `sys_config` / RECOVERY: **TF-card boot** (`storage_type=1`). Also `fw_env` on `ubi0:env` in rootfs — treat UBI as env/root layout detail; **primary backup = whole TF `dd`**. |
+| **FEL entry (generic T113)** | USB id `1f3a:efe8`. Common method: short SPI-flash pins 1–4 while plugging USB (or empty flash). **MK20-specific button/pads: not verified on this board tonight** — do not assume a front-panel FEL key. |
+| **Tools** | **`xfel`** (`xboot/xfel`): `xfel ddr t113-s3`, spinor/spinand read/write — community-proven for T113-S3. **`sunxi-fel`**: T113 SoC support merged; SPI flash support historically incomplete — prefer xfel for flash I/O. |
+| **Packed Tina `.img`** | PhoenixSuit/IMAGEWTY encapsulation — **cannot** raw-write with xfel; need PhoenixCard / unpacked image. Vendor `MK20_V1.0.img` is this format (see RECOVERY §3). |
+| **Backup via adb (when shell works)** | Prefer `dd if=/dev/mmcblk0 …` / partition nodes under `/dev/by-name/` to SDCARD or `adb pull`. Also `nanddump`/`ubi` tools if applicable. **Verify partition map live before any write.** |
+| **swupdate / OTA** | `S99swupdate_autorun` → `swupdate_cmd.sh`; params in U-Boot env (`swu_param`, `swu_software`, `swu_mode`, `swu_version`). Log `/mnt/UDISK/swupdate.log`. Standard swupdate `-e software,mode` — **do not invoke** without a known-good `.swu` and TF backup. |
+
+**Tonight:** research only. No FEL attempts, no dd writes, no swupdate.
+
+---
+
+### 4) Morning one-shot tests (prepared, self-recovering)
+
+Prepared under `deck/m2-scripts/`:
+
+- `lunch-morning-combo.sh` — dumps prior M2 status files, attempts ACM+ADB add-beside,
+  logs gadget/UDC, **self-deletes before USB change**, failsafe + **90 min** watchdog
+  → `setusbconfig serial`.
+- Existing staged device hook (`lunch.sh` + `mk20-add-adb.sh`) already one-shot;
+  next power-cycle after it runs is stock serial even if ignored.
+
+**Rule:** any morning test must leave the next boot as plain serial without human
+intervention beyond one power-cycle.
+
+---
+
+### Re-ranked design (**Wi-Fi excluded**)
+
+| Rank | Design | Flash? | Why |
+|---|---|---|---|
+| **1** | **ADB + combined HID (kbd+abs, report IDs)**; Protocol A via **pty↔TCP + `adb forward`**; screen via **host-pushed RFB over `adb forward`** *or* upgraded adbd **`reverse`** to Mac :5900 | No | Fits stock EP (1 INT); keeps deck control plane; no NIC/Wi-Fi. Blocked only on proving adb enumerate + setusbconfig wrapper. |
+| **2** | **ACM + ADB** (add-beside) for shell; input via **GD32 ttyS1** / VNC pointer; screen via host-push or PPP-ACM later | No | Already staged for morning; keeps Protocol A on ACM (no pty bridge yet). No hardware abs pointer on T113 HID until INT freed. |
+| **3** | **PPP over ACM** to Mac `pppd` + VNC client on device to peer IP | No (needs device pppd binary) | Real IP without USB NIC; fights Protocol A on same tty unless time-sliced/bridged. |
+| **4** | Patch `ep3→int`, then **ACM + ADB + combined HID** (+ optional ECM) | **Yes** (kernel) | Best “everything on USB” UX; **only after** TF `dd` backup + verified FEL/xfel recovery (§3). |
+| **5 (avoid)** | Wi-Fi / USB Wi-Fi dongle | — | **User rejected** |
+| **6 (avoid)** | RNDIS primary on Apple Silicon | — | HoRNDIS dead |
+| **7 (avoid)** | ACM+HID or ACM+ECM on **stock** kernel | — | 2× INT impossible |
+
+### Morning checklist (updated)
+
+1. Power-cycle **once** (current one-shot ACM+ADB hook).
+2. Expect: either ACM+new adb (collect) **or** failsafe plain serial. Second cycle always stock.
+3. If adb up: pull `m2-adb-status.txt`, `morning-*.log`, `cat /sys/.../usb_device`,
+   `ls configs/c.1`, try `adb forward tcp:17890 tcp:17890` dry-run.
+4. **Do not** arm Protocol-A-over-pty or `adb,hid` until ACM+ADB prove-in succeeds.
+5. Optional later: push `ttygs_tcp_bridge`, wrap setusbconfig, test KD on PTY.
+6. Kernel patch only after RECOVERY §5 FEL drill + full TF image.
+
+### New artifacts
+
+- `artifacts/m2-pty-bridge/ttygs_tcp_bridge` (+ `.c`) — static armhf
+- `deck/m2-scripts/lunch-morning-combo.sh`, `README-morning.md`
+- This addendum; RECOVERY §5 FEL/xfel notes
+
+*Addendum author: Grok Bot executor · ~03:20 SGT · Wi-Fi excluded · no flash · user not woken.*
