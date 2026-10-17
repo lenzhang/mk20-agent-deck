@@ -85,3 +85,48 @@ There is no separate SEND_JSON command; JSON goes via cmd 101.
    - Command: `cd ~/worktrees/mk20-agent-deck-p0/deck && ../.venv/bin/python tools/passive_listen.py /dev/cu.usbmodem1101 90 ~/mk20-backup/2026-10-17/passive-listen-keys.jsonl`
    - Steps: press each of the 20 keys once, turn each knob both ways, then press each knob.
 2. **If still silent:** power off, take the TF card out, and image it read-only (`dd` to a file) on the Mac. Inspect `log.txt` (appLunch appends dmesg plus "app start/stop"), `lunch.sh`, `overlayDir` and `/data/KeyboardDevice` (version string).
+
+## Offline key handling and the mode switch (added 23:42–23:55 SGT)
+
+### Keycaps
+Photo: `artifacts/device-keycaps-2026-10-17-2342.jpg`. The theme page shown is not the 23:17 one.
+
+| row | col1 | col2 | col3 | col4 | col5 |
+|---|---|---|---|---|---|
+| 1 | Q | W | E | R | T |
+| 2 | A | S | D | F | G |
+| 3 | Z | X | C | V | B |
+| 4 | Esc | Caps Lock | Shift | Ctrl | (icon: box with arrow) |
+
+The top strip shows a CPU/GPU/RAM widget.
+
+### Who decides offline vs host mode
+- **Default at boot:** `main()` calls `setAppProperty("deviceProtocolVersion","V1")` before `Check_Key()`.
+- **Local handler:** `VideoPlayer::keyStateChanged(pressed,row,col,…)` returns immediately unless `deviceProtocolVersion == "V1"`. In V1 it looks up the theme item at (row,col) and does the following:
+  - plays `soundFile`;
+  - builds a command list from `controlData` / `controlDataList` (pageSwitch, keyboard_switch → `request_upload_key_s(0, keycode)`, …);
+  - runs it via `FunctionRunner` / `keyStateChanged_s`;
+  - typing reaches the Mac as HID through the GD32: `STM32CommunicationObject::request_upload_key` / `request_upload_string` on `/dev/ttyS1`.
+- **Mode flip:** the only thing that sets `"V2"` is `parse_cmd_new_t`, on a cmd-101 `{"method":"getInfo"}` received over `A1A55A5E`.
+  - After that, local typing stops and key events go to the host as `keyStateChanged` JSON (`SerialPort::device_keyState_Changed` → cmd 101, id 0xFFFFFFFF).
+  - Legacy JSON `{"connect":true}` (in `device_dispose_json`, reached via the legacy `AA551234 FIXEDCMDHEAD ` parser) sets it back to `"V1"`.
+- **No persistent flag:** no config file or theme key selects the mode. The only USB-related config is `usbTYpe` (0 or absent = serial ACM gadget plus `/dev/ttyGS0`; 1 = UAC1 audio gadget with the port closed). The Mac sees "Serial", so `usbTYpe` is 0.
+
+So the "offline default mode" is simply V1, which is the boot default. It doesn't prevent host mode; getInfo would switch the device to V2 if it reached the parser.
+
+### Legacy protocol (for reference; not used)
+- **Header:** ASCII `"AA551234 FIXEDCMDHEAD "` (22 bytes), then type u32, cmd u32, size u32, crc32(data) u32, then data.
+- **Device-side gate:** device-initiated legacy packets are only sent when connection state `this+0x2c == 2` (or cmd 0).
+- **Abort marker:** an ASCII line `"AA551234 Abort file transfer 123455AA"` at the start of a chunk resets the file-receive state.
+- **Do not send:** legacy JSON keys include `bootloader_jump` (puts the GD32 into DFU), `controlMouse`, `qmk_string`, `setDeviceName` and `wifissid`.
+
+### New live evidence (23:4x SGT)
+- **The OUT direction is drained:** the Mac wrote 8 MiB and then 16 MiB of `'0'` at about 10–11 MB/s with no write timeout.
+  - In Linux u_serial, OUT requests are only queued while `/dev/ttyGS0` is open, so something on the T113 has the port open and is consuming the data.
+  - This weakens the earlier inference from DSR/CD (they stay 0, so the Tina f_acm or the macOS driver probably doesn't report SERIAL_STATE).
+  - One read after the 8 MiB run reported in_waiting=1020 but wasn't read. The repeat with readback (16 MiB) got 0 bytes back.
+- **Abort marker then getInfo:** 0 bytes back.
+- **Conclusion so far:** the device accepts our bytes but produces no reply. Since the codec matches the device parser exactly, either:
+  - the consumer of ttyGS0 is not KeyboardDevice's SerialPort, or
+  - its reply path (`RemoteCommandExecutor` → `writeData`) is not running.
+  This needs a device-side view: the ttyS3 console (`ttyS3::askfirst:/bin/ash --login` in inittab; UART pads, 3.3 V) or a read-only image of the TF card (`log.txt`, `lunch.sh`, `overlayDir`).
