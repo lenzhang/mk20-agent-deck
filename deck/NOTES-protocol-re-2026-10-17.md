@@ -165,3 +165,8 @@ So the "offline default mode" is simply V1, which is the boot default. It doesn'
 - With V2.31 the device never replied on `/dev/ttyGS0`. With V2.32 plus a re-enumeration it replies at once. The root cause was device-side: the old daemon or its state. It was not our codec.
 - Our client must call `setBacklight` after the handshake. Otherwise the deck stays dark in host mode.
 - Once a host sends getInfo, the device is in V2 and offline typing stops until the next reboot or replug. That is expected for P0, but worth stating in the docs.
+
+**Follow-up (2026-10-18):**
+- The daemon now sends `setBacklight(cfg.backlight)` (default 80) after every handshake: the first connect, after a replug, and after a wake re-handshake.
+- `devtest --headless` re-applies the backlight on its reconnect too.
+- README documents that connecting leaves offline typing until the device is rebooted or replugged.

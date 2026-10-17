@@ -41,7 +41,10 @@ class DeckConfig:
     heartbeat_s: float = 2.0
     ack_timeout_s: float = 1.0
     preamble_flush: int = 1024 * 1024
-    backlight: int | None = None
+    # setBacklight level sent right after every handshake (first connect, replug, wake).
+    # The device comes out of offline mode with backlight 0 (dark keys) — see
+    # NOTES-protocol-re-2026-10-17.md "Official app test".  false/"off" disables.
+    backlight: int | None = 80
     ptt_fallback_b: bool = False  # PRD §6.5: B only after IME verification; not implemented in P0
     skills: list[Skill] = field(default_factory=lambda: [Skill(l, p) for l, p in DEFAULT_SKILLS])
     codex: CodexDesktopConfig = field(default_factory=CodexDesktopConfig)
@@ -54,6 +57,16 @@ class DeckConfig:
     # keycode-form key events (keyCodeH/L): "0x00e6" -> "1,4" (document col,row) or "K1:cw"
     keycode_map: dict[str, str] = field(default_factory=dict)
     state_path: str = os.path.join(CONFIG_DIR, "state.json")
+
+
+def parse_backlight(v: Any) -> int | None:
+    """``false``/``"off"``/``"none"``/negative -> None (don't touch); otherwise clamp to 0..100."""
+    if v is None or v is False or (isinstance(v, str) and v.strip().lower() in ("off", "none", "false", "")):
+        return None
+    if v is True:
+        return 80
+    n = int(v)
+    return None if n < 0 else max(0, min(100, n))
 
 
 def load_config(path: str | None = None) -> DeckConfig:
@@ -70,6 +83,7 @@ def load_config(path: str | None = None) -> DeckConfig:
               "heartbeat_s", "ack_timeout_s", "preamble_flush", "backlight", "state_path"):
         if k in deck:
             setattr(cfg, k, deck[k])
+    cfg.backlight = parse_backlight(cfg.backlight)
     if cfg.fw_coord_base == "auto":
         cfg.fw_coord_base = None
     cfg.max_fps = min(float(cfg.max_fps), 8.0)  # PRD §7.4 hard ceiling

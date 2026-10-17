@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import protocol as P
 from .controller import Controller
 from .daemon import Daemon, WakeReconnect
 from .layout import DeviceLayout
@@ -46,6 +47,25 @@ class Supervisor:
             self.stats.note(msg)
             self._last_port_msg = msg
 
+    def apply_backlight(self, link: DeviceLink) -> bool | None:
+        """Send ``setBacklight`` after each handshake (initial, replug, wake re-handshake).
+
+        Connecting (getInfo) switches the device from offline typing (protocol V1, keys
+        type their keycap characters via the GD32) into host mode (V2) with the backlight
+        at 0, so without this the keys stay dark.  Failure is logged, never fatal.
+        """
+        level = getattr(self.cfg, "backlight", None)
+        if level is None:
+            return None
+        try:
+            ack = link.call(P.set_backlight(level))
+        except Exception as e:  # noqa: BLE001
+            self.stats.note(f"setBacklight({level}) 失败：{e}")
+            return False
+        ok = bool(ack and ack.success)
+        self.stats.note(f"背光 {level}" + ("" if ok else f" 未确认（{ack.error if ack else 'timeout'}）"))
+        return ok
+
     def run(self, stop: threading.Event, max_connects: int | None = None) -> SupervisorStats:
         cfg = self.cfg
         while not stop.is_set():
@@ -78,9 +98,7 @@ class Supervisor:
                 self._last_port_msg = ""
                 self.stats.note(f"已连接 {ports[0]} 画布 {renderer.layout.width}x{renderer.layout.height}"
                                 f"{'（猜测）' if renderer.layout.guessed else ''}")
-                if getattr(cfg, "backlight", None) is not None:
-                    from . import protocol as P
-                    link.call(P.set_backlight(cfg.backlight))
+                self.apply_backlight(link)
                 self.controller.presses.clear()  # never replay gestures across reconnects
                 d.run(stop)
             except WakeReconnect as e:

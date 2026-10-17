@@ -271,3 +271,155 @@ def test_keycode_form_events_are_parsed_and_mapped():
 def test_set_volume_range_matches_firmware():
     from mk20deck import protocol as P
     assert P.set_volume(50)["parameters"]["level"] == 7
+
+
+# ------------------------------------------------------------------ backlight after every handshake
+def test_backlight_config_parsing_and_default(tmp_path):
+    from mk20deck.config import load_config, parse_backlight
+    assert DeckConfig().backlight == 80
+    assert parse_backlight(False) is None and parse_backlight("off") is None and parse_backlight(-1) is None
+    assert parse_backlight(150) == 100 and parse_backlight(40) == 40 and parse_backlight(True) == 80
+    p = tmp_path / "c.toml"
+    p.write_text('[deck]\nbacklight = false\n')
+    assert load_config(str(p)).backlight is None
+    p.write_text('[deck]\nbacklight = 55\n')
+    assert load_config(str(p)).backlight == 55
+
+
+def test_supervisor_sets_backlight_after_every_handshake():
+    cfg = DeckConfig()
+    cfg.preamble_flush, cfg.ack_timeout_s, cfg.heartbeat_s, cfg.poll_interval_s = 0, 0.2, 0.05, 0.5
+    state = {"dev": MockDevice(), "present": True}
+    first = state["dev"]
+    sup = Supervisor(_ctl(FakeClock()), lambda: ["/dev/mock"] if state["present"] else [],
+                     lambda port: state["dev"], default_renderer_factory(cfg), cfg, retry_s=0.05)
+    stop = threading.Event()
+    th = threading.Thread(target=sup.run, args=(stop,), daemon=True)
+    th.start()
+    assert wait_until(lambda: sup.stats.connects == 1)
+    assert wait_until(lambda: any(r["method"] == "setBacklight" for r in first.json_requests))
+    methods = [r["method"] for r in first.json_requests]
+    assert methods.index("getInfo") < methods.index("setBacklight")
+    assert [r for r in first.json_requests if r["method"] == "setBacklight"][0]["parameters"]["level"] == 80
+    first.unplugged, state["present"] = True, False
+    assert wait_until(lambda: any("连接中断" in m for _, m in sup.stats.events))
+    state["dev"], state["present"] = MockDevice(), True
+    assert wait_until(lambda: sup.stats.connects == 2)
+    assert wait_until(lambda: any(r["method"] == "setBacklight" for r in state["dev"].json_requests))
+    stop.set()
+    th.join(3)
+    assert any("背光 80" in m for _, m in sup.stats.events)
+
+
+def test_supervisor_backlight_disabled_sends_nothing():
+    cfg = DeckConfig()
+    cfg.preamble_flush, cfg.ack_timeout_s, cfg.heartbeat_s, cfg.backlight = 0, 0.2, 0.05, None
+    dev = MockDevice()
+    sup = Supervisor(_ctl(FakeClock()), lambda: ["/dev/mock"], lambda p: dev, default_renderer_factory(cfg), cfg,
+                     retry_s=0.05)
+    stop = threading.Event()
+    th = threading.Thread(target=sup.run, args=(stop,), daemon=True)
+    th.start()
+    assert wait_until(lambda: sup.stats.connects == 1 and len(dev.frames) >= 1)
+    stop.set()
+    th.join(3)
+    assert not any(r["method"] == "setBacklight" for r in dev.json_requests)
+
+
+# ------------------------------------------------------------------ headless devtest
+class FakeHid:
+    def __init__(self):
+        self.samples = []
+        self.started = self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def add(self, name):
+        self.samples.append((time.monotonic(), name))
+
+    def between(self, t0, t1):
+        return [s for s in self.samples if t0 <= s[0] <= t1]
+
+    def info(self):
+        return {"source": "fake"}
+
+
+def _headless(tmp_path, state, acts, hid, **kw):
+    opts = DevTestOptions(fps_seconds=0.2, ack_frames=2, step_timeout=0.6, quiet_s=0.2, headless=True,
+                          start_timeout=3.0, allow_device_writes=True, backlight_level=80, **kw)
+    return DevTest(opts, ScriptedPrompter(acts, delay=0.05), str(tmp_path),
+                   find_ports=lambda: ["/dev/mock"] if state["present"] else [],
+                   open_transport=lambda p: state["dev"], hid_monitor=hid)
+
+
+def test_headless_devtest_runs_without_input_and_auto_checks(tmp_path):
+    from mk20deck.hw.devtest import step_plan
+    state = {"dev": MockDevice(), "present": True}
+    hid = FakeHid()
+    prompter = _scripted(state, 0, FakePower())
+    acts = dict(prompter.actions)
+    acts["start"] = lambda: (state["dev"].press(4, 3, True), time.sleep(0.05), state["dev"].press(4, 3, False))
+    del acts["key:3,2"]  # user never presses this one -> timeout, skip and record
+    k52 = acts["key:5,2"]
+    acts["key:5,2"] = lambda: (k52(), hid.add("keyDown"))  # this key leaks a keystroke to the Mac
+    rep = _headless(tmp_path, state, acts, hid).run()
+    s = rep["sections"]
+    st = {k: v["status"] for k, v in s.items()}
+    assert rep["start_gate"]["pressed"] and rep["step_plan"] == step_plan(DevTestOptions(headless=True))
+    assert prompter.log == [] and hid.started and hid.stopped  # (scripted prompter only fires actions)
+    assert s["keys"]["missing"] == ["3,2"] and s["keys"]["results"]["3,2"]["timed_out_s"] == 0.6
+    assert st["keys"] == "fail" and st["knobs"] == "pass" and st["timing"] == "pass"
+    assert st["hid_leak"] == "fail" and s["hid_leak"]["correlated"] >= 1 and s["hid_leak"]["auto"]
+    assert s["display"]["needs_manual_confirmation"] and s["display"]["visual_ok"] is None
+    assert "needs_manual_confirmation" in s["ptt"] and s["ptt"]["ime_triggered"] is None
+    assert st["reconnect"] == "pass" and st["sleep"] == "skip"
+    # backlight re-applied on the initial connect and after the replug
+    assert [b["success"] for b in rep["backlight_applied"]] == [True, True]
+    prog = json.loads((tmp_path / "progress.json").read_text())
+    assert prog["state"] == "finished"
+
+
+def test_headless_devtest_no_leak_passes_and_overall_timeout_skips(tmp_path):
+    state = {"dev": MockDevice(), "present": True}
+    hid = FakeHid()
+    acts = dict(_scripted(state, 0, FakePower()).actions)
+    acts["start"] = lambda: (state["dev"].press(0, 0, True), time.sleep(0.05), state["dev"].press(0, 0, False))
+    rep = _headless(tmp_path, state, acts, hid, overall_timeout=2.0).run()
+    s = rep["sections"]
+    assert s["keys"]["results"]["1,1"]["ok"]
+    skipped = [k for k, r in s["keys"]["results"].items() if r.get("skipped") == "overall timeout"]
+    assert skipped  # budget ran out mid-way: remaining keys skipped and recorded
+    assert s["timing"]["status"] == "skip" and "overall" in s["timing"]["reason"]
+    assert s["hid_leak"]["status"] == "pass" and s["hid_leak"]["correlated"] == 0
+
+
+def test_headless_leak_unavailable_is_manual(tmp_path):
+    state = {"dev": MockDevice(), "present": True}
+    acts = {"start": lambda: (state["dev"].press(0, 0, True), state["dev"].press(0, 0, False))}
+    rep = _headless(tmp_path, state, acts, None, overall_timeout=1.0).run()
+    assert rep["sections"]["hid_leak"]["status"] == "manual"
+    assert rep["sections"]["hid_leak"]["needs_manual_confirmation"]
+
+
+def test_hid_activity_monitor_detects_idle_resets():
+    from mk20deck.hw.hidwatch import TYPES, HidActivityMonitor, correlate
+    idle = {t: 100.0 for t in TYPES.values()}
+    t = [10.0]
+    m = HidActivityMonitor(lambda typ: idle[typ], clock=lambda: t[0])
+    m.poll_once()
+    for v in idle:
+        idle[v] += 0.5
+    t[0] = 10.5
+    m.poll_once()
+    assert m.samples == []
+    idle[TYPES["keyDown"]] = 0.1
+    t[0] = 11.0
+    m.poll_once()
+    assert m.samples == [(10.9, "keyDown")]
+    c = correlate(m.samples, [10.8, 50.0])
+    assert c["correlated"] == 1 and c["uncorrelated"] == 0
+    assert correlate(m.samples, [20.0])["uncorrelated"] == 1

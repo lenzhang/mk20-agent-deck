@@ -104,11 +104,17 @@ def _port_users(port: str) -> dict:
 
 
 def cmd_devtest(args) -> int:
-    from .hw.devtest import ConsolePrompter, DevTest, DevTestOptions
+    from .hw.devtest import ConsolePrompter, DevTest, DevTestOptions, HeadlessPrompter, step_plan
     from .hw.power import PowerMonitor
     from .hw.usbenum import enumerate_usb
     from .transport import SerialTransport, find_ports
 
+    if args.headless:
+        # guided entirely on the device: host mode starts with backlight 0, so a
+        # backlight write is required for the user to see anything.
+        args.allow_device_writes = True
+        if args.backlight is None:
+            args.backlight = 80
     if args.backlight is not None and not args.allow_device_writes:
         print("--backlight 需要同时给出 --allow-device-writes")
         return 2
@@ -117,17 +123,28 @@ def cmd_devtest(args) -> int:
                           keys=not args.skip_keys, knobs=not args.skip_knobs, timing=not args.skip_timing,
                           reconnect=not args.skip_reconnect, sleep=args.with_sleep, via=not args.skip_via,
                           probe_reject=not args.no_reject_probe, allow_device_writes=args.allow_device_writes,
-                          backlight_level=args.backlight, step_timeout=args.step_timeout)
+                          backlight_level=args.backlight, step_timeout=args.step_timeout,
+                          headless=args.headless, start_timeout=args.start_timeout,
+                          overall_timeout=args.overall_timeout if args.headless else None)
     via_open = None
     if opts.via:
         via_open = _via_open_factory(allow_writes=False)
-    t = DevTest(opts, ConsolePrompter(), out, find_ports, SerialTransport, enumerate_usb=enumerate_usb,
-                port_users=_port_users, via_open=via_open, power=PowerMonitor.default())
+    hid_monitor = None
+    if args.headless:
+        from .hw.hidwatch import HidActivityMonitor
+        hid_monitor = HidActivityMonitor.macos()
+        print(f"无头模式：按设备屏幕提示操作；开始门限 {opts.start_timeout:.0f}s，之后总时限 {opts.overall_timeout:.0f}s，"
+              f"每步 {opts.step_timeout:.0f}s；HID 监视={'on' if hid_monitor else 'off'}；输出 {out}", flush=True)
+        for i, st in enumerate(step_plan(opts), 1):
+            print(f"  {i:2}. {st}", flush=True)
+    t = DevTest(opts, HeadlessPrompter() if args.headless else ConsolePrompter(), out, find_ports, SerialTransport,
+                enumerate_usb=enumerate_usb, port_users=_port_users, via_open=via_open, power=PowerMonitor.default(),
+                hid_monitor=hid_monitor)
     rep = t.run()
     for name, s in rep["sections"].items():
         print(f"{name:10} {s['status']}")
     print(f"\n报告：{os.path.join(out, 'devtest.md')}\n      {os.path.join(out, 'devtest.json')}")
-    return 0 if all(s["status"] in ("pass", "skip") for s in rep["sections"].values()) else 1
+    return 0 if all(s["status"] in ("pass", "skip", "manual") for s in rep["sections"].values()) else 1
 
 
 def _via_open_factory(allow_writes: bool):
@@ -246,6 +263,10 @@ def main(argv: list[str] | None = None) -> int:
     dt.add_argument("--no-reject-probe", action="store_true")
     dt.add_argument("--allow-device-writes", action="store_true", help="permit non-display writes (backlight)")
     dt.add_argument("--backlight", type=int, default=None)
+    dt.add_argument("--headless", action="store_true",
+                    help="no terminal input: guided on the device screens, auto-advance/skip, automatic HID-leak check")
+    dt.add_argument("--start-timeout", type=float, default=180.0, help="headless: wait for the first key press")
+    dt.add_argument("--overall-timeout", type=float, default=300.0, help="headless: guided-phase budget after start")
     dt.set_defaults(fn=cmd_devtest)
     ub = sub.add_parser("usb-list", help="read-only USB enumeration with MK20 roles")
     ub.set_defaults(fn=cmd_usb)

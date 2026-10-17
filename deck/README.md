@@ -65,7 +65,25 @@ python3 -m mk20deck usb-list                 # read-only enumeration
 python3 -m mk20deck via-backup               # read-only VIA keymap backup (pip install hidapi)
 python3 -m mk20deck devtest                  # guided, ~5 min; add --with-sleep for the sleep/wake step
 python3 -m mk20deck devtest --auto           # non-interactive subset (USB, port, getInfo, display timing, VIA)
+python3 -m mk20deck devtest --headless       # no terminal input: guided on the device screens (see below)
 ```
+`--headless` shows each step on the sub-screen with the target key highlighted (done keys turn green),
+waits for "press any key" (`--start-timeout`, default 180 s), then runs the guided steps within
+`--overall-timeout` (default 300 s), each `--step-timeout` (20 s) — a step that times out is skipped and
+recorded.  Questions become automatic checks: the HID-leak gate watches macOS HID activity
+(`CGEventSourceSecondsSinceLastEventType`: keyDown / flagsChanged / systemDefined / scroll, no
+permission needed, no characters, no source device) and correlates it (±0.35 s) with MK20 key events;
+the visual check and PTT→IME are recorded as `needs_manual_confirmation`.  It sets the backlight
+(default 80) because host mode starts dark; `progress.json` in the report dir shows the current step.
+
+### Offline typing vs host mode
+Out of the box the MK20 is in *offline* mode (protocol V1): each key types its keycap character
+through the GD32 as an ordinary keyboard.  The first answered `getInfo` (daemon, devtest, ScreenKey)
+switches it to *host* mode (V2): keys are reported to the host over CDC and stop typing, and the
+backlight starts at 0.  **It stays in host mode until the MK20 is rebooted / replugged** — quitting
+the daemon does not restore offline typing.  The daemon therefore sends `setBacklight`
+(`[deck] backlight`, default 80; `false` to disable) right after every handshake, including after
+replug and wake.
 Covers PRD §10.1: USB roles (T113 CDC / GD32 VIA / DFU / FEL), CDC port + ScreenKey contention
 (read-only lsof/pgrep), getInfo canvas + 0/1-based coords, SHOW_JPG ACK P50/P95 + full-screen fps
 (pattern vs noise JPEG, q60/85/95 sizes), wrong-resolution reject, visual check, 20 keys with on-screen

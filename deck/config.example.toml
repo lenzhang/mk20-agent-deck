@@ -8,7 +8,7 @@ animations = true
 jpeg_quality = 85
 poll_interval_s = 2.0
 heartbeat_s = 2.0
-# backlight = 60
+backlight = 80                   # sent after every handshake (host mode starts at 0 = dark); false = leave alone
 
 [codex_desktop]
 codex_home = "~/.codex"

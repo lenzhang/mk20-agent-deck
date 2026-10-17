@@ -53,6 +53,25 @@ class ConsolePrompter:
         return self.inp(f"⏎ [{step}] {text}（回车继续，s=跳过）").strip().lower()
 
 
+class HeadlessPrompter:
+    """No terminal input: everything is shown on the device; progress goes to a log line."""
+
+    def __init__(self, out=None) -> None:
+        import sys
+        self.out = out or (lambda m: (sys.stdout.write(m + "\n"), sys.stdout.flush()))
+
+    def instruct(self, step: str, text: str) -> None:
+        self.out(f"{time.strftime('%H:%M:%S')} ▶ [{step}] {text}")
+
+    def ask(self, step: str, question: str, choices: str = "yn") -> str:
+        self.out(f"{time.strftime('%H:%M:%S')} ? [{step}] {question} → 无终端输入，记为需人工确认")
+        return "s"
+
+    def wait_enter(self, step: str, text: str) -> str:
+        self.out(f"{time.strftime('%H:%M:%S')} ⏎ [{step}] {text} → 自动继续")
+        return ""
+
+
 class ScriptedPrompter:
     """Test double: ``actions[step]()`` runs (in a thread, after ``delay``) when a step is announced."""
 
@@ -154,7 +173,8 @@ def _ms(v):
 
 # ------------------------------------------------------------------ test pattern
 def pattern(layout: DeviceLayout, note: str = "", highlight: tuple[int, int] | None = None,
-            noise: bool = False, seed: int = 0, quality: int = 85) -> bytes:
+            noise: bool = False, seed: int = 0, quality: int = 85, title: str = "MK20 devtest",
+            done: frozenset = frozenset()) -> bytes:
     from PIL import Image, ImageDraw
 
     from ..render.fonts import font
@@ -167,7 +187,8 @@ def pattern(layout: DeviceLayout, note: str = "", highlight: tuple[int, int] | N
     for r in layout.keys:
         doc = layout.fw_to_doc(r.col, r.row)
         hl = highlight is not None and doc == highlight
-        fill = (250, 200, 40) if hl else ((40, 70, 120) if (doc[0] + doc[1]) % 2 else (60, 60, 70))
+        fill = (250, 200, 40) if hl else ((30, 120, 60) if doc in done else
+                                          ((40, 70, 120) if (doc[0] + doc[1]) % 2 else (60, 60, 70)))
         if not noise or hl:
             d.rectangle([r.x + 2, r.y + 2, r.x + r.w - 3, r.y + r.h - 3], fill=fill)
         d.rectangle([r.x, r.y, r.x + r.w - 1, r.y + r.h - 1], outline=(255, 255, 255))
@@ -179,7 +200,7 @@ def pattern(layout: DeviceLayout, note: str = "", highlight: tuple[int, int] | N
     sub = layout.subscreen
     if sub is not None:
         d.rectangle([sub.x, sub.y, sub.x + sub.w - 1, sub.y + sub.h - 1], fill=(0, 0, 0), outline=(0, 200, 120))
-        d.text((sub.x + 8, sub.y + 6), "MK20 devtest", font=f_small, fill=(0, 200, 120))
+        d.text((sub.x + 8, sub.y + 6), title, font=f_small, fill=(0, 200, 120))
         y = sub.y + 30
         line = ""
         for ch in note:  # naive wrap
@@ -213,6 +234,11 @@ class DevTestOptions:
     backlight_level: int | None = None
     step_timeout: float = 20.0
     quiet_s: float = 1.5
+    # headless: guided purely on the device (no terminal input); y/n questions become
+    # automatic checks or "needs manual confirmation".
+    headless: bool = False
+    start_timeout: float = 180.0  # headless: wait this long for the first key press ("press any key")
+    overall_timeout: float | None = None  # guided-phase budget (s) after the start gate; then skip+record
 
 
 @dataclass
@@ -231,6 +257,11 @@ class DevTest:
     link: DeviceLink | None = None
     port: str | None = None
     rec: Recorder = field(default_factory=Recorder)
+    hid_monitor: object | None = None
+    deadline: float | None = None
+    step_no: int = 0
+    done_keys: set = field(default_factory=set)
+    progress_path: str | None = None
 
     # -------------------------------------------------- plumbing
     def _sec(self, name: str, status: str, **kw) -> dict:
@@ -238,12 +269,53 @@ class DevTest:
         self.report["sections"][name] = s
         return s
 
+    def _title(self) -> str:
+        t = "MK20 自检"
+        if self.step_no:
+            t += f"  步骤 {self.step_no}/{len(step_plan(self.opts))}"
+        left = self.remaining()
+        if left != float("inf"):
+            t += f"  剩余 {int(left // 60)}:{int(left % 60):02d}"
+        return t
+
     def _show(self, note: str, highlight=None) -> None:
         if self.link and self.link.connected:
             try:
-                self.link.show_jpeg(pattern(self.link.layout, note, highlight))
+                self.link.show_jpeg(pattern(self.link.layout, note, highlight, title=self._title(),
+                                            done=frozenset(self.done_keys)))
             except Exception:  # noqa: BLE001
                 pass
+
+    def remaining(self) -> float:
+        return float("inf") if self.deadline is None else max(0.0, self.deadline - self.clock())
+
+    def _tmo(self, base: float) -> float:
+        return max(0.0, min(base, self.remaining()))
+
+    def _step(self, name: str, text: str, highlight=None) -> float:
+        """Announce one guided step (device + log + progress file); returns its start time."""
+        self.step_no += 1
+        self._show(text, highlight)
+        self.prompter.instruct(name, text)
+        self._progress(name, text)
+        return self.clock()
+
+    def _progress(self, name: str, text: str, state: str = "waiting") -> None:
+        if not self.progress_path:
+            return
+        try:
+            with open(self.progress_path, "w", encoding="utf-8") as f:
+                json.dump({"step_no": self.step_no, "total": len(step_plan(self.opts)), "step": name, "text": text,
+                           "state": state, "remaining_s": None if self.deadline is None else round(self.remaining()),
+                           "at": _dt.datetime.now().astimezone().isoformat(timespec="seconds")}, f, ensure_ascii=False)
+        except OSError:
+            pass
+
+    def _hid_since(self, t0: float, t1: float | None = None) -> list:
+        if self.hid_monitor is None:
+            return []
+        return [x for x in self.hid_monitor.between(t0, t1 if t1 is not None else self.clock() + 1)
+                if x[1] in LEAK_TYPES]
 
     def connect(self) -> DeviceLayout:
         ports = [self.opts.port] if self.opts.port != "auto" else self.find_ports()
@@ -253,7 +325,14 @@ class DevTest:
         tr = self.open_transport(self.port)
         self.link = DeviceLink(tr, on_json=self.rec.add)
         self.link.start()
-        return self.link.handshake(None)
+        lay = self.link.handshake(None)
+        # Host mode starts with backlight 0 (dark keys): re-apply on every (re)connect.
+        if self.opts.backlight_level is not None and self.opts.allow_device_writes:
+            ack = self.link.call(P.set_backlight(self.opts.backlight_level))
+            self.report.setdefault("backlight_applied", []).append(
+                {"level": self.opts.backlight_level, "success": bool(ack and ack.success),
+                 "error": ack.error if ack else "timeout"})
+        return lay
 
     def disconnect(self) -> None:
         if self.link:
@@ -264,22 +343,36 @@ class DevTest:
         os.makedirs(self.out_dir, exist_ok=True)
         self.report = {"format": "mk20deck-devtest/1",
                        "started": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                       "options": asdict(self.opts), "sections": {}}
+                       "options": asdict(self.opts), "sections": {},
+                       "step_plan": step_plan(self.opts) if self.opts.headless else None}
+        if self.opts.headless:
+            self.progress_path = os.path.join(self.out_dir, "progress.json")
+            if self.hid_monitor is not None:
+                try:
+                    self.hid_monitor.start()
+                except Exception:  # noqa: BLE001
+                    self.hid_monitor = None
         steps = [("usb", self.t_usb), ("port", self.t_port), ("getinfo", self.t_getinfo), ("methods", self.t_methods),
                  ("files", self.t_files),
                  ("display", self.t_display), ("backlight", self.t_backlight),
-                 ("keys", self.t_keys), ("knobs", self.t_knobs), ("hid_leak", self.t_leak),
-                 ("ptt", self.t_ptt), ("timing", self.t_timing), ("reconnect", self.t_reconnect),
+                 ("keys", self.t_keys), ("knobs", self.t_knobs),
+                 ("ptt", self.t_ptt), ("timing", self.t_timing), ("hid_leak", self.t_leak),
+                 ("reconnect", self.t_reconnect),
                  ("sleep", self.t_sleep), ("via", self.t_via)]
         for name, fn in steps:
             try:
                 fn()
             except Exception as e:  # noqa: BLE001
                 self._sec(name, "error", error=f"{type(e).__name__}: {e}")
+        self.step_no = 0
+        self.deadline = None
         try:
-            self._show("devtest 完成，可拔线或运行 mk20deck run")
+            self._show("自检完成 ✓  报告已保存。可拔线（拔插后恢复离线打字）或运行 mk20deck run")
         finally:
             self.disconnect()
+            if self.hid_monitor is not None:
+                self.hid_monitor.stop()
+            self._progress("finished", "done", state="finished")
         self.report["finished"] = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
         self.report["suggested_config"] = self.suggest()
         self.report["raw_events"] = [{"t": round(t, 3), **o} for t, o in _events(self.rec.items)][:2000]
@@ -299,7 +392,27 @@ class DevTest:
         if not self.opts.interactive:
             self._sec(name, "skip", reason="非交互模式（--auto）")
             return False
+        if self.remaining() <= 0:
+            self._sec(name, "skip", reason="超出总时限（overall timeout）")
+            return False
         return self._need_link(name)
+
+    def start_gate(self) -> bool:
+        """Headless: wait for any key press, then start the guided-phase budget."""
+        text = "设备自检开始：请按 任意一个键 开始（之后按屏幕提示操作，无需碰电脑）"
+        t0 = self._step("start", text)
+        got = self.rec.wait(lambda xs: bool(_keys(xs, True)) or any(
+            any(w in str(o.get("method", "")).lower() for w in ("key", "knob")) for _, o in _events(xs)),
+            t0, self.opts.start_timeout)
+        if not got and self._hid_since(t0):
+            got = True  # key typed via HID only (no CDC) — the user is there anyway
+        waited = self.clock() - t0
+        self.report["start_gate"] = {"pressed": got, "waited_s": round(waited, 1),
+                                     "via": "cdc" if _events(self.rec.since(t0)) else ("hid" if got else None)}
+        time.sleep(0.6)  # let the starting press be released before step 1
+        if self.opts.overall_timeout:
+            self.deadline = self.clock() + self.opts.overall_timeout
+        return got
 
     # -------------------------------------------------- sections
     def t_usb(self) -> None:
@@ -413,8 +526,10 @@ class DevTest:
             self.link.ack_misses = 0
         self._show("请看键面：每个键左上角应显示自己的坐标（左上 1,1 → 右下 5,4）")
         vis = self.prompter.ask("display_visual", "键面是否显示正确（左上=1,1，右下=5,4，无错位/镜像）？") \
-            if self.opts.interactive else "s"
+            if self.opts.interactive and not self.opts.headless else "s"
         res["visual_ok"] = {"y": True, "n": False}.get(vis)
+        if self.opts.headless:
+            res["needs_manual_confirmation"] = "目视：键面坐标是否正确（无错位/镜像）——无头模式无法自动判定"
         worst = min(v["fps"] for v in fps.values()) if fps else 0
         res["recommended_max_fps"] = round(min(8.0, worst * 0.8), 1)
         st = "pass" if fails == 0 and worst > 0 and res["visual_ok"] is not False else "warn"
@@ -436,29 +551,61 @@ class DevTest:
                   ack=asdict(ack) if ack else None, note="原背光值不可读，结束后请手动调回")
 
     def _press_release(self, step: str, text: str, highlight) -> dict:
-        self._show(text, highlight)
-        t0 = self.clock()
-        self.prompter.instruct(step, text)
-        got = self.rec.wait(lambda xs: bool(_keys(xs, True)) and any(
-            not k[3] and (k[1], k[2]) == _keys(xs, True)[0][1:3] for k in _keys(xs)), t0, self.opts.step_timeout)
+        if self.remaining() <= 0:
+            return {"ok": False, "fw": None, "hold_ms": None, "skipped": "overall timeout", "raw": []}
+        t0 = self._step(step, text, highlight)
+
+        def done(xs):
+            ks = _keys(xs)
+            first = next((k for k in ks if k[3]), None)
+            return first is not None and any(not k[3] and k[1:3] == first[1:3] for k in ks)
+
+        tmo = self._tmo(self.opts.step_timeout)
+        got = self.rec.wait(done, t0, tmo) if not self.opts.headless else self._wait_or_hid(done, t0, tmo)
         xs = self.rec.since(t0)
         ks = _keys(xs)
         down = next((k for k in ks if k[3]), None)
         up = next((k for k in ks if down and not k[3] and k[1:3] == down[1:3]), None)
-        return {"ok": got, "fw": list(down[1:3]) if down else None,
-                "hold_ms": _ms(up[0] - down[0]) if down and up else None,
-                "raw": [o for _, o in _events(xs)][:6]}
+        hid = self._hid_since(t0)
+        out = {"ok": got, "fw": list(down[1:3]) if down else None,
+               "hold_ms": _ms(up[0] - down[0]) if down and up else None,
+               "raw": [o for _, o in _events(xs)][:6]}
+        if self.opts.headless:
+            out["hid_activity"] = sorted({n for _, n in hid})
+            if not got:
+                out["timed_out_s"] = round(tmo, 1)
+                if hid:
+                    out["hid_only"] = True
+        if got and highlight is not None:
+            self.done_keys.add(tuple(highlight))
+        return out
+
+    def _wait_or_hid(self, pred, t0: float, timeout: float) -> bool:
+        """Wait for a CDC condition; also advance (returning False) after HID-only activity settles."""
+        end = self.clock() + timeout
+        while self.clock() < end:
+            if self.rec.wait(pred, t0, min(0.1, max(0.0, end - self.clock()))):
+                return True
+            hid = self._hid_since(t0)
+            if hid and self.clock() - hid[-1][0] > 0.8 and not _events(self.rec.since(t0)):
+                return False
+        return pred(self.rec.since(t0))
 
     def t_keys(self) -> None:
         if not self.opts.keys or not self._guided("keys"):
             return
-        self.prompter.wait_enter("keys_intro", "按键测试：请先打开并聚焦一个空白文本窗口（用于观察 HID 泄漏），"
-                                 "然后按设备副屏/黄色高亮提示逐个按键；无需回到终端")
+        if self.opts.headless:
+            if "start_gate" not in self.report:
+                self.start_gate()
+        else:
+            self.prompter.wait_enter("keys_intro", "按键测试：请先打开并聚焦一个空白文本窗口（用于观察 HID 泄漏），"
+                                     "然后按设备副屏/黄色高亮提示逐个按键；无需回到终端")
         results = {}
         for row in range(1, 5):
             for col in range(1, 6):
-                results[f"{col},{row}"] = self._press_release(f"key:{col},{row}", f"按下并松开 第{row}行 第{col}列 键",
-                                                              (col, row))
+                results[f"{col},{row}"] = self._press_release(
+                    f"key:{col},{row}", f"按下并松开 黄色高亮键（第{row}行 第{col}列）"
+                    + ("；不按则 20 秒后自动跳过" if self.opts.headless else ""), (col, row))
         kc_form = {k: r["fw"][1] for k, r in results.items() if r["fw"] and r["fw"][0] == "kc"}
         if kc_form:
             missing = [k for k, r in results.items() if not r["ok"]]
@@ -493,16 +640,23 @@ class DevTest:
             for act, text in (("cw", f"顺时针转 {side}旋钮 {knob} 三格"), ("ccw", f"逆时针转 {side}旋钮 {knob} 三格"),
                               ("press", f"按下并松开 {side}旋钮 {knob}")):
                 step = f"knob:{knob}:{act}"
-                self._show(text)
-                t0 = self.clock()
-                self.prompter.instruct(step, text)
-                xs = self.rec.wait_quiet(t0, self.opts.step_timeout, self.opts.quiet_s, self.opts.step_timeout)
+                if self.remaining() <= 0:
+                    out[step] = {"events": 0, "methods": [], "key_cells": [], "outside_key_grid": [], "raw": [],
+                                 "skipped": "overall timeout"}
+                    continue
+                t0 = self._step(step, text + ("（不动则 20 秒后自动跳过）" if self.opts.headless else ""))
+                tmo = self._tmo(self.opts.step_timeout)
+                if self.opts.headless:
+                    self._wait_or_hid(lambda xs: bool(_events(xs)), t0, tmo)
+                xs = self.rec.wait_quiet(t0, tmo if not self.opts.headless else 0.05, self.opts.quiet_s, tmo)
                 ks = _keys(xs)
                 out[step] = {"events": len(xs), "methods": sorted({o.get("method", "?") for _, o in xs}),
                              "key_cells": sorted({(k[1], k[2]) for k in ks}, key=str),
                              "outside_key_grid": sorted({(k[1], k[2]) for k in ks if (k[1], k[2]) not in key_cells},
                                                         key=str),
                              "raw": [o for _, o in xs][:12]}
+                if self.opts.headless:
+                    out[step]["hid_activity"] = sorted({n for _, n in self._hid_since(t0)})
         silent = [k for k, v in out.items() if not v["events"]]
         self._sec("knobs", "warn" if silent else "pass", silent_steps=silent,
                   note="无 CDC 事件的动作可能只走 GD32 HID（需 VIA/hidutil 净化，见 §6.5）" if silent else "",
@@ -512,25 +666,77 @@ class DevTest:
         if not self.opts.interactive or (not self.opts.keys and not self.opts.knobs):
             self._sec("hid_leak", "skip", reason="未执行按键/旋钮引导")
             return
+        if self.opts.headless:
+            self._leak_auto()
+            return
         a = self.prompter.ask("hid_leak", "刚才按键/转旋钮时，Mac 上是否出现了输入字符、音量变化或快捷键？(y=有泄漏)")
         self._sec("hid_leak", {"y": "fail", "n": "pass"}.get(a, "skip"), answer=a,
                   note="P0 硬门槛：19 个非 PTT 键与两旋钮不得产生副作用 HID；泄漏→按 VIA KC_NO→现有配置→hidutil 顺序处理")
 
+    def _guided_window(self) -> tuple[float, float] | None:
+        g = self.report.get("start_gate")
+        if not g:
+            return None
+        ts = [t for t, _ in _events(self.rec.items)]
+        return (min(ts) - 1.0, self.clock()) if ts else None
+
+    def _leak_auto(self) -> None:
+        note = "P0 硬门槛：19 个非 PTT 键与两旋钮不得产生副作用 HID；泄漏→按 VIA KC_NO→现有配置→hidutil 顺序处理"
+        if self.hid_monitor is None:
+            self._sec("hid_leak", "manual", needs_manual_confirmation=True, reason="无 HID 监视器（非 macOS？）",
+                      note=note)
+            return
+        from .hidwatch import correlate
+        win = self._guided_window()
+        if win is None:
+            self._sec("hid_leak", "manual", needs_manual_confirmation=True, monitor=self.hid_monitor.info(),
+                      reason="引导期间没有收到任何设备按键事件，无法关联", note=note)
+            return
+        ptt = self.report["sections"].get("ptt", {}).get("window")
+        key_times = [t for t, *_ in _keys(self.rec.since(win[0]))]
+        samples = [x for x in self.hid_monitor.between(*win) if x[1] in LEAK_TYPES]
+        non_ptt = [x for x in samples if not (ptt and ptt[0] - 0.3 <= x[0] <= ptt[1] + 0.3)]
+        c = correlate(non_ptt, key_times)
+        hid_only = [k for k, r in self.report["sections"].get("keys", {}).get("results", {}).items()
+                    if r.get("hid_only")]
+        knob_hid = [k for k, r in self.report["sections"].get("knobs", {}).get("results", {}).items()
+                    if r.get("hid_activity")]
+        if c["correlated"] or hid_only or knob_hid:
+            st = "fail"
+        elif c["uncorrelated"]:
+            st = "warn"
+        else:
+            st = "pass"
+        self._sec("hid_leak", st, auto=True, monitor=self.hid_monitor.info(), guided_window_s=round(win[1] - win[0], 1),
+                  **c, hid_only_keys=hid_only, knob_steps_with_hid=knob_hid,
+                  limitation="只能看到“有无 HID 事件及类型”，看不到字符与来源设备；与 MK20 键事件时间相关(±0.35 s)即判泄漏；"
+                             "期间若有人用 Mac 键盘会产生不相关样本(→warn)",
+                  note=note)
+
     def t_ptt(self) -> None:
         if not self._guided("ptt"):
             return
-        text = "按住左下角 PTT 键约 2 秒后松开（如 IME 语音被触发属正常）"
+        text = "按住黄色高亮的 PTT 键（左下角）约 2 秒后松开"
+        t0 = self.clock()
         r = self._press_release("ptt", text, PTT_DOC)
-        ime = self.prompter.ask("ptt_ime", "按住期间 Mac 输入法语音（右 Option）是否被触发？")
+        extra = {}
+        if self.opts.headless:
+            ime = "s"
+            hid = self._hid_since(t0)
+            extra = {"window": [t0, self.clock()], "hid_activity": sorted({n for _, n in hid}),
+                     "right_option_seen": any(n == "flagsChanged" for _, n in hid),
+                     "needs_manual_confirmation": "IME 语音是否被触发需目视确认（无头模式只能看到 flagsChanged）"}
+        else:
+            ime = self.prompter.ask("ptt_ime", "按住期间 Mac 输入法语音（右 Option）是否被触发？")
         self._sec("ptt", "pass" if r["ok"] else "warn", cdc_observed=r["ok"], hold_ms=r["hold_ms"], fw=r["fw"],
                   ime_triggered={"y": True, "n": False}.get(ime),
-                  note="" if r["ok"] else "PTT 无 CDC 事件 → 设备上无法画按住动画（PRD §6.5：静态麦标）")
+                  note="" if r["ok"] else "PTT 无 CDC 事件 → 设备上无法画按住动画（PRD §6.5：静态麦标）", **extra)
 
     def _collect_presses(self, step: str, text: str, n: int) -> list[tuple[float, float]]:
-        self._show(text, TIMING_DOC)
-        t0 = self.clock()
-        self.prompter.instruct(step, text)
-        self.rec.wait(lambda xs: len(_pairs(_keys(xs))) >= n, t0, self.opts.step_timeout + n)
+        if self.remaining() <= 0:
+            return []
+        t0 = self._step(step, text, TIMING_DOC)
+        self.rec.wait(lambda xs: len(_pairs(_keys(xs))) >= n, t0, self._tmo(self.opts.step_timeout + n))
         return _pairs(_keys(self.rec.since(t0)))[:n]
 
     def t_timing(self) -> None:
@@ -555,18 +761,21 @@ class DevTest:
         if not self.opts.reconnect or not self._guided("reconnect"):
             return
         port = self.port
-        self._show("重连测试：请拔掉 MK20 的 USB 线")
-        t0 = self.clock()
-        self.prompter.instruct("unplug", "请拔掉 MK20 的 USB 线（等待检测）")
+        t0 = self._step("unplug", "最后一步：拔掉 MK20 的 USB 线，等 3 秒再插回（屏幕会黑，正常）"
+                        if self.opts.headless else "重连测试：请拔掉 MK20 的 USB 线")
         detected = None
-        while self.clock() - t0 < self.opts.step_timeout:
+        while self.clock() - t0 < (self.opts.step_timeout + 10 if self.opts.headless else self.opts.step_timeout):
             if not self.link.connected or port not in self.find_ports():
                 detected = self.clock() - t0
                 break
             time.sleep(0.05)
+        if detected is None and self.opts.headless:
+            self._sec("reconnect", "skip", reason=f"{self.opts.step_timeout:.0f} s 内未拔线（自动跳过）")
+            return
         self.disconnect()
         t1 = self.clock()
         self.prompter.instruct("replug", "请重新插上 MK20（等待重新握手）")
+        self._progress("replug", "waiting for replug + handshake")
         port_back = ready = None
         err = ""
         while self.clock() - t1 < self.opts.step_timeout + 20:
@@ -588,8 +797,8 @@ class DevTest:
                   same_port=self.port == port, last_error=err)
 
     def t_sleep(self) -> None:
-        if not self.opts.sleep:
-            self._sec("sleep", "skip", reason="未启用（--with-sleep）")
+        if not self.opts.sleep or self.opts.headless:
+            self._sec("sleep", "skip", reason="未启用（--with-sleep；无头模式不支持）")
             return
         if not self._guided("sleep"):
             return
@@ -654,6 +863,25 @@ class DevTest:
         return out
 
 
+LEAK_TYPES = ("keyDown", "flagsChanged", "systemDefined", "scrollWheel")
+
+
+def step_plan(opts: DevTestOptions) -> list[str]:
+    """Guided steps as the user sees them on the device (headless numbering)."""
+    out = ["按任意键开始"] if opts.headless else []
+    if opts.keys:
+        out += [f"按下并松开 黄色高亮键（第{r}行 第{c}列）" for r in range(1, 5) for c in range(1, 6)]
+    if opts.knobs:
+        for knob, side in (("K1", "左"), ("K2", "右")):
+            out += [f"顺时针转 {side}旋钮 {knob} 三格", f"逆时针转 {side}旋钮 {knob} 三格", f"按下并松开 {side}旋钮 {knob}"]
+    out.append("按住 PTT 键（左下角）约 2 秒后松开")
+    if opts.timing:
+        out += ["用正常速度单击 高亮键 5 次", "双击 高亮键 3 次（共 6 下）", "长按 高亮键 约 1 秒，重复 3 次"]
+    if opts.reconnect:
+        out.append("拔掉 USB 线，等 3 秒再插回")
+    return out
+
+
 def _pairs(ks) -> list[tuple[float, float]]:
     out, down = [], {}
     for t, c, r, p in ks:
@@ -676,7 +904,7 @@ def _suggest_knob_map(results: dict) -> dict:
 
 
 # ------------------------------------------------------------------ markdown
-_ICON = {"pass": "✅", "warn": "⚠️", "fail": "❌", "skip": "⏭", "error": "💥"}
+_ICON = {"pass": "✅", "warn": "⚠️", "fail": "❌", "skip": "⏭", "error": "💥", "manual": "👁"}
 
 
 def render_markdown(rep: dict) -> str:
