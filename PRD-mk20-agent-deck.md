@@ -804,3 +804,22 @@ herdr 保留第二优先及 D9 安装时机：签字后、联调前先只读核�
 - 抓帧帧率/延迟、JPEG 编码耗时（CPU vs 硬件 JPEG）、内存峰值。
 - HID 与 VNC 输入延迟；锁屏下 VNC 输入是否被拦截。
 - AirPlay 接收端（仅备选）：T113 VE 硬解 H.264 可行性，留作记录不排期。
+
+### 14.7 备选方案对比：OSHWHub ESP32-P4 USB 副屏（an_ye/project_ygsitoma）
+
+> 来源：box `/workspace/oshw-p4-usbdisplay/`（页面存档、固件 `fw/`、Windows IDD 与 Linux DRM 驱动、NOTES.md，2026-10-17 调研）。该项目为 6.2" 1280×452 USB 触控副屏：ESP32-P4 + MIPI-DSI，TinyUSB HS 复合设备（Vendor bulk 显示流 + HID 触摸屏 + MSC，可选 UAC），许可 CC BY-NC-SA 4.0。本节仅作对比记录，**不改变 §14.2–14.6 的选定路径**。
+
+| 维度 | 现方案：T113 VNC over CDC-ECM + 硬件 HID（§14.2–14.3） | 备选：ESP32-P4 USB 副屏思路 |
+|---|---|---|
+| 屏幕图像如何获得 | T113 作为 RFB 客户端，经 ECM 点对点链路向 macOS 屏幕共享**按需拉取** Mac 主屏帧（整帧/增量），T113 缩放+JPEG 后上传云端 | 方向相反：**Mac 把一块"扩展显示器"的画面推给设备**（Vendor bulk，16B udisp 头 + JPEG/RGB）。设备只能看到 Mac 主动渲染到这块虚拟屏上的内容，**拿不到 Mac 主屏**；要"看"主屏只能镜像，且仍需主机端驱动 |
+| Mac 是否需要驱动 | 否：ECM 为 macOS 原生类驱动；屏幕共享为系统自带（需开启并授权） | **需要**：Windows 依赖 IDD 驱动，Linux 依赖 GPL DRM 内核模块 `udisp_drm`，**无 macOS 驱动**；macOS 需自写 DriverKit/虚拟显示 + 用户态推流，签名/公证成本高 |
+| 延迟 / 带宽 | 按需抓帧，P95 目标 ≤800ms/帧（1280 长边 JPEG）；只在 agent 需要时传输，链路占用低。USB 2.0 HS 经 GL852G | 面向持续推流（副屏刷新），带宽高（JPEG 流，USB HS）；对 agent 的"按需看一眼"是浪费；延迟取决于主机驱动编码 |
+| 输入方式 | 主：硬件 HID（T113 configfs `f_hid` 键盘 + 绝对坐标指针，或 GD32 键盘回落）；备：VNC KeyEvent/PointerEvent；单通道仲裁 | HID Digitizer Touch Screen（5 指）——只表达"触摸这块副屏"，坐标落在副屏区域；macOS 对 HID 触摸屏支持有限，不适合作为主屏指针 |
+| 硬件成本 / 额外板子 | 0：复用 MK20 现有 T113 + USB gadget + GL852G | 需另加 ESP32-P4 板（+ 屏/触摸），或替换 MK20 主控；与 MK20 现有 T113 体系不兼容 |
+| 复杂度 | 中：T113 上 RFB 客户端、JPEG、configfs HID、仲裁与急停（均为用户态 + 已有 gadget） | 高：设备固件 + **macOS 驱动从零开发** + 主屏捕获仍未解决 |
+| 风险 | macOS 屏幕共享认证/权限变化；T113 128MB 内存；锁屏下 VNC 输入受限（已规定锁屏只走 HID） | 无 macOS 驱动（阻断性）；方向不符（显示输出≠屏幕采集）；CC BY-NC-SA 许可限制商用复用；需新硬件 |
+| 结论 | **保留为选定路径** | **不采用**：不能解决"抓取 Mac 屏幕"，且需 Mac 驱动；仅借鉴下列两点 |
+
+**可借鉴点（纳入 §14.6 spike 考虑，不改变范围）**
+1. **复合 gadget 结构**：参考其 TinyUSB 复合设备组织（Vendor bulk + HID + MSC [+ UAC] 共存、端点分配、按功能开关的接口编号/描述符拼装），用于 T113 configfs 在现有 ECM + ACM 上**增加 `f_hid`**（以及可选的 MSC 用于分发说明/助手）时的端点预算与描述符布局；T113 侧仍用 Linux configfs，不引入 TinyUSB。
+2. **绝对坐标指针 HID 描述符**：借鉴其报告里 Generic Desktop X/Y（Usage 0x30/0x31）`Data,Var,Abs` + 16 位逻辑范围的字段写法，但**改为 Generic Desktop Mouse/Pointer 应用集合**（Usage Page 0x01, Usage 0x02，按钮 + 绝对 X/Y，逻辑 0–32767 映射主屏），而非其 Digitizer Touch Screen（0x0D/0x04）集合——macOS 对后者支持有限。即 §14.3 R-CU-2「HID-B 键盘 + 绝对坐标指针」的描述符参考实现。
