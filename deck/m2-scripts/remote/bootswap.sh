@@ -35,7 +35,7 @@ if [ -f $S/boot-stock.img.sha256 ] && [ ! -f $S/boot-swap.rebackup ]; then
   else fail "partition sha $PSHA != recorded stock $O nor baseline; refusing (touch boot-swap.rebackup to override)"; fi
 fi
 # kernel-write lock (fd 8): hardreset.sh waits for it, so no reset can tear a p4 write. Held until exit.
-mkdir -p /tmp/mk20; exec 8>/tmp/mk20/kwrite.lock; flock -w 60 8 || fail "kernel-write lock busy"
+mkdir -p /tmp/mk20; exec 8>/tmp/mk20/kwrite.lock; flock -n 8 || fail "kernel-write lock busy"
 if [ $SKIPBK = 0 ]; then
 rm -f $STOCK
 FREE=$(( $(df -k $S | awk 'NR==2{print $4}') * 1024 )); echo "SDCARD free=$FREE need=$((PART+131072))"

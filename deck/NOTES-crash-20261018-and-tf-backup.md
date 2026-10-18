@@ -206,3 +206,17 @@
 - Still needs the user: which credential to use (a dedicated macOS account is recommended, or the VNC password).
   It is stored 600 on the T113 and never uploaded. Also Screen Recording/control consent if macOS prompts.
 - VNC work resumes after packaging M0.5-M2 (plan v0.2).
+
+## 16:50 SGT: M0.5 reset path. 16:37 hang root cause + hardreset v2.1 verified
+- 16:37 hang: busybox 1.27 `flock` has no `-w`. hardreset v2 ran `flock -w 600` -> usage error -> logged
+  "REFUSED: kernel-write lock held" (713.21) and returned. The watcher still running from the /tmp copy was the OLD
+  v2, which falls back to `reboot` -> PSCI hang -> power-cycle (user, 16:46). The RO remount was never reached.
+- Fixes: v2.1 polls `flock -n` (600 s cap); remount ro is backgrounded and bounded (5 s). bootswap/postswap use
+  `flock -n`. Watcher v2.1 (now running) has no `reboot` fallback: a refused reset reports reboot-failed and keeps
+  the board up.
+- Verified 16:49: cmd-reboot -> lock ok -> remount ro EBUSY (files open; synced, benign) -> pings stopped -> USB
+  drop after 15 s -> adb back 61 s later -> composite OK at 57 s uptime, 1 KD, ping 10.20.0.2 1.2 ms.
+- Kernel inventory: /data/mk20/kernel/{9ac68ed98a70 stock, f2a19d3cb8fd ep3, 7326d9e5ab9f ep5out}/{boot.img,MANIFEST}
+  + ALLOWLIST (sha -> features). Running p4 = ep5out.
+- Device recovery path noted for RECOVERY.md: qt_app1 copies /mnt/SDCARD/overlayDir/* onto / at every boot and then
+  empties it. A Mac with a TF reader can drop files there (and a security note: same path = root on boot).

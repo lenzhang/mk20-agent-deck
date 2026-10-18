@@ -12,7 +12,7 @@ revert() {
   log "REVERT: $*"; rm -f $S/mk20/boot-once/postswap-check.sh*
   SRC=""; for c in $STOCK $STOCK2; do [ -f $c ] && [ "$(sha256sum $c | awk '{print $1}')" = "$PS" ] && { SRC=$c; break; }; done
   [ -n "$SRC" ] || { log "NO VALID STOCK COPY - leave as is; pull TF + tf-restore-boot.sh --slice s4"; echo "revert-failed-no-stock: $*" > $ST; sync; exit 1; }
-  mkdir -p /tmp/mk20; exec 8>/tmp/mk20/kwrite.lock; flock -w 60 8 || log "WARN kernel-write lock busy; writing anyway (revert has priority)"
+  mkdir -p /tmp/mk20; exec 8>/tmp/mk20/kwrite.lock; flock -n 8 || log "WARN kernel-write lock busy; writing anyway (revert has priority)"
   dd if=$SRC of=$DEV bs=1M conv=fsync 2>&1 | tail -1 >> $L; sync; echo 3 > /proc/sys/vm/drop_caches
   R=$(sha256sum $DEV | awk '{print $1}')
   if [ "$R" = "$PS" ]; then log "stock restored ($R)"; echo "reverted: $*" > $ST; else log "RESTORE READBACK BAD $R"; echo "revert-readback-bad: $*" > $ST; fi
