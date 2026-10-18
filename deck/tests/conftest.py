@@ -57,9 +57,23 @@ class Dev:
         return f.read_text().strip() if f.exists() else None
 
 
+def _kill_strays(tmp):
+    """Kill every process still running a script from this test's tmp dir (e.g. the detached loader-deadline.sh
+    poller, which loops forever under the fixed test uptime). Test artifacts only: matched by the tmp path."""
+    import signal
+    key = str(tmp).encode()
+    for d in pathlib.Path("/proc").glob("[0-9]*"):
+        try:
+            if key in (d / "cmdline").read_bytes() and int(d.name) != os.getpid():
+                os.kill(int(d.name), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+
+
 @pytest.fixture
 def dev(tmp_path):
-    return Dev(tmp_path)
+    yield Dev(tmp_path)
+    _kill_strays(tmp_path)
 
 
 def sha(path):

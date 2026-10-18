@@ -41,7 +41,8 @@ if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
       MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
       MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;;
     esac; done < "$GENV"
-  else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) echo "release mode: no $GENV (gates not passed at boot) -> refused"; exit 1;; esac; fi
+  else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) m="release mode: no $GENV (gates not passed at boot) -> refused"; echo "$m"
+    echo "gadget $(cut -d' ' -f1 /proc/uptime): $m" >> "$LOG" 2>/dev/null; exit 1;; esac; fi   # r8 #1: detached jobs have no stdout
 fi
 ECM_IP=${MK20_ECM_IP:-172.30.250.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
 DEV_MAC=${MK20_DEV_MAC:-02:11:22:33:44:55}; HOST_MAC=${MK20_HOST_MAC:-02:11:22:33:44:56}
@@ -176,7 +177,8 @@ uint_cap() {
 # 5, add-adb ~4 x7, 6x15 re-add window) ~= 260 s -> 330 s so a healthy rollback incl. add-adb is never cut off.
 RBRETRY=$(uint_cap "${MK20_RB_RETRY_S:-}" 20 0 300)       # queued/manual rollback: pause before its one retry (s)
 RBT=$(uint_cap "${MK20_RB_TIMEOUT:-}" 330 1 900)          # rollback / post-timeout cleanup bound (s)
-RBTRIES=$(uint_cap "${MK20_RB_LOCK_TRIES:-}" 3600 1 4800)  # rollback mutex wait (x0.25 s) >= SUT+RBT+30 s owner hold
+RBTRIES=$(uint_cap "${MK20_RB_LOCK_TRIES:-}" 4400 1 4800)  # rollback mutex wait (x0.25 s = 1100 s) > worst owner hold:
+# setup supervisor SUT+RBT+30 verify+2x10 kill checks+20 escalate (~850 s) + fork/poll overhead (r8 #4)
 SUTRIES=$(uint_cap "${MK20_SETUP_LOCK_TRIES:-}" 40 1 4800) # setup mutex wait (x0.25 s)
 SUT=$(uint_cap "${MK20_SETUP_TIMEOUT:-}" 450 1 1800)       # whole setup incl. its own failsafe (~60 s + cleanup <=330 s)
 # bounded_wait <pid> <s>: 0 = the child exited in time (rc in BW_RC); 1 = timed out: its whole tree was stopped,
@@ -198,13 +200,16 @@ bounded_wait() {
 # stock mode (flag read at boot) and hard-reset via the rescue watcher (cmd-reboot) - same path as flapmon's.
 # r6: the writes run in a bounded child WITHOUT fd 7 (a hung FAT write cannot wedge the mutex); success = both files
 # exist afterwards (sync cannot mask a failed touch). 0 = escalated, 1 = could not persist (caller exits 1, not 3).
+# r8: BW_RC is saved/restored (callers still need their own child's rc); the writer marks success on tmpfs BEFORE
+# sync (a slow sync or the watcher consuming cmd-reboot is not a failure); the STUCK/ESCALATED status is written last.
 escalate() {
-  EF=${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}; ER=${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}
-  log "ESCALATE: $1 -> $EF + reboot"; rb_status "$2"
-  ( touch "$EF" && touch "$ER"; r=$?; sync; exit $r ) </dev/null 7>&- &
-  bounded_wait $! 20; ebw=$?
-  [ "$ebw" = 0 ] && [ "$BW_RC" = 0 ] && [ -e "$EF" ] && [ -e "$ER" ] && return 0
-  log "ESCALATE FAILED (bw=$ebw rc=$BW_RC): $EF / $ER not persisted"; return 1
+  ebrc=${BW_RC:-1}; EF=${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}; ER=${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}
+  EOKF=/tmp/mk20/escalate.ok; rm -f "$EOKF"
+  log "ESCALATE: $1 -> $EF + reboot"
+  ( touch "$EF" && touch "$ER" && [ -e "$EF" ] && [ -e "$ER" ] && touch "$EOKF"; sync ) </dev/null 7>&- &
+  bounded_wait $! 20; ebw=$?; BW_RC=$ebrc
+  if [ -e "$EOKF" ]; then rm -f "$EOKF"; rb_status "$2"; return 0; fi
+  log "ESCALATE FAILED (bw=$ebw): $EF / $ER not persisted"; rb_status "$2-ESCALATE-FAILED"; return 1
 }
 # stuck <why> <status>: rc-3 exit (escalated; flapmon/confirm waiter do not retry). Clears gadget.busy like every
 # other exit under the mutex; rc 1 if the escalation itself could not be persisted.
@@ -265,11 +270,11 @@ trap '' HUP
 SP=$!
 bounded_wait $SP "$SUT"; bw=$?
 if [ $bw = 0 ]; then
-  [ "$BW_RC" = 0 ] && exit 0
+  src=$BW_RC; [ "$src" = 0 ] && exit 0   # r8 BLOCKER: saved before escalate() can run another bounded_wait
   # setup failed and ran its own failsafe: verify stock, else escalate (flapmon is stopped at this point)
   i=0; while ! stock_ok && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
-  stock_ok || escalate "setup failed (rc $BW_RC) and its failsafe did not reach stock" setup-failsafe-NOT-verified
-  rm -f /tmp/mk20/gadget.busy; exit "$BW_RC"
+  stock_ok || escalate "setup failed (rc $src) and its failsafe did not reach stock" setup-failsafe-NOT-verified
+  rm -f /tmp/mk20/gadget.busy; exit "$src"
 fi
 [ $bw = 2 ] && stuck "setup tree $SP unkillable after ${SUT}s (D state)" setup-STUCK
 log "SETUP TIMEOUT: exceeded ${SUT}s -> killed+reaped own setup tree $SP; bounded cleanup"
@@ -285,9 +290,9 @@ exit 1
 # <<< setup-supervisor
 }
 setup_main() {
-touch /tmp/mk20-flapmon-stop   # a re-run: any old flap monitor / confirm waiter exits (new ones start below)
 GEN="$(cut -d' ' -f1 /proc/uptime)-$$"; mkdir -p /tmp/mk20; echo "$GEN" > "$GENF.t" && mv -f "$GENF.t" "$GENF"   # under the mutex (r5 #7)
 [ "$(cat "$GENF" 2>/dev/null)" = "$GEN" ] || { log "FAIL cannot publish generation $GEN (nothing mutated)"; exit 1; }   # GPT r7
+touch /tmp/mk20-flapmon-stop   # r8 #5: only after the publish: a re-run: any old flap monitor / confirm waiter exits
 log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
 
 trap cleanup EXIT

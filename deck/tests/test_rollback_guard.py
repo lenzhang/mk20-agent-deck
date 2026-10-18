@@ -234,7 +234,7 @@ def test_rb_timeout_default_covers_healthy_cleanup():
     # healthy budget from cleanup(): kd_stop 32 + umount 10 + kd_start 23 + readd_adb (60 + 5 + 7*4 + 90)
     assert rbt >= 330 and rbt >= 32 + 10 + 23 + 60 + 5 + 28 + 90
     assert sut >= 60 + rbt or sut >= 450
-    assert tries * 0.25 >= sut + rbt + 30   # a rollback waiter outlasts the longest owner hold
+    assert tries * 0.25 >= sut + rbt + 30 + 2 * 10 + 20 + 60   # outlasts the worst supervisor hold + overhead (r8 #4)
 
 
 # ---- r5 #9 / #4: fd 7 + detach ----
@@ -369,6 +369,7 @@ def test_stale_request_with_busy_mutex_is_rc5_not_rc4(dev, tmp_path):
 def test_generation_publication_is_checked():
     sm = G[G.index("setup_main() {"):]
     assert '[ "$(cat "$GENF" 2>/dev/null)" = "$GEN" ] || {' in sm
+    assert sm.index("cannot publish generation") < sm.index("touch /tmp/mk20-flapmon-stop")   # r8 #5
     assert sm.index("cannot publish generation") < sm.index("trap cleanup EXIT")   # before any mutation
 
 
