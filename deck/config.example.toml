@@ -1,0 +1,37 @@
+# ~/.config/mk20-agent-deck/config.toml  (all keys optional)
+[deck]
+default_mode = "codex_desktop"   # first run only; afterwards the last used mode is remembered
+port = "auto"                    # or "/dev/cu.usbmodemXXXX"
+fw_coord_base = "auto"           # firmware col/row base: "auto" (infer from getInfo rects), 0 or 1 (PRD D12)
+max_fps = 8                      # global ceiling (PRD §7.4); clamped to <= 8
+animations = true
+jpeg_quality = 85
+poll_interval_s = 2.0
+heartbeat_s = 2.0
+backlight = 80                   # sent after every handshake (host mode starts at 0 = dark); false = leave alone
+
+[codex_desktop]
+codex_home = "~/.codex"
+originators = ["Codex Desktop", "codex_work_desktop", ""]
+running_window_s = 600           # task_started without completion older than this -> unknown
+max_candidates = 24
+max_prompt_chars = 2000          # skill prefill: fail (never truncate) beyond this
+
+[tmux]
+patterns = ["ag-ccai-*", "ag-codex-*"]
+registered_panes = []
+terminal_app = ""                # e.g. "Ghostty"; empty -> focus disabled ("请绑定终端 App")
+new_session_cmd = ""             # e.g. "ccai sg"; empty -> new-session key disabled
+
+[herdr]
+binary = "herdr"
+
+# Knob events: CDC vs HID path is unverified (PRD §6.4). Map firmware "col,row" from
+# keyStateChanged to knob actions once measured, e.g.:
+# [knobs]
+# "5,0" = "K1:press"
+# "6,0" = "K1:cw"
+
+# [[skills]]  # exactly four entries to override (label + prompt)
+# label = "审 PR"
+# prompt = "请审查当前分支相对主干的改动……"
