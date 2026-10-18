@@ -5,6 +5,10 @@
 // neighbour on another interface cannot reach the alias address; strict parsing (exit 2 on a bad argument).
 // Creates a raw PTY, symlinks --link to its slave, serves one TCP client at a time (new client
 // replaces old). With no client, output from KD is discarded so KD never blocks.
+// v3 (firmware 1.2.0): --tap PATH serves a local unix socket (0600) that receives a copy of the KD->host bytes for
+// the on-board router (mk20-router). One tap client at a time (new replaces old); sends are MSG_DONTWAIT and a full
+// socket drops the chunk, so a slow or stuck tap client can never stall KD or the Mac link. Bytes from the tap
+// client are read and discarded (it cannot write to KD). A tap that cannot be created is logged and skipped.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,8 +23,24 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 static const char *linkp = "/dev/ttyGS0";
-static void cleanup(int s) { (void)s; unlink(linkp); _exit(0); }
+static const char *tapp = NULL;
+static void cleanup(int s) { (void)s; unlink(linkp); if (tapp) unlink(tapp); _exit(0); }
+static int tap_listen(const char *path) {  // -1 on failure (caller continues without a tap)
+  struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
+  if (strlen(path) >= sizeof a.sun_path) return -1;
+  strcpy(a.sun_path, path);
+  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  if (fd < 0) return -1;
+  unlink(path);
+  mode_t old = umask(077);
+  int rc = bind(fd, (void *)&a, sizeof a);
+  umask(old);
+  if (rc || chmod(path, 0600) || listen(fd, 1)) { close(fd); unlink(path); return -1; }
+  return fd;
+}
 static int wall(int fd, const char *b, ssize_t n) {  // blocking-style (to the PTY / KD)
   while (n > 0) { ssize_t w = write(fd, b, n); if (w < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(1000); continue; } return -1; } b += w; n -= w; }
   return 0;
@@ -48,6 +68,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[i], "--listen") && i + 1 < argc) { if (nl == MAXL) { fprintf(stderr, "too many --listen\n"); return 2; } ls_s[nl++] = argv[++i]; }
     else if (!strcmp(argv[i], "--link") && i + 1 < argc) linkp = argv[++i];
     else if (!strcmp(argv[i], "--dev") && i + 1 < argc && strlen(argv[i + 1]) < 16) dev = argv[++i];
+    else if (!strcmp(argv[i], "--tap") && i + 1 < argc && argv[i + 1][0] == '/' && strlen(argv[i + 1]) < 100) tapp = argv[++i];
     else { fprintf(stderr, "bad argument %s\n", argv[i]); return 2; }
   }
   if (!nl) { fprintf(stderr, "usage: ttygs_tcp_bridge --listen ADDR:PORT [--listen ...] --link PATH\n"); return 2; }
@@ -70,14 +91,27 @@ int main(int argc, char **argv) {
     if (ls[i] < 0 || bind(ls[i], (void *)&la[i], sizeof la[i]) || listen(ls[i], 2)) { perror(ls_s[i]); return 1; }
   }
   unlink(linkp); if (symlink(sn, linkp)) { perror("symlink"); return 1; }
-  for (int i = 0; i < nl; i++) fprintf(stderr, "bridge v2 %s <-> %s\n", sn, ls_s[i]);
+  for (int i = 0; i < nl; i++) fprintf(stderr, "bridge v3 %s <-> %s\n", sn, ls_s[i]);
+  int tl = -1, tc = -1;
+  if (tapp) { tl = tap_listen(tapp); if (tl < 0) { fprintf(stderr, "tap %s unavailable: %s (continuing without tap)\n", tapp, strerror(errno)); tapp = NULL; } else fprintf(stderr, "tap %s\n", tapp); }
   int cl = -1; char buf[4096];
   for (;;) {
-    struct pollfd p[2 + MAXL]; int np = 0;
+    struct pollfd p[4 + MAXL]; int np = 0;
     p[np++] = (struct pollfd){m, POLLIN, 0};
     for (int i = 0; i < nl; i++) p[np++] = (struct pollfd){ls[i], POLLIN, 0};
     int ci = np; if (cl >= 0) p[np++] = (struct pollfd){cl, POLLIN, 0};
+    int tli = -1, tci = -1;
+    if (tl >= 0) { tli = np; p[np++] = (struct pollfd){tl, POLLIN, 0}; }
+    if (tc >= 0) { tci = np; p[np++] = (struct pollfd){tc, POLLIN, 0}; }
     if (poll(p, np, -1) < 0) { if (errno == EINTR) continue; break; }
+    if (tli >= 0 && (p[tli].revents & POLLIN)) {
+      int n = accept4(tl, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+      if (n >= 0) { if (tc >= 0) close(tc); tc = n; tci = -1; fprintf(stderr, "tap client connected\n"); }
+    }
+    if (tc >= 0 && tci >= 0 && (p[tci].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
+      char junk[256]; ssize_t r = (p[tci].revents & POLLNVAL) ? -1 : recv(tc, junk, sizeof junk, MSG_DONTWAIT);
+      if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) { close(tc); tc = -1; fprintf(stderr, "tap client gone\n"); }
+    }
     for (int i = 0; i < nl; i++) if (p[1 + i].revents & POLLIN) {
       int n = accept4(ls[i], NULL, NULL, SOCK_CLOEXEC);
       if (n >= 0) { if (cl >= 0) close(cl); cl = n; ci = -1; setsockopt(cl, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one); fprintf(stderr, "client connected via %s\n", ls_s[i]); }
@@ -86,6 +120,7 @@ int main(int argc, char **argv) {
     if (p[0].revents & (POLLIN | POLLHUP)) {
       ssize_t r = read(m, buf, sizeof buf);
       if (r > 0 && cl >= 0 && wsock(cl, buf, r)) { close(cl); cl = -1; }
+      if (r > 0 && tc >= 0 && wsock(tc, buf, r)) { close(tc); tc = -1; fprintf(stderr, "tap client dropped\n"); }
       if (r <= 0) usleep(10000);
     }
     if (cl >= 0 && ci >= 0 && ci < np && (p[ci].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {

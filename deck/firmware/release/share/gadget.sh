@@ -345,6 +345,8 @@ ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG" || die "usb0 ip"
 BRIDGE_LISTEN="--dev usb0 --listen $ECM_IP:$BRIDGE_PORT"
 if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
 else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
+# 1.2.0: KD->host copy for the on-board router (release bridge only; a legacy /data bridge has no --tap)
+[ -n "${MK20_REL:-}" ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --tap /tmp/mk20/kd-tap.sock"
 rm -f /tmp/mk20-bridge-stop
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
 mkdir -p /tmp/mk20

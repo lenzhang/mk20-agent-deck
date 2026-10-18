@@ -9,6 +9,11 @@
 #   mk20d config    effective configuration (mk20.conf + flag overrides) and warnings
 #   mk20d maint     detached housekeeping loop started by boot (single instance: flock): log rotation
 #                   (/data/mk20/logs), tmpfs bridge-log trim, periodic /tmp/mk20/health.json (MK20_MAINT_S=300 s)
+#   mk20d router    supervised on-board router loop started by boot (1.2.0; single instance: flock): runs
+#                   bin/mk20-router on the bridge tap (/tmp/mk20/kd-tap.sock) -> /dev/hidg0, restart with backoff
+#                   (1..30 s), ends on /tmp/mk20-router-stop, composite down, or FEATURE_ROUTER=0
+#                   (mk20.conf, FAT flag mk20-no-router, env MK20_ROUTER=0). Reported in selftest (INFO only, never
+#                   gates confirm) and health.json "router". Log: /tmp/mk20/router.log (tmpfs, trimmed by maint)
 #   mk20d version
 # Gate policy: kernel not in kernel/ALLOWLIST -> NO USB changes at all (KD's stock ACM stays); kernel without ecm or
 # vendor hash mismatch or config/flag -> stock ACM+KD+adb (adb with restore-to-serial on failure, like legacy adb.sh).
@@ -43,6 +48,7 @@ kd_count() { pgrep -f '^/data/KeyboardDevice' | wc -l | tr -d ' '; }   # not -x:
 composite_up() { [ -e "$C/ecm.usb0" ]; }
 listening() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }   # exact local address
 lock_held() { ( exec 5>"$1"; ! flock -n 5 ) 2>/dev/null; }   # a live instance holds the lock
+router_running() { pgrep -f 'bin/mk20-router --src' >/dev/null; }
 wdt_armed() { ${MK20_UBUS:-ubus} call system watchdog 2>/dev/null | grep -q '"running"'; }
 
 selftest() { # FAIL = host-independent breakage. Composite rollback to stock is "degraded" (WARN): flapmon rolls back on
@@ -61,6 +67,9 @@ selftest() { # FAIL = host-independent breakage. Composite rollback to stock is 
   else echo "WARN composite down (stock ACM+KD$([ -e "$C/ffs.adb" ] && echo +adb))"
     for n in /data/appLunch.sh /data/setusbconfig; do shim_mounted "$n" && { echo "FAIL shim still mounted on $n with composite down"; f=1; }; done; fi
   n=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); case "$n" in ''|*[!0-9]*) ;; *) [ "$n" -lt 1024 ] && echo "WARN FAT free ${n} KiB";; esac
+  # on-board router (1.2.0): reported only (INFO), never FAIL/WARN, so it can neither block confirm nor degrade status
+  if [ "${FEATURE_ROUTER:-1}" != 1 ]; then echo "INFO router disabled"
+  elif composite_up; then router_running && echo "INFO router running" || echo "INFO router not running"; fi
   return $f
 }
 
@@ -87,6 +96,8 @@ health() {
       "$(num "$(cat "$R/sys/class/net/usb0/mtu" 2>/dev/null)")" "$(jstr "$ECM_SUBNET")" "$(jbool listening "$ECM_IP:$BRIDGE_PORT")" "$(jbool test -w "$R/dev/hidg0")"
     printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,' "$(num "$(kd_count)")" "$(jbool pidof adbd)" \
       "$(jbool pgrep -f mk20-flapmon.sh)" "$(jbool lock_held "$TM/mk20d-maint.lock")" "$mounts"
+    printf '"router":{"enabled":%s,"running":%s,"loop":%s,"tap":%s},' "$([ "${FEATURE_ROUTER:-1}" = 1 ] && echo true || echo false)" \
+      "$(jbool router_running)" "$(jbool lock_held "$TM/router.lock")" "$(jbool test -S "$TM/kd-tap.sock")"
     printf '"watchdog":%s,"mem_avail_kb":%s,"fat_free_kb":%s,"data_free_kb":%s,' "$(jbool wdt_armed)" "$(num "$mem")" "$(num "$fat")" "$(num "$dat")"
     printf '"release":{"good":%s,"pending":%s,"last_rollback":%s},' "$(jstr "$(head -n 1 "$MK20_HOME/state/good" 2>/dev/null)")" \
       "$(jstr "$(head -n 1 "$MK20_HOME/state/pending" 2>/dev/null)")" "$(jstr "$(head -n 1 "$MK20_HOME/state/last-rollback" 2>/dev/null)")"
@@ -145,6 +156,11 @@ boot)
     log WARN boot "composite skipped: $why -> stock ACM+KD$([ $SADB = 1 ] && echo +adb)"
     [ $SADB = 1 ] && stock_adb
   else log ERROR boot "$why -> no USB changes (stock ACM+KD only)"; fi
+  # 1.2.0 on-board router: only on a composite that set up cleanly with HID; never part of the confirm decision
+  if [ $MODE = composite ] && [ "${grc:-1}" = 0 ] && [ $NOHID = 0 ] && [ "$FEATURE_ROUTER" = 1 ] && [ -x "$REL/bin/mk20-router" ]; then
+    ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V exec sh "$REL/sbin/mk20d" router </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) &
+    log INFO router "supervisor launched"
+  else log INFO router "not started (mode=$MODE grc=${grc:-} nohid=$NOHID enabled=$FEATURE_ROUTER)"; fi
   sleep "${MK20_STABLE:-30}"
   # a gadget failsafe (flap rollback + adb re-add, up to ~2.5 min) in progress is not a failure: wait it out (cap)
   # The marker is set by flapmon BEFORE it launches a rollback and by cleanup(); a sample taken while (or just
@@ -192,11 +208,31 @@ maint)
     cfg_load
     log_rotate "$LOGDIR/mk20d.log"; log_rotate "$LOGDIR/gadget.log"
     b=$TM/bridge.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }   # O_APPEND writers keep appending
+    b=$TM/router.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
     health > /dev/null 2>&1
     sleep "${MK20_MAINT_S:-300}" 5>&-   # the lock dies with this loop, not with an orphaned sleep
   done;;
+router)
+  exec 5>"$TM/router.lock"; flock -n 5 || exit 0
+  RB=$REL/bin/mk20-router; TAP=$TM/kd-tap.sock; HID=$R/dev/hidg0; STOP=$R/tmp/mk20-router-stop; RL=$TM/router.log
+  rm -f "$STOP"; d=1; why=""
+  log INFO router "start pid=$$"
+  while :; do
+    cfg_load
+    [ "$FEATURE_ROUTER" = 1 ] || { why="disabled"; break; }
+    [ -f "$STOP" ] && { why="stop file"; break; }
+    composite_up || { why="composite down"; break; }
+    if [ -S "$TAP" ] && [ -e "$HID" ]; then
+      t0=$(cut -d. -f1 /proc/uptime)
+      "$RB" --src "unix:$TAP" --hid "$HID" </dev/null >>"$RL" 2>&1 5>&-; rc=$?
+      t1=$(cut -d. -f1 /proc/uptime); [ $((t1 - t0)) -ge 60 ] && d=1   # a long healthy run resets the backoff
+      echo "$(date '+%F %T') mk20-router exit rc=$rc after $((t1 - t0)) s; retry in ${d}s" >> "$RL"
+    fi
+    sleep "$d" 5>&-; d=$((d * 2)); [ $d -gt "${MK20_ROUTER_BACKOFF_MAX:-30}" ] && d=${MK20_ROUTER_BACKOFF_MAX:-30}
+  done
+  log INFO router "stop ($why)";;
 selftest) cfg_load; selftest; exit $?;;
 config) cfg_load; cfg_print;;
 version) echo "$V";;
-*) echo "usage: mk20d boot|health|selftest|config|maint|version"; exit 2;;
+*) echo "usage: mk20d boot|health|selftest|config|maint|router|version"; exit 2;;
 esac

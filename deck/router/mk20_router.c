@@ -14,6 +14,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -116,8 +117,15 @@ static uint8_t mods;
 static int hid_write_kbd(uint8_t m) {
     uint8_t rep[9] = {1, m, 0, 0, 0, 0, 0, 0, 0}; /* report id 1: mods, reserved, 6 keys */
     if (hid_fd < 0) return -1;
-    ssize_t w = write(hid_fd, rep, sizeof rep);
-    return w == (ssize_t)sizeof rep ? 0 : -1;
+    /* hid_fd is O_NONBLOCK: a host that stops polling (suspend, unplug) must not wedge the router; wait <= ~500 ms */
+    for (int tries = 0; tries < 10; tries++) {
+        ssize_t w = write(hid_fd, rep, sizeof rep);
+        if (w == (ssize_t)sizeof rep) return 0;
+        if (w >= 0 || (errno != EAGAIN && errno != EINTR)) return -1;
+        struct pollfd pf = {hid_fd, POLLOUT, 0};
+        poll(&pf, 1, 50);
+    }
+    return -1;
 }
 
 static void on_key(long col, long row, long pressed) {
@@ -216,7 +224,7 @@ int main(int argc, char **argv) {
     crc_init();
     trace_init();
     buf = malloc(bcap);
-    hid_fd = open(hid, O_WRONLY | O_CLOEXEC);
+    hid_fd = open(hid, O_WRONLY | O_CLOEXEC | O_NONBLOCK);
     if (hid_fd < 0) { fprintf(stderr, "mk20-router: open %s: %s\n", hid, strerror(errno)); return 1; }
     int fd = open_src(src);
     if (fd < 0) { fprintf(stderr, "mk20-router: open src %s: %s\n", src, strerror(errno)); return 1; }
