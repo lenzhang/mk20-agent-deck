@@ -1,79 +1,37 @@
 #!/bin/sh
-# Add FunctionFS adb beside existing ACM.
-# Order: verify unbind → mount ffs → link → adbd → wait ep1/ep2 → bind UDC
-LOG=${LOG:-/mnt/SDCARD/mk20-gadget.log}
+# mk20-add-adb v2: add FunctionFS adb beside the existing ACM (KD keeps ttyGS0).
+# Root cause of v1 failures (2026-10-18): adbd binds the UDC itself (set_udc); our extra
+# `echo UDC` got EBUSY and was treated as FAIL -> restore. Also ffs.adb must be linked in c.1.
+# Sequence: kill adbd -> unbind UDC -> link ffs.adb -> mount functionfs -> start adbd (binds)
+#           -> only if UDC still empty after eps appear, bind it ourselves (EBUSY ignored).
+LOG=${LOG:-/mnt/SDCARD/mk20/logs/adb-helper.log}
 G=/sys/kernel/config/usb_gadget/g1
-log() { echo "add-adb $(date 2>/dev/null || echo nodate): $*" >> "$LOG"; }
-
+log() { echo "add-adb $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
+udc() { cat "$G/UDC" 2>/dev/null; }
+adbd_up() { pidof adbd >/dev/null 2>&1 || pgrep adbd >/dev/null 2>&1; }
+# NEVER run this from an adb shell in the foreground: killing adbd kills the caller mid-way
+# (UDC left unbound). From adb use:  setsid sh mk20-add-adb.sh </dev/null >/dev/null 2>&1 &
 [ -d "$G" ] || { log "FAIL no g1"; exit 1; }
-UDC_NAME=$(ls /sys/class/udc 2>/dev/null | head -n1)
-[ -n "$UDC_NAME" ] || { log "FAIL no udc"; exit 1; }
+UDC_NAME=$(ls /sys/class/udc 2>/dev/null | head -n1); [ -n "$UDC_NAME" ] || { log "FAIL no udc"; exit 1; }
 
-if [ -e "$G/configs/c.1/ffs.adb" ] && [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && pgrep -x adbd >/dev/null \
-   && [ -e /dev/usb-ffs/adb/ep1 ]; then
-  log "already composite+adbd+eps; ok"
-  exit 0
+if [ -e "$G/configs/c.1/ffs.adb" ] && [ -n "$(udc)" ] && adbd_up; then
+  log "already composite (links: $(ls $G/configs/c.1 | tr '\n' ' ')) adbd=$(pidof adbd); ok"; exit 0
 fi
-
-log "BEGIN udc=$UDC_NAME links=$(ls "$G/configs/c.1" 2>/dev/null | tr '\n' ' ')"
-
-# Unbind — must actually clear UDC before changing links
-echo "" > "$G/UDC" 2>>"$LOG" || true
-sleep 0.5
-i=0
-while [ -n "$(cat "$G/UDC" 2>/dev/null)" ]; do
-  i=$((i + 1))
-  [ "$i" -gt 20 ] && { log "FAIL UDC still bound after unbind: $(cat "$G/UDC")"; exit 6; }
-  echo "" > "$G/UDC" 2>/dev/null || true
-  sleep 0.2
-done
-log "UDC unbound"
-
-mkdir -p "$G/functions/ffs.adb"
-mkdir -p /dev/usb-ffs/adb
-if ! grep -q " /dev/usb-ffs/adb " /proc/mounts 2>/dev/null; then
-  mount -o uid=2000,gid=2000 -t functionfs adb /dev/usb-ffs/adb 2>>"$LOG" \
-    || mount -t functionfs adb /dev/usb-ffs/adb 2>>"$LOG" \
-    || { log "FAIL functionfs mount"; exit 3; }
+log "BEGIN udc=$(udc) links=$(ls $G/configs/c.1 2>/dev/null | tr '\n' ' ')"
+killall adbd 2>/dev/null; sleep 1
+echo "" > "$G/UDC" 2>/dev/null
+i=0; while [ -n "$(udc)" ] && [ $i -lt 20 ]; do echo "" > "$G/UDC" 2>/dev/null; usleep 200000; i=$((i+1)); done
+[ -z "$(udc)" ] || { log "FAIL UDC still bound: $(udc)"; exit 6; }
+mkdir -p "$G/functions/ffs.adb" /dev/usb-ffs/adb
+[ -e "$G/configs/c.1/ffs.adb" ] || ln -s "$G/functions/ffs.adb" "$G/configs/c.1/ffs.adb" 2>>"$LOG" || { log "FAIL ln"; exit 7; }
+grep -q " /dev/usb-ffs/adb " /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb 2>>"$LOG" || { log "FAIL ffs mount"; exit 3; }
+[ -e "$G/configs/c.1/acm.usb0" ] || log "WARN acm.usb0 not linked"
+/bin/adbd </dev/null >/tmp/adbd.log 2>&1 &
+i=0; while [ $i -lt 40 ]; do [ -n "$(udc)" ] && break; usleep 200000; i=$((i+1)); done
+if [ -z "$(udc)" ]; then
+  if [ -e /dev/usb-ffs/adb/ep1 ]; then echo "$UDC_NAME" > "$G/UDC" 2>>"$LOG"; sleep 1; fi
 fi
-
-if [ ! -e "$G/configs/c.1/ffs.adb" ]; then
-  ln -s "$G/functions/ffs.adb" "$G/configs/c.1/ffs.adb" 2>>"$LOG" \
-    || { log "FAIL ln ffs.adb"; exit 7; }
-fi
-[ -e "$G/configs/c.1/ffs.adb" ] || { log "FAIL ffs.adb link missing"; exit 7; }
-# ACM should still be linked (we do not remove it)
-[ -e "$G/configs/c.1/acm.usb0" ] || log "WARN acm.usb0 link missing (will still try adb)"
-
-echo "Serial,ADB" > "$G/strings/0x409/product" 2>/dev/null || true
-
-killall adbd 2>/dev/null || true
-sleep 0.3
-/bin/adbd -D >> "$LOG" 2>&1 &
-ADB_PID=$!
-log "adbd started pid=$ADB_PID"
-
-i=0
-while [ "$i" -lt 50 ]; do
-  if [ -e /dev/usb-ffs/adb/ep1 ] && [ -e /dev/usb-ffs/adb/ep2 ]; then
-    log "ffs eps ready i=$i ($(ls /dev/usb-ffs/adb 2>/dev/null | tr '\n' ' '))"
-    break
-  fi
-  if ! kill -0 "$ADB_PID" 2>/dev/null && ! pgrep -x adbd >/dev/null; then
-    log "FAIL adbd exited before eps"
-    exit 4
-  fi
-  i=$((i + 1)); sleep 0.2
-done
-[ -e /dev/usb-ffs/adb/ep1 ] || { log "FAIL timeout ffs eps"; ls -la /dev/usb-ffs/adb >>"$LOG" 2>&1; exit 5; }
-
-echo "$UDC_NAME" > "$G/UDC" 2>>"$LOG" || { log "FAIL echo UDC"; exit 2; }
-sleep 0.8
-BOUND=$(cat "$G/UDC" 2>/dev/null)
-[ "$BOUND" = "$UDC_NAME" ] || { log "FAIL rebound mismatch got='$BOUND' want='$UDC_NAME'"; exit 2; }
-[ -e "$G/configs/c.1/ffs.adb" ] || { log "FAIL ffs.adb disappeared after bind"; exit 8; }
-pgrep -x adbd >/dev/null || { log "FAIL adbd dead after bind"; exit 9; }
-
-log "OK rebound UDC=$BOUND links=$(ls "$G/configs/c.1" 2>/dev/null | tr '\n' ' ') adbd=$(pgrep -x adbd)"
-cat /sys/devices/platform/soc@3000000/soc@3000000:usbc0@0/usb_device >> "$LOG" 2>/dev/null || true
+[ "$(udc)" = "$UDC_NAME" ] || { log "FAIL UDC not bound after adbd (got '$(udc)')"; exit 2; }
+adbd_up || { log "FAIL adbd died"; exit 9; }
+log "OK UDC=$(udc) links=$(ls $G/configs/c.1 | tr '\n' ' ') adbd=$(pidof adbd) eps=$(ls /dev/usb-ffs/adb | tr '\n' ' ')"
 exit 0

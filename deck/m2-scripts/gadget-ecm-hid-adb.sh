@@ -1,10 +1,12 @@
 #!/bin/sh
 # Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS) if EP budget allows.
-# Requires patched kernel (ep3 ISO→INT) + CONFIG_USB_CONFIGFS_ECM=y.
+# Requires the binary-patched STOCK kernel (ep3 ISO→INT + ep5out INT-capable, see
+# NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko (insmod'ed below; HID/FFS are built in).
 # Failsafe: on any error, restore stock serial via /data/setusbconfig serial.
 #
-# EP budget after ep3→INT: 2 INT (ECM or HID + ACM-like) + bulk pairs.
-# ECM: 1 INT + 2 bulk; HID combined: 1 INT; ADB FFS: 2 bulk. Total INT=2 — fits.
+# EP budget: f_hid (5.4) ALWAYS needs INT IN + INT OUT. ECM notify INT IN + HID IN/OUT = 3 INT:
+#   ep3 (INT, patched) , ep4 (INT), ep5out (bulk+INT, patched). Bulk: ep1, ep2 pairs (ECM, ADB).
+#   Link ECM BEFORE HID (configfs binds in link order) or ECM notify finds no INT IN endpoint.
 
 set -eu
 LOG=/mnt/SDCARD/gadget-ecm-hid.log
@@ -51,6 +53,7 @@ echo "ECM+HID+ADB" > configs/c.1/strings/0x409/configuration
 echo 250 > configs/c.1/MaxPower
 
 # --- ECM ---
+grep -q '^usb_f_ecm ' /proc/modules || insmod /data/mk20/usb_f_ecm.ko
 mkdir -p functions/ecm.usb0
 # Stable locally-administered MACs
 echo "02:11:22:33:44:55" > functions/ecm.usb0/dev_addr

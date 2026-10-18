@@ -1,5 +1,5 @@
 #!/bin/sh
-# MK20 watcher v1 — polls /mnt/SDCARD every 2s. Started by lunch stub.
+# MK20 watcher v2 — polls /mnt/SDCARD every 2s. Started by lunch stub.
 #   cmd-reboot                      -> sync + reboot
 #   job.sh + job.sh.sha256          -> verify, run once (300s cap), log, emit over ttyGS0
 #   mk20/boot-once/*.sh(+.sha256)   -> run once at boot (after KD up), emit log
@@ -62,6 +62,14 @@ wait_kd() { i=0; while ! pgrep -f KeyboardDevice >/dev/null 2>&1 && [ $i -lt 90 
     [ -f "$f" ] || continue
     if shaok "$f"; then runjob "$f" "boot-$(basename "$f" .sh)"
     else log "boot-once sha FAIL $f"; mv -f "$f" "$f.bad"; fi
+  done
+  # every-boot jobs (sha-gated, NOT consumed): e.g. boot-every/adb.sh (persistent ACM+adb)
+  for f in "$D"/boot-every/*.sh; do
+    [ -f "$f" ] || continue
+    [ -f $S/mk20-no-bootevery ] && break
+    if shaok "$f"; then cp -f "$f" "/tmp/mk20/every-$(basename "$f")"; cp -f "$f.sha256" "/tmp/mk20/every-$(basename "$f").sha256"
+      runjob "/tmp/mk20/every-$(basename "$f")" "every-$(basename "$f" .sh)"
+    else log "boot-every sha FAIL $f"; fi
   done
   sleep 110
   for f in "$D"/boot-delayed/*.sh; do
