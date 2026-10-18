@@ -1,0 +1,21 @@
+Read-only review of MK20 T113 in-place boot-swap plan (user strategy 10:48 SGT).
+Do NOT edit files or run destructive commands. Mode is ask only.
+
+Context files (if present in workspace):
+- deck/NOTES-boot-swap-prep.md
+- deck/NOTES-kernel-patch-recovery.md
+- deck/m2-scripts/lunch-boot-swap.sh
+- deck/m2-scripts/gadget-ecm-hid-adb.sh
+- deck/kernel/patches/apply-ep3-int.sh
+- deck/tools/tf-restore-boot.sh
+
+Evaluate:
+1) In-place lunch.sh boot swap: backup to 8MB FAT SDCARD + UDISK, write boot-new.img, sha256 readback, reboot — anti-brick adequacy vs pull-TF restore?
+2) Size gate (~7MB) vs stock ~5.4MB boot.img — sound?
+3) ep3-iso→ep3-int patch per Allwinner USB guide §3.3 example 2 — correct for ACM/ECM+HID?
+4) ECM+HID(+ADB) EP budget after one ISO→INT?
+5) Self-fallback limits (no A/B; rely on SDCARD stock + mark-fail) — acceptable?
+6) Building from MangoPi Tina 5.4.61 (not Waveshare private tree) — risk to boot?
+7) Blockers before arming one USB replug.
+
+Output: Blockers, Risks, What looks sound, Suggested arming order. Under ~500 lines.

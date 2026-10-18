@@ -1,1 +1,1 @@
-Claude Opus 5.5 Max boot-swap review still empty/running at commit time. GPT-5.6 sol-xhigh included; lunch layout fixed per GPT blockers.
+Claude Opus 5.5 Max boot-swap review killed empty (~15m). GPT-5.6 sol-xhigh used; lunch layout fixed per GPT.
