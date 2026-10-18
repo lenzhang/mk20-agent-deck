@@ -1,0 +1,873 @@
+You are reviewing firmware 1.2.0 for the MK20 macro keyboard (Allwinner T113, Tina Linux 5.4.61, BusyBox 1.27, glibc 2.23 armhf; shell scripts run under BusyBox sh). Context: KeyboardDevice (KD, vendor, must never stall) writes Protocol A frames to /dev/ttyGS0, which is a pty owned by ttygs_tcp_bridge; the bridge serves ONE TCP client (the Mac link, over USB ECM) and must never stall KD or that link. 1.2.0 adds plan steps 1-2 of an on-board router:
+(1) bridge v3 `--tap /tmp/mk20/kd-tap.sock`: unix socket 0600, one client (new replaces old), KD->host bytes copied with MSG_DONTWAIT; EAGAIN drops the chunk (a partial send may truncate a chunk; the router resyncs on magic+CRC). A tap that cannot be created is logged and skipped.
+(2) `mk20d router`: supervised loop (flock single instance; backoff 1..30 s, reset after a >=60 s run) running static armhf bin/mk20-router --src unix:TAP --hid /dev/hidg0 (PTT key -> HID Right Alt; non-blocking HID writes, <=500 ms wait). Ends on /tmp/mk20-router-stop, composite down, or FEATURE_ROUTER=0 (mk20.conf, FAT flag /mnt/SDCARD/mk20-no-router, env MK20_ROUTER=0). Boot launches it only on a composite that set up cleanly with HID. Selftest reports `INFO router ...` only (never FAIL/WARN, so it cannot gate the release confirm or degrade health status); health.json gets "router":{enabled,running,loop,tap}; maint trims /tmp/mk20/router.log. Binaries live in the release on /data; FAT (~1.2 MiB free) is untouched. Version 1.1.4 -> 1.2.0.
+Tests: bridge tap (slow/absent/replaced/unavailable tap client; Mac client gets every byte), service (restart, stop file, single instance, kill switches, absent tap backoff, INFO-only selftest, boot gating), release binaries == source build; shellcheck clean.
+Review ONLY for true blockers: anything that could stall KD or the Mac link, break boot/confirm/rollback, wedge the device, leave a HID modifier stuck in a realistic case, leak processes across rollback, or is a security issue (socket perms, injection). No style nits, no nice-to-haves. End with exactly one line `VERDICT: GO` or `VERDICT: NO-GO`, preceded by a numbered list of blockers (file:line, why, minimal fix) or "No blockers.".
+```diff
+diff --git a/deck/Makefile b/deck/Makefile
+index fe51eb4..b8594f3 100644
+--- a/deck/Makefile
++++ b/deck/Makefile
+@@ -1,10 +1,13 @@
+ test: sim-test
+-	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh
++	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh tools/mk20-build-bins.sh
+ 	shellcheck -s bash -S warning tools/tf-identify.sh tools/tf-restore-boot.sh
+ 	python3 -m py_compile tools/mk20_key_latency.py tools/mk20_accept.py tools/mk20_soak.py tools/mk20_host_net.py tools/tcp_transport.py tools/tf_gpt_check.py
+ 	(cd tools && uv run --with pytest python -m pytest -q test_tcp_transport.py test_mk20_host_net.py test_mk20_soak.py test_mk20_accept.py test_tf_gpt.py)
+ 	MK20_TEST_BUSYBOX=$${MK20_TEST_BUSYBOX:-$$( [ -x /workspace/tools/bb127/busybox ] && echo /workspace/tools/bb127/busybox )} uv run --with pytest python -m pytest -q tests
+ 
++bins:   # static armhf bridge + router from source into firmware/release/bin (needs arm-linux-gnueabihf-gcc)
++	sh tools/mk20-build-bins.sh
++
+ release:
+ 	sh tools/mk20-release-build.sh firmware out $$(git rev-parse --short HEAD 2>/dev/null || echo dev)
+ 
+@@ -14,4 +17,4 @@ sim-test:
+ sim:
+ 	uv run python -m mk20sim --port 8766
+ 
+-.PHONY: test release sim-test sim
++.PHONY: test bins release sim-test sim
+diff --git a/deck/firmware/RECOVERY.md b/deck/firmware/RECOVERY.md
+index a4a6774..b9a9267 100644
+--- a/deck/firmware/RECOVERY.md
++++ b/deck/firmware/RECOVERY.md
+@@ -40,6 +40,7 @@ Symptoms and where to go:
+ | `mk20-no-composite` | release runs in stock mode: ACM + KD (+adb), no ECM/HID/bridge. **Set automatically** (1.1.4+) when flapmon's rollback fails 3 times; flapmon then hard-resets. Delete it once the cause is fixed |
+ | `mk20-gadget-nohid` | composite without HID (ECM + ADB + bridge). Not a fix for the ep3 kernel: 1.1.x releases don't run on it at all (see level 5) |
+ | `mk20-no-adb` | no adb in any mode |
++| `mk20-no-router` | (1.2.0+) the on-board router (`mk20d router` → `bin/mk20-router`, PTT → HID) is not started; same as `FEATURE_ROUTER=0` in mk20.conf or env `MK20_ROUTER=0`. To stop it now without a reboot: `touch /tmp/mk20-router-stop; killall mk20-router`. The router never gates confirm |
+ | `mk20-no-release` | loader skips releases: legacy `boot-every/` jobs only (stock + adb keeper) |
+ | `mk20-no-watch` | boot stub does nothing at all: pure vendor behaviour, no rescue watcher, no adb |
+ 
+diff --git a/deck/firmware/VERSION b/deck/firmware/VERSION
+index 65087b4..26aaba0 100644
+--- a/deck/firmware/VERSION
++++ b/deck/firmware/VERSION
+@@ -1 +1 @@
+-1.1.4
++1.2.0
+diff --git a/deck/firmware/release/sbin/mk20d b/deck/firmware/release/sbin/mk20d
+index 095e414..5594702 100755
+--- a/deck/firmware/release/sbin/mk20d
++++ b/deck/firmware/release/sbin/mk20d
+@@ -9,6 +9,11 @@
+ #   mk20d config    effective configuration (mk20.conf + flag overrides) and warnings
+ #   mk20d maint     detached housekeeping loop started by boot (single instance: flock): log rotation
+ #                   (/data/mk20/logs), tmpfs bridge-log trim, periodic /tmp/mk20/health.json (MK20_MAINT_S=300 s)
++#   mk20d router    supervised on-board router loop started by boot (1.2.0; single instance: flock): runs
++#                   bin/mk20-router on the bridge tap (/tmp/mk20/kd-tap.sock) -> /dev/hidg0, restart with backoff
++#                   (1..30 s), ends on /tmp/mk20-router-stop, composite down, or FEATURE_ROUTER=0
++#                   (mk20.conf, FAT flag mk20-no-router, env MK20_ROUTER=0). Reported in selftest (INFO only, never
++#                   gates confirm) and health.json "router". Log: /tmp/mk20/router.log (tmpfs, trimmed by maint)
+ #   mk20d version
+ # Gate policy: kernel not in kernel/ALLOWLIST -> NO USB changes at all (KD's stock ACM stays); kernel without ecm or
+ # vendor hash mismatch or config/flag -> stock ACM+KD+adb (adb with restore-to-serial on failure, like legacy adb.sh).
+@@ -43,6 +48,7 @@ kd_count() { pgrep -f '^/data/KeyboardDevice' | wc -l | tr -d ' '; }   # not -x:
+ composite_up() { [ -e "$C/ecm.usb0" ]; }
+ listening() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }   # exact local address
+ lock_held() { ( exec 5>"$1"; ! flock -n 5 ) 2>/dev/null; }   # a live instance holds the lock
++router_running() { pgrep -f 'bin/mk20-router --src' >/dev/null; }
+ wdt_armed() { ${MK20_UBUS:-ubus} call system watchdog 2>/dev/null | grep -q '"running"'; }
+ 
+ selftest() { # FAIL = host-independent breakage. Composite rollback to stock is "degraded" (WARN): flapmon rolls back on
+@@ -61,6 +67,9 @@ selftest() { # FAIL = host-independent breakage. Composite rollback to stock is
+   else echo "WARN composite down (stock ACM+KD$([ -e "$C/ffs.adb" ] && echo +adb))"
+     for n in /data/appLunch.sh /data/setusbconfig; do shim_mounted "$n" && { echo "FAIL shim still mounted on $n with composite down"; f=1; }; done; fi
+   n=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); case "$n" in ''|*[!0-9]*) ;; *) [ "$n" -lt 1024 ] && echo "WARN FAT free ${n} KiB";; esac
++  # on-board router (1.2.0): reported only (INFO), never FAIL/WARN, so it can neither block confirm nor degrade status
++  if [ "${FEATURE_ROUTER:-1}" != 1 ]; then echo "INFO router disabled"
++  elif composite_up; then router_running && echo "INFO router running" || echo "INFO router not running"; fi
+   return $f
+ }
+ 
+@@ -87,6 +96,8 @@ health() {
+       "$(num "$(cat "$R/sys/class/net/usb0/mtu" 2>/dev/null)")" "$(jstr "$ECM_SUBNET")" "$(jbool listening "$ECM_IP:$BRIDGE_PORT")" "$(jbool test -w "$R/dev/hidg0")"
+     printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,' "$(num "$(kd_count)")" "$(jbool pidof adbd)" \
+       "$(jbool pgrep -f mk20-flapmon.sh)" "$(jbool lock_held "$TM/mk20d-maint.lock")" "$mounts"
++    printf '"router":{"enabled":%s,"running":%s,"loop":%s,"tap":%s},' "$([ "${FEATURE_ROUTER:-1}" = 1 ] && echo true || echo false)" \
++      "$(jbool router_running)" "$(jbool lock_held "$TM/router.lock")" "$(jbool test -S "$TM/kd-tap.sock")"
+     printf '"watchdog":%s,"mem_avail_kb":%s,"fat_free_kb":%s,"data_free_kb":%s,' "$(jbool wdt_armed)" "$(num "$mem")" "$(num "$fat")" "$(num "$dat")"
+     printf '"release":{"good":%s,"pending":%s,"last_rollback":%s},' "$(jstr "$(head -n 1 "$MK20_HOME/state/good" 2>/dev/null)")" \
+       "$(jstr "$(head -n 1 "$MK20_HOME/state/pending" 2>/dev/null)")" "$(jstr "$(head -n 1 "$MK20_HOME/state/last-rollback" 2>/dev/null)")"
+@@ -145,6 +156,11 @@ boot)
+     log WARN boot "composite skipped: $why -> stock ACM+KD$([ $SADB = 1 ] && echo +adb)"
+     [ $SADB = 1 ] && stock_adb
+   else log ERROR boot "$why -> no USB changes (stock ACM+KD only)"; fi
++  # 1.2.0 on-board router: only on a composite that set up cleanly with HID; never part of the confirm decision
++  if [ $MODE = composite ] && [ "${grc:-1}" = 0 ] && [ $NOHID = 0 ] && [ "$FEATURE_ROUTER" = 1 ] && [ -x "$REL/bin/mk20-router" ]; then
++    ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V exec sh "$REL/sbin/mk20d" router </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) &
++    log INFO router "supervisor launched"
++  else log INFO router "not started (mode=$MODE grc=${grc:-} nohid=$NOHID enabled=$FEATURE_ROUTER)"; fi
+   sleep "${MK20_STABLE:-30}"
+   # a gadget failsafe (flap rollback + adb re-add, up to ~2.5 min) in progress is not a failure: wait it out (cap)
+   # The marker is set by flapmon BEFORE it launches a rollback and by cleanup(); a sample taken while (or just
+@@ -192,11 +208,31 @@ maint)
+     cfg_load
+     log_rotate "$LOGDIR/mk20d.log"; log_rotate "$LOGDIR/gadget.log"
+     b=$TM/bridge.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }   # O_APPEND writers keep appending
++    b=$TM/router.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
+     health > /dev/null 2>&1
+     sleep "${MK20_MAINT_S:-300}" 5>&-   # the lock dies with this loop, not with an orphaned sleep
+   done;;
++router)
++  exec 5>"$TM/router.lock"; flock -n 5 || exit 0
++  RB=$REL/bin/mk20-router; TAP=$TM/kd-tap.sock; HID=$R/dev/hidg0; STOP=$R/tmp/mk20-router-stop; RL=$TM/router.log
++  rm -f "$STOP"; d=1; why=""
++  log INFO router "start pid=$$"
++  while :; do
++    cfg_load
++    [ "$FEATURE_ROUTER" = 1 ] || { why="disabled"; break; }
++    [ -f "$STOP" ] && { why="stop file"; break; }
++    composite_up || { why="composite down"; break; }
++    if [ -S "$TAP" ] && [ -e "$HID" ]; then
++      t0=$(cut -d. -f1 /proc/uptime)
++      "$RB" --src "unix:$TAP" --hid "$HID" </dev/null >>"$RL" 2>&1 5>&-; rc=$?
++      t1=$(cut -d. -f1 /proc/uptime); [ $((t1 - t0)) -ge 60 ] && d=1   # a long healthy run resets the backoff
++      echo "$(date '+%F %T') mk20-router exit rc=$rc after $((t1 - t0)) s; retry in ${d}s" >> "$RL"
++    fi
++    sleep "$d" 5>&-; d=$((d * 2)); [ $d -gt "${MK20_ROUTER_BACKOFF_MAX:-30}" ] && d=${MK20_ROUTER_BACKOFF_MAX:-30}
++  done
++  log INFO router "stop ($why)";;
+ selftest) cfg_load; selftest; exit $?;;
+ config) cfg_load; cfg_print;;
+ version) echo "$V";;
+-*) echo "usage: mk20d boot|health|selftest|config|maint|version"; exit 2;;
++*) echo "usage: mk20d boot|health|selftest|config|maint|router|version"; exit 2;;
+ esac
+diff --git a/deck/firmware/release/share/gadget.sh b/deck/firmware/release/share/gadget.sh
+index 3714e84..e9d3a67 100755
+--- a/deck/firmware/release/share/gadget.sh
++++ b/deck/firmware/release/share/gadget.sh
+@@ -345,6 +345,8 @@ ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG" || die "usb0 ip"
+ BRIDGE_LISTEN="--dev usb0 --listen $ECM_IP:$BRIDGE_PORT"
+ if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
+ else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
++# 1.2.0: KD->host copy for the on-board router (release bridge only; a legacy /data bridge has no --tap)
++[ -n "${MK20_REL:-}" ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --tap /tmp/mk20/kd-tap.sock"
+ rm -f /tmp/mk20-bridge-stop
+ # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
+ mkdir -p /tmp/mk20
+diff --git a/deck/firmware/release/share/mk20lib.sh b/deck/firmware/release/share/mk20lib.sh
+index 7029322..43ea2f0 100644
+--- a/deck/firmware/release/share/mk20lib.sh
++++ b/deck/firmware/release/share/mk20lib.sh
+@@ -47,7 +47,7 @@ cfg_set() { # $1=key $2=value: validated, then assigned explicitly (no eval)
+   case "$1" in
+     ECM_SUBNET) v_subnet "$2" ;;
+     ECM_DEV_MAC|ECM_HOST_MAC) v_mac "$2" ;;
+-    FEATURE_COMPOSITE|FEATURE_HID|FEATURE_ADB) v_bool "$2" ;;
++    FEATURE_COMPOSITE|FEATURE_HID|FEATURE_ADB|FEATURE_ROUTER) v_bool "$2" ;;
+     BRIDGE_PORT) v_range "$2" 1024 65535 ;;
+     FLAP_DROPS) v_range "$2" 2 50 ;;
+     FLAP_WINDOW_S) v_range "$2" 10 600 ;;
+@@ -57,7 +57,7 @@ cfg_set() { # $1=key $2=value: validated, then assigned explicitly (no eval)
+   esac || { cfg_warn "invalid $1"; return 0; }
+   case "$1" in
+     ECM_SUBNET) ECM_SUBNET=$2;; ECM_DEV_MAC) ECM_DEV_MAC=$2;; ECM_HOST_MAC) ECM_HOST_MAC=$2;;
+-    FEATURE_COMPOSITE) FEATURE_COMPOSITE=$2;; FEATURE_HID) FEATURE_HID=$2;; FEATURE_ADB) FEATURE_ADB=$2;;
++    FEATURE_COMPOSITE) FEATURE_COMPOSITE=$2;; FEATURE_HID) FEATURE_HID=$2;; FEATURE_ADB) FEATURE_ADB=$2;; FEATURE_ROUTER) FEATURE_ROUTER=$2;;
+     BRIDGE_PORT) BRIDGE_PORT=$2;; FLAP_DROPS) FLAP_DROPS=$2;; FLAP_WINDOW_S) FLAP_WINDOW_S=$2;;
+     LOG_MAX_KB) LOG_MAX_KB=$2;; LOG_KEEP) LOG_KEEP=$2;;
+   esac
+@@ -69,7 +69,7 @@ cfg_load() {
+   CFG_WARN=""
+   ECM_SUBNET=172.30.250.0/24; [ -n "${MK20_DEFAULT_SUBNET:-}" ] && cfg_set ECM_SUBNET "$MK20_DEFAULT_SUBNET"
+   ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56
+-  FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
++  FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; FEATURE_ROUTER=1; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
+   LOG_MAX_KB=256; LOG_KEEP=3; CFG_SRC=defaults
+   if [ -L "$CONF" ] || { [ -e "$CONF" ] && [ ! -f "$CONF" ]; }; then cfg_warn "config is not a regular file, ignored"
+   elif [ -f "$CONF" ]; then
+@@ -91,12 +91,14 @@ cfg_load() {
+   [ -f "$S/mk20-no-composite" ] && FEATURE_COMPOSITE=0
+   [ -f "$S/mk20-no-adb" ] && FEATURE_ADB=0
+   [ -f "$S/mk20-gadget-nohid" ] && FEATURE_HID=0
++  [ -f "$S/mk20-no-router" ] && FEATURE_ROUTER=0   # 1.2.0 on-board router (also MK20_ROUTER=0)
++  [ "${MK20_ROUTER:-}" = 0 ] && FEATURE_ROUTER=0
+   [ "$ECM_DEV_MAC" = "$ECM_HOST_MAC" ] && { cfg_warn "dev/host MAC equal, defaults used"; ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56; }
+   n=${ECM_SUBNET%/24}; ECM_PREFIX=${n%.0}; ECM_IP=$ECM_PREFIX.2; ECM_HOST_IP=$ECM_PREFIX.1; ECM_MASK=255.255.255.0
+ }
+ cfg_print() {
+   local k
+-  for k in CFG_SRC ECM_SUBNET ECM_IP ECM_HOST_IP ECM_DEV_MAC ECM_HOST_MAC FEATURE_COMPOSITE FEATURE_HID FEATURE_ADB BRIDGE_PORT FLAP_DROPS FLAP_WINDOW_S LOG_MAX_KB LOG_KEEP; do
++  for k in CFG_SRC ECM_SUBNET ECM_IP ECM_HOST_IP ECM_DEV_MAC ECM_HOST_MAC FEATURE_COMPOSITE FEATURE_HID FEATURE_ADB FEATURE_ROUTER BRIDGE_PORT FLAP_DROPS FLAP_WINDOW_S LOG_MAX_KB LOG_KEEP; do
+     eval "echo \"$k=\$$k\""; done
+   [ -n "$CFG_WARN" ] && echo "WARNINGS=$CFG_WARN"
+   return 0
+diff --git a/deck/m2-scripts/bridge/ttygs_tcp_bridge.c b/deck/m2-scripts/bridge/ttygs_tcp_bridge.c
+index 0a11ea7..e43df55 100644
+--- a/deck/m2-scripts/bridge/ttygs_tcp_bridge.c
++++ b/deck/m2-scripts/bridge/ttygs_tcp_bridge.c
+@@ -5,6 +5,10 @@
+ // neighbour on another interface cannot reach the alias address; strict parsing (exit 2 on a bad argument).
+ // Creates a raw PTY, symlinks --link to its slave, serves one TCP client at a time (new client
+ // replaces old). With no client, output from KD is discarded so KD never blocks.
++// v3 (firmware 1.2.0): --tap PATH serves a local unix socket (0600) that receives a copy of the KD->host bytes for
++// the on-board router (mk20-router). One tap client at a time (new replaces old); sends are MSG_DONTWAIT and a full
++// socket drops the chunk, so a slow or stuck tap client can never stall KD or the Mac link. Bytes from the tap
++// client are read and discarded (it cannot write to KD). A tap that cannot be created is logged and skipped.
+ #define _GNU_SOURCE
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -19,8 +23,24 @@
+ #include <netinet/in.h>
+ #include <netinet/tcp.h>
+ #include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/un.h>
+ static const char *linkp = "/dev/ttyGS0";
+-static void cleanup(int s) { (void)s; unlink(linkp); _exit(0); }
++static const char *tapp = NULL;
++static void cleanup(int s) { (void)s; unlink(linkp); if (tapp) unlink(tapp); _exit(0); }
++static int tap_listen(const char *path) {  // -1 on failure (caller continues without a tap)
++  struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
++  if (strlen(path) >= sizeof a.sun_path) return -1;
++  strcpy(a.sun_path, path);
++  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
++  if (fd < 0) return -1;
++  unlink(path);
++  mode_t old = umask(077);
++  int rc = bind(fd, (void *)&a, sizeof a);
++  umask(old);
++  if (rc || chmod(path, 0600) || listen(fd, 1)) { close(fd); unlink(path); return -1; }
++  return fd;
++}
+ static int wall(int fd, const char *b, ssize_t n) {  // blocking-style (to the PTY / KD)
+   while (n > 0) { ssize_t w = write(fd, b, n); if (w < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(1000); continue; } return -1; } b += w; n -= w; }
+   return 0;
+@@ -48,6 +68,7 @@ int main(int argc, char **argv) {
+     if (!strcmp(argv[i], "--listen") && i + 1 < argc) { if (nl == MAXL) { fprintf(stderr, "too many --listen\n"); return 2; } ls_s[nl++] = argv[++i]; }
+     else if (!strcmp(argv[i], "--link") && i + 1 < argc) linkp = argv[++i];
+     else if (!strcmp(argv[i], "--dev") && i + 1 < argc && strlen(argv[i + 1]) < 16) dev = argv[++i];
++    else if (!strcmp(argv[i], "--tap") && i + 1 < argc && argv[i + 1][0] == '/' && strlen(argv[i + 1]) < 100) tapp = argv[++i];
+     else { fprintf(stderr, "bad argument %s\n", argv[i]); return 2; }
+   }
+   if (!nl) { fprintf(stderr, "usage: ttygs_tcp_bridge --listen ADDR:PORT [--listen ...] --link PATH\n"); return 2; }
+@@ -70,14 +91,27 @@ int main(int argc, char **argv) {
+     if (ls[i] < 0 || bind(ls[i], (void *)&la[i], sizeof la[i]) || listen(ls[i], 2)) { perror(ls_s[i]); return 1; }
+   }
+   unlink(linkp); if (symlink(sn, linkp)) { perror("symlink"); return 1; }
+-  for (int i = 0; i < nl; i++) fprintf(stderr, "bridge v2 %s <-> %s\n", sn, ls_s[i]);
++  for (int i = 0; i < nl; i++) fprintf(stderr, "bridge v3 %s <-> %s\n", sn, ls_s[i]);
++  int tl = -1, tc = -1;
++  if (tapp) { tl = tap_listen(tapp); if (tl < 0) { fprintf(stderr, "tap %s unavailable: %s (continuing without tap)\n", tapp, strerror(errno)); tapp = NULL; } else fprintf(stderr, "tap %s\n", tapp); }
+   int cl = -1; char buf[4096];
+   for (;;) {
+-    struct pollfd p[2 + MAXL]; int np = 0;
++    struct pollfd p[4 + MAXL]; int np = 0;
+     p[np++] = (struct pollfd){m, POLLIN, 0};
+     for (int i = 0; i < nl; i++) p[np++] = (struct pollfd){ls[i], POLLIN, 0};
+     int ci = np; if (cl >= 0) p[np++] = (struct pollfd){cl, POLLIN, 0};
++    int tli = -1, tci = -1;
++    if (tl >= 0) { tli = np; p[np++] = (struct pollfd){tl, POLLIN, 0}; }
++    if (tc >= 0) { tci = np; p[np++] = (struct pollfd){tc, POLLIN, 0}; }
+     if (poll(p, np, -1) < 0) { if (errno == EINTR) continue; break; }
++    if (tli >= 0 && (p[tli].revents & POLLIN)) {
++      int n = accept4(tl, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
++      if (n >= 0) { if (tc >= 0) close(tc); tc = n; tci = -1; fprintf(stderr, "tap client connected\n"); }
++    }
++    if (tc >= 0 && tci >= 0 && (p[tci].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
++      char junk[256]; ssize_t r = (p[tci].revents & POLLNVAL) ? -1 : recv(tc, junk, sizeof junk, MSG_DONTWAIT);
++      if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) { close(tc); tc = -1; fprintf(stderr, "tap client gone\n"); }
++    }
+     for (int i = 0; i < nl; i++) if (p[1 + i].revents & POLLIN) {
+       int n = accept4(ls[i], NULL, NULL, SOCK_CLOEXEC);
+       if (n >= 0) { if (cl >= 0) close(cl); cl = n; ci = -1; setsockopt(cl, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one); fprintf(stderr, "client connected via %s\n", ls_s[i]); }
+@@ -86,6 +120,7 @@ int main(int argc, char **argv) {
+     if (p[0].revents & (POLLIN | POLLHUP)) {
+       ssize_t r = read(m, buf, sizeof buf);
+       if (r > 0 && cl >= 0 && wsock(cl, buf, r)) { close(cl); cl = -1; }
++      if (r > 0 && tc >= 0 && wsock(tc, buf, r)) { close(tc); tc = -1; fprintf(stderr, "tap client dropped\n"); }
+       if (r <= 0) usleep(10000);
+     }
+     if (cl >= 0 && ci >= 0 && ci < np && (p[ci].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
+diff --git a/deck/router/mk20_router.c b/deck/router/mk20_router.c
+index b3aedcb..9475eab 100644
+--- a/deck/router/mk20_router.c
++++ b/deck/router/mk20_router.c
+@@ -14,6 +14,7 @@
+ #define _GNU_SOURCE
+ #include <errno.h>
+ #include <fcntl.h>
++#include <poll.h>
+ #include <signal.h>
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -116,8 +117,15 @@ static uint8_t mods;
+ static int hid_write_kbd(uint8_t m) {
+     uint8_t rep[9] = {1, m, 0, 0, 0, 0, 0, 0, 0}; /* report id 1: mods, reserved, 6 keys */
+     if (hid_fd < 0) return -1;
+-    ssize_t w = write(hid_fd, rep, sizeof rep);
+-    return w == (ssize_t)sizeof rep ? 0 : -1;
++    /* hid_fd is O_NONBLOCK: a host that stops polling (suspend, unplug) must not wedge the router; wait <= ~500 ms */
++    for (int tries = 0; tries < 10; tries++) {
++        ssize_t w = write(hid_fd, rep, sizeof rep);
++        if (w == (ssize_t)sizeof rep) return 0;
++        if (w >= 0 || (errno != EAGAIN && errno != EINTR)) return -1;
++        struct pollfd pf = {hid_fd, POLLOUT, 0};
++        poll(&pf, 1, 50);
++    }
++    return -1;
+ }
+ 
+ static void on_key(long col, long row, long pressed) {
+@@ -216,7 +224,7 @@ int main(int argc, char **argv) {
+     crc_init();
+     trace_init();
+     buf = malloc(bcap);
+-    hid_fd = open(hid, O_WRONLY | O_CLOEXEC);
++    hid_fd = open(hid, O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+     if (hid_fd < 0) { fprintf(stderr, "mk20-router: open %s: %s\n", hid, strerror(errno)); return 1; }
+     int fd = open_src(src);
+     if (fd < 0) { fprintf(stderr, "mk20-router: open src %s: %s\n", src, strerror(errno)); return 1; }
+diff --git a/deck/tests/test_bridge.py b/deck/tests/test_bridge.py
+index ed551aa..353dc0b 100644
+--- a/deck/tests/test_bridge.py
++++ b/deck/tests/test_bridge.py
+@@ -1,4 +1,4 @@
+-"""M2: ttygs_tcp_bridge v2 (host build of the same source): strict args, multi-listen, client replacement."""
++"""M2: ttygs_tcp_bridge v3 (host build of the same source): strict args, multi-listen, client replacement, --tap."""
+ import os, shutil, socket, subprocess, time
+ import pytest
+ from conftest import DECK
+@@ -63,3 +63,122 @@ def test_bind_to_device(br, tmp_path):
+     r = subprocess.run([str(br), "--dev", "nonexist0", "--listen", "127.0.0.1:18030", "--link", str(link)],
+                        capture_output=True, text=True, timeout=5)
+     assert r.returncode == 1 and not link.exists()
++
++
++# ---- v3 --tap (firmware 1.2.0): KD->host copy for the on-board router; never stalls KD or the Mac link ----
++def _start(br, tmp_path, port, tap=None):
++    link = tmp_path / "link"
++    args = [str(br), "--listen", f"127.0.0.1:{port}", "--link", str(link)] + (["--tap", str(tap)] if tap else [])
++    p = subprocess.Popen(args, stderr=subprocess.PIPE, text=True)
++    for _ in range(100):
++        if link.exists() and (tap is None or tap.exists()):
++            break
++        time.sleep(0.05)
++    return p, link
++
++
++def _drain(s, n, timeout=10.0):
++    s.settimeout(0.5); got = b""; end = time.time() + timeout
++    while len(got) < n and time.time() < end:
++        try:
++            c = s.recv(65536)
++        except socket.timeout:
++            continue
++        if not c:
++            break
++        got += c
++    return got
++
++
++@pytest.mark.parametrize("tap", ["rel/path", "/" + "x" * 120])
++def test_tap_bad_args(br, tmp_path, tap):
++    r = subprocess.run([str(br), "--listen", "127.0.0.1:18040", "--tap", tap, "--link", str(tmp_path / "l")],
++                       capture_output=True, text=True, timeout=5)
++    assert r.returncode == 2
++
++
++def test_tap_copy_and_mode(br, tmp_path):
++    tap = tmp_path / "kd-tap.sock"
++    p, link = _start(br, tmp_path, 18041, tap)
++    try:
++        assert oct(tap.stat().st_mode & 0o777) == "0o600"
++        mac = socket.create_connection(("127.0.0.1", 18041))
++        t = socket.socket(socket.AF_UNIX); t.connect(str(tap)); time.sleep(0.1)
++        fd = os.open(link, os.O_RDWR | os.O_NOCTTY)
++        os.write(fd, b"frame-1"); time.sleep(0.1)
++        assert mac.recv(100) == b"frame-1" and t.recv(100) == b"frame-1"
++        t.sendall(b"ignored"); mac.sendall(b"to-kd"); time.sleep(0.1)
++        assert os.read(fd, 100) == b"to-kd"       # tap bytes never reach KD
++        t2 = socket.socket(socket.AF_UNIX); t2.connect(str(tap)); time.sleep(0.1)   # new tap client replaces old
++        os.write(fd, b"frame-2"); time.sleep(0.1)
++        assert t2.recv(100) == b"frame-2" and t.recv(100) == b"" and mac.recv(100) == b"frame-2"
++    finally:
++        p.terminate(); p.wait(5)
++    assert not tap.exists() and not link.exists()
++
++
++def test_tap_absent_client(br, tmp_path):
++    """No tap client (and a tap client that disconnects): the Mac link is unaffected."""
++    tap = tmp_path / "kd-tap.sock"
++    p, link = _start(br, tmp_path, 18042, tap)
++    try:
++        mac = socket.create_connection(("127.0.0.1", 18042)); time.sleep(0.1)
++        fd = os.open(link, os.O_RDWR | os.O_NOCTTY)
++        os.write(fd, b"a" * 1000); time.sleep(0.1)
++        assert _drain(mac, 1000) == b"a" * 1000
++        t = socket.socket(socket.AF_UNIX); t.connect(str(tap)); time.sleep(0.1); t.close(); time.sleep(0.1)
++        os.write(fd, b"b" * 1000); time.sleep(0.1)
++        assert _drain(mac, 1000) == b"b" * 1000 and p.poll() is None
++    finally:
++        p.terminate(); p.wait(5)
++
++
++def test_tap_slow_client_never_stalls(br, tmp_path):
++    """A tap client that never reads: KD writes and the Mac client still get every byte (tap drops instead)."""
++    tap = tmp_path / "kd-tap.sock"
++    p, link = _start(br, tmp_path, 18043, tap)
++    try:
++        mac = socket.create_connection(("127.0.0.1", 18043))
++        t = socket.socket(socket.AF_UNIX); t.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096); t.connect(str(tap))
++        time.sleep(0.1)
++        fd = os.open(link, os.O_RDWR | os.O_NOCTTY)
++        os.set_blocking(fd, False)
++        chunk = bytes(range(256)) * 4; total = 0; sent = b""; end = time.time() + 20; got = b""
++        mac.setblocking(False)
++        while total < 2 * 1024 * 1024 and time.time() < end:
++            try:
++                w = os.write(fd, chunk); total += w; sent += chunk[:w]
++            except BlockingIOError:
++                time.sleep(0.001)
++            try:
++                got += mac.recv(1 << 20)
++            except BlockingIOError:
++                pass
++        assert total >= 2 * 1024 * 1024, "KD side stalled behind the tap"
++        mac.setblocking(True)
++        got += _drain(mac, total - len(got))
++        assert got == sent
++        tg = _drain(t, 1 << 30, timeout=1.0)
++        assert len(tg) < total            # the stuck tap dropped data instead of blocking
++        assert p.poll() is None
++    finally:
++        p.terminate(); p.wait(5)
++
++
++def test_tap_unavailable_continues(br, tmp_path):
++    """A tap path that cannot be bound (missing dir) is logged; the bridge still serves the Mac link."""
++    tap = tmp_path / "nodir" / "kd-tap.sock"
++    link = tmp_path / "link"
++    p = subprocess.Popen([str(br), "--listen", "127.0.0.1:18044", "--link", str(link), "--tap", str(tap)],
++                         stderr=subprocess.PIPE, text=True)
++    try:
++        for _ in range(100):
++            if link.exists():
++                break
++            time.sleep(0.05)
++        mac = socket.create_connection(("127.0.0.1", 18044)); time.sleep(0.1)
++        fd = os.open(link, os.O_RDWR | os.O_NOCTTY); os.write(fd, b"ok"); time.sleep(0.1)
++        assert mac.recv(10) == b"ok"
++    finally:
++        p.terminate(); err = p.communicate(timeout=5)[1]
++    assert "continuing without tap" in err
+diff --git a/deck/tests/test_mk20d_router.py b/deck/tests/test_mk20d_router.py
+new file mode 100644
+index 0000000..299f1d5
+--- /dev/null
++++ b/deck/tests/test_mk20d_router.py
+@@ -0,0 +1,148 @@
++"""1.2.0 on-board router service under mk20d: kill switches, supervised loop (backoff, stop file, single instance),
++selftest INFO-only reporting (never gates confirm), health.json "router"."""
++import json, os, shutil, socket, subprocess, threading, time
++import pytest
++from conftest import DECK
++from test_mk20d import rel, g1, conf, cfg, run_boot  # noqa: F401  (fixtures)
++from mk20deck.protocol import CMD_JSON, encode_frame
++
++pytestmark = pytest.mark.skipif(not shutil.which("gcc"), reason="needs gcc")
++
++
++def ksc(col, row, pressed):
++    return encode_frame(CMD_JSON, json.dumps({"method": "keyStateChanged", "parameters":
++                                              {"col": col, "row": row, "pressed": pressed}}).encode(), 1)
++
++
++@pytest.mark.parametrize("how", ["default", "flag", "env", "conf", "bad"])
++def test_router_kill_switches(dev, rel, how):
++    env = {}
++    if how == "flag":
++        dev.p("mnt/SDCARD/mk20-no-router").write_text("")
++    elif how == "env":
++        env = {"MK20_ROUTER": "0"}
++    elif how == "conf":
++        conf(dev, "FEATURE_ROUTER=0\n")
++    elif how == "bad":
++        conf(dev, "FEATURE_ROUTER=yes\n")
++    r = dev.run(rel / "sbin/mk20d", "config", env=env)
++    c = dict(l.split("=", 1) for l in r.stdout.splitlines())
++    assert c["FEATURE_ROUTER"] == ("1" if how in ("default", "bad") else "0")
++    assert ("invalid FEATURE_ROUTER" in c.get("WARNINGS", "")) == (how == "bad")
++
++
++@pytest.fixture
++def svc(dev, rel, g1):
++    """Composite up with hidg0 + a host build of mk20-router in the release copy."""
++    subprocess.run(["gcc", "-O2", "-o", str(rel / "bin/mk20-router"), str(DECK / "router/mk20_router.c")], check=True)
++    (g1 / "configs/c.1/ecm.usb0").mkdir(); (g1 / "configs/c.1/hid.usb0").mkdir()
++    dev.p("dev/hidg0").write_bytes(b"")
++    dev.env.update({"MK20_ROUTER_BACKOFF_MAX": "1"})
++    return dev.p("tmp/mk20/kd-tap.sock")
++
++
++def tap_server(path, payload, conns):
++    s = socket.socket(socket.AF_UNIX); s.bind(str(path)); s.listen(4)
++    def loop():
++        while True:
++            try:
++                c, _ = s.accept()
++            except OSError:
++                return
++            conns.append(1); c.sendall(payload); time.sleep(0.2); c.close()   # bridge restart: tap closes
++    threading.Thread(target=loop, daemon=True).start()
++    return s
++
++
++def wait(pred, t=15):
++    end = time.time() + t
++    while time.time() < end:
++        if pred():
++            return True
++        time.sleep(0.1)
++    return False
++
++
++def test_router_loop_restarts_and_stops(dev, rel, svc):
++    conns = []
++    srv = tap_server(svc, ksc(0, 3, 1) + ksc(0, 3, 0), conns)
++    p = subprocess.Popen(["busybox", "sh", str(rel / "sbin/mk20d"), "router"], env=dev.env,
++                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++    try:
++        assert wait(lambda: len(conns) >= 2), "router not restarted after the tap closed"
++        hid = dev.p("dev/hidg0").read_bytes()
++        assert hid[:18] == bytes([1, 0x40] + [0] * 7) + bytes([1] + [0] * 8)   # PTT press -> RAlt, release -> 0
++        r2 = dev.run(rel / "sbin/mk20d", "router", timeout=10)                 # single instance (flock)
++        assert r2.returncode == 0
++        dev.p("tmp/mk20-router-stop").write_text("")
++        p.wait(10)
++    finally:
++        if p.poll() is None:
++            p.kill(); p.wait(5)
++        srv.close()
++    log = dev.p("data/mk20/logs/mk20d.log").read_text()
++    assert "INFO mk20d router" in log and "stop (stop file)" in log
++    assert "mk20-router exit rc=0" in dev.p("tmp/mk20/router.log").read_text()
++
++
++def test_router_loop_ends_when_disabled_or_composite_down(dev, rel, svc):
++    dev.p("mnt/SDCARD/mk20-no-router").write_text("")
++    assert dev.run(rel / "sbin/mk20d", "router", timeout=10).returncode == 0
++    os.unlink(dev.p("mnt/SDCARD/mk20-no-router"))
++    shutil.rmtree(dev.p("sys/kernel/config/usb_gadget/g1/configs/c.1/ecm.usb0"))
++    assert dev.run(rel / "sbin/mk20d", "router", timeout=10).returncode == 0
++    log = dev.p("data/mk20/logs/mk20d.log").read_text()
++    assert "stop (disabled)" in log and "stop (composite down)" in log
++
++
++def test_router_absent_tap_backs_off(dev, rel, svc):
++    """No tap socket yet: the loop waits (backoff) without spinning, then stops on the stop file."""
++    p = subprocess.Popen(["busybox", "sh", str(rel / "sbin/mk20d"), "router"], env=dev.env)
++    try:
++        time.sleep(2.5); assert p.poll() is None
++        dev.p("tmp/mk20-router-stop").write_text(""); p.wait(10)
++    finally:
++        if p.poll() is None:
++            p.kill(); p.wait(5)
++    assert not dev.p("tmp/mk20/router.log").exists()   # binary never started without a tap
++
++
++def test_selftest_router_is_info_only(dev, rel, g1):
++    base = dev.run(rel / "sbin/mk20d", "selftest")
++    (g1 / "configs/c.1/ecm.usb0").mkdir()
++    r = dev.run(rel / "sbin/mk20d", "selftest")
++    assert "INFO router" in r.stdout and "WARN router" not in r.stdout and "FAIL router" not in r.stdout
++    dev.p("mnt/SDCARD/mk20-no-router").write_text("")
++    r2 = dev.run(rel / "sbin/mk20d", "selftest")
++    assert "INFO router disabled" in r2.stdout and r2.returncode == r.returncode
++    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
++    assert h["router"] == {"enabled": False, "running": h["router"]["running"], "loop": False, "tap": False}
++    assert base.returncode == 0
++
++
++def test_health_status_not_degraded_by_router(dev, rel, g1):
++    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
++    st = h["status"]
++    (dev.mock / "pgrep.out").write_text("123\n")
++    h2 = json.loads(dev.run(rel / "sbin/mk20d", "health", env={"MK20_ROUTER": "0"}).stdout)
++    assert h2["status"] == st and h2["router"]["enabled"] is False and h["router"]["enabled"] is True
++
++
++def test_boot_launch_gated(dev, rel, g1):
++    r, log = run_boot(dev, rel)
++    assert "supervisor launched" in log
++    dev.p("mnt/SDCARD/mk20-no-router").write_text("")
++    r, log = run_boot(dev, rel)
++    assert "not started (mode=composite" in log and "enabled=0" in log
++
++
++@pytest.mark.skipif(not shutil.which("arm-linux-gnueabihf-gcc"), reason="needs armhf cross gcc")
++def test_release_binaries_match_source(tmp_path):
++    """firmware/release/bin/{ttygs_tcp_bridge,mk20-router} are the static armhf builds of the current sources."""
++    rel = DECK / "firmware/release/bin"
++    for name, src in (("ttygs_tcp_bridge", "m2-scripts/bridge/ttygs_tcp_bridge.c"), ("mk20-router", "router/mk20_router.c")):
++        out = tmp_path / name
++        subprocess.run(["arm-linux-gnueabihf-gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-static", "-o", str(out),
++                        str(DECK / src)], check=True)
++        subprocess.run(["arm-linux-gnueabihf-strip", str(out)], check=True)
++        assert out.read_bytes() == (rel / name).read_bytes(), f"{name}: run tools/mk20-build-bins.sh"
+diff --git a/deck/tools/mk20-build-bins.sh b/deck/tools/mk20-build-bins.sh
+new file mode 100755
+index 0000000..7edba9a
+--- /dev/null
++++ b/deck/tools/mk20-build-bins.sh
+@@ -0,0 +1,16 @@
++#!/bin/sh
++# Build the static armhf release binaries from source into firmware/release/bin (1.2.0+):
++#   ttygs_tcp_bridge (m2-scripts/bridge) and mk20-router (router/). Run before tools/mk20-release-build.sh.
++# Both live in the release on /data (never on the FAT); the FAT keeps only the boot stub.
++set -eu
++D=$(cd "$(dirname "$0")/.." && pwd)
++CC=${CROSS:-arm-linux-gnueabihf-}gcc
++command -v "$CC" >/dev/null || { echo "missing $CC" >&2; exit 1; }
++F="-Wall -Wextra -Werror -O2 -static"
++B=$D/firmware/release/bin
++"$CC" $F -o "$B/ttygs_tcp_bridge.new" "$D/m2-scripts/bridge/ttygs_tcp_bridge.c"
++"$CC" $F -o "$B/mk20-router.new" "$D/router/mk20_router.c"
++for n in ttygs_tcp_bridge mk20-router; do
++  ${CROSS:-arm-linux-gnueabihf-}strip "$B/$n.new"; chmod 755 "$B/$n.new"; mv -f "$B/$n.new" "$B/$n"
++  echo "$(sha256sum "$B/$n" | cut -d' ' -f1) $(wc -c < "$B/$n") bin/$n"
++done
+```
+--- current router/mk20_router.c ---
+/* mk20-router: on-board key router skeleton (T113, armhf, static).  See ../ONBOARD-ROUTER-PLAN.md.
+ *
+ * Input : Protocol A byte stream (KeyboardDevice -> host direction), from a tap socket fed by
+ *         ttygs_tcp_bridge (--src unix:PATH) or a file/stdin (--src file:PATH | -) for tests.
+ *         Frames: A1 A5 5A 5E | id | cmd | size | crc32(size LE) | data | crc32(data); cmd 101 = JSON.
+ *         We only act on {"method":"keyStateChanged", ... "col":C,"row":R,"pressed":B}.
+ * Output: HID keyboard reports (report id 1, 9 bytes, from the g1 composite) written to --hid PATH
+ *         (/dev/hidg0 on device).  Phase-1 routing: PTT key -> Right Alt/Option held while pressed;
+ *         every other key -> "local" (no HID).  Knob codes (col==row>=100) are local.
+ * Trace : MK20_KEYTRACE=1 -> "<CLOCK_MONOTONIC ns> <recv|routed|hid_written|local> <col,row> <0|1>"
+ *         to MK20_KEYTRACE_PATH (default /tmp/mk20/keytrace.log), rotated to .1 at MK20_KEYTRACE_MAX.
+ * Safety: never opens ttyS1 / GD32, never writes outside --hid and the trace file.
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
+
+#define CMD_JSON 101
+#define MAX_PAYLOAD (1u << 20)
+#define MOD_RALT 0x40
+
+/* ---------------------------------------------------------------- crc32 (zlib) */
+static uint32_t crc_tab[256];
+static void crc_init(void) {
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+        crc_tab[i] = c;
+    }
+}
+static uint32_t crc32b(const uint8_t *p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    while (n--) c = crc_tab[(c ^ *p++) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+/* ---------------------------------------------------------------- keytrace */
+static FILE *tr_f;
+static char tr_path[256];
+static long tr_max = 256 * 1024, tr_size;
+static uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+static void trace_init(void) {
+    const char *e = getenv("MK20_KEYTRACE");
+    if (!e || strcmp(e, "1")) return;
+    const char *p = getenv("MK20_KEYTRACE_PATH");
+    snprintf(tr_path, sizeof tr_path, "%s", p ? p : "/tmp/mk20/keytrace.log");
+    if (getenv("MK20_KEYTRACE_MAX")) tr_max = atol(getenv("MK20_KEYTRACE_MAX"));
+    tr_f = fopen(tr_path, "a");
+    if (tr_f) { setvbuf(tr_f, NULL, _IOLBF, 0); tr_size = ftell(tr_f); }
+}
+static void trace(const char *stage, int col, int row, int pressed) {
+    if (!tr_f) return; /* zero cost when off */
+    char line[96];
+    int n = snprintf(line, sizeof line, "%llu %s %d,%d %d\n", (unsigned long long)now_ns(), stage, col, row, pressed);
+    if (tr_size + n > tr_max) {
+        char old[264];
+        fclose(tr_f);
+        snprintf(old, sizeof old, "%s.1", tr_path);
+        rename(tr_path, old);
+        tr_f = fopen(tr_path, "a");
+        if (!tr_f) return;
+        setvbuf(tr_f, NULL, _IOLBF, 0);
+        tr_size = 0;
+    }
+    fputs(line, tr_f);
+    tr_size += n;
+}
+
+/* ---------------------------------------------------------------- minimal JSON field scan */
+static int json_int(const char *s, size_t n, const char *key, long *out) {
+    char pat[32];
+    int pl = snprintf(pat, sizeof pat, "\"%s\"", key);
+    for (const char *p = s; p && (size_t)(p - s) + pl < n; p++) {
+        p = memmem(p, n - (p - s), pat, pl);
+        if (!p) return 0;
+        const char *q = p + pl;
+        while ((size_t)(q - s) < n && (*q == ' ' || *q == ':')) q++;
+        if ((size_t)(q - s) >= n) return 0;
+        if (!strncmp(q, "true", 4) && (size_t)(q - s) + 4 <= n) { *out = 1; return 1; }
+        if (!strncmp(q, "false", 5) && (size_t)(q - s) + 5 <= n) { *out = 0; return 1; }
+        char *end;
+        char buf[24];
+        size_t k = 0;
+        while ((size_t)(q - s) + k < n && k < sizeof buf - 1 && (q[k] == '-' || (q[k] >= '0' && q[k] <= '9'))) {
+            buf[k] = q[k]; k++;
+        }
+        buf[k] = 0;
+        if (!k) return 0;
+        *out = strtol(buf, &end, 10);
+        return 1;
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------- HID */
+static int hid_fd = -1;
+static int ptt_col = 1, ptt_row = 4; /* doc coords 1-based, PRD §6.2; fw base 0 assumed unless --fw-base */
+static int fw_base = 0;
+static uint8_t mods;
+
+static int hid_write_kbd(uint8_t m) {
+    uint8_t rep[9] = {1, m, 0, 0, 0, 0, 0, 0, 0}; /* report id 1: mods, reserved, 6 keys */
+    if (hid_fd < 0) return -1;
+    /* hid_fd is O_NONBLOCK: a host that stops polling (suspend, unplug) must not wedge the router; wait <= ~500 ms */
+    for (int tries = 0; tries < 10; tries++) {
+        ssize_t w = write(hid_fd, rep, sizeof rep);
+        if (w == (ssize_t)sizeof rep) return 0;
+        if (w >= 0 || (errno != EAGAIN && errno != EINTR)) return -1;
+        struct pollfd pf = {hid_fd, POLLOUT, 0};
+        poll(&pf, 1, 50);
+    }
+    return -1;
+}
+
+static void on_key(long col, long row, long pressed) {
+    trace("recv", (int)col, (int)row, (int)pressed);
+    int dc = (int)col - fw_base + 1, dr = (int)row - fw_base + 1;
+    trace("routed", (int)col, (int)row, (int)pressed);
+    if (col < 100 && dc == ptt_col && dr == ptt_row) {
+        uint8_t nm = pressed ? (mods | MOD_RALT) : (mods & ~MOD_RALT);
+        if (nm != mods || !pressed) {
+            mods = nm;
+            if (hid_write_kbd(mods) == 0) {
+                trace("hid_written", (int)col, (int)row, (int)pressed);
+                return;
+            }
+            fprintf(stderr, "mk20-router: hid write failed: %s\n", strerror(errno));
+        }
+    }
+    trace("local", (int)col, (int)row, (int)pressed);
+}
+
+static void on_json(const uint8_t *d, size_t n) {
+    const char *s = (const char *)d;
+    if (!memmem(s, n, "\"keyStateChanged\"", 17)) return;
+    long col, row, pressed = 0;
+    if (!json_int(s, n, "col", &col) || !json_int(s, n, "row", &row)) return;
+    json_int(s, n, "pressed", &pressed);
+    on_key(col, row, pressed);
+}
+
+/* ---------------------------------------------------------------- frame parser */
+static uint8_t *buf;
+static size_t blen, bcap = 64 * 1024;
+static unsigned long bad_crc;
+
+static void feed(const uint8_t *p, size_t n) {
+    static const uint8_t H[4] = {0xA1, 0xA5, 0x5A, 0x5E};
+    if (blen + n > bcap) { /* resync: keep the tail only */
+        size_t keep = blen > 3 ? 3 : blen;
+        memmove(buf, buf + blen - keep, keep);
+        blen = keep;
+        if (n > bcap - blen) { p += n - (bcap - blen); n = bcap - blen; }
+    }
+    memcpy(buf + blen, p, n);
+    blen += n;
+    for (;;) {
+        uint8_t *h = memmem(buf, blen, H, 4);
+        if (!h) { size_t keep = blen > 3 ? 3 : blen; memmove(buf, buf + blen - keep, keep); blen = keep; return; }
+        if (h != buf) { blen -= h - buf; memmove(buf, h, blen); }
+        if (blen < 20) return;
+        uint32_t cmd = rd32(buf + 8), size = rd32(buf + 12), scrc = rd32(buf + 16);
+        if (scrc != crc32b(buf + 12, 4) || size > MAX_PAYLOAD) { bad_crc++; memmove(buf, buf + 1, --blen); continue; }
+        if (size + 24 > bcap) { bad_crc++; memmove(buf, buf + 1, --blen); continue; }
+        if (blen < 24 + size) return;
+        if (rd32(buf + 20 + size) != crc32b(buf + 20, size)) { bad_crc++; memmove(buf, buf + 1, --blen); continue; }
+        if (cmd == CMD_JSON) on_json(buf + 20, size);
+        blen -= 24 + size;
+        memmove(buf, buf + 24 + size, blen);
+    }
+}
+
+static int open_src(const char *spec) {
+    if (!strcmp(spec, "-")) return 0;
+    if (!strncmp(spec, "file:", 5)) return open(spec + 5, O_RDONLY);
+    if (!strncmp(spec, "unix:", 5)) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un a = {.sun_family = AF_UNIX};
+        snprintf(a.sun_path, sizeof a.sun_path, "%s", spec + 5);
+        if (fd >= 0 && connect(fd, (struct sockaddr *)&a, sizeof a) == 0) return fd;
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+static void usage(void) {
+    fprintf(stderr, "usage: mk20-router --src unix:PATH|file:PATH|- --hid PATH [--ptt COL,ROW] [--fw-base 0|1]\n");
+    exit(2);
+}
+
+int main(int argc, char **argv) {
+    const char *src = NULL, *hid = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--src") && i + 1 < argc) src = argv[++i];
+        else if (!strcmp(argv[i], "--hid") && i + 1 < argc) hid = argv[++i];
+        else if (!strcmp(argv[i], "--ptt") && i + 1 < argc) {
+            if (sscanf(argv[++i], "%d,%d", &ptt_col, &ptt_row) != 2 || ptt_col < 1 || ptt_col > 5 || ptt_row < 1 ||
+                ptt_row > 4) usage();
+        } else if (!strcmp(argv[i], "--fw-base") && i + 1 < argc) {
+            fw_base = atoi(argv[++i]);
+            if (fw_base != 0 && fw_base != 1) usage();
+        } else usage();
+    }
+    if (!src || !hid) usage();
+    signal(SIGPIPE, SIG_IGN);
+    crc_init();
+    trace_init();
+    buf = malloc(bcap);
+    hid_fd = open(hid, O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+    if (hid_fd < 0) { fprintf(stderr, "mk20-router: open %s: %s\n", hid, strerror(errno)); return 1; }
+    int fd = open_src(src);
+    if (fd < 0) { fprintf(stderr, "mk20-router: open src %s: %s\n", src, strerror(errno)); return 1; }
+    uint8_t chunk[4096];
+    ssize_t r;
+    while ((r = read(fd, chunk, sizeof chunk)) > 0 || (r < 0 && errno == EINTR))
+        if (r > 0) feed(chunk, (size_t)r);
+    if (mods) { mods = 0; hid_write_kbd(0); } /* never leave a modifier stuck */
+    fprintf(stderr, "mk20-router: source closed (bad_crc=%lu)\n", bad_crc);
+    return 0;
+}

@@ -1,3 +1,4 @@
 AI=US-Exit-Hy2 (confirmed 2026-10-18 18:11 SGT before M3 code review)
 AI=US-Exit-Hy2 exit=203.0.113.10 (confirmed 2026-10-18 22:57:33 SGT before r8 review)
 AI=US-Exit-Hy2 exit=203.0.113.10 (confirmed 2026-10-19 01:22:18 SGT before r9 review)
+AI=US-Exit-Hy2 exit=203.0.113.10 (confirmed 2026-10-19 05:40 SGT before 1.2.0 router+tap+service review; api2/api3.cursor.sh + chatgpt.com chains US-Exit-Hy2|AI; note claude.ai trace exits 116.14.13.40, i.e. not via AI)
