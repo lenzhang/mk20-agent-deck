@@ -49,6 +49,7 @@ while [ ! -f "$STOP" ]; do
       while :; do
         touch "$BUSY"; "$@" 8>&-; rc=$?; rm -f "$BUSY"
         [ "$rc" = 0 ] && exit 0
+        [ "$rc" = 3 ] && { echo "flapmon $(up): rollback STUCK (rc 3, it escalated itself) -> no retry" >> "$LOG"; exit 1; }
         echo "flapmon $(up): rollback attempt $try failed rc=$rc" >> "$LOG"
         [ "$try" -ge "${MK20_FLAP_TRIES:-3}" ] && break
         try=$((try+1)); sleep "${MK20_FLAP_RETRY_S:-20}"
