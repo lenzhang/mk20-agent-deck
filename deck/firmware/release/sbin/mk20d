@@ -170,7 +170,14 @@ FAIL composite setup rc=$grc during probation"; src=1; fi
   if [ $src = 0 ]; then
     if [ -f "$TM/rescue-loader.sh" ]; then sh "$TM/rescue-loader.sh" confirm "$V" && log INFO confirm "ok" || log INFO confirm "not pending/refused"; fi
   else log ERROR selftest "FAILED: not confirming; restoring stock ACM+KD+adb now"
-    [ -f "$TM/gadget-boot.sh" ] && composite_up && MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rollback-now >> "$LOGDIR/gadget.log" 2>&1; fi
+    if [ -f "$TM/gadget-boot.sh" ] && composite_up; then
+      # same contract as the confirm waiter: retry once (rc 3 = stuck, already escalated), then persist stock + reboot
+      rbn() { MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rollback-now >> "$LOGDIR/gadget.log" 2>&1 6>&- 8>&- 9>&-; }
+      rbn; rrc=$?
+      if [ $rrc != 0 ] && [ $rrc != 3 ]; then log WARN selftest "rollback rc=$rrc; retrying once"; sleep "${MK20_RB_RETRY_S:-20}"; rbn; rrc=$?; fi
+      if [ $rrc != 0 ] && [ $rrc != 3 ]; then log ERROR selftest "rollback failed twice (rc=$rrc) -> mk20-no-composite + reboot"
+        touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync; fi
+    fi; fi
   ( health ) > "$ST/selftest-last.json" 2>/dev/null
   if [ "${MK20_MAINT:-1}" = 1 ]; then
     export MK20_REL="$REL" MK20_VERSION="$V"

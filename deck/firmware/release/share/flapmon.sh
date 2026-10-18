@@ -47,8 +47,13 @@ while [ ! -f "$STOP" ]; do
       echo "flapmon $now: FLAPPING -> rollback" >> "$LOG"
       try=1
       while :; do
-        touch "$BUSY"; "$@" 8>&-; rc=$?; rm -f "$BUSY"
+        # r5 #6: only clear a marker we created, and never after a refusal (rc 4: another owner holds the mutex and
+        # owns gadget.busy; it clears it itself under the mutex). rc 5 = stale generation: our composite is gone.
+        mine=0; [ -e "$BUSY" ] || { touch "$BUSY"; mine=1; }
+        "$@" 8>&-; rc=$?
+        [ "$rc" = 4 ] || [ "$mine" = 0 ] || rm -f "$BUSY"
         [ "$rc" = 0 ] && exit 0
+        [ "$rc" = 5 ] && { echo "flapmon $(up): rollback stale (rc 5, newer composite) -> exit" >> "$LOG"; exit 0; }
         [ "$rc" = 3 ] && { echo "flapmon $(up): rollback STUCK (rc 3, it escalated itself) -> no retry" >> "$LOG"; exit 1; }
         echo "flapmon $(up): rollback attempt $try failed rc=$rc" >> "$LOG"
         [ "$try" -ge "${MK20_FLAP_TRIES:-3}" ] && break

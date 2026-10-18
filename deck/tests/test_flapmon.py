@@ -109,3 +109,27 @@ def test_bad_args_exit_2(dev, tmp_path):
     for args in (["s", "x", "5", "l", "st", "--", "true"], ["s", "60", "5", "l", "st", "true", "x"], ["s"]):
         r = subprocess.run(["sh", str(FM), *args], env=dev.env, capture_output=True, timeout=5)
         assert r.returncode == 2
+
+
+# ---- r5 #6 ----
+def test_refused_rollback_keeps_other_owners_busy_marker(dev, tmp_path, monkeypatch):
+    monkeypatch.setattr(dev, "env", dict(dev.env, MK20_FLAP_TRIES="1", MK20_FLAP_RETRY_S="0",
+                                         MK20_FLAP_FLAG=str(tmp_path / "nocomp"), MK20_FLAP_REBOOT=str(tmp_path / "reboot")))
+    n, log, busy = run_fm(dev, tmp_path, [("default", 101), ("configured", 101), ("default", 102)],
+                          drops=2, cmd=["sh", "-c", f"touch {tmp_path}/busy; exit 4"])   # owner set it; we were refused
+    assert "failed rc=4" in log and busy
+
+
+def test_preexisting_busy_marker_not_removed(dev, tmp_path):
+    (tmp_path / "busy").write_text("")
+    n, log, busy = run_fm(dev, tmp_path, [("default", 101), ("configured", 101), ("default", 102)], drops=2)
+    assert n == 1 and busy   # not ours: the owner (gadget.sh, under the mutex) clears it
+
+
+def test_stale_rollback_rc5_exits_without_retry_or_escalation(dev, tmp_path, monkeypatch):
+    monkeypatch.setattr(dev, "env", dict(dev.env, MK20_FLAP_TRIES="3", MK20_FLAP_RETRY_S="0",
+                                         MK20_FLAP_FLAG=str(tmp_path / "nocomp"), MK20_FLAP_REBOOT=str(tmp_path / "reboot")))
+    n, log, busy = run_fm(dev, tmp_path, [("default", 101), ("configured", 101), ("default", 102)],
+                          drops=2, cmd=["sh", "-c", f"echo x >> {tmp_path}/tries; exit 5"])
+    assert "stale (rc 5" in log and not busy and len((tmp_path / "tries").read_text().split()) == 1
+    assert not (tmp_path / "nocomp").exists() and not (tmp_path / "reboot").exists()

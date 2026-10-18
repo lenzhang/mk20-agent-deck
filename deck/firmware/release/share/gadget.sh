@@ -75,7 +75,7 @@ udc_now() { cat $G/UDC 2>/dev/null; }
 # KD stop: procd may respawn appLunch.sh right after `stop`; killing that sh later orphaned its fresh KD
 # (PPid 1) -> TWO KD after rollback (16:17 and 16:20). Kill appLunch.sh first, then KD, until both stay gone.
 kd_stop() {
-  [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1
+  [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1 7>&-
   i=0; while [ $i -lt 15 ]; do
     for p in $(pgrep -f /data/appLunch.sh); do kill $p 2>/dev/null; done
     killall KeyboardDevice 2>/dev/null; sleep 1
@@ -94,7 +94,7 @@ kd_start() {
     while ! pgrep -f /data/KeyboardDevice >/dev/null && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
     pgrep -f /data/KeyboardDevice >/dev/null || log "WARN KD not up 20 s after procd start"
   else
-    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 7>&- ) & }
+    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 7>&- ) & ); }   # detached (r5 #4): reparented to init
   fi
   sleep 3; n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" -le 1 ] || { log "WARN $n KeyboardDevice processes"; kd_reap_orphans; }
 }
@@ -166,10 +166,12 @@ uint_cap() {
   [ ${#v} -gt 6 ] && { echo "$4"; return; }
   [ "$v" -lt "$3" ] && v=$3; [ "$v" -gt "$4" ] && v=$4; echo "$v"
 }
-RBT=$(uint_cap "${MK20_RB_TIMEOUT:-}" 240 1 900)          # rollback / post-timeout cleanup bound (s)
-RBTRIES=$(uint_cap "${MK20_RB_LOCK_TRIES:-}" 1200 1 4800)  # rollback mutex wait (x0.25 s)
+# r5 #5: cleanup worst case on a HEALTHY board = kd_stop<=32 + umount<=10 + kd_start<=23 + readd_adb (g1 wait<=60,
+# 5, add-adb ~4 x7, 6x15 re-add window) ~= 260 s -> 330 s so a healthy rollback incl. add-adb is never cut off.
+RBT=$(uint_cap "${MK20_RB_TIMEOUT:-}" 330 1 900)          # rollback / post-timeout cleanup bound (s)
+RBTRIES=$(uint_cap "${MK20_RB_LOCK_TRIES:-}" 3600 1 4800)  # rollback mutex wait (x0.25 s) >= SUT+RBT+30 s owner hold
 SUTRIES=$(uint_cap "${MK20_SETUP_LOCK_TRIES:-}" 40 1 4800) # setup mutex wait (x0.25 s)
-SUT=$(uint_cap "${MK20_SETUP_TIMEOUT:-}" 300 1 1800)       # whole setup incl. its own failsafe (s)
+SUT=$(uint_cap "${MK20_SETUP_TIMEOUT:-}" 450 1 1800)       # whole setup incl. its own failsafe (~60 s + cleanup <=330 s)
 # bounded_wait <pid> <s>: 0 = the child exited in time (rc in BW_RC); 1 = timed out: its whole tree was stopped,
 # SIGKILLed and the child reaped; 2 = timed out AND still alive 10 s after SIGKILL (D state, e.g. a stuck UDC write):
 # not waited for (an unbounded wait would wedge us). Only ever used on OUR OWN children.
@@ -190,8 +192,14 @@ escalate() {
   log "ESCALATE: $1 -> ${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite} + reboot"; rb_status "$2"
   touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync
 }
+# Exit codes of --rollback-now: 0 stock verified | 1 not verified | 3 stuck+escalated | 4 refused (mutex busy: another
+# owner is mid-transition and owns gadget.busy) | 5 stale (r5 #7: MK20_GEN names an older composite than the current
+# generation in $GENF -> a queued rollback from a dead composite must not tear down a newer one; nothing touched).
+GENF=/tmp/mk20/composite.gen
 if [ "${1:-}" = --rollback-now ]; then
-  tl_lock "$RBTRIES" || { log "rollback: transition mutex not acquired (busy or lock error) -> refused"; exit 1; }
+  tl_lock "$RBTRIES" || { log "rollback: transition mutex not acquired (busy or lock error) -> refused"; exit 4; }
+  if [ -n "${MK20_GEN:-}" ] && [ "$(cat "$GENF" 2>/dev/null)" != "$MK20_GEN" ]; then
+    log "rollback: stale request for generation $MK20_GEN (current $(cat "$GENF" 2>/dev/null || echo none)) -> ignored"; exit 5; fi
   if stock_ok; then log "rollback already done (stock verified)"; exit 0; fi
   log "rollback requested"
   ( trap - EXIT INT TERM; cleanup ) </dev/null &
@@ -248,6 +256,7 @@ exit 1
 }
 setup_main() {
 touch /tmp/mk20-flapmon-stop   # a re-run: any old flap monitor / confirm waiter exits (new ones start below)
+GEN="$(cut -d' ' -f1 /proc/uptime)-$$"; mkdir -p /tmp/mk20; echo "$GEN" > "$GENF.t" && mv -f "$GENF.t" "$GENF"   # under the mutex (r5 #7)
 log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
 
 trap cleanup EXIT
@@ -334,7 +343,7 @@ ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh.new && [ "$(sha256sum < 
 rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready
 FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
 { [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh.new && mv -f /tmp/mk20-flapmon.sh.new /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
-( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG"
+( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG" MK20_GEN="$GEN"
   exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
     sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
 FP=$!; i=0; while [ ! -f /tmp/mk20/flapmon.ready ] && [ $i -lt 40 ] && kill -0 $FP 2>/dev/null; do sleep 0.25; i=$((i+1)); done
@@ -343,7 +352,7 @@ log "flap monitor started (pid $FP)"
 if [ "$MODE" = --boot ]; then
   touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
 fi
-( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] && exit 0; [ \$rc = 3 ] && exit 3; sleep 20; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now && exit 0; touch /mnt/SDCARD/mk20-no-composite && touch /mnt/SDCARD/cmd-reboot; sync" </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
+( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_GEN=$GEN MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] && exit 0; [ \$rc = 3 ] && exit 3; [ \$rc = 5 ] && exit 0; sleep 20; MK20_GEN=$GEN MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] || [ \$rc = 5 ] && exit 0; touch /mnt/SDCARD/mk20-no-composite && touch /mnt/SDCARD/cmd-reboot; sync" </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
 WP=$!; sleep 1; kill -0 $WP 2>/dev/null || [ -f /mnt/SDCARD/mk20-composite-ok ] || { OK=0; die "confirm waiter did not start -> rollback now"; }
 log "confirm window 180s started (pid $WP)"
 echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status

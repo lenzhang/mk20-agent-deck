@@ -383,3 +383,28 @@ def test_kd_count_pattern_matches_device_cmdline():
     line = next(l for l in src.splitlines() if l.startswith("kd_count()"))
     assert "pgrep -f '^/data/KeyboardDevice'" in line and "pgrep -x" not in line.split("#")[0]
     assert re.search(r"^/data/KeyboardDevice", "/data/KeyboardDevice") and not re.search(r"^/data/KeyboardDevice", "sha256sum /data/KeyboardDevice")
+
+
+def test_selftest_failed_rollback_retries_once_then_escalates():
+    """r5: a failed selftest rollback is not ignored: retry once (rc 3 = already escalated), then no-composite + reboot."""
+    m = (REL / "sbin/mk20d").read_text()
+    blk = m[m.index('FAILED: not confirming'):m.index('( health ) > "$ST/selftest-last.json"')]
+    assert blk.count("rbn; rrc=$?") == 2 and "retrying once" in blk
+    assert '[ $rrc != 0 ] && [ $rrc != 3 ]' in blk
+    assert 'touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"' in blk
+
+
+def test_selftest_rollback_escalation_runs(dev, tmp_path):
+    """Execute the escalation snippet under busybox with a rollback that always fails (rc 1)."""
+    m = (REL / "sbin/mk20d").read_text()
+    a = m.index("    if [ -f \"$TM/gadget-boot.sh\" ] && composite_up; then")
+    b = m.index("    fi; fi", a)
+    snip = m[a:b] + "    fi\n"
+    tm = tmp_path / "tm"; tm.mkdir(); (tm / "gadget-boot.sh").write_text(f'echo x >> {tmp_path}/tries; exit 1\n')
+    sh = tmp_path / "s.sh"
+    sh.write_text(f"TM={tm}; LOGDIR={tmp_path}; REL=/x\nlog() {{ echo \"$*\" >> {tmp_path}/log; }}\ncomposite_up() {{ return 0; }}\n" + snip)
+    env = dict(dev.env, MK20_RB_RETRY_S="0", MK20_FLAP_FLAG=str(tmp_path / "flag"), MK20_FLAP_REBOOT=str(tmp_path / "reboot"))
+    import subprocess
+    subprocess.run(["sh", str(sh)], env=env, timeout=30, check=True)
+    assert len((tmp_path / "tries").read_text().split()) == 2
+    assert (tmp_path / "flag").exists() and (tmp_path / "reboot").exists()

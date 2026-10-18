@@ -110,7 +110,7 @@ def test_busy_mutex_refused_never_kills_holder(dev, tmp_path):
     try:
         time.sleep(0.5)
         env = dict(dev.env, MK20_RB_LOCK_TRIES="4")
-        assert subprocess.run(["sh", str(s), "--rollback-now"], env=env, timeout=60).returncode == 1
+        assert subprocess.run(["sh", str(s), "--rollback-now"], env=env, timeout=60).returncode == 4   # refused
         assert cleanups(tmp_path) == 0 and holder.poll() is None
         assert "mutex not acquired" in (tmp_path / "log").read_text()
     finally:
@@ -157,12 +157,12 @@ def test_invalid_timeout_and_tries_are_validated(dev, tmp_path, bad):
     assert "arithmetic" not in r.stderr and "fell-through" not in r.stdout
 
 
-@pytest.mark.parametrize("val,exp", [("abc", "240"), ("0", "1"), ("08", "8"), ("000", "1"), ("5", "5"),
+@pytest.mark.parametrize("val,exp", [("abc", "330"), ("0", "1"), ("08", "8"), ("000", "1"), ("5", "5"),
                                      ("901", "900"), ("12345678901234567890", "900")])
 def test_uint_cap(dev, tmp_path, val, exp):
     f = G[G.index("uint_cap() {"):]
     f = f[:f.index("\n}\n") + 3]
-    r = subprocess.run(["sh", "-c", f + f'uint_cap "{val}" 240 1 900'], env=dev.env, capture_output=True, text=True)
+    r = subprocess.run(["sh", "-c", f + f'uint_cap "{val}" 330 1 900'], env=dev.env, capture_output=True, text=True)
     assert r.stdout.strip() == exp, r.stderr
 
 
@@ -182,3 +182,85 @@ def test_unkillable_cleanup_escalates_rc3_no_unbounded_wait(dev, tmp_path):
 def test_confirm_waiter_retries_then_escalates():
     w = [ln for ln in G.splitlines() if "confirm" not in ln and "mk20-composite-ok ] && exit 0" in ln][0]
     assert "rc = 3 ] && exit 3" in w and "sleep 20" in w and "mk20-no-composite" in w and "cmd-reboot" in w
+
+
+# ---- r5 #7: generation token ----
+def test_stale_generation_is_ignored_without_cleanup(dev, tmp_path):
+    s = harness(tmp_path, cleanup_makes_stock=False, cleanup_s=0)
+    (tmp_path / "mk20").mkdir(exist_ok=True)
+    (tmp_path / "mk20/composite.gen").write_text("200.5-42\n")   # a newer composite is up
+    (tmp_path / "mk20/gadget.busy").write_text("")
+    env = dict(dev.env, MK20_GEN="100.1-7")
+    assert subprocess.run(["sh", str(s), "--rollback-now"], env=env, timeout=60).returncode == 5
+    assert cleanups(tmp_path) == 0 and "stale request" in (tmp_path / "log").read_text()
+    assert (tmp_path / "mk20/gadget.busy").exists()   # nothing touched
+
+
+def test_matching_generation_rolls_back(dev, tmp_path):
+    s = harness(tmp_path, cleanup_s=0)
+    (tmp_path / "mk20").mkdir(exist_ok=True)
+    (tmp_path / "mk20/composite.gen").write_text("100.1-7\n")
+    env = dict(dev.env, MK20_GEN="100.1-7")
+    assert subprocess.run(["sh", str(s), "--rollback-now"], env=env, timeout=60).returncode == 0 and cleanups(tmp_path) == 1
+
+
+def test_no_generation_is_unconditional(dev, tmp_path):
+    s = harness(tmp_path, cleanup_s=0)
+    (tmp_path / "mk20").mkdir(exist_ok=True)
+    (tmp_path / "mk20/composite.gen").write_text("100.1-7\n")
+    assert run(dev, s) == 0 and cleanups(tmp_path) == 1   # mk20d / manual rollback targets whatever is current
+
+
+def test_generation_written_under_mutex_and_passed_to_monitors():
+    sm = G[G.index("setup_main() {"):]
+    assert 'echo "$GEN" > "$GENF.t" && mv -f "$GENF.t" "$GENF"' in sm
+    assert 'MK20_GEN="$GEN"' in sm and sm.count("MK20_GEN=$GEN ") == 2   # flapmon + both confirm-waiter attempts
+    assert "[ \\$rc = 5 ] && exit 0" in sm
+
+
+# ---- r5 #5: rollback bound covers a healthy cleanup incl. add-adb ----
+def _default(name):
+    import re as _re
+    return int(_re.search(r'%s:-\}" (\d+) ' % name, G).group(1))
+
+
+def test_rb_timeout_default_covers_healthy_cleanup():
+    rbt, sut, tries = _default("MK20_RB_TIMEOUT"), _default("MK20_SETUP_TIMEOUT"), _default("MK20_RB_LOCK_TRIES")
+    # healthy budget from cleanup(): kd_stop 32 + umount 10 + kd_start 23 + readd_adb (60 + 5 + 7*4 + 90)
+    assert rbt >= 330 and rbt >= 32 + 10 + 23 + 60 + 5 + 28 + 90
+    assert sut >= 60 + rbt or sut >= 450
+    assert tries * 0.25 >= sut + rbt + 30   # a rollback waiter outlasts the longest owner hold
+
+
+# ---- r5 #9 / #4: fd 7 + detach ----
+def test_every_service_and_helper_call_in_cleanup_closes_fd7():
+    import re as _re
+    body = G[G.index("kd_stop() {"):G.index("# rollback runs before any preflight")]
+    for line in body.splitlines():
+        code = line.split(" #")[0]
+        if code.lstrip().startswith("#"):
+            continue
+        if _re.search(r"\$KDSVC (start|stop)|setusbconfig serial|mk20-add-adb\.sh >>|appLunch\.sh <", code):
+            assert "7>&-" in code, line
+
+
+def test_daemons_started_by_cleanup_are_detached():
+    body = G[G.index("kd_start() {"):G.index("OK=0\ncleanup()")]
+    assert "( ( trap '' HUP INT; exec /data/appLunch.sh" in body
+    a = (Path(__file__).resolve().parents[1] / "firmware/release/share/mk20-add-adb.sh").read_text()
+    assert "( /bin/adbd </dev/null >/tmp/adbd.log 2>&1 7>&- & )" in a
+
+
+def test_detached_child_survives_kill_tree(dev, tmp_path):
+    """kill_tree walks PPid; a double-forked daemon is reparented to init and survives a killed cleanup tree."""
+    kt = G[G.index("kids() {"):G.index("# uint_cap")]
+    sh = tmp_path / "k.sh"
+    sh.write_text(kt + f"""( ( exec sleep 30 ) & echo $! > {tmp_path}/det ) ; ( sleep 30 & echo $! > {tmp_path}/att; wait ) &
+CP=$!; sleep 0.5; kill_tree $CP; sleep 0.3
+""")
+    subprocess.run(["sh", str(sh)], env=dev.env, timeout=30)
+    det, att = (int((tmp_path / n).read_text()) for n in ("det", "att"))
+    try:
+        assert not _gone(det) and _gone(att)
+    finally:
+        subprocess.run(["kill", "-9", str(det)])

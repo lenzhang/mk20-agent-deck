@@ -26,7 +26,7 @@ mkdir -p "$G/functions/ffs.adb" /dev/usb-ffs/adb
 [ -e "$G/configs/c.1/ffs.adb" ] || ln -s "$G/functions/ffs.adb" "$G/configs/c.1/ffs.adb" 2>>"$LOG" || { log "FAIL ln"; exit 7; }
 grep -q " /dev/usb-ffs/adb " /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb 2>>"$LOG" || { log "FAIL ffs mount"; exit 3; }
 [ -e "$G/configs/c.1/acm.usb0" ] || log "WARN acm.usb0 not linked"
-/bin/adbd </dev/null >/tmp/adbd.log 2>&1 &
+( /bin/adbd </dev/null >/tmp/adbd.log 2>&1 7>&- & )   # detached (r5 #4): a killed caller tree must not take adbd
 i=0; while [ $i -lt 40 ]; do [ -n "$(udc)" ] && break; usleep 200000; i=$((i+1)); done
 if [ -z "$(udc)" ]; then
   if [ -e /dev/usb-ffs/adb/ep1 ]; then echo "$UDC_NAME" > "$G/UDC" 2>>"$LOG"; sleep 1; fi
