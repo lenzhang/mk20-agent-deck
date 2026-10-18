@@ -23,6 +23,10 @@ Expectations (all keys optional, all must hold):
   agent_call_within_ms: {"name": "focus", "ms": 350}  – first call ≤ ms after last mark
   hid: ["RightOption down", ...]                 – prefixes of the HID outputs, in order
   key_image_size: [128,128], sub_image_size: [428,142], frames_min: n
+  settings.<field>: value   – settings mock: active/tab/focus/test or a config key (profile, provider…)
+  settings_toast_contains: text
+Optional top-level "latency": {"input_ms", "input_jitter_ms", "router_ms", "router_jitter_ms",
+  "frame_ms", "frame_jitter_ms", "seed"} injects delays for the whole case.
 """
 from __future__ import annotations
 
@@ -34,7 +38,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .harness import Sim
+from .harness import Latency, Sim
 
 CASES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cases")
 
@@ -47,6 +51,7 @@ class Case:
     steps: list[dict]
     path: str = ""
     draft: bool = False
+    latency: dict | None = None
 
     @property
     def id(self) -> str:
@@ -99,7 +104,7 @@ def load_cases(directory: str = CASES_DIR, include_drafts: bool = False) -> list
                 d = json.load(f)
             for c in (d if isinstance(d, list) else [d]):
                 out.append(Case(c["name"], c.get("group", "drafts" if draft else "misc"), c.get("desc", ""),
-                                c["steps"], p, draft or bool(c.get("draft"))))
+                                c["steps"], p, draft or bool(c.get("draft")), c.get("latency")))
     out.sort(key=lambda c: (c.draft, c.group, c.path, c.name))
     return out
 
@@ -156,6 +161,14 @@ def _check(sim: Sim, exp: dict, mark: dict, idx: int, src: dict) -> None:
             need(k, f">= {v}", sim.frames, sim.frames >= v)
         elif k == "key":
             pass
+        elif k.startswith("settings."):
+            f = k.split(".", 1)[1]
+            sv = sim.settings.state()
+            cur = sv.get(f) if f in sv else sim.settings.cfg(f)
+            need(k, v, cur)
+        elif k == "settings_toast_contains":
+            t = sim.settings.toast or ""
+            need(k, v, t, v in t)
         else:
             raise _Fail(StepFailure(idx, src, k, "known expectation", "unknown key"))
 
@@ -183,7 +196,7 @@ def _do(sim: Sim, s: dict, mark: dict) -> None:
 
 def run_case(case: Case, observer: Callable[[Sim, float], None] | None = None,
              on_step: Callable[[int, dict, Sim], None] | None = None, sim: Sim | None = None) -> CaseResult:
-    sim = sim or Sim()
+    sim = sim or Sim(latency=Latency.from_dict(case.latency))
     sim.observer = observer
     w0, s0 = time.perf_counter(), sim.now()
     mark: dict = {"t": s0}

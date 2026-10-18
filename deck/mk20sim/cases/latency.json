@@ -1,0 +1,182 @@
+[
+ {
+  "name": "double_tap_focus_30ms_jitter",
+  "group": "latency",
+  "desc": "30 ms 输入 + 10 ms 路由（带抖动）下双击仍判为聚焦",
+  "latency": {
+   "input_ms": 30,
+   "input_jitter_ms": 15,
+   "router_ms": 10,
+   "router_jitter_ms": 5,
+   "frame_ms": 40,
+   "frame_jitter_ms": 20,
+   "seed": 7
+  },
+  "steps": [
+   {
+    "press": "A1",
+    "hold": 40
+   },
+   {
+    "wait": 100
+   },
+   {
+    "press": "A1",
+    "hold": 40
+   },
+   {
+    "wait": 200
+   },
+   {
+    "expect": {
+     "agent_calls": {
+      "focus": 1
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "double_tap_focus_80ms_jitter",
+  "group": "latency",
+  "desc": "80±40 ms 输入延迟下双击仍判为聚焦（FIFO 保序）",
+  "latency": {
+   "input_ms": 80,
+   "input_jitter_ms": 40,
+   "router_ms": 20,
+   "router_jitter_ms": 10,
+   "frame_ms": 120,
+   "frame_jitter_ms": 40,
+   "seed": 3
+  },
+  "steps": [
+   {
+    "press": "A1",
+    "hold": 40
+   },
+   {
+    "wait": 100
+   },
+   {
+    "press": "A1",
+    "hold": 40
+   },
+   {
+    "wait": 300
+   },
+   {
+    "expect": {
+     "agent_calls": {
+      "focus": 1
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "long_press_mode_80ms_jitter",
+  "group": "latency",
+  "desc": "80±40 ms 延迟下模式键长按 650 ms 仍进 L4，短按仍切模式",
+  "latency": {
+   "input_ms": 80,
+   "input_jitter_ms": 40,
+   "router_ms": 20,
+   "router_jitter_ms": 10,
+   "frame_ms": 120,
+   "frame_jitter_ms": 40,
+   "seed": 3
+  },
+  "steps": [
+   {
+    "mark": "t"
+   },
+   {
+    "press": "MODE",
+    "hold": 100
+   },
+   {
+    "wait": 300
+   },
+   {
+    "expect": {
+     "mode_changed": true,
+     "page": "L1"
+    }
+   },
+   {
+    "press": "MODE",
+    "hold": 650
+   },
+   {
+    "wait": 300
+   },
+   {
+    "expect": {
+     "page": "L4"
+    }
+   }
+  ]
+ },
+ {
+  "name": "stop_short_80ms_jitter",
+  "group": "latency",
+  "desc": "80±40 ms 延迟下停止键短按（150 ms）不会被误判为长按",
+  "latency": {
+   "input_ms": 80,
+   "input_jitter_ms": 40,
+   "router_ms": 20,
+   "router_jitter_ms": 10,
+   "frame_ms": 120,
+   "frame_jitter_ms": 40,
+   "seed": 3
+  },
+  "steps": [
+   {
+    "press": "A1"
+   },
+   {
+    "press": "STOP",
+    "hold": 150
+   },
+   {
+    "wait": 300
+   },
+   {
+    "expect": {
+     "agent_calls": {
+      "stop": 0
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "frame_push_delay_visible",
+  "group": "latency",
+  "desc": "推帧延迟 120 ms：状态立即变化，画面滞后",
+  "latency": {
+   "input_ms": 80,
+   "input_jitter_ms": 40,
+   "router_ms": 20,
+   "router_jitter_ms": 10,
+   "frame_ms": 120,
+   "frame_jitter_ms": 40,
+   "seed": 3
+  },
+  "steps": [
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "wait": 400
+   },
+   {
+    "expect": {
+     "page": "L4",
+     "frames_min": 2
+    }
+   }
+  ]
+ }
+]

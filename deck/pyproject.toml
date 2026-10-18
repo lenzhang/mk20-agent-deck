@@ -21,6 +21,7 @@ include = ["mk20deck*", "mk20sim*"]
 
 [tool.setuptools.package-data]
 mk20deck = ["py.typed"]
+mk20sim = ["cases/*.json", "cases/drafts/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

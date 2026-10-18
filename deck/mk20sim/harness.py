@@ -16,6 +16,7 @@ fw→doc coordinate translation are all exercised.  Output side:
 from __future__ import annotations
 
 import io
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -32,6 +33,8 @@ from mk20deck.model import ActionResult
 from mk20deck.protocol import KeyEvent
 from mk20deck.render.canvas import Renderer
 from mk20deck.sim import FakeClock, demo_adapters
+
+from .settings import SettingsMock
 
 # PRD §6.2 L1 names → 1-based document (col, row)
 KEY_NAMES: dict[str, tuple[int, int]] = {
@@ -75,14 +78,44 @@ class _Recording(MockAdapter):
 
 
 @dataclass
+class Latency:
+    """Injected delays (ms).  input = GD32→T113 link, router = T113 processing before the
+    controller sees the event, frame = render→LCD push.  Jitter is uniform ±jitter, seeded,
+    and FIFO order is preserved (a serial link cannot reorder)."""
+    input_ms: float = 0
+    input_jitter_ms: float = 0
+    router_ms: float = 0
+    router_jitter_ms: float = 0
+    frame_ms: float = 0
+    frame_jitter_ms: float = 0
+    seed: int = 1
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "Latency":
+        d = d or {}
+        return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
+
+    def any(self) -> bool:
+        return any((self.input_ms, self.input_jitter_ms, self.router_ms, self.router_jitter_ms, self.frame_ms,
+                    self.frame_jitter_ms))
+
+
+@dataclass
 class Sim:
     realtime: bool = False
     animations: bool = False
     layout: DeviceLayout = field(default_factory=DeviceLayout.default)
     outputs: list[Output] = field(default_factory=list)
+    latency: Latency = field(default_factory=Latency)
 
     def __post_init__(self) -> None:
         self.lock = threading.RLock()
+        self.settings = SettingsMock()
+        self._rng = random.Random(self.latency.seed)
+        self._inq: list[tuple[float, int, int, bool]] = []   # (deliver_at, col, row, pressed)
+        self._frameq: list[tuple[float, bytes]] = []
+        self._k1_down: float | None = None
+        self.frame_lag_ms: float = 0.0
         self.fake = FakeClock()
         self.clock: Callable[[], float] = time.monotonic if self.realtime else self.fake
         self.t0 = self.clock()
@@ -108,13 +141,77 @@ class Sim:
     def _emit(self, kind: str, text: str) -> None:
         self.outputs.append(Output(round(self.now(), 3), kind, text))
 
+    def set_latency(self, lat: Latency) -> None:
+        with self.lock:
+            self.latency, self._rng = lat, random.Random(lat.seed)
+
+    def _delay(self, base: float, jit: float) -> float:
+        return max(0.0, base + (self._rng.uniform(-jit, jit) if jit else 0.0)) / 1000
+
     def _sink(self, jpeg: bytes) -> None:
-        self.frame = jpeg
-        self.frames += 1
+        if self.settings.active:
+            return  # settings page owns the screens while open
+        self._publish(jpeg)
+
+    def _publish(self, jpeg: bytes) -> None:
+        d = self._delay(self.latency.frame_ms, self.latency.frame_jitter_ms)
+        if d <= 0:
+            self.frame, self.frame_lag_ms = jpeg, 0.0
+            self.frames += 1
+        else:
+            self._frameq.append((self.clock() + d, jpeg))
+
+    def _pump_queues(self) -> None:
+        now = self.clock()
+        while self._inq and self._inq[0][0] <= now:
+            _t, c, r, p = self._inq.pop(0)
+            self._deliver(c, r, p)
+        while self._frameq and self._frameq[0][0] <= now:
+            t, jpeg = self._frameq.pop(0)
+            self.frame, self.frames = jpeg, self.frames + 1
+            self.frame_lag_ms = round((now - t) * 1000 + self.latency.frame_ms, 1)
+
+    def _deliver(self, col: int, row: int, pressed: bool) -> None:
+        """Router: settings page (draft) or the real daemon/controller."""
+        knob = self.daemon.knob_map.get(f"{col},{row}")
+        st = self.settings
+        if st.active:
+            if knob:
+                k, a = int(knob[1]), knob.split(":")[1]
+                if a == "press":
+                    if not pressed:
+                        st.knob(k, "press")
+                elif pressed:
+                    st.knob(k, a)
+            elif pressed:
+                dc, dr = self.layout.fw_to_doc(col, row)
+                st.key(dc, dr)
+            if not st.active:  # left the page
+                self.controller.page = st.exit_to or "L1"
+                self.controller.version += 1
+                self.daemon.step(force=True)
+            return
+        if knob == "K1:press" and self.controller.page == "L4":
+            # DRAFT: on L4 a short K1 press opens the settings page
+            if pressed:
+                self._k1_down = self.clock()
+            elif self._k1_down is not None and self.clock() - self._k1_down < 0.6:
+                self._k1_down = None
+                st.open()
+            return
+        self.daemon.on_device_key(KeyEvent(col, row, pressed))
 
     def step(self, force: bool = False) -> None:
         with self.lock:
+            self._pump_queues()
             self.daemon.step(force=force)
+            if self.settings.active and (self.settings.dirty or force):
+                buf = io.BytesIO()
+                self.settings.render(self.layout).save(buf, "JPEG", quality=85)
+                self._publish(buf.getvalue())
+            for msg in self.settings.log[getattr(self, "_seen_slog", 0):]:
+                self._emit("local", f"settings: {msg}")
+            self._seen_slog = len(self.settings.log)
             c = self.controller
             for msg in c.log[self._seen_log:]:
                 self._emit("toast", msg)
@@ -133,7 +230,13 @@ class Sim:
         """Firmware-coordinate keyStateChanged, exactly as the link reader delivers it."""
         with self.lock:
             self._emit("input", f"raw {col},{row} {'down' if pressed else 'up'}")
-            self.daemon.on_device_key(KeyEvent(col, row, pressed))
+            lat = self.latency
+            d = self._delay(lat.input_ms, lat.input_jitter_ms) + self._delay(lat.router_ms, lat.router_jitter_ms)
+            if d <= 0 and not self._inq:
+                self._deliver(col, row, pressed)
+            else:
+                at = max(self.clock() + d, self._inq[-1][0] if self._inq else 0.0)  # FIFO link
+                self._inq.append((at, col, row, pressed))
         self.step()
 
     def _fw(self, name: str) -> tuple[int, int]:
@@ -251,7 +354,8 @@ class Sim:
         return {
             "t": round(self.now(), 3), "page": c.page, "mode": c.mode.value, "ptt": c.ptt_held,
             "toast": v.sub.toast, "selected": (sel.title if sel else None), "scroll": c.scroll,
-            "frames": self.frames,
+            "frames": self.frames, "frame_lag_ms": self.frame_lag_ms, "queued_inputs": len(self._inq),
+            "latency": self.latency.__dict__, "settings": self.settings.state(),
             "keys": [{"col": k.col, "row": k.row, "role": k.role.value, "label": k.label, "selected": k.selected,
                       "disabled": k.disabled} for k in v.keys],
         }

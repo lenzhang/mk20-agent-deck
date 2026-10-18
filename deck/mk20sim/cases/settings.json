@@ -1,0 +1,177 @@
+[
+ {
+  "name": "open_settings_from_l4",
+  "group": "settings",
+  "desc": "草案：L4 上 K1 短按进入设置；回 L1 键退出",
+  "steps": [
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "expect": {
+     "page": "L4"
+    }
+   },
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "expect": {
+     "settings.active": true,
+     "settings.tab": "net",
+     "settings.profile": "mac_proxy"
+    }
+   },
+   {
+    "press": "5,4"
+   },
+   {
+    "expect": {
+     "settings.active": false,
+     "page": "L1"
+    }
+   }
+  ]
+ },
+ {
+  "name": "switch_provider_needs_web_key",
+  "group": "settings",
+  "desc": "草案：切到 Kimi（无 Key）→ 提示去 Mac/网页填；应用后生效，模型自动换成该家默认",
+  "steps": [
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "press": "2,1"
+   },
+   {
+    "press": "3,2"
+   },
+   {
+    "expect": {
+     "settings_toast_contains": "Mac",
+     "settings.provider": "kimi",
+     "settings.model": "kimi-k2"
+    }
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "expect": {
+     "settings.pending": {}
+    }
+   },
+   {
+    "press": "4,1"
+   },
+   {
+    "press": "1,2"
+   },
+   {
+    "expect": {
+     "settings.test": "失败：无 Key"
+    }
+   }
+  ]
+ },
+ {
+  "name": "knobs_scroll_and_adjust_port",
+  "group": "settings",
+  "desc": "草案：K2 转移动焦点到代理端口，K1 转 +3，返回需二次确认放弃",
+  "steps": [
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "knob": "K2",
+    "action": "cw",
+    "n": 2
+   },
+   {
+    "expect": {
+     "settings.focus": 2
+    }
+   },
+   {
+    "knob": "K1",
+    "action": "cw",
+    "n": 3
+   },
+   {
+    "expect": {
+     "settings.proxy_port": 7893
+    }
+   },
+   {
+    "press": "1,4"
+   },
+   {
+    "expect": {
+     "settings.active": true,
+     "settings_toast_contains": "再按一次"
+    }
+   },
+   {
+    "press": "1,4"
+   },
+   {
+    "expect": {
+     "settings.active": false,
+     "page": "L4",
+     "settings.proxy_port": 7890
+    }
+   }
+  ]
+ },
+ {
+  "name": "foreign_provider_on_wifi_fails_test",
+  "group": "settings",
+  "desc": "草案：板载 Wi-Fi + 国外模型商 → 连接测试提示需代理",
+  "steps": [
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "press": "2,2"
+   },
+   {
+    "press": "2,1"
+   },
+   {
+    "press": "5,2"
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "press": "4,1"
+   },
+   {
+    "press": "1,2"
+   },
+   {
+    "expect": {
+     "settings.test": "失败：需代理"
+    }
+   }
+  ]
+ }
+]

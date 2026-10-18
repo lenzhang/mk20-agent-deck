@@ -49,6 +49,9 @@ button,select{background:#2a2e36;color:#ddd;border:1px solid #444;border-radius:
 <div class=hint>鼠标按下/松开 = 键按下/抬起（长按 ≥600 ms、双击 ≤350 ms 按真实时序判定）· 旋钮：滚轮 = 旋转，点击 = 按下 ·
 键盘：1-5/q-t/a-g/z-b = 四行键，[ ] = K1 转，; ' = K2 转，Shift+[ / Shift+; = 按 K1/K2</div>
 <h3>状态</h3><div id=state></div>
+<div class=hint style="margin-top:6px">延迟注入 (ms，±抖动)：输入 GD32→T113 <input id=li size=3 value=0>±<input id=lij size=2 value=0>
+ 路由 <input id=lr size=3 value=0>±<input id=lrj size=2 value=0> 推帧 <input id=lf size=3 value=0>±<input id=lfj size=2 value=0>
+ <button onclick="setLat()">应用</button><button onclick="preset(30,15,10,5,40,20)">30ms</button><button onclick="preset(80,40,20,10,120,40)">80ms</button><button onclick="preset(0,0,0,0,0,0)">0</button></div>
 <h3>测试用例 <span class=hint>（与 pytest / run-cases 同一份 mk20sim/cases/*.json）</span></h3>
 <div><button onclick="runSel()">运行所选</button><button onclick="runAll()">全部运行</button><button onclick="post('/run/stop')">停止</button>
 速度 <select id=speed><option value=1x>实时 1x</option><option value=fast selected>快速</option><option value=instant>瞬时</option></select>
@@ -87,8 +90,11 @@ async function loop(){try{L=L||await (await fetch('/layout')).json();RUN=await (
  const live=!(RUN.running||RUN.hold_view);const img=new Image();img.onload=()=>{frame=img;draw()};img.src=(live?'/frame.jpg?':'/run/frame.jpg?')+Date.now();
  renderRun();
  const st=await (await fetch('/state')).json();document.getElementById('state').textContent=
- `page=${st.page}  mode=${st.mode}  ptt=${st.ptt}  scroll=${st.scroll}\nselected=${st.selected}\ntoast=${st.toast||''}`;
- const lg=document.getElementById('log');lg.innerHTML=st.outputs.map(o=>`<span class=${o.kind}>${o.t.toFixed(3).padStart(9)}  ${o.kind.padEnd(6)} ${o.text.replace(/</g,'&lt;')}</span>`).join('\n');lg.scrollTop=1e9;}catch(e){}
+ `page=${st.page}  mode=${st.mode}  ptt=${st.ptt}  scroll=${st.scroll}\nselected=${st.selected}\ntoast=${st.toast||''}`+
+ `\nlatency: in ${st.latency.input_ms}±${st.latency.input_jitter_ms} / router ${st.latency.router_ms}±${st.latency.router_jitter_ms} / frame ${st.latency.frame_ms}±${st.latency.frame_jitter_ms} ms  queued=${st.queued_inputs} lag=${st.frame_lag_ms}`+
+ (st.settings.active?`\nSETTINGS(草案) tab=${st.settings.tab} focus=${st.settings.focus} pending=${JSON.stringify(st.settings.pending)} test=${st.settings.test||''}`:`\n(L4 上 K1 短按 = 进入设置草案)`);
+ const lg=document.getElementById('log');const outs=live?st.outputs:(RUN.outputs||[]);
+ lg.dataset.src=live?'live':'run';lg.innerHTML=(live?'':'<span class=run>— 用例运行日志: '+RUN.current+' —</span>\n')+outs.map(o=>`<span class=${o.kind}>${o.t.toFixed(3).padStart(9)}  ${o.kind.padEnd(6)} ${o.text.replace(/</g,'&lt;')}</span>`).join('\n');lg.scrollTop=1e9;}catch(e){}
  setTimeout(loop,120);}
 
 async function loadCases(){const cs=await (await fetch('/cases')).json();NAMES=cs.names;let g='',h='';
@@ -98,6 +104,9 @@ async function loadCases(){const cs=await (await fetch('/cases')).json();NAMES=c
 function runIds(ids){fetch('/run',{method:'POST',body:JSON.stringify({ids,speed:document.getElementById('speed').value})})}
 function runSel(){runIds([...document.querySelectorAll('.ck:checked')].map(e=>e.value))}
 function runAll(){runIds([...document.querySelectorAll('.ck')].filter(e=>!e.value.startsWith('drafts/')).map(e=>e.value))}
+function setLat(){const v=id=>+document.getElementById(id).value||0;
+ fetch('/latency',{method:'POST',body:JSON.stringify({input_ms:v('li'),input_jitter_ms:v('lij'),router_ms:v('lr'),router_jitter_ms:v('lrj'),frame_ms:v('lf'),frame_jitter_ms:v('lfj')})})}
+function preset(...a){['li','lij','lr','lrj','lf','lfj'].forEach((id,i)=>document.getElementById(id).value=a[i]);setLat()}
 function renderRun(){if(!RUN)return;const hl=new Set(RUN.highlight||[]);
  for(const [k,el] of Object.entries(hitEl))el.classList.toggle('down',hl.has(k));for(const [k,el] of Object.entries(knobEl))el.classList.toggle('down',hl.has(k));
  document.getElementById('banner').textContent=RUN.running?`▶ ${RUN.current}  步骤 ${RUN.step}/${RUN.nsteps}: ${JSON.stringify(RUN.step_src)}`:(RUN.results.length?'已完成 · 键盘停留在最后一个用例画面（点任一键回到实时模式）':'');
@@ -136,10 +145,12 @@ class Runner:
         self.current, self.step, self.nsteps, self.step_src, self.highlight = "", 0, 0, None, []
         self.results: list[dict] = []
         self.full: dict[str, dict] = {}
+        self.sim = None
 
     def state(self) -> dict:
         with self.lock:
             return {"running": self.running, "hold_view": self.hold_view, "current": self.current, "step": self.step,
+                    "outputs": [o.__dict__ for o in (self.sim.outputs[-150:] if self.sim else [])],
                     "nsteps": self.nsteps, "step_src": self.step_src, "highlight": self.highlight,
                     "results": self.results}
 
@@ -178,7 +189,11 @@ class Runner:
                     break
                 with self.lock:
                     self.current, self.nsteps, self.step = c.id, len(c.steps), 0
-                r = run_case(c, observer=observer, on_step=on_step).to_json()
+                from .harness import Latency
+                sim_c = Sim(latency=Latency.from_dict(c.latency))
+                with self.lock:
+                    self.sim = sim_c
+                r = run_case(c, observer=observer, on_step=on_step, sim=sim_c).to_json()
                 if r["error"] and "Stopped" in r["error"]:
                     break
                 with self.lock:
@@ -268,6 +283,11 @@ def serve(host: str = "127.0.0.1", port: int = 8766) -> None:
             if u.path in ("/run/stop", "/run/release"):
                 run.stop_ev.set() if u.path == "/run/stop" else None
                 run.hold_view = False
+                self._ok(b"ok", "text/plain")
+                return
+            if u.path == "/latency":
+                from .harness import Latency
+                sim.set_latency(Latency.from_dict(body))
                 self._ok(b"ok", "text/plain")
                 return
             if u.path == "/record/save":
