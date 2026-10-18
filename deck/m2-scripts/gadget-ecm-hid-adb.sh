@@ -29,7 +29,7 @@ log() { echo "gadget $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
 
 # Launch: adbd kills the whole process group of an adb shell when it ends (trap HUP does not help) and
 # this busybox has no setsid, so we hand ourselves to the watcher job queue (runs outside adb/ACM sessions).
-if [ "${1:-}" != --run ]; then
+if [ "${1:-}" != --run ] && [ "${1:-}" != --rollback ]; then
   Q=/mnt/SDCARD/job.sh; [ -e $Q ] && { echo "watcher queue busy ($Q exists)"; exit 1; }
   echo "sh $(readlink -f "$0") --run" > $Q.tmp
   sha256sum $Q.tmp | awk '{print $1"  job.sh"}' > $Q.sha256.tmp; mv -f $Q.tmp $Q; mv -f $Q.sha256.tmp $Q.sha256
@@ -40,7 +40,7 @@ fi
 UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
 [ -n "$UDC" ] || { log "ABORT no udc"; exit 1; }
 [ -d $G ] && [ -d $C ] || { log "ABORT no g1 (KD has not configured USB yet)"; exit 1; }
-[ -x $BR ] || { log "ABORT $BR missing: KD would lose ttyGS0 (black screens)"; exit 1; }
+[ "${1:-}" = --rollback ] || [ -x $BR ] || { log "ABORT $BR missing: KD would lose ttyGS0 (black screens)"; exit 1; }
 [ -x /bin/adbd ] || { log "ABORT no /bin/adbd"; exit 1; }
 grep -q '^usb_f_ecm ' /proc/modules || [ -f $ECMKO ] || { log "ABORT no $ECMKO"; exit 1; }
 KDSVC=$(grep -l -E 'KeyboardDevice|qt_app2' /etc/init.d/* 2>/dev/null | head -1)
@@ -58,12 +58,13 @@ cleanup() {
   for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
   rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
   umount /data/setusbconfig 2>/dev/null
-  pkill -f ttygs_tcp_bridge 2>/dev/null; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
+  killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
   /data/setusbconfig serial >>"$LOG" 2>&1
   kd_start
   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
 }
 trap cleanup EXIT
+if [ "${1:-}" = --rollback ]; then log "rollback requested (no host confirm)"; KDSVC=${KDSVC:-/etc/init.d/qt_app2}; exit 1; fi
 trap 'exit 1' INT TERM
 trap '' HUP
 die() { log "FAIL $*"; exit 1; }
@@ -103,8 +104,7 @@ if [ -z "$(udc_now)" ]; then echo "$UDC" > $G/UDC 2>>"$LOG" || die "bind"; fi
 sleep 1
 [ -e /dev/hidg0 ] || die "no /dev/hidg0"
 [ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
-ip link set usb0 up 2>>"$LOG" || ifconfig usb0 up 2>>"$LOG"
-ip addr add 192.168.7.2/24 dev usb0 2>>"$LOG" || ifconfig usb0 192.168.7.2 netmask 255.255.255.0 2>>"$LOG"
+ifconfig usb0 169.254.7.2 netmask 255.255.0.0 up 2>>"$LOG"; ifconfig usb0:1 192.168.7.2 netmask 255.255.255.0 up 2>>"$LOG"
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
 [ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
 ( trap '' HUP INT; exec $BR --listen 0.0.0.0:17890 --link /dev/ttyGS0 </dev/null >>"$LOG" 2>&1 ) &
@@ -117,4 +117,9 @@ pgrep -f KeyboardDevice >/dev/null || die "KD not running"
 OK=1
 log "OK UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=192.168.7.2 kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status
+# host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
+# within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
+rm -f /mnt/SDCARD/mk20-composite-ok; ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh
+( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; sleep 2; i=\$((i+1)); done; sh /tmp/mk20-gadget.sh --rollback" </dev/null >/dev/null 2>&1 9>&- ) &
+log "confirm window 180s started (pid $!)"
 exit 0

@@ -58,4 +58,5 @@ if [ -f $PC ]; then mkdir -p $S/mk20/boot-once; cp -f $PC $S/mk20/boot-once/post
   echo "staged postswap-check"; else echo "WARNING: no $PC (no auto-revert)"; fi
 rm -f $S/mk20-swap-ok
 echo "ok-rebooting" > $ST; sync
+if [ -f $S/boot-swap.noreboot ]; then rm -f $S/boot-swap.noreboot; echo "ok-power-cycle-now" > $ST; sync; echo "write verified; NO reboot (soft reboot hangs): user must power-cycle"; exit 0; fi
 echo "write verified; rebooting in 3s"; sleep 3; reboot
