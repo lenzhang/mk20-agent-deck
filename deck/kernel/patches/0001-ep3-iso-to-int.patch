@@ -1,0 +1,59 @@
+From: mk20-agent <zwj8727@gmail.com>
+Subject: [PATCH] sunxi_usb: convert ep3 from ISO to INT (Tina USB guide §3.3)
+
+Allwinner UDC default: 3x BULK + 1x ISO (ep3) + 1x INT (ep4).
+ACM+HID (or ECM+HID) needs two INT endpoints. Official recipe:
+rename ep3-iso → ep3-int and flip caps/bmAttributes to INT.
+
+Applies to Tina linux-5.4 / sun8iw20 (T113) 8K FIFO layout.
+
+---
+ drivers/usb/sunxi_usb/include/sunxi_udc.h | 4 ++--
+ drivers/usb/sunxi_usb/udc/sunxi_udc.c     | 8 ++++----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/usb/sunxi_usb/include/sunxi_udc.h b/drivers/usb/sunxi_usb/include/sunxi_udc.h
+index 1111111..2222222 100644
+--- a/drivers/usb/sunxi_usb/include/sunxi_udc.h
++++ b/drivers/usb/sunxi_usb/include/sunxi_udc.h
+@@ -88,7 +88,7 @@
+ static const char ep2in_bulk_name[]  = "ep2in-bulk";
+ static const char ep2out_bulk_name[] = "ep2out-bulk";
+-static const char ep3_iso_name[]     = "ep3-iso";
++static const char ep3_int_name[]     = "ep3-int";
+ static const char ep4_int_name[]     = "ep4-int";
+ static const char ep5in_bulk_name[]  = "ep5in-bulk";
+ static const char ep5out_bulk_name[] = "ep5out-bulk";
+@@ -125,7 +125,7 @@
+ 	{ep1out_bulk_name, 1536, 1024, 1},
+ 	{ep2in_bulk_name,  2560, 1024, 1},
+ 	{ep2out_bulk_name, 3584, 1024, 1},
+-	{ep3_iso_name,     4608, 1024, 0},
++	{ep3_int_name,     4608, 1024, 0},
+ 	{ep4_int_name,     5632, 512,  0},
+ 	{ep5in_bulk_name,  6144, 1024, 1},
+ 	{ep5out_bulk_name, 7168, 1024, 1},
+diff --git a/drivers/usb/sunxi_usb/udc/sunxi_udc.c b/drivers/usb/sunxi_usb/udc/sunxi_udc.c
+index 1111111..2222222 100644
+--- a/drivers/usb/sunxi_usb/udc/sunxi_udc.c
++++ b/drivers/usb/sunxi_usb/udc/sunxi_udc.c
+@@ -3367,16 +3367,16 @@
+ 	.ep[5] = {
+ 		.num			= 3,
+ 		.ep = {
+-			.name		= ep3_iso_name,
++			.name		= ep3_int_name,
+ 			.ops		= &sunxi_udc_ep_ops,
+-			.maxpacket	= SW_UDC_EP_ISO_FIFO_SIZE,
+-			.maxpacket_limit = SW_UDC_EP_ISO_FIFO_SIZE,
+-			.caps	= USB_EP_CAPS(USB_EP_CAPS_TYPE_ISO,
++			.maxpacket	= SW_UDC_EP_FIFO_SIZE,
++			.maxpacket_limit = SW_UDC_EP_FIFO_SIZE,
++			.caps	= USB_EP_CAPS(USB_EP_CAPS_TYPE_INT,
+ 					USB_EP_CAPS_DIR_ALL),
+ 		},
+ 		.dev		        = &sunxi_udc,
+ 		.bEndpointAddress   = 3,
+-		.bmAttributes	    = USB_ENDPOINT_XFER_ISOC,
++		.bmAttributes	    = USB_ENDPOINT_XFER_INT,
+ 	},
