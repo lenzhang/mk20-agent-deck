@@ -1,7 +1,10 @@
-# On-device settings page — DRAFT (simulator only)
+# On-device settings page — DECIDED (v1, 2026-10-19)
 
-Status: design draft for review, implemented as a state-only clickable mock in `deck/mk20sim/settings.py`.
-No real network/model configuration is touched. Screenshot: `sim/screenshot-settings.png`.
+Status: **decided** (user delegated the open questions, 2026-10-19). Implemented in the real controller:
+model/persistence/apply interface `deck/mk20deck/settings.py`, renderer `deck/mk20deck/render/settings.py`,
+page `LS` in `controller.py`. Persistence: `SettingsStore` JSON (device `/data/mk20/settings.json`, Mac
+`~/.config/mk20-agent-deck/settings.json`, sim/tests temp; override `MK20_SETTINGS`). Apply goes to a
+`SettingsApplier`; the default `LoggingApplier` only logs — no real network/model change yet. Screenshot: `sim/screenshot-settings.png`.
 
 ## 1. What the stock Waveshare system does (research)
 Sources: Waveshare wiki https://www.waveshare.com/wiki/MK20 (sections "Software Settings",
@@ -41,7 +44,7 @@ row3  item6  item7  item8  item9  item10              blue ring = K2 focus, grey
 row4  [返回 L4] [应用 n项] [撤销] [Mac/网页] [回 L1]
 sub   title · summary (*未应用) · message/toast | K1 hint | K2 hint
 ```
-Entry (draft): on **L4 (模式/设置页) a short K1 press opens settings** (K1 long press already = go to L4;
+Entry: on **L4 (模式/设置页) a short K1 press opens settings** (K1 long press already = go to L4;
 L4 has no free key). Exit: 返回 → L4, 回 L1 → L1 (both discard pending changes; 返回 with pending changes
 needs a second press).
 
@@ -54,7 +57,7 @@ Tabs:
   Switching provider auto-selects that provider's first model.
 - **连接测试**: one key; mock result rules: no key → 失败：无 Key; foreign provider on 板载 Wi-Fi → 失败：需代理;
   else 成功 · simulated latency.
-- **设备信息**: fw 1.1.4, kernel 5.4.61 #221, IP (ECM) 172.30.250.2, GD32 V2.32, current egress (read-only; mock values).
+- **设备信息**: 亮度 / 音量 (K1 ±10 %), fw 1.1.4, kernel 5.4.61 #221, IP (ECM) 172.30.250.2, GD32 V2.32, current egress (read-only; mock values).
 
 Changes are staged (`pending`) and only take effect with **应用** — avoids a stray knob turn changing the
 live network profile.
@@ -63,7 +66,8 @@ live network profile.
 open/exit from L4 · switch provider without key → web hint + apply + test fails "无 Key" ·
 K2 focus + K1 port adjust + two-press discard · Wi-Fi + foreign provider → test "需代理".
 
-## 5. Open questions for the user
-- Entry point: L4 K1 short press OK, or dedicate an L4 key (e.g. replace 回L1 with 设置 since K2 also goes back)?
-- Should 应用 on network profile require a confirm (it can cut the agent's model access)?
-- Brightness/volume (stock has them via voice/knob) — add as a 6th tab or put under 设备信息?
+## 5. Decisions (2026-10-19)
+- **Entry = short K1 press on L4** (K1 short press on L1 keeps the effort read-out).
+- **Network-profile changes (profile, proxy port) need a second 应用 press** ("将切换网络出口… 再按一次「应用」确认");
+  any other input disarms the confirm. Other changes apply on one press.
+- **Brightness & volume live on the 设备信息 tab** (first two items, K1 ±10 %, staged + 应用).

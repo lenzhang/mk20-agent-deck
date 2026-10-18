@@ -2,7 +2,7 @@
  {
   "name": "open_settings_from_l4",
   "group": "settings",
-  "desc": "草案：L4 上 K1 短按进入设置；回 L1 键退出",
+  "desc": "L4 上 K1 短按进入设置；回 L1 键退出",
   "steps": [
    {
     "knob": "K2",
@@ -38,7 +38,7 @@
  {
   "name": "switch_provider_needs_web_key",
   "group": "settings",
-  "desc": "草案：切到 Kimi（无 Key）→ 提示去 Mac/网页填；应用后生效，模型自动换成该家默认",
+  "desc": "切到 Kimi（无 Key）→ 提示去 Mac/网页填；应用后生效，模型自动换成该家默认",
   "steps": [
    {
     "knob": "K2",
@@ -85,7 +85,7 @@
  {
   "name": "knobs_scroll_and_adjust_port",
   "group": "settings",
-  "desc": "草案：K2 转移动焦点到代理端口，K1 转 +3，返回需二次确认放弃",
+  "desc": "K2 转移动焦点到代理端口，K1 转 +3，返回需二次确认放弃",
   "steps": [
    {
     "knob": "K2",
@@ -137,9 +137,9 @@
   ]
  },
  {
-  "name": "foreign_provider_on_wifi_fails_test",
+  "name": "network_apply_needs_confirm",
   "group": "settings",
-  "desc": "草案：板载 Wi-Fi + 国外模型商 → 连接测试提示需代理",
+  "desc": "板载 Wi-Fi 需二次确认才应用；Wi-Fi + 国外模型商 → 连接测试提示需代理",
   "steps": [
    {
     "knob": "K2",
@@ -162,6 +162,22 @@
     "press": "2,4"
    },
    {
+    "expect": {
+     "settings.confirm_net": true,
+     "settings_toast_contains": "再按一次"
+    }
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "expect": {
+     "settings.confirm_net": false,
+     "settings.pending": {},
+     "settings.profile": "wifi"
+    }
+   },
+   {
     "press": "4,1"
    },
    {
@@ -170,6 +186,48 @@
    {
     "expect": {
      "settings.test": "失败：需代理"
+    }
+   }
+  ]
+ },
+ {
+  "name": "brightness_volume_on_info_tab",
+  "group": "settings",
+  "desc": "设备信息页：K1 调亮度 -20%、音量 +10%，应用无需二次确认",
+  "steps": [
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "press": "5,1"
+   },
+   {
+    "knob": "K1",
+    "action": "ccw",
+    "n": 2
+   },
+   {
+    "knob": "K2",
+    "action": "cw"
+   },
+   {
+    "knob": "K1",
+    "action": "cw"
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "expect": {
+     "settings.brightness": 60,
+     "settings.volume": 60,
+     "settings.pending": {},
+     "settings.confirm_net": false
     }
    }
   ]

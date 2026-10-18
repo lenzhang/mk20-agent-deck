@@ -31,7 +31,9 @@ def build_adapters(cfg: DeckConfig):
 
 def build_controller(cfg: DeckConfig, adapters, sim: bool = False) -> Controller:
     state = load_state(cfg.state_path)
-    return Controller(cfg, adapters, state=state, sim=sim,
+    from .settings import SettingsPage, SettingsStore
+    settings = SettingsPage(store=SettingsStore.temp() if sim else SettingsStore())
+    return Controller(cfg, adapters, state=state, sim=sim, settings=settings,
                       on_state_change=lambda st: save_state(cfg.state_path, st))
 
 

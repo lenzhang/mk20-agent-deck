@@ -45,6 +45,9 @@ class Renderer:
 
     def compose(self, view: DeckView, t: float, heartbeat_on: bool = True) -> Image.Image:
         lay = self.layout
+        if view.settings is not None:
+            from .settings import SettingsRenderer
+            return SettingsRenderer(view.settings).render(lay)
         img = Image.new("RGB", (lay.width, lay.height), BG)
         for kv in view.keys:
             r = lay.key_rect(kv.col, kv.row)

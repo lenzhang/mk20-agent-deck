@@ -34,7 +34,6 @@ from mk20deck.protocol import KeyEvent
 from mk20deck.render.canvas import Renderer
 from mk20deck.sim import FakeClock, demo_adapters
 
-from .settings import SettingsMock
 
 # PRD §6.2 L1 names → 1-based document (col, row)
 KEY_NAMES: dict[str, tuple[int, int]] = {
@@ -110,11 +109,9 @@ class Sim:
 
     def __post_init__(self) -> None:
         self.lock = threading.RLock()
-        self.settings = SettingsMock()
         self._rng = random.Random(self.latency.seed)
         self._inq: list[tuple[float, int, int, bool]] = []   # (deliver_at, col, row, pressed)
         self._frameq: list[tuple[float, bytes]] = []
-        self._k1_down: float | None = None
         self.frame_lag_ms: float = 0.0
         self.fake = FakeClock()
         self.clock: Callable[[], float] = time.monotonic if self.realtime else self.fake
@@ -149,8 +146,6 @@ class Sim:
         return max(0.0, base + (self._rng.uniform(-jit, jit) if jit else 0.0)) / 1000
 
     def _sink(self, jpeg: bytes) -> None:
-        if self.settings.active:
-            return  # settings page owns the screens while open
         self._publish(jpeg)
 
     def _publish(self, jpeg: bytes) -> None:
@@ -172,43 +167,17 @@ class Sim:
             self.frame_lag_ms = round((now - t) * 1000 + self.latency.frame_ms, 1)
 
     def _deliver(self, col: int, row: int, pressed: bool) -> None:
-        """Router: settings page (draft) or the real daemon/controller."""
-        knob = self.daemon.knob_map.get(f"{col},{row}")
-        st = self.settings
-        if st.active:
-            if knob:
-                k, a = int(knob[1]), knob.split(":")[1]
-                if a == "press":
-                    if not pressed:
-                        st.knob(k, "press")
-                elif pressed:
-                    st.knob(k, a)
-            elif pressed:
-                dc, dr = self.layout.fw_to_doc(col, row)
-                st.key(dc, dr)
-            if not st.active:  # left the page
-                self.controller.page = st.exit_to or "L1"
-                self.controller.version += 1
-                self.daemon.step(force=True)
-            return
-        if knob == "K1:press" and self.controller.page == "L4":
-            # DRAFT: on L4 a short K1 press opens the settings page
-            if pressed:
-                self._k1_down = self.clock()
-            elif self._k1_down is not None and self.clock() - self._k1_down < 0.6:
-                self._k1_down = None
-                st.open()
-            return
+        """Router → the real daemon/controller (settings page included)."""
         self.daemon.on_device_key(KeyEvent(col, row, pressed))
+
+    @property
+    def settings(self):
+        return self.controller.settings
 
     def step(self, force: bool = False) -> None:
         with self.lock:
             self._pump_queues()
             self.daemon.step(force=force)
-            if self.settings.active and (self.settings.dirty or force):
-                buf = io.BytesIO()
-                self.settings.render(self.layout).save(buf, "JPEG", quality=85)
-                self._publish(buf.getvalue())
             for msg in self.settings.log[getattr(self, "_seen_slog", 0):]:
                 self._emit("local", f"settings: {msg}")
             self._seen_slog = len(self.settings.log)

@@ -1,6 +1,9 @@
-"""DRAFT on-device settings page ("LS") — clickable mock, state only.
+"""On-device settings page ("LS") — state model, persistence and apply interface.
 
-Nothing here changes real network/model configuration; see sim/SETTINGS-DRAFT.md.
+Decided design: sim/SETTINGS.md.  Entry: short K1 press on L4.  Persistence goes through
+``SettingsStore`` (JSON file; device: /data/mk20/settings.json, Mac: ~/.config/mk20-agent-deck,
+sim/tests: a temp path).  ``apply`` hands the changed keys to a ``SettingsApplier``; the default
+``LoggingApplier`` only logs — no real network/model change is made yet.
 Layout (1-based doc col,row):
 
     row1  [网络] [模型商] [模型] [连接测试] [设备信息]      ← category tabs
@@ -10,12 +13,14 @@ Layout (1-based doc col,row):
 """
 from __future__ import annotations
 
+import json
+import logging
+import os
+import tempfile
 from dataclasses import dataclass, field
+from typing import Protocol
 
-from PIL import Image, ImageDraw
-
-from mk20deck.layout import DeviceLayout
-from mk20deck.render.fonts import font
+log = logging.getLogger(__name__)
 
 TABS = [("net", "网络"), ("provider", "模型商"), ("model", "模型"), ("test", "连接测试"), ("info", "设备信息")]
 PROVIDERS = [  # (id, label, domestic)
@@ -27,7 +32,66 @@ MODELS = {  # example names only — the real list comes from the provider at ru
     "openai": ["gpt-5", "gpt-5-mini"], "anthropic": ["claude-sonnet-4.5", "claude-haiku-4.5"],
     "gemini": ["gemini-2.5-pro", "gemini-2.5-flash"]}
 WEB_HINT = "密钥/Wi-Fi 密码不在设备上输入：请在 Mac 端或网页 http://172.30.250.1:8780 设置"
-BG, FG, DIM, ACC, OK, BAD = (14, 16, 20), (235, 235, 240), (120, 125, 135), (80, 170, 255), (90, 210, 120), (240, 90, 90)
+DEFAULTS = {"profile": "mac_proxy", "proxy_port": 7890, "provider": "qwen", "model": "qwen3-max",
+            "brightness": 80, "volume": 50}
+DEVICE_PATH = "/data/mk20/settings.json"
+NET_KEYS = ("profile", "proxy_port")
+
+
+def default_settings_path() -> str:
+    if os.environ.get("MK20_SETTINGS"):
+        return os.environ["MK20_SETTINGS"]
+    if os.path.isdir("/data/mk20"):
+        return DEVICE_PATH
+    return os.path.join(os.path.expanduser("~"), ".config", "mk20-agent-deck", "settings.json")
+
+
+class SettingsStore:
+    """Atomic JSON persistence; unknown keys ignored, bad files fall back to defaults."""
+
+    def __init__(self, path: str | None = None) -> None:
+        self.path = path or default_settings_path()
+
+    @classmethod
+    def temp(cls) -> "SettingsStore":
+        fd, p = tempfile.mkstemp(prefix="mk20-settings-", suffix=".json")
+        os.close(fd)
+        os.unlink(p)
+        return cls(p)
+
+    def load(self) -> dict:
+        out = dict(DEFAULTS)
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                d = json.load(f)
+            out.update({k: d[k] for k in DEFAULTS if k in d and type(d[k]) is type(DEFAULTS[k])})
+        except (OSError, ValueError):
+            pass
+        return out
+
+    def save(self, cfg: dict) -> None:
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({k: cfg[k] for k in DEFAULTS}, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)
+
+
+class SettingsApplier(Protocol):
+    def apply(self, changes: dict, full: dict) -> tuple[bool, str]: ...
+
+
+@dataclass
+class LoggingApplier:
+    """Stub: records what would be applied (network profile, provider…); changes nothing."""
+    calls: list = field(default_factory=list)
+
+    def apply(self, changes: dict, full: dict) -> tuple[bool, str]:
+        self.calls.append(dict(changes))
+        log.info("settings apply (stub, no real change): %s", changes)
+        return True, "已应用（仅保存配置，网络/模型切换待实现）"
 
 
 @dataclass
@@ -41,13 +105,15 @@ class Item:
 
 
 @dataclass
-class SettingsMock:
+class SettingsPage:
+    store: SettingsStore = field(default_factory=SettingsStore.temp)
+    applier: SettingsApplier = field(default_factory=LoggingApplier)
     active: bool = False
     tab: str = "net"
     focus: int = 0
-    saved: dict = field(default_factory=lambda: {"profile": "mac_proxy", "proxy_port": 7890, "provider": "qwen",
-                                                  "model": "qwen3-max"})
+    saved: dict = field(default_factory=dict)
     pending: dict = field(default_factory=dict)
+    confirm_net: bool = False
     keys_set: dict = field(default_factory=lambda: {"qwen": True, "openai": True})  # mock: which providers have an API key on file
     test_result: str | None = None
     toast: str | None = None
@@ -55,6 +121,10 @@ class SettingsMock:
     armed: bool = False
     exit_to: str | None = None   # "L4" | "L1" after leaving
     log: list = field(default_factory=list)
+    version: int = 0
+
+    def __post_init__(self) -> None:
+        self.saved = self.store.load()
 
     # ------------------------------------------------------------- model
     def cfg(self, k: str):
@@ -75,7 +145,9 @@ class SettingsMock:
             return [Item(f"model:{m}", m, "", c("model") == m) for m in MODELS[c("provider")]]
         if self.tab == "test":
             return [Item("run_test", "测试连接", self.test_result or "按下测试")]
-        return [Item("i_fw", "固件", "1.1.4", readonly=True), Item("i_kernel", "内核", "5.4.61 #221", readonly=True),
+        return [Item("brightness", "亮度", f"{c('brightness')}%", adjustable=True),
+                Item("volume", "音量", f"{c('volume')}%", adjustable=True),
+                Item("i_fw", "固件", "1.1.4", readonly=True), Item("i_kernel", "内核", "5.4.61 #221", readonly=True),
                 Item("i_ip", "IP(ECM)", "172.30.250.2", readonly=True), Item("i_gd32", "GD32", "V2.32", readonly=True),
                 Item("i_net", "出口", "Mac 代理" if c("profile") == "mac_proxy" else "Wi-Fi", readonly=True)]
 
@@ -86,12 +158,14 @@ class SettingsMock:
     # ------------------------------------------------------------- input (doc coords / knob actions)
     def open(self) -> None:
         self.active, self.tab, self.focus, self.exit_to, self.dirty = True, "net", 0, None, True
-        self._say("进入设置（草案）")
+        self._say("进入设置")
 
     def key(self, col: int, row: int) -> None:
         self.dirty = True
         self.toast = None
         armed, self.armed = self.armed, False
+        if col != 2 or row != 4:
+            self.confirm_net = False
         if row == 1:
             self.tab, self.focus = TABS[col - 1][0], 0
             return
@@ -109,6 +183,7 @@ class SettingsMock:
             self._leave("L4")
         elif col == 2:
             self.apply()
+            return
         elif col == 3:
             self.pending.clear()
             self._say("已撤销未应用的改动")
@@ -119,7 +194,7 @@ class SettingsMock:
             self._leave("L1")
 
     def _leave(self, page: str) -> None:
-        self.active, self.exit_to, self.pending = False, page, {}
+        self.active, self.exit_to, self.pending, self.confirm_net = False, page, {}, False
         self.log.append(f"离开设置 -> {page}")
 
     def _choose(self, it: Item) -> None:
@@ -128,15 +203,15 @@ class SettingsMock:
             return
         k, _, v = it.id.partition(":")
         if k == "provider":
-            self.pending["provider"] = v
+            self._stage("provider", v)
             if self.cfg("model") not in MODELS[v]:
-                self.pending["model"] = MODELS[v][0]
+                self._stage("model", MODELS[v][0])
             if not self.keys_set.get(v):
                 self._say(f"{it.label} 尚无 API Key — " + WEB_HINT)
         elif k in ("profile", "model"):
-            self.pending[k] = v
-        elif k == "proxy_port":
-            self._say("旋转 K1 调整端口")
+            self._stage(k, v)
+        elif it.adjustable:
+            self._say(f"旋转 K1 调整{it.label}")
         elif k == "run_test":
             self.run_test()
 
@@ -149,21 +224,44 @@ class SettingsMock:
             self._choose(items[self.focus])
         elif k == 1 and action in ("cw", "ccw"):
             it = items[self.focus] if items else None
+            sign = 1 if action == "cw" else -1
             if it and it.id == "proxy_port":
-                self.pending["proxy_port"] = max(1, min(65535, self.cfg("proxy_port") + (1 if action == "cw" else -1)))
+                self._stage("proxy_port", max(1, min(65535, self.cfg("proxy_port") + sign)))
+            elif it and it.id in ("brightness", "volume"):
+                self._stage(it.id, max(0 if it.id == "volume" else 10, min(100, self.cfg(it.id) + 10 * sign)))
             else:
                 self._say("此项不可调")
         elif k == 1 and action == "press":
             self._say(f"当前：{self.summary()}")
 
+    def _stage(self, k: str, v) -> None:
+        if v == self.saved.get(k):
+            self.pending.pop(k, None)
+        else:
+            self.pending[k] = v
+        self.confirm_net = False
+
     def apply(self) -> None:
-        if not self.pending:
+        changes = {k: v for k, v in self.pending.items() if self.saved.get(k) != v}
+        if not changes:
+            self.pending.clear()
             self._say("没有改动")
             return
-        self.saved.update(self.pending)
+        if any(k in NET_KEYS for k in changes) and not self.confirm_net:
+            self.confirm_net = True
+            self._say("将切换网络出口，可能中断模型连接 — 再按一次「应用」确认")
+            return
+        self.confirm_net = False
+        full = {**self.saved, **changes}
+        ok, msg = self.applier.apply(changes, full)
+        if not ok:
+            self._say(f"应用失败：{msg}")
+            return
+        self.saved = full
+        self.store.save(self.saved)
         self.pending.clear()
         self.test_result = None
-        self._say("已应用（SIM：仅状态，不改真实网络）")
+        self._say(msg)
 
     def run_test(self) -> None:
         p = self.cfg("provider")
@@ -182,64 +280,6 @@ class SettingsMock:
 
     def state(self) -> dict:
         return {"active": self.active, "tab": self.tab, "focus": self.focus, "saved": dict(self.saved),
-                "pending": dict(self.pending), "test": self.test_result, "toast": self.toast}
+                "pending": dict(self.pending), "test": self.test_result, "toast": self.toast,
+                "confirm_net": self.confirm_net}
 
-    # ------------------------------------------------------------- render
-    def render(self, lay: DeviceLayout) -> Image.Image:
-        img = Image.new("RGB", (lay.width, lay.height), (0, 0, 0))
-        items = self.items()
-        for r in lay.keys:
-            c, w = lay.fw_to_doc(r.col, r.row)
-            img.paste(self._key(c, w, items), (r.x, r.y))
-        s = lay.subscreen
-        img.paste(self._sub(items, s.w, s.h), (s.x, s.y))
-        self.dirty = False
-        return img
-
-    def _face(self, title: str, sub: str = "", *, hi=False, chosen=False, dim=False, color=FG) -> Image.Image:
-        im = Image.new("RGB", (128, 128), BG)
-        d = ImageDraw.Draw(im)
-        if chosen:
-            d.rounded_rectangle((4, 4, 123, 123), 14, fill=(22, 48, 80))
-        if hi:
-            d.rounded_rectangle((3, 3, 124, 124), 14, outline=ACC, width=4)
-        d.text((64, 52), title, font=font(22 if len(title) <= 5 else 17, bold=True), fill=DIM if dim else color,
-               anchor="mm")
-        if sub:
-            d.text((64, 90), sub, font=font(15), fill=OK if chosen else DIM, anchor="mm")
-        if chosen:
-            d.text((112, 16), "✓", font=font(18, bold=True), fill=OK, anchor="mm")
-        return im
-
-    def _key(self, c: int, w: int, items: list[Item]) -> Image.Image:
-        if w == 1:
-            tid, name = TABS[c - 1]
-            return self._face(name, "", chosen=tid == self.tab, color=ACC if tid == self.tab else FG)
-        if w in (2, 3):
-            idx = (w - 2) * 5 + (c - 1)
-            if idx >= len(items):
-                return self._face("", "")
-            it = items[idx]
-            col = OK if it.value.startswith("成功") else BAD if it.value.startswith("失败") else FG
-            return self._face(it.label, it.value, hi=idx == self.focus, chosen=it.chosen, dim=it.readonly,
-                              color=col if it.id == "run_test" else FG)
-        return [self._face("返回", "L4"), self._face("应用", f"{len(self.pending)} 项改动" if self.pending else "",
-                                                   color=OK if self.pending else DIM),
-                self._face("撤销", ""), self._face("Mac/网页", "填密钥"), self._face("回 L1", "")][c - 1]
-
-    def _sub(self, items: list[Item], w: int, h: int) -> Image.Image:
-        im = Image.new("RGB", (w, h), (8, 10, 14))
-        d = ImageDraw.Draw(im)
-        d.text((10, 8), f"设置 · {dict(TABS)[self.tab]}   (草案 SIM)", font=font(18, bold=True), fill=ACC)
-        d.text((10, 38), self.summary() + ("  *未应用" if self.pending else ""), font=font(15),
-               fill=(255, 210, 90) if self.pending else FG)
-        msg = self.toast or (items[self.focus].label + "：" + (items[self.focus].value or "")) if items else ""
-        d.text((10, 64), msg[:34], font=font(14), fill=FG)
-        if len(msg) > 34:
-            d.text((10, 84), msg[34:68], font=font(14), fill=FG)
-        # two encoder halves, like the stock ScreenKey "Encoder 214x142" regions
-        d.line((0, h - 30, w, h - 30), fill=(40, 44, 52))
-        d.line((w // 2, h - 30, w // 2, h), fill=(40, 44, 52))
-        d.text((10, h - 22), "K1 ⟲⟳ 调值 · 按=当前", font=font(13), fill=DIM)
-        d.text((w // 2 + 10, h - 22), "K2 ⟲⟳ 选项 · 按=确认", font=font(13), fill=DIM)
-        return im

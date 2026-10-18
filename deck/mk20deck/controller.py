@@ -16,6 +16,7 @@ from typing import Callable
 from .adapters.base import BackendUnavailable, ModeAdapter
 from .config import DeckConfig
 from .model import (ATTENTION_STATES, MODE_CYCLE, PRIORITY, ActionResult, Mode, Session, State, Tool)
+from .settings import SettingsPage
 from .slots import N_SLOTS, SlotManager
 
 log = logging.getLogger(__name__)
@@ -120,6 +121,7 @@ class SubView:
 class DeckView:
     keys: list[KeyView]
     sub: SubView
+    settings: object | None = None  # SettingsPage when page == "LS"
 
 
 @dataclass
@@ -136,7 +138,8 @@ class _Press:
 class Controller:
     def __init__(self, cfg: DeckConfig, adapters: dict[Mode, ModeAdapter], state: dict | None = None,
                  clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
-                 sim: bool = False, on_state_change: Callable[[dict], None] | None = None) -> None:
+                 sim: bool = False, on_state_change: Callable[[dict], None] | None = None,
+                 settings: "SettingsPage | None" = None) -> None:
         self.cfg = cfg
         self.adapters = adapters
         self.clock = clock
@@ -162,6 +165,7 @@ class Controller:
         self.scroll = 0
         self.version = 0  # bumps whenever the view may have changed
         self.log: list[str] = []
+        self.settings = settings or SettingsPage()
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -233,8 +237,26 @@ class Controller:
         self._touch()
 
     # ------------------------------------------------------------------ input
+    # ------------------------------------------------------------------ settings page (LS)
+    def open_settings(self) -> None:
+        self.presses.clear()
+        self.settings.open()
+        self.page = "LS"
+        self._touch()
+
+    def _settings_after(self) -> None:
+        st = self.settings
+        if not st.active:
+            self.page = st.exit_to or "L1"
+        self._touch()
+
     def on_key(self, col: int, row: int, pressed: bool) -> None:
         """1-based doc coordinates."""
+        if self.page == "LS":
+            if pressed:
+                self.settings.key(col, row)
+            self._settings_after()
+            return
         t = self.clock()
         kr = role_at(self.page, col, row)
         if kr is None:
@@ -253,6 +275,13 @@ class Controller:
         self._touch()
 
     def on_knob(self, knob: int, kind: str) -> None:
+        if self.page == "LS":
+            if kind in ("cw", "ccw"):
+                self.settings.knob(knob, kind)
+            elif kind == "up":
+                self.settings.knob(knob, "press")
+            self._settings_after()
+            return
         t = self.clock()
         pk = ("knob", knob)
         if kind == "down":
@@ -260,6 +289,9 @@ class Controller:
         elif kind == "up":
             p = self.presses.pop(pk, None)
             if p and not p.long_fired and not p.cancelled and t - p.t0 < LONG_PRESS:
+                if knob == 1 and self.page == "L4":
+                    self.open_settings()  # SETTINGS.md: short K1 press on L4 opens settings
+                    return
                 if knob == 1:
                     s = self.mgr.selected_session()
                     self._say(f"effort：{s.effort or '未知'}（只读）· {self.adapter.capabilities().effort_set or '可调'}"
@@ -482,6 +514,9 @@ class Controller:
     # ------------------------------------------------------------------ view
     def view(self) -> DeckView:
         t = self.clock()
+        if self.page == "LS":
+            sv = SubView("LS", self.mode, True, "", None, None, None, 0, 0, None, "", self.ptt_held, 0, self.sim)
+            return DeckView([], sv, settings=self.settings)
         if self.toast and t >= self.toast[1]:
             self.toast = None
         mgr, caps = self.mgr, self.adapter.capabilities()

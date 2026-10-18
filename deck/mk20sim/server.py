@@ -92,7 +92,7 @@ async function loop(){try{L=L||await (await fetch('/layout')).json();RUN=await (
  const st=await (await fetch('/state')).json();document.getElementById('state').textContent=
  `page=${st.page}  mode=${st.mode}  ptt=${st.ptt}  scroll=${st.scroll}\nselected=${st.selected}\ntoast=${st.toast||''}`+
  `\nlatency: in ${st.latency.input_ms}±${st.latency.input_jitter_ms} / router ${st.latency.router_ms}±${st.latency.router_jitter_ms} / frame ${st.latency.frame_ms}±${st.latency.frame_jitter_ms} ms  queued=${st.queued_inputs} lag=${st.frame_lag_ms}`+
- (st.settings.active?`\nSETTINGS(草案) tab=${st.settings.tab} focus=${st.settings.focus} pending=${JSON.stringify(st.settings.pending)} test=${st.settings.test||''}`:`\n(L4 上 K1 短按 = 进入设置草案)`);
+ (st.settings.active?`\nSETTINGS tab=${st.settings.tab} focus=${st.settings.focus} pending=${JSON.stringify(st.settings.pending)} test=${st.settings.test||''}`:`\n(L4 上 K1 短按 = 进入设置)`);
  const lg=document.getElementById('log');const outs=live?st.outputs:(RUN.outputs||[]);
  lg.dataset.src=live?'live':'run';lg.innerHTML=(live?'':'<span class=run>— 用例运行日志: '+RUN.current+' —</span>\n')+outs.map(o=>`<span class=${o.kind}>${o.t.toFixed(3).padStart(9)}  ${o.kind.padEnd(6)} ${o.text.replace(/</g,'&lt;')}</span>`).join('\n');lg.scrollTop=1e9;}catch(e){}
  setTimeout(loop,120);}
