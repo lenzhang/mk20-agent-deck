@@ -172,7 +172,7 @@ FAIL composite setup rc=$grc during probation"; src=1; fi
   else log ERROR selftest "FAILED: not confirming; restoring stock ACM+KD+adb now"
     if [ -f "$TM/gadget-boot.sh" ] && composite_up; then
       # same contract as the confirm waiter: retry once (rc 3 = stuck, already escalated), then persist stock + reboot
-      rbn() { MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rollback-now >> "$LOGDIR/gadget.log" 2>&1 6>&- 8>&- 9>&-; }
+      rbn() { MK20_GEN='' MK20_RB_CALLER_RETRIES=1 MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rollback-now >> "$LOGDIR/gadget.log" 2>&1 6>&- 8>&- 9>&-; }
       rbn; rrc=$?
       if [ $rrc != 0 ] && [ $rrc != 3 ]; then log WARN selftest "rollback rc=$rrc; retrying once"; sleep "${MK20_RB_RETRY_S:-20}"; rbn; rrc=$?; fi
       if [ $rrc != 0 ] && [ $rrc != 3 ]; then log ERROR selftest "rollback failed twice (rc=$rrc) -> mk20-no-composite + reboot"

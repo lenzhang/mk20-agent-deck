@@ -6,7 +6,7 @@
 # default 5 s) that ends in anything but configured (a bus reset/glitch the poll caught as idle). A long suspend
 # (Mac sleep) is not a flap: suspend, resume and a resume reset / unplug after it are logged, not counted.
 # Single instance (flock on fd 8, not inherited by the rollback). The stopfile is re-checked right before rollback.
-# The busy marker is cleared after every rollback attempt. A failed rollback is retried (MK20_FLAP_TRIES, default 3,
+# The busy marker is cleared by flapmon only if it created it (sticky across retries; kept after a final rc 4). A failed rollback is retried (MK20_FLAP_TRIES, default 3,
 # MK20_FLAP_RETRY_S apart); if all fail, the persistent mk20-no-composite flag is set and the watcher hard-resets
 # (cmd-reboot), so the next boot runs stock until the flag is deleted.
 # The rollback command bounds itself (gadget.sh --rollback-now: transition mutex + owner-local supervisor that kills
@@ -45,13 +45,14 @@ while [ ! -f "$STOP" ]; do
     if [ "$cnt" -ge "$N" ]; then
       [ -f "$STOP" ] && exit 0
       echo "flapmon $now: FLAPPING -> rollback" >> "$LOG"
-      try=1
+      try=1; mine=0
       while :; do
         # r5 #6: only clear a marker we created, and never after a refusal (rc 4: another owner holds the mutex and
         # owns gadget.busy; it clears it itself under the mutex). rc 5 = stale generation: our composite is gone.
-        mine=0; [ -e "$BUSY" ] || { touch "$BUSY"; mine=1; }
+        # GPT r7: ownership is sticky across retries, so a marker we created is removed on every terminal path.
+        [ "$mine" = 1 ] || [ -e "$BUSY" ] || { touch "$BUSY"; mine=1; }
         "$@" 8>&-; rc=$?
-        [ "$rc" = 4 ] || [ "$mine" = 0 ] || rm -f "$BUSY"
+        [ "$rc" = 4 ] || [ "$mine" = 0 ] || { rm -f "$BUSY"; mine=0; }
         [ "$rc" = 0 ] && exit 0
         [ "$rc" = 5 ] && { echo "flapmon $(up): rollback stale (rc 5, newer composite) -> exit" >> "$LOG"; exit 0; }
         [ "$rc" = 3 ] && { echo "flapmon $(up): rollback STUCK (rc 3, it escalated itself) -> no retry" >> "$LOG"; exit 1; }
@@ -59,6 +60,7 @@ while [ ! -f "$STOP" ]; do
         [ "$try" -ge "${MK20_FLAP_TRIES:-3}" ] && break
         try=$((try+1)); sleep "${MK20_FLAP_RETRY_S:-20}"
       done
+      [ "$mine" = 1 ] && [ "$rc" != 4 ] && rm -f "$BUSY"   # after a final refusal the owner may still hold it (mk20d caps its wait)
       # still not stock: persist stock mode (flag file, read at boot) and hard-reset via the rescue watcher
       echo "flapmon $(up): rollback failed $try times -> ${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite} + reboot" >> "$LOG"
       touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync

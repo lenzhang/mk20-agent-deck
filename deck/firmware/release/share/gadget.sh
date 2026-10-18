@@ -63,7 +63,9 @@ MODE=${1:-}
 if [ "$MODE" != --run ] && [ "$MODE" != --boot ] && [ "$MODE" != --rollback-now ]; then
   Q=/mnt/SDCARD/job.sh; [ -e $Q ] && { echo "watcher queue busy ($Q exists)"; exit 1; }
   A=--run; [ "${1:-}" = --rollback-queued ] && A=--rollback-now
-  echo "MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh $(readlink -f "$0") $A" > $Q.tmp
+  # Opus r7 BLOCKER: the watcher kills a job tree after MK20_JOB_TIMEOUT (300 s) - shorter than the setup/rollback
+  # supervisors' own bounds - so the transition is detached from the job (reparented to init, no FAT job log held).
+  echo "( MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh $(readlink -f "$0") $A </dev/null >/dev/null 2>&1 7>&- & ); echo started" > $Q.tmp
   sha256sum $Q.tmp | awk '{print $1"  job.sh"}' > $Q.sha256.tmp; mv -f $Q.tmp $Q; mv -f $Q.sha256.tmp $Q.sha256
   echo "queued to watcher"; exit 0
 fi
@@ -140,8 +142,8 @@ cleanup() {
 # owner holds it and it is released when the owner exits. A rollback that finds stock verified is a no-op: exit 0
 # always means stock is up. Every lock step is checked (fail closed: no mutation without the mutex).
 # Owner-local bounded supervisor: the rollback runs cleanup in its own child and waits at most MK20_RB_TIMEOUT
-# (default 240 s); on timeout it stops, kills and reaps ITS OWN child tree before releasing the mutex. No caller ever
-# kills another owner; a waiter that cannot get the mutex in MK20_RB_LOCK_TRIES*0.25 s (default 300 s) gives up (rc 1).
+# (default 330 s); on timeout it stops, kills and reaps ITS OWN child tree before releasing the mutex. No caller ever
+# kills another owner; a waiter that cannot get the mutex in MK20_RB_LOCK_TRIES*0.25 s (default 900 s) gives up (rc 4).
 # >>> rollback-block (tests extract from here to the matching end marker)
 TL=/tmp/mk20/transition.lock
 stock_ok() { [ -e $C/acm.usb0 ] && [ ! -e $C/ecm.usb0 ] && [ ! -e $C/hid.usb0 ] && [ -n "$(udc_now)" ] &&
@@ -157,7 +159,11 @@ tl_lock() {
   n=0; until flock -n 7; do n=$((n+1)); [ "$n" -ge "$1" ] && { exec 7>&-; return 1; }; sleep 0.25; done
 }
 kids() { for d in /proc/[0-9]*; do [ "$(awk '/^PPid:/{print $2}' "$d/status" 2>/dev/null)" = "$1" ] && echo "${d#/proc/}"; done; }
-kill_tree() { kill -STOP "$1" 2>/dev/null; for k in $(kids "$1"); do kill_tree "$k"; done; kill -9 "$1" 2>/dev/null; }
+# kill_tree prints "pid:starttime" for every process it stops (taken while STOPped, before SIGKILL reparents the
+# descendants to init) so bounded_wait can check the WHOLE tree afterwards (r6: an unkillable grandchild may hold fd 7).
+kill_tree() { kill -STOP "$1" 2>/dev/null; echo "$1:$(pstart "$1")"; for k in $(kids "$1"); do kill_tree "$k"; done; kill -9 "$1" 2>/dev/null; }
+# any_alive "<pid:start ...>": 0 if any listed process still runs with the same start time (not a zombie)
+any_alive() { for e in $1; do [ -n "${e#*:}" ] && [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && return 0; done; return 1; }
 # uint_cap <value> <default> <min> <max>: a validated, clamped decimal (no octal, no overflow: >6 digits = max).
 # Every timeout/lock-try knob goes through this BEFORE any lock or fork (r5: bad arithmetic must not kill the owner).
 uint_cap() {
@@ -168,50 +174,74 @@ uint_cap() {
 }
 # r5 #5: cleanup worst case on a HEALTHY board = kd_stop<=32 + umount<=10 + kd_start<=23 + readd_adb (g1 wait<=60,
 # 5, add-adb ~4 x7, 6x15 re-add window) ~= 260 s -> 330 s so a healthy rollback incl. add-adb is never cut off.
+RBRETRY=$(uint_cap "${MK20_RB_RETRY_S:-}" 20 0 300)       # queued/manual rollback: pause before its one retry (s)
 RBT=$(uint_cap "${MK20_RB_TIMEOUT:-}" 330 1 900)          # rollback / post-timeout cleanup bound (s)
 RBTRIES=$(uint_cap "${MK20_RB_LOCK_TRIES:-}" 3600 1 4800)  # rollback mutex wait (x0.25 s) >= SUT+RBT+30 s owner hold
 SUTRIES=$(uint_cap "${MK20_SETUP_LOCK_TRIES:-}" 40 1 4800) # setup mutex wait (x0.25 s)
 SUT=$(uint_cap "${MK20_SETUP_TIMEOUT:-}" 450 1 1800)       # whole setup incl. its own failsafe (~60 s + cleanup <=330 s)
 # bounded_wait <pid> <s>: 0 = the child exited in time (rc in BW_RC); 1 = timed out: its whole tree was stopped,
 # SIGKILLed and the child reaped; 2 = timed out AND still alive 10 s after SIGKILL (D state, e.g. a stuck UDC write):
-# not waited for (an unbounded wait would wedge us). Only ever used on OUR OWN children.
+# not waited for (an unbounded wait would wedge us). "Alive" covers EVERY process of the tree snapshotted by
+# kill_tree, not just the root (r6). Only ever used on OUR OWN children.
 bounded_wait() {
   bst=$(pstart "$1"); bi=0; BW_RC=1
   while [ -n "$bst" ] && [ "$(pstart "$1")" = "$bst" ] && [ $bi -lt $(($2*4)) ]; do sleep 0.25; bi=$((bi+1)); done
   if [ -n "$bst" ] && [ "$(pstart "$1")" = "$bst" ]; then
-    kill_tree "$1"; bi=0
-    while [ "$(pstart "$1")" = "$bst" ] && [ $bi -lt 40 ]; do sleep 0.25; bi=$((bi+1)); done
-    [ "$(pstart "$1")" = "$bst" ] && return 2
+    bsnap="$1:$bst $(kill_tree "$1")"; bi=0
+    while any_alive "$bsnap" && [ $bi -lt 40 ]; do sleep 0.25; bi=$((bi+1)); done
+    any_alive "$bsnap" && return 2
     wait "$1" 2>/dev/null; return 1
   fi
   wait "$1" 2>/dev/null; BW_RC=$?; return 0
 }
 # escalate <why>: no transition can complete (an unkillable child holds fd 7, or stock is not reached): persist
 # stock mode (flag read at boot) and hard-reset via the rescue watcher (cmd-reboot) - same path as flapmon's.
+# r6: the writes run in a bounded child WITHOUT fd 7 (a hung FAT write cannot wedge the mutex); success = both files
+# exist afterwards (sync cannot mask a failed touch). 0 = escalated, 1 = could not persist (caller exits 1, not 3).
 escalate() {
-  log "ESCALATE: $1 -> ${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite} + reboot"; rb_status "$2"
-  touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync
+  EF=${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}; ER=${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}
+  log "ESCALATE: $1 -> $EF + reboot"; rb_status "$2"
+  ( touch "$EF" && touch "$ER"; r=$?; sync; exit $r ) </dev/null 7>&- &
+  bounded_wait $! 20; ebw=$?
+  [ "$ebw" = 0 ] && [ "$BW_RC" = 0 ] && [ -e "$EF" ] && [ -e "$ER" ] && return 0
+  log "ESCALATE FAILED (bw=$ebw rc=$BW_RC): $EF / $ER not persisted"; return 1
 }
+# stuck <why> <status>: rc-3 exit (escalated; flapmon/confirm waiter do not retry). Clears gadget.busy like every
+# other exit under the mutex; rc 1 if the escalation itself could not be persisted.
+stuck() { rm -f /tmp/mk20/gadget.busy; escalate "$1" "$2" && exit 3; exit 1; }
 # Exit codes of --rollback-now: 0 stock verified | 1 not verified | 3 stuck+escalated | 4 refused (mutex busy: another
 # owner is mid-transition and owns gadget.busy) | 5 stale (r5 #7: MK20_GEN names an older composite than the current
 # generation in $GENF -> a queued rollback from a dead composite must not tear down a newer one; nothing touched).
 GENF=/tmp/mk20/composite.gen
+# stale only when a DIFFERENT current generation is published (GPT r7: a missing/empty token is not "stale")
+gen_stale() { gcur=$(cat "$GENF" 2>/dev/null); [ -n "${MK20_GEN:-}" ] && [ -n "$gcur" ] && [ "$gcur" != "$MK20_GEN" ]; }
 if [ "${1:-}" = --rollback-now ]; then
-  tl_lock "$RBTRIES" || { log "rollback: transition mutex not acquired (busy or lock error) -> refused"; exit 4; }
-  if [ -n "${MK20_GEN:-}" ] && [ "$(cat "$GENF" 2>/dev/null)" != "$MK20_GEN" ]; then
+  # GPT r7: a stale request that could not get the mutex is rc 5 (no-op), never rc 4 (callers would retry/escalate)
+  tl_lock "$RBTRIES" || { gen_stale && { log "rollback: mutex busy and request stale ($MK20_GEN) -> ignored"; exit 5; }
+    log "rollback: transition mutex not acquired (busy or lock error) -> refused"; exit 4; }
+  if gen_stale; then
     log "rollback: stale request for generation $MK20_GEN (current $(cat "$GENF" 2>/dev/null || echo none)) -> ignored"; exit 5; fi
   if stock_ok; then log "rollback already done (stock verified)"; exit 0; fi
   log "rollback requested"
-  ( trap - EXIT INT TERM; cleanup ) </dev/null &
-  CP=$!
-  bounded_wait $CP "$RBT"; bw=$?
-  [ $bw = 0 ] || log "rollback cleanup exceeded ${RBT}s -> killing own child tree $CP ($([ $bw = 1 ] && echo killed+reaped || echo UNKILLABLE))"
-  [ $bw = 2 ] && { escalate "rollback cleanup $CP unkillable (D state)" rollback-STUCK; exit 3; }   # flapmon: rc 3 = no retry
-  rm -f /tmp/mk20/gadget.busy   # always, still under the mutex (a killed cleanup never reached its own rm)
-  i=0; while ! stock_ok && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done   # KD's own setusbconfig reset can lag
-  if stock_ok; then log "rollback verified"; rb_status rollback-verified; exit 0; fi
-  rb_status rollback-NOT-verified
-  log "rollback NOT verified (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now) ttyGS0=$([ -L /dev/ttyGS0 ] && echo link || echo dev)) -> mutex released"; exit 1
+  # r6: flapmon, the confirm waiter and mk20d retry/escalate themselves (MK20_RB_CALLER_RETRIES=1: one attempt, rc 1).
+  # A queued/manual run has nobody behind it: it retries once (still under the mutex) and then escalates (rc 3).
+  RBA=2; [ "${MK20_RB_CALLER_RETRIES:-0}" = 1 ] && RBA=1; a=0
+  while :; do a=$((a+1))
+    ( trap - EXIT INT TERM; cleanup ) </dev/null &
+    CP=$!
+    bounded_wait $CP "$RBT"; bw=$?
+    [ $bw = 0 ] || log "rollback cleanup exceeded ${RBT}s -> killing own child tree $CP ($([ $bw = 1 ] && echo killed+reaped || echo UNKILLABLE))"
+    [ $bw = 2 ] && stuck "rollback cleanup tree $CP unkillable (D state)" rollback-STUCK   # flapmon: rc 3 = no retry
+    rm -f /tmp/mk20/gadget.busy   # always, still under the mutex (a killed cleanup never reached its own rm)
+    i=0; while ! stock_ok && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done   # KD's own setusbconfig reset can lag
+    if stock_ok; then log "rollback verified"; rb_status rollback-verified; exit 0; fi
+    rb_status rollback-NOT-verified
+    log "rollback NOT verified, attempt $a/$RBA (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now) ttyGS0=$([ -L /dev/ttyGS0 ] && echo link || echo dev))"
+    [ $a -ge $RBA ] && break
+    sleep "$RBRETRY"
+  done
+  [ $RBA = 1 ] && exit 1   # the caller retries / escalates
+  stuck "queued/manual rollback not verified after $RBA attempts" rollback-NOT-verified-ESCALATED
 fi
 # <<< rollback-block
 
@@ -241,13 +271,13 @@ if [ $bw = 0 ]; then
   stock_ok || escalate "setup failed (rc $BW_RC) and its failsafe did not reach stock" setup-failsafe-NOT-verified
   rm -f /tmp/mk20/gadget.busy; exit "$BW_RC"
 fi
-[ $bw = 2 ] && { escalate "setup tree $SP unkillable after ${SUT}s (D state)" setup-STUCK; exit 3; }
+[ $bw = 2 ] && stuck "setup tree $SP unkillable after ${SUT}s (D state)" setup-STUCK
 log "SETUP TIMEOUT: exceeded ${SUT}s -> killed+reaped own setup tree $SP; bounded cleanup"
 ( trap - EXIT INT TERM; OK=0; cleanup ) </dev/null &
 SC=$!
 bounded_wait $SC "$RBT"; bw=$?
 [ $bw = 0 ] || log "cleanup after setup timeout exceeded ${RBT}s -> killed+reaped own cleanup tree $SC"
-[ $bw = 2 ] && { escalate "cleanup tree $SC unkillable (D state)" setup-STUCK; exit 3; }
+[ $bw = 2 ] && stuck "cleanup tree $SC unkillable (D state)" setup-STUCK
 rm -f /tmp/mk20/gadget.busy
 i=0; while ! stock_ok && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
 if stock_ok; then rb_status setup-timeout; else escalate "setup timeout and cleanup did not reach stock" setup-timeout-NOT-verified; fi
@@ -257,6 +287,7 @@ exit 1
 setup_main() {
 touch /tmp/mk20-flapmon-stop   # a re-run: any old flap monitor / confirm waiter exits (new ones start below)
 GEN="$(cut -d' ' -f1 /proc/uptime)-$$"; mkdir -p /tmp/mk20; echo "$GEN" > "$GENF.t" && mv -f "$GENF.t" "$GENF"   # under the mutex (r5 #7)
+[ "$(cat "$GENF" 2>/dev/null)" = "$GEN" ] || { log "FAIL cannot publish generation $GEN (nothing mutated)"; exit 1; }   # GPT r7
 log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
 
 trap cleanup EXIT
@@ -343,7 +374,7 @@ ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh.new && [ "$(sha256sum < 
 rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready
 FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
 { [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh.new && mv -f /tmp/mk20-flapmon.sh.new /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
-( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG" MK20_GEN="$GEN"
+( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG" MK20_GEN="$GEN" MK20_RB_CALLER_RETRIES=1
   exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
     sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
 FP=$!; i=0; while [ ! -f /tmp/mk20/flapmon.ready ] && [ $i -lt 40 ] && kill -0 $FP 2>/dev/null; do sleep 0.25; i=$((i+1)); done
@@ -352,7 +383,7 @@ log "flap monitor started (pid $FP)"
 if [ "$MODE" = --boot ]; then
   touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
 fi
-( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_GEN=$GEN MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] && exit 0; [ \$rc = 3 ] && exit 3; [ \$rc = 5 ] && exit 0; sleep 20; MK20_GEN=$GEN MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] || [ \$rc = 5 ] && exit 0; touch /mnt/SDCARD/mk20-no-composite && touch /mnt/SDCARD/cmd-reboot; sync" </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
+( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_GEN=$GEN MK20_RB_CALLER_RETRIES=1 MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] && exit 0; [ \$rc = 3 ] && exit 3; [ \$rc = 5 ] && exit 0; sleep 20; MK20_GEN=$GEN MK20_RB_CALLER_RETRIES=1 MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] || [ \$rc = 5 ] && exit 0; touch /mnt/SDCARD/mk20-no-composite && touch /mnt/SDCARD/cmd-reboot; sync" </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
 WP=$!; sleep 1; kill -0 $WP 2>/dev/null || [ -f /mnt/SDCARD/mk20-composite-ok ] || { OK=0; die "confirm waiter did not start -> rollback now"; }
 log "confirm window 180s started (pid $WP)"
 echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status

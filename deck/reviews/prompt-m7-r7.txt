@@ -1,0 +1,777 @@
+Review MK20 firmware changes (BusyBox 1.27.2 ash on device: flock only -sxun, no setsid/nohup). Goals: setup/rollback must never wedge the fd-7 transition mutex, never double-rollback, never let a stale rollback tear down a newer composite, must report success truthfully, and must escalate (mk20-no-composite + cmd-reboot) when stock cannot be reached. Report BLOCKER/MAJOR/MINOR with file:line and a concrete fix. Be concise. Do not run commands; review the diff only.
+Round 7. Diff c502516..d2d1ece applies Opus r5 #4 (detach KD fallback + add-adb adbd via double fork), #5 (MK20_RB_TIMEOUT default 330 s, setup 450 s, rollback mutex wait 900 s), #6 (flapmon clears only a gadget.busy it created and never after rc 4=refused), #7 + GPT r6 BLOCKER 3 (generation token /tmp/mk20/composite.gen written under the mutex; flapmon/confirm waiter pass MK20_GEN; mismatch -> rc 5 no-op), #9 ($KDSVC stop 7>&-, fd7 tests) and mk20d selftest rollback retry-once-then-escalate. KNOWN OPEN (not yet fixed, from GPT r6): bounded_wait checks only the root pid (unkillable grandchild holding fd 7 -> rc 1 not 2); direct/manual rollback that ends not-verified returns 1 with no escalation; escalate() masks touch failure with sync and can hang under the mutex; rc-3 early exits skip clearing gadget.busy. Verify the new changes, confirm/refine the known-open items, and look for new races. Full current gadget.sh, flapmon.sh and mk20d follow the diff.
+```diff
+diff --git a/deck/firmware/release/sbin/mk20d b/deck/firmware/release/sbin/mk20d
+index 4a56e4e..b143da4 100755
+--- a/deck/firmware/release/sbin/mk20d
++++ b/deck/firmware/release/sbin/mk20d
+@@ -170,7 +170,14 @@ FAIL composite setup rc=$grc during probation"; src=1; fi
+   if [ $src = 0 ]; then
+     if [ -f "$TM/rescue-loader.sh" ]; then sh "$TM/rescue-loader.sh" confirm "$V" && log INFO confirm "ok" || log INFO confirm "not pending/refused"; fi
+   else log ERROR selftest "FAILED: not confirming; restoring stock ACM+KD+adb now"
+-    [ -f "$TM/gadget-boot.sh" ] && composite_up && MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rollback-now >> "$LOGDIR/gadget.log" 2>&1; fi
++    if [ -f "$TM/gadget-boot.sh" ] && composite_up; then
++      # same contract as the confirm waiter: retry once (rc 3 = stuck, already escalated), then persist stock + reboot
++      rbn() { MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rollback-now >> "$LOGDIR/gadget.log" 2>&1 6>&- 8>&- 9>&-; }
++      rbn; rrc=$?
++      if [ $rrc != 0 ] && [ $rrc != 3 ]; then log WARN selftest "rollback rc=$rrc; retrying once"; sleep "${MK20_RB_RETRY_S:-20}"; rbn; rrc=$?; fi
++      if [ $rrc != 0 ] && [ $rrc != 3 ]; then log ERROR selftest "rollback failed twice (rc=$rrc) -> mk20-no-composite + reboot"
++        touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync; fi
++    fi; fi
+   ( health ) > "$ST/selftest-last.json" 2>/dev/null
+   if [ "${MK20_MAINT:-1}" = 1 ]; then
+     export MK20_REL="$REL" MK20_VERSION="$V"
+diff --git a/deck/firmware/release/share/flapmon.sh b/deck/firmware/release/share/flapmon.sh
+index 6432830..59fad34 100644
+--- a/deck/firmware/release/share/flapmon.sh
++++ b/deck/firmware/release/share/flapmon.sh
+@@ -47,8 +47,13 @@ while [ ! -f "$STOP" ]; do
+       echo "flapmon $now: FLAPPING -> rollback" >> "$LOG"
+       try=1
+       while :; do
+-        touch "$BUSY"; "$@" 8>&-; rc=$?; rm -f "$BUSY"
++        # r5 #6: only clear a marker we created, and never after a refusal (rc 4: another owner holds the mutex and
++        # owns gadget.busy; it clears it itself under the mutex). rc 5 = stale generation: our composite is gone.
++        mine=0; [ -e "$BUSY" ] || { touch "$BUSY"; mine=1; }
++        "$@" 8>&-; rc=$?
++        [ "$rc" = 4 ] || [ "$mine" = 0 ] || rm -f "$BUSY"
+         [ "$rc" = 0 ] && exit 0
++        [ "$rc" = 5 ] && { echo "flapmon $(up): rollback stale (rc 5, newer composite) -> exit" >> "$LOG"; exit 0; }
+         [ "$rc" = 3 ] && { echo "flapmon $(up): rollback STUCK (rc 3, it escalated itself) -> no retry" >> "$LOG"; exit 1; }
+         echo "flapmon $(up): rollback attempt $try failed rc=$rc" >> "$LOG"
+         [ "$try" -ge "${MK20_FLAP_TRIES:-3}" ] && break
+diff --git a/deck/firmware/release/share/gadget.sh b/deck/firmware/release/share/gadget.sh
+index 1e32e7b..5e33702 100755
+--- a/deck/firmware/release/share/gadget.sh
++++ b/deck/firmware/release/share/gadget.sh
+@@ -75,7 +75,7 @@ udc_now() { cat $G/UDC 2>/dev/null; }
+ # KD stop: procd may respawn appLunch.sh right after `stop`; killing that sh later orphaned its fresh KD
+ # (PPid 1) -> TWO KD after rollback (16:17 and 16:20). Kill appLunch.sh first, then KD, until both stay gone.
+ kd_stop() {
+-  [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1
++  [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1 7>&-
+   i=0; while [ $i -lt 15 ]; do
+     for p in $(pgrep -f /data/appLunch.sh); do kill $p 2>/dev/null; done
+     killall KeyboardDevice 2>/dev/null; sleep 1
+@@ -94,7 +94,7 @@ kd_start() {
+     while ! pgrep -f /data/KeyboardDevice >/dev/null && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
+     pgrep -f /data/KeyboardDevice >/dev/null || log "WARN KD not up 20 s after procd start"
+   else
+-    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 7>&- ) & }
++    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 7>&- ) & ); }   # detached (r5 #4): reparented to init
+   fi
+   sleep 3; n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" -le 1 ] || { log "WARN $n KeyboardDevice processes"; kd_reap_orphans; }
+ }
+@@ -166,10 +166,12 @@ uint_cap() {
+   [ ${#v} -gt 6 ] && { echo "$4"; return; }
+   [ "$v" -lt "$3" ] && v=$3; [ "$v" -gt "$4" ] && v=$4; echo "$v"
+ }
+-RBT=$(uint_cap "${MK20_RB_TIMEOUT:-}" 240 1 900)          # rollback / post-timeout cleanup bound (s)
+-RBTRIES=$(uint_cap "${MK20_RB_LOCK_TRIES:-}" 1200 1 4800)  # rollback mutex wait (x0.25 s)
++# r5 #5: cleanup worst case on a HEALTHY board = kd_stop<=32 + umount<=10 + kd_start<=23 + readd_adb (g1 wait<=60,
++# 5, add-adb ~4 x7, 6x15 re-add window) ~= 260 s -> 330 s so a healthy rollback incl. add-adb is never cut off.
++RBT=$(uint_cap "${MK20_RB_TIMEOUT:-}" 330 1 900)          # rollback / post-timeout cleanup bound (s)
++RBTRIES=$(uint_cap "${MK20_RB_LOCK_TRIES:-}" 3600 1 4800)  # rollback mutex wait (x0.25 s) >= SUT+RBT+30 s owner hold
+ SUTRIES=$(uint_cap "${MK20_SETUP_LOCK_TRIES:-}" 40 1 4800) # setup mutex wait (x0.25 s)
+-SUT=$(uint_cap "${MK20_SETUP_TIMEOUT:-}" 300 1 1800)       # whole setup incl. its own failsafe (s)
++SUT=$(uint_cap "${MK20_SETUP_TIMEOUT:-}" 450 1 1800)       # whole setup incl. its own failsafe (~60 s + cleanup <=330 s)
+ # bounded_wait <pid> <s>: 0 = the child exited in time (rc in BW_RC); 1 = timed out: its whole tree was stopped,
+ # SIGKILLed and the child reaped; 2 = timed out AND still alive 10 s after SIGKILL (D state, e.g. a stuck UDC write):
+ # not waited for (an unbounded wait would wedge us). Only ever used on OUR OWN children.
+@@ -190,8 +192,14 @@ escalate() {
+   log "ESCALATE: $1 -> ${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite} + reboot"; rb_status "$2"
+   touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync
+ }
++# Exit codes of --rollback-now: 0 stock verified | 1 not verified | 3 stuck+escalated | 4 refused (mutex busy: another
++# owner is mid-transition and owns gadget.busy) | 5 stale (r5 #7: MK20_GEN names an older composite than the current
++# generation in $GENF -> a queued rollback from a dead composite must not tear down a newer one; nothing touched).
++GENF=/tmp/mk20/composite.gen
+ if [ "${1:-}" = --rollback-now ]; then
+-  tl_lock "$RBTRIES" || { log "rollback: transition mutex not acquired (busy or lock error) -> refused"; exit 1; }
++  tl_lock "$RBTRIES" || { log "rollback: transition mutex not acquired (busy or lock error) -> refused"; exit 4; }
++  if [ -n "${MK20_GEN:-}" ] && [ "$(cat "$GENF" 2>/dev/null)" != "$MK20_GEN" ]; then
++    log "rollback: stale request for generation $MK20_GEN (current $(cat "$GENF" 2>/dev/null || echo none)) -> ignored"; exit 5; fi
+   if stock_ok; then log "rollback already done (stock verified)"; exit 0; fi
+   log "rollback requested"
+   ( trap - EXIT INT TERM; cleanup ) </dev/null &
+@@ -248,6 +256,7 @@ exit 1
+ }
+ setup_main() {
+ touch /tmp/mk20-flapmon-stop   # a re-run: any old flap monitor / confirm waiter exits (new ones start below)
++GEN="$(cut -d' ' -f1 /proc/uptime)-$$"; mkdir -p /tmp/mk20; echo "$GEN" > "$GENF.t" && mv -f "$GENF.t" "$GENF"   # under the mutex (r5 #7)
+ log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
+ 
+ trap cleanup EXIT
+@@ -334,7 +343,7 @@ ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh.new && [ "$(sha256sum <
+ rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready
+ FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
+ { [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh.new && mv -f /tmp/mk20-flapmon.sh.new /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
+-( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG"
++( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG" MK20_GEN="$GEN"
+   exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
+     sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
+ FP=$!; i=0; while [ ! -f /tmp/mk20/flapmon.ready ] && [ $i -lt 40 ] && kill -0 $FP 2>/dev/null; do sleep 0.25; i=$((i+1)); done
+@@ -343,7 +352,7 @@ log "flap monitor started (pid $FP)"
+ if [ "$MODE" = --boot ]; then
+   touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
+ fi
+-( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] && exit 0; [ \$rc = 3 ] && exit 3; sleep 20; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now && exit 0; touch /mnt/SDCARD/mk20-no-composite && touch /mnt/SDCARD/cmd-reboot; sync" </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
++( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_GEN=$GEN MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] && exit 0; [ \$rc = 3 ] && exit 3; [ \$rc = 5 ] && exit 0; sleep 20; MK20_GEN=$GEN MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] || [ \$rc = 5 ] && exit 0; touch /mnt/SDCARD/mk20-no-composite && touch /mnt/SDCARD/cmd-reboot; sync" </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
+ WP=$!; sleep 1; kill -0 $WP 2>/dev/null || [ -f /mnt/SDCARD/mk20-composite-ok ] || { OK=0; die "confirm waiter did not start -> rollback now"; }
+ log "confirm window 180s started (pid $WP)"
+ echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status
+diff --git a/deck/firmware/release/share/mk20-add-adb.sh b/deck/firmware/release/share/mk20-add-adb.sh
+index 4efe429..aaf3386 100755
+--- a/deck/firmware/release/share/mk20-add-adb.sh
++++ b/deck/firmware/release/share/mk20-add-adb.sh
+@@ -26,7 +26,7 @@ mkdir -p "$G/functions/ffs.adb" /dev/usb-ffs/adb
+ [ -e "$G/configs/c.1/ffs.adb" ] || ln -s "$G/functions/ffs.adb" "$G/configs/c.1/ffs.adb" 2>>"$LOG" || { log "FAIL ln"; exit 7; }
+ grep -q " /dev/usb-ffs/adb " /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb 2>>"$LOG" || { log "FAIL ffs mount"; exit 3; }
+ [ -e "$G/configs/c.1/acm.usb0" ] || log "WARN acm.usb0 not linked"
+-/bin/adbd </dev/null >/tmp/adbd.log 2>&1 &
++( /bin/adbd </dev/null >/tmp/adbd.log 2>&1 7>&- & )   # detached (r5 #4): a killed caller tree must not take adbd
+ i=0; while [ $i -lt 40 ]; do [ -n "$(udc)" ] && break; usleep 200000; i=$((i+1)); done
+ if [ -z "$(udc)" ]; then
+   if [ -e /dev/usb-ffs/adb/ep1 ]; then echo "$UDC_NAME" > "$G/UDC" 2>>"$LOG"; sleep 1; fi
+```
+=== firmware/release/share/gadget.sh
+```sh
+     1	#!/bin/sh
+     2	# v3.9 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+     3	# (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
+     4	# Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
+     5	# NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
+     6	#
+     7	# EP budget: f_hid (5.4) ALWAYS takes INT IN + INT OUT. ECM notify INT IN + HID IN/OUT = 3 INT:
+     8	#   ep3 (INT, patched), ep4 (INT), ep5out (bulk+INT, patched). Bulk: ep1 pair (ECM), ep2 pair (ADB).
+     9	#   ACM cannot also fit, so KD's ttyGS0 is replaced by a PTY<->TCP bridge (/data/ttygs_tcp_bridge).
+    10	#   Link order matters (configfs binds in link order): ECM, then HID, then ffs.adb.
+    11	#
+    12	# Safety (v3, per GPT-5.6 review 2026-10-18):
+    13	#  - adbd is started BEFORE the UDC is bound (FunctionFS needs descriptors first, else -ENODEV).
+    14	#  - HID report_length 9 (report ID 1 keyboard = 1 ID + 8 bytes; pointer = 1 + 5).
+    15	#  - EXIT trap: on ANY failure it unbinds, unlinks and removes our functions, restores stock serial
+    16	#    (/data/setusbconfig serial) and restarts KeyboardDevice.
+    17	#  - Stale links in g1/configs/c.1 are removed before reuse.
+    18	#  - KD is stopped via its procd service (no respawn race) and restarted at the end. setusbconfig is
+    19	#    shadowed by a tmpfs no-op bind mount (gone at reboot), so KD's restart does not wipe the composite.
+    20	#  - KD gets a filtered `dmesg` (PATH shim via bind-mounted appLunch.sh) so its USB-reset hack does not fire on
+    21	#    f_hid's harmless -EOPNOTSUPP for SET_IDLE/SET_REPORT (root cause of the 3 s flapping, 2026-10-18 15:53).
+    22	#  - v3.2 boot mode (--boot, run by boot-every/composite.sh in the watcher): no host confirmation; instead a
+    23	#    detached flap monitor polls /sys/class/udc/<udc>/state and rolls back if the link drops >=5 times in 60 s.
+    24	#    Any rollback (failure, flapping, --rollback) ends in stock ACM + KD + adb (mk20-add-adb.sh).
+    25	#  - Addressing (1.1.0+): usb0 172.30.250.2/24 (Mac MK20 service manual 172.30.250.1/24) + alias 169.254.7.2/16;
+    26	#    fixed MACs. mk20d passes the configured values; the defaults here only apply outside release mode.
+    27	#  - It must NEVER run inside an adb shell (it kills adbd; adbd kills the session group). It queues itself to the watcher.
+    28	set -u
+    29	LOG=${MK20_GADGET_LOG:-/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log}
+    30	# v3.8 knobs (set by mk20d from mk20.conf; defaults = the proven v3.7 behaviour)
+    31	# Release mode: a manual/queued run (no MK20_ECM_IP in the env) takes the knobs mk20d validated at boot from
+    32	# /tmp/mk20/gadget.env; mk20d writes that file only when the kernel/vendor/config gates allow the composite, so
+    33	# without it only a rollback is allowed (fail closed).
+    34	GENV=/tmp/mk20/gadget.env
+    35	if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
+    36	  if [ -f "$GENV" ]; then
+    37	    while IFS='=' read -r k v; do
+    38	      case "$v" in *[!0-9a-f.:]*|'') continue;; esac   # values are digits/dots/hex/colons only (mk20d validated them)
+    39	      case "$k" in
+    40	      MK20_ECM_IP) MK20_ECM_IP=$v;; MK20_ECM_MASK) MK20_ECM_MASK=$v;; MK20_DEV_MAC) MK20_DEV_MAC=$v;; MK20_HOST_MAC) MK20_HOST_MAC=$v;;
+    41	      MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
+    42	      MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;;
+    43	    esac; done < "$GENV"
+    44	  else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) echo "release mode: no $GENV (gates not passed at boot) -> refused"; exit 1;; esac; fi
+    45	fi
+    46	ECM_IP=${MK20_ECM_IP:-172.30.250.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
+    47	DEV_MAC=${MK20_DEV_MAC:-02:11:22:33:44:55}; HOST_MAC=${MK20_HOST_MAC:-02:11:22:33:44:56}
+    48	BRIDGE_PORT=${MK20_BRIDGE_PORT:-17890}   # v3.9: the bridge binds the usb0 addresses only (ECM IP + link-local alias, SO_BINDTODEVICE usb0)
+    49	FLAP_DROPS=${MK20_FLAP_DROPS:-5}; FLAP_WINDOW=${MK20_FLAP_WINDOW:-60}
+    50	NOADB=${MK20_NOADB:-0}; [ -f /mnt/SDCARD/mk20-no-adb ] && NOADB=1
+    51	G=/sys/kernel/config/usb_gadget/g1
+    52	C=$G/configs/c.1
+    53	# release mode (firmware >= 1.0.0): the loader exports MK20_REL (verified tmpfs copy of the release)
+    54	if [ -n "${MK20_REL:-}" ]; then export MK20_REL; BR=$MK20_REL/bin/ttygs_tcp_bridge; ECMKO=$MK20_REL/lib/usb_f_ecm.ko; ADDADB=$MK20_REL/share/mk20-add-adb.sh
+    55	else BR=/data/ttygs_tcp_bridge; ECMKO=/data/mk20/usb_f_ecm.ko; ADDADB=/mnt/SDCARD/mk20/mk20-add-adb.sh; fi
+    56	mkdir -p "$(dirname "$LOG")" /mnt/SDCARD/mk20/logs
+    57	log() { echo "gadget $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
+    58	
+    59	# Launch: adbd kills the whole process group of an adb shell when it ends (trap HUP does not help) and
+    60	# this busybox has no setsid, so we hand ourselves to the watcher job queue (runs outside adb/ACM sessions).
+    61	if [ "${1:-}" = --rollback ]; then set -- --rollback-queued; fi   # adb-safe: rollback also goes via the watcher
+    62	MODE=${1:-}
+    63	if [ "$MODE" != --run ] && [ "$MODE" != --boot ] && [ "$MODE" != --rollback-now ]; then
+    64	  Q=/mnt/SDCARD/job.sh; [ -e $Q ] && { echo "watcher queue busy ($Q exists)"; exit 1; }
+    65	  A=--run; [ "${1:-}" = --rollback-queued ] && A=--rollback-now
+    66	  echo "MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh $(readlink -f "$0") $A" > $Q.tmp
+    67	  sha256sum $Q.tmp | awk '{print $1"  job.sh"}' > $Q.sha256.tmp; mv -f $Q.tmp $Q; mv -f $Q.sha256.tmp $Q.sha256
+    68	  echo "queued to watcher"; exit 0
+    69	fi
+    70	
+    71	KDSVC=/etc/init.d/qt_app2   # procd service (CMD=/data/appLunch.sh). NOT qt_app1 (plain sh, kills adbd)
+    72	[ -x $KDSVC ] || KDSVC=""
+    73	udc_now() { cat $G/UDC 2>/dev/null; }
+    74	# KD start: via procd only when the service exists (a manual fallback raced procd -> TWO KD processes, 16:17).
+    75	# KD stop: procd may respawn appLunch.sh right after `stop`; killing that sh later orphaned its fresh KD
+    76	# (PPid 1) -> TWO KD after rollback (16:17 and 16:20). Kill appLunch.sh first, then KD, until both stay gone.
+    77	kd_stop() {
+    78	  [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1 7>&-
+    79	  i=0; while [ $i -lt 15 ]; do
+    80	    for p in $(pgrep -f /data/appLunch.sh); do kill $p 2>/dev/null; done
+    81	    killall KeyboardDevice 2>/dev/null; sleep 1
+    82	    pgrep -f /data/KeyboardDevice >/dev/null || pgrep -f /data/appLunch.sh >/dev/null || { sleep 1; pgrep -f /data/KeyboardDevice >/dev/null || pgrep -f /data/appLunch.sh >/dev/null || return 0; }
+    83	    i=$((i+1)); done
+    84	  killall -9 KeyboardDevice 2>/dev/null; log "WARN kd_stop: KD/appLunch still alive after 15 s (sent KILL)"
+    85	}
+    86	# reap any KD whose parent is not appLunch.sh (orphan from a respawn race)
+    87	kd_reap_orphans() {
+    88	  for p in $(pgrep -f /data/KeyboardDevice); do pp=$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null)
+    89	    grep -q appLunch /proc/$pp/cmdline 2>/dev/null || { kill $p 2>/dev/null; log "reaped orphan KD $p (ppid $pp)"; }; done
+    90	}
+    91	kd_start() {
+    92	  if [ -n "$KDSVC" ]; then
+    93	    $KDSVC start >>"$LOG" 2>&1 7>&-; i=0
+    94	    while ! pgrep -f /data/KeyboardDevice >/dev/null && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
+    95	    pgrep -f /data/KeyboardDevice >/dev/null || log "WARN KD not up 20 s after procd start"
+    96	  else
+    97	    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 7>&- ) & ); }   # detached (r5 #4): reparented to init
+    98	  fi
+    99	  sleep 3; n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" -le 1 ] || { log "WARN $n KeyboardDevice processes"; kd_reap_orphans; }
+   100	}
+   101	# after a rollback: stock KD has re-run `setusbconfig serial` (ACM only) -> add adb back like boot-every/adb.sh
+   102	readd_adb() {
+   103	  [ "$NOADB" = 1 ] && return
+   104	  H=$ADDADB; [ -f "$H" ] || return
+   105	  i=0; until [ -n "$(udc_now)" ] && [ -e $C/acm.usb0 ] && [ -e /dev/ttyGS0 ] && pgrep -f KeyboardDevice >/dev/null; do
+   106	    i=$((i+1)); [ $i -gt 60 ] && { log "readd_adb: g1 not ready"; return; }; sleep 1; done
+   107	  sleep 5; cp -f $H /tmp/mk20-add-adb.sh; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 7>&- && log "adb re-added" || log "adb re-add FAILED"
+   108	  # KD's startup re-runs `setusbconfig serial` (drops ffs.adb) once or twice: keep re-adding for ~90 s
+   109	  n=0; while [ $n -lt 6 ]; do sleep 15; n=$((n+1)); [ -e $C/ffs.adb ] && continue
+   110	    log "adb gone again (KD reset) -> re-add #$n"; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 7>&-; done
+   111	}
+   112	OK=0
+   113	cleanup() {
+   114	  [ "$OK" = 1 ] && return
+   115	  mkdir -p /tmp/mk20; touch /tmp/mk20/gadget.busy
+   116	  log "FAILSAFE: undo composite"
+   117	  touch /tmp/mk20-flapmon-stop
+   118	  killall adbd 2>/dev/null
+   119	  echo "" > $G/UDC 2>/dev/null
+   120	  for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
+   121	  rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
+   122	  # stop the bridge loop + bridge, restore the real ttyGS0 (validated pid: BusyBox `kill ""` = own process group)
+   123	  touch /tmp/mk20-bridge-stop; bp=$(cat /tmp/mk20-bridge-loop.pid 2>/dev/null); case "$bp" in ''|*[!0-9]*|0|1) ;; *) kill "$bp" 2>/dev/null;; esac
+   124	  killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
+   125	  # KD may hold the dead PTY: restart it cleanly on real ttyGS0
+   126	  # unmount the shims only after KD + appLunch.sh have exited (a running sh keeps its script busy -> EBUSY)
+   127	  kd_stop
+   128	  for m in /data/setusbconfig /data/appLunch.sh; do i=0; while grep -q " $m " /proc/mounts && [ $i -lt 5 ]; do umount $m 2>/dev/null || sleep 1; i=$((i+1)); done
+   129	    grep -q " $m " /proc/mounts && log "WARN still mounted: $m"; done
+   130	  /data/setusbconfig serial >>"$LOG" 2>&1 7>&-
+   131	  kd_start
+   132	  readd_adb
+   133	  log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
+   134	  rm -f /tmp/mk20/gadget.busy
+   135	}
+   136	# rollback runs before any preflight so an abnormal state cannot block it
+   137	# Transition mutex (1.1.4, r5): ONE flock (fd 7 on /tmp/mk20/transition.lock) is held for the WHOLE setup or the WHOLE
+   138	# rollback, so they can never overlap (flapmon, the confirm waiter and mk20d may all ask for --rollback-now). Every
+   139	# process spawned while it is held gets 7>&- (adbd, bridge loop, KD, add-adb, flapmon, confirm waiter), so only the
+   140	# owner holds it and it is released when the owner exits. A rollback that finds stock verified is a no-op: exit 0
+   141	# always means stock is up. Every lock step is checked (fail closed: no mutation without the mutex).
+   142	# Owner-local bounded supervisor: the rollback runs cleanup in its own child and waits at most MK20_RB_TIMEOUT
+   143	# (default 240 s); on timeout it stops, kills and reaps ITS OWN child tree before releasing the mutex. No caller ever
+   144	# kills another owner; a waiter that cannot get the mutex in MK20_RB_LOCK_TRIES*0.25 s (default 300 s) gives up (rc 1).
+   145	# >>> rollback-block (tests extract from here to the matching end marker)
+   146	TL=/tmp/mk20/transition.lock
+   147	stock_ok() { [ -e $C/acm.usb0 ] && [ ! -e $C/ecm.usb0 ] && [ ! -e $C/hid.usb0 ] && [ -n "$(udc_now)" ] &&
+   148	  [ -c /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && ! grep -qE ' /data/(setusbconfig|appLunch\.sh) ' /proc/mounts &&
+   149	  pgrep -f '^/data/KeyboardDevice' >/dev/null; }
+   150	rb_status() { echo "$1" > /mnt/SDCARD/gadget-ecm-hid.status 2>/dev/null; }
+   151	pstart() { awk '$3 != "Z" {print $22}' "/proc/$1/stat" 2>/dev/null; }   # empty if gone or a zombie
+   152	# tl_lock <tries>: take the transition mutex on fd 7 (tries 0.25 s apart; BusyBox flock has no -w). 1 = not held.
+   153	tl_lock() {
+   154	  mkdir -p "$(dirname "$TL")" 2>/dev/null || return 1
+   155	  touch "$TL" 2>/dev/null || return 1   # an exec redirect error would exit the shell (special builtin)
+   156	  exec 7>"$TL" || return 1
+   157	  n=0; until flock -n 7; do n=$((n+1)); [ "$n" -ge "$1" ] && { exec 7>&-; return 1; }; sleep 0.25; done
+   158	}
+   159	kids() { for d in /proc/[0-9]*; do [ "$(awk '/^PPid:/{print $2}' "$d/status" 2>/dev/null)" = "$1" ] && echo "${d#/proc/}"; done; }
+   160	kill_tree() { kill -STOP "$1" 2>/dev/null; for k in $(kids "$1"); do kill_tree "$k"; done; kill -9 "$1" 2>/dev/null; }
+   161	# uint_cap <value> <default> <min> <max>: a validated, clamped decimal (no octal, no overflow: >6 digits = max).
+   162	# Every timeout/lock-try knob goes through this BEFORE any lock or fork (r5: bad arithmetic must not kill the owner).
+   163	uint_cap() {
+   164	  case "$1" in ''|*[!0-9]*) echo "$2"; return;; esac
+   165	  v=${1#"${1%%[!0]*}"}; [ -n "$v" ] || v=0
+   166	  [ ${#v} -gt 6 ] && { echo "$4"; return; }
+   167	  [ "$v" -lt "$3" ] && v=$3; [ "$v" -gt "$4" ] && v=$4; echo "$v"
+   168	}
+   169	# r5 #5: cleanup worst case on a HEALTHY board = kd_stop<=32 + umount<=10 + kd_start<=23 + readd_adb (g1 wait<=60,
+   170	# 5, add-adb ~4 x7, 6x15 re-add window) ~= 260 s -> 330 s so a healthy rollback incl. add-adb is never cut off.
+   171	RBT=$(uint_cap "${MK20_RB_TIMEOUT:-}" 330 1 900)          # rollback / post-timeout cleanup bound (s)
+   172	RBTRIES=$(uint_cap "${MK20_RB_LOCK_TRIES:-}" 3600 1 4800)  # rollback mutex wait (x0.25 s) >= SUT+RBT+30 s owner hold
+   173	SUTRIES=$(uint_cap "${MK20_SETUP_LOCK_TRIES:-}" 40 1 4800) # setup mutex wait (x0.25 s)
+   174	SUT=$(uint_cap "${MK20_SETUP_TIMEOUT:-}" 450 1 1800)       # whole setup incl. its own failsafe (~60 s + cleanup <=330 s)
+   175	# bounded_wait <pid> <s>: 0 = the child exited in time (rc in BW_RC); 1 = timed out: its whole tree was stopped,
+   176	# SIGKILLed and the child reaped; 2 = timed out AND still alive 10 s after SIGKILL (D state, e.g. a stuck UDC write):
+   177	# not waited for (an unbounded wait would wedge us). Only ever used on OUR OWN children.
+   178	bounded_wait() {
+   179	  bst=$(pstart "$1"); bi=0; BW_RC=1
+   180	  while [ -n "$bst" ] && [ "$(pstart "$1")" = "$bst" ] && [ $bi -lt $(($2*4)) ]; do sleep 0.25; bi=$((bi+1)); done
+   181	  if [ -n "$bst" ] && [ "$(pstart "$1")" = "$bst" ]; then
+   182	    kill_tree "$1"; bi=0
+   183	    while [ "$(pstart "$1")" = "$bst" ] && [ $bi -lt 40 ]; do sleep 0.25; bi=$((bi+1)); done
+   184	    [ "$(pstart "$1")" = "$bst" ] && return 2
+   185	    wait "$1" 2>/dev/null; return 1
+   186	  fi
+   187	  wait "$1" 2>/dev/null; BW_RC=$?; return 0
+   188	}
+   189	# escalate <why>: no transition can complete (an unkillable child holds fd 7, or stock is not reached): persist
+   190	# stock mode (flag read at boot) and hard-reset via the rescue watcher (cmd-reboot) - same path as flapmon's.
+   191	escalate() {
+   192	  log "ESCALATE: $1 -> ${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite} + reboot"; rb_status "$2"
+   193	  touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync
+   194	}
+   195	# Exit codes of --rollback-now: 0 stock verified | 1 not verified | 3 stuck+escalated | 4 refused (mutex busy: another
+   196	# owner is mid-transition and owns gadget.busy) | 5 stale (r5 #7: MK20_GEN names an older composite than the current
+   197	# generation in $GENF -> a queued rollback from a dead composite must not tear down a newer one; nothing touched).
+   198	GENF=/tmp/mk20/composite.gen
+   199	if [ "${1:-}" = --rollback-now ]; then
+   200	  tl_lock "$RBTRIES" || { log "rollback: transition mutex not acquired (busy or lock error) -> refused"; exit 4; }
+   201	  if [ -n "${MK20_GEN:-}" ] && [ "$(cat "$GENF" 2>/dev/null)" != "$MK20_GEN" ]; then
+   202	    log "rollback: stale request for generation $MK20_GEN (current $(cat "$GENF" 2>/dev/null || echo none)) -> ignored"; exit 5; fi
+   203	  if stock_ok; then log "rollback already done (stock verified)"; exit 0; fi
+   204	  log "rollback requested"
+   205	  ( trap - EXIT INT TERM; cleanup ) </dev/null &
+   206	  CP=$!
+   207	  bounded_wait $CP "$RBT"; bw=$?
+   208	  [ $bw = 0 ] || log "rollback cleanup exceeded ${RBT}s -> killing own child tree $CP ($([ $bw = 1 ] && echo killed+reaped || echo UNKILLABLE))"
+   209	  [ $bw = 2 ] && { escalate "rollback cleanup $CP unkillable (D state)" rollback-STUCK; exit 3; }   # flapmon: rc 3 = no retry
+   210	  rm -f /tmp/mk20/gadget.busy   # always, still under the mutex (a killed cleanup never reached its own rm)
+   211	  i=0; while ! stock_ok && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done   # KD's own setusbconfig reset can lag
+   212	  if stock_ok; then log "rollback verified"; rb_status rollback-verified; exit 0; fi
+   213	  rb_status rollback-NOT-verified
+   214	  log "rollback NOT verified (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now) ttyGS0=$([ -L /dev/ttyGS0 ] && echo link || echo dev)) -> mutex released"; exit 1
+   215	fi
+   216	# <<< rollback-block
+   217	
+   218	# ---- preflight (nothing touched yet) ----
+   219	UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+   220	[ -n "$UDC" ] || { log "ABORT no udc"; exit 1; }
+   221	[ -d $G ] && [ -d $C ] || { log "ABORT no g1 (KD has not configured USB yet)"; exit 1; }
+   222	[ "${1:-}" = --rollback-now ] || [ -x $BR ] || { log "ABORT $BR missing: KD would lose ttyGS0 (black screens)"; exit 1; }
+   223	[ -x /bin/adbd ] || { log "ABORT no /bin/adbd"; exit 1; }
+   224	grep -q '^usb_f_ecm ' /proc/modules || [ -f $ECMKO ] || { log "ABORT no $ECMKO"; exit 1; }
+   225	[ -n "${MK20_REL:-}" ] && [ -f "$MK20_REL/share/flapmon.sh" ] || { log "ABORT no flapmon.sh (MK20_REL unset?)"; exit 1; }
+   226	supervise_setup() {
+   227	# >>> setup-supervisor (r6): the owner holds fd 7 and runs the mutating setup (and its own EXIT failsafe) in a
+   228	# child bounded by MK20_SETUP_TIMEOUT. A hung service script / setusbconfig / add-adb can no longer wedge the mutex:
+   229	# on timeout the owner kills+reaps ITS OWN setup tree, runs a cleanup bounded by MK20_RB_TIMEOUT (killed+reaped
+   230	# too if it hangs), clears gadget.busy and only then releases fd 7 (exit). The child inherits fd 7 on purpose, so
+   231	# the mutex also stays held if the owner itself dies while the child is still mutating.
+   232	tl_lock "$SUTRIES" || { log "ABORT transition in progress (mutex busy) or lock error"; exit 1; }   # held until exit
+   233	trap '' HUP
+   234	( setup_main ) </dev/null &
+   235	SP=$!
+   236	bounded_wait $SP "$SUT"; bw=$?
+   237	if [ $bw = 0 ]; then
+   238	  [ "$BW_RC" = 0 ] && exit 0
+   239	  # setup failed and ran its own failsafe: verify stock, else escalate (flapmon is stopped at this point)
+   240	  i=0; while ! stock_ok && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
+   241	  stock_ok || escalate "setup failed (rc $BW_RC) and its failsafe did not reach stock" setup-failsafe-NOT-verified
+   242	  rm -f /tmp/mk20/gadget.busy; exit "$BW_RC"
+   243	fi
+   244	[ $bw = 2 ] && { escalate "setup tree $SP unkillable after ${SUT}s (D state)" setup-STUCK; exit 3; }
+   245	log "SETUP TIMEOUT: exceeded ${SUT}s -> killed+reaped own setup tree $SP; bounded cleanup"
+   246	( trap - EXIT INT TERM; OK=0; cleanup ) </dev/null &
+   247	SC=$!
+   248	bounded_wait $SC "$RBT"; bw=$?
+   249	[ $bw = 0 ] || log "cleanup after setup timeout exceeded ${RBT}s -> killed+reaped own cleanup tree $SC"
+   250	[ $bw = 2 ] && { escalate "cleanup tree $SC unkillable (D state)" setup-STUCK; exit 3; }
+   251	rm -f /tmp/mk20/gadget.busy
+   252	i=0; while ! stock_ok && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
+   253	if stock_ok; then rb_status setup-timeout; else escalate "setup timeout and cleanup did not reach stock" setup-timeout-NOT-verified; fi
+   254	exit 1
+   255	# <<< setup-supervisor
+   256	}
+   257	setup_main() {
+   258	touch /tmp/mk20-flapmon-stop   # a re-run: any old flap monitor / confirm waiter exits (new ones start below)
+   259	GEN="$(cut -d' ' -f1 /proc/uptime)-$$"; mkdir -p /tmp/mk20; echo "$GEN" > "$GENF.t" && mv -f "$GENF.t" "$GENF"   # under the mutex (r5 #7)
+   260	log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
+   261	
+   262	trap cleanup EXIT
+   263	trap 'exit 1' INT TERM
+   264	trap '' HUP
+   265	die() { log "FAIL $*"; exit 1; }
+   266	
+   267	# ---- stop KD (via procd so it is not respawned mid-change) and adbd ----
+   268	kd_stop; killall adbd 2>/dev/null; sleep 1
+   269	pgrep -f /data/KeyboardDevice >/dev/null && die "KD still running/respawned after stop"
+   270	# ---- unbind + clean stale links ----
+   271	i=0; while [ -n "$(udc_now)" ] && [ $i -lt 10 ]; do echo "" > $G/UDC 2>/dev/null; sleep 0.3; i=$((i+1)); done
+   272	[ -z "$(udc_now)" ] || die "cannot unbind"
+   273	for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
+   274	# ---- functions ----
+   275	grep -q '^usb_f_ecm ' /proc/modules || insmod $ECMKO 2>>"$LOG" || die "insmod ecm"
+   276	mkdir -p $G/functions/ecm.usb0 || die "mkdir ecm"
+   277	echo "$DEV_MAC" > $G/functions/ecm.usb0/dev_addr 2>/dev/null
+   278	echo "$HOST_MAC" > $G/functions/ecm.usb0/host_addr 2>/dev/null
+   279	NOHID=${MK20_NOHID:-0}; [ -f /mnt/SDCARD/mk20-gadget-nohid ] && NOHID=1   # ECM+ADB+bridge only (works on the ep3-only kernel)
+   280	if [ $NOHID = 0 ]; then
+   281	mkdir -p $G/functions/hid.usb0 || die "mkdir hid"
+   282	echo 1 > $G/functions/hid.usb0/protocol; echo 1 > $G/functions/hid.usb0/subclass
+   283	echo 9 > $G/functions/hid.usb0/report_length || die "report_length"
+   284	printf '\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0\x05\x01\x09\x02\xa1\x01\x85\x02\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x03\x05\x01\x09\x30\x09\x31\x16\x00\x00\x26\xff\x7f\x75\x10\x95\x02\x81\x02\xc0\xc0' > /tmp/hid.desc
+   285	cat /tmp/hid.desc > $G/functions/hid.usb0/report_desc || die "report_desc"
+   286	fi
+   287	[ "$NOADB" = 1 ] || mkdir -p $G/functions/ffs.adb || die "mkdir ffs.adb"
+   288	# link order: ECM, HID, ADB
+   289	ln -s $G/functions/ecm.usb0 $C/ecm.usb0 || die "link ecm"
+   290	[ $NOHID = 1 ] || ln -s $G/functions/hid.usb0 $C/hid.usb0 || die "link hid"
+   291	[ "$NOADB" = 1 ] || ln -s $G/functions/ffs.adb $C/ffs.adb || die "link adb"
+   292	echo "ECM+HID+ADB" > $C/strings/0x409/configuration 2>/dev/null
+   293	# ---- adbd BEFORE bind (writes FFS descriptors; stock adbd then binds g1/UDC itself) ----
+   294	if [ "$NOADB" = 0 ]; then
+   295	mkdir -p /dev/usb-ffs/adb
+   296	grep -q ' /dev/usb-ffs/adb ' /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb || die "mount ffs"
+   297	/bin/adbd </dev/null >/tmp/adbd.log 2>&1 7>&- &
+   298	i=0; while [ ! -e /dev/usb-ffs/adb/ep1 ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
+   299	[ -e /dev/usb-ffs/adb/ep1 ] || die "adbd did not write FFS descriptors"
+   300	fi
+   301	i=0; while [ -z "$(udc_now)" ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
+   302	if [ -z "$(udc_now)" ]; then echo "$UDC" > $G/UDC 2>>"$LOG" || die "bind"; fi
+   303	[ "$(udc_now)" = "$UDC" ] || die "UDC not bound"
+   304	sleep 1
+   305	[ $NOHID = 1 ] || [ -e /dev/hidg0 ] || die "no /dev/hidg0"
+   306	[ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
+   307	ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
+   308	ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG" || die "usb0 ip"
+   309	BRIDGE_LISTEN="--dev usb0 --listen $ECM_IP:$BRIDGE_PORT"
+   310	if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
+   311	else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
+   312	rm -f /tmp/mk20-bridge-stop
+   313	# ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
+   314	mkdir -p /tmp/mk20
+   315	[ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
+   316	( trap '' HUP INT; exec sh -c "echo \$\$ > /tmp/mk20-bridge-loop.pid; while [ ! -f /tmp/mk20-bridge-stop ]; do $BR $BRIDGE_LISTEN --link /dev/ttyGS0; sleep 1; done" </dev/null >>/tmp/mk20/bridge.log 2>&1 7>&- ) &   # supervised (tmpfs log: an open FAT file blocks hardreset's remount ro)
+   317	i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
+   318	[ -e /dev/ttyGS0 ] || die "bridge did not create /dev/ttyGS0"
+   319	printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n' > /tmp/setusbconfig-noop; chmod 755 /tmp/setusbconfig-noop
+   320	mount --bind /tmp/setusbconfig-noop /data/setusbconfig || die "shadow setusbconfig"
+   321	# ROOT CAUSE of the 15:40 flapping (found 15:53): KD's UsbCDCStateThread runs `dmesg -c` every 3 s and, if the
+   322	# output contains "ERR: Operation not supported", reads usbc0/usb_device = full USB rmmod/insmod. sunxi_udc prints
+   323	# that line whenever a function's setup() returns -EOPNOTSUPP; f_hid (5.4) does that for SET_IDLE / SET_REPORT on
+   324	# ep0, which macOS sends to a keyboard -> reset every ~3 s. Fix: give KD a PATH-first `dmesg` that drops that line.
+   325	mkdir -p /tmp/mk20-shim
+   326	printf '#!/bin/sh\n/bin/busybox dmesg "$@" | /bin/busybox grep -v "ERR: Operation not supported"\n' > /tmp/mk20-shim/dmesg; chmod 755 /tmp/mk20-shim/dmesg
+   327	umount /data/appLunch.sh 2>/dev/null; sed 's#^source /data/qt_env.sh#source /data/qt_env.sh; export PATH=/tmp/mk20-shim:$PATH#' /data/appLunch.sh > /tmp/appLunch-shim.sh; chmod 755 /tmp/appLunch-shim.sh
+   328	grep -q mk20-shim /tmp/appLunch-shim.sh || die "dmesg shim sed"
+   329	mount --bind /tmp/appLunch-shim.sh /data/appLunch.sh || die "shadow appLunch"
+   330	kd_start
+   331	pgrep -f KeyboardDevice >/dev/null || die "KD not running"
+   332	# test hook (one-shot): prove the failure rollback with everything set up (bridge, shims, KD on PTY)
+   333	if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
+   334	rm -f /mnt/SDCARD/mk20-composite-ok
+   335	OK=1
+   336	log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_IP bridge=[$BRIDGE_LISTEN] kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
+   337	# host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
+   338	# within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
+   339	ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh.new && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh.new)" ] &&
+   340	  mv -f /tmp/mk20-gadget.sh.new /tmp/mk20-gadget.sh || { OK=0; die "cannot stage rollback copy"; }   # atomic: a running rollback keeps its file
+   341	# flap monitor (both modes, share/flapmon.sh): >=5 configured->not-configured drops within 60 s -> rollback to
+   342	# ACM+KD+adb. Host USB suspend (Mac sleep) is not a flap.
+   343	rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready
+   344	FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
+   345	{ [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh.new && mv -f /tmp/mk20-flapmon.sh.new /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
+   346	( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG" MK20_GEN="$GEN"
+   347	  exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
+   348	    sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
+   349	FP=$!; i=0; while [ ! -f /tmp/mk20/flapmon.ready ] && [ $i -lt 40 ] && kill -0 $FP 2>/dev/null; do sleep 0.25; i=$((i+1)); done
+   350	[ -f /tmp/mk20/flapmon.ready ] && kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start (no lock/ready marker)"; }
+   351	log "flap monitor started (pid $FP)"
+   352	if [ "$MODE" = --boot ]; then
+   353	  touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
+   354	fi
+   355	( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_GEN=$GEN MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] && exit 0; [ \$rc = 3 ] && exit 3; [ \$rc = 5 ] && exit 0; sleep 20; MK20_GEN=$GEN MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; rc=\$?; [ \$rc = 0 ] || [ \$rc = 5 ] && exit 0; touch /mnt/SDCARD/mk20-no-composite && touch /mnt/SDCARD/cmd-reboot; sync" </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
+   356	WP=$!; sleep 1; kill -0 $WP 2>/dev/null || [ -f /mnt/SDCARD/mk20-composite-ok ] || { OK=0; die "confirm waiter did not start -> rollback now"; }
+   357	log "confirm window 180s started (pid $WP)"
+   358	echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status
+   359	exit 0
+   360	}
+   361	supervise_setup
+```
+=== firmware/release/share/flapmon.sh
+```sh
+     1	#!/bin/sh
+     2	# MK20 flap monitor (1.1.2+; was an inline heredoc in gadget.sh). Started detached by gadget.sh:
+     3	#   flapmon.sh <udc-state-file> <window_s> <drops> <log> <stopfile> -- <rollback command...>
+     4	# Counts link drops; >= <drops> within <window_s> -> touch the gadget.busy marker and run the rollback command once,
+     5	# then exit. A drop is: configured -> anything but configured/suspended, or a SHORT suspend (< MK20_FLAP_SUSP_S,
+     6	# default 5 s) that ends in anything but configured (a bus reset/glitch the poll caught as idle). A long suspend
+     7	# (Mac sleep) is not a flap: suspend, resume and a resume reset / unplug after it are logged, not counted.
+     8	# Single instance (flock on fd 8, not inherited by the rollback). The stopfile is re-checked right before rollback.
+     9	# The busy marker is cleared after every rollback attempt. A failed rollback is retried (MK20_FLAP_TRIES, default 3,
+    10	# MK20_FLAP_RETRY_S apart); if all fail, the persistent mk20-no-composite flag is set and the watcher hard-resets
+    11	# (cmd-reboot), so the next boot runs stock until the flag is deleted.
+    12	# The rollback command bounds itself (gadget.sh --rollback-now: transition mutex + owner-local supervisor that kills
+    13	# and reaps its own cleanup tree after MK20_RB_TIMEOUT), so a hung rollback returns rc!=0 here and is retried/escalated.
+    14	# Writes the ready marker (MK20_FLAP_READY, default /tmp/mk20/flapmon.ready) once the lock is held.
+    15	# Test env: MK20_UPTIME_CMD (seconds), MK20_FLAP_POLL (default 0.3), MK20_BUSY, MK20_FLAP_LOCK, MK20_FLAP_SUSP_S.
+    16	[ $# -ge 7 ] && [ "$6" = -- ] || { echo "usage: flapmon.sh state window drops log stopfile -- cmd..." >&2; exit 2; }
+    17	U=$1; W=$2; N=$3; LOG=$4; STOP=$5; shift 6
+    18	case "$W$N" in ''|*[!0-9]*) echo "flapmon: window/drops must be integers" >&2; exit 2;; esac
+    19	BUSY=${MK20_BUSY:-/tmp/mk20/gadget.busy}; SUSP=${MK20_FLAP_SUSP_S:-5}
+    20	LOCK=${MK20_FLAP_LOCK:-/tmp/mk20/flapmon.lock}; mkdir -p "$(dirname "$LOCK")"
+    21	exec 8>"$LOCK"; i=0; while ! flock -n 8; do i=$((i+1)); [ $i -lt 10 ] && { sleep 0.5; continue; }
+    22	  { echo "flapmon $(cut -d. -f1 /proc/uptime): another monitor holds $LOCK" >> "$LOG"; exit 3; }; done
+    23	READY=${MK20_FLAP_READY:-/tmp/mk20/flapmon.ready}; mkdir -p "$(dirname "$READY")"; : > "$READY"   # lock held: gadget.sh waits for this
+    24	up() { if [ -n "${MK20_UPTIME_CMD:-}" ]; then $MK20_UPTIME_CMD; else cut -d. -f1 /proc/uptime; fi; }
+    25	prev=$(cat "$U" 2>/dev/null); times=""; sus=""
+    26	while [ ! -f "$STOP" ]; do
+    27	  s=$(cat "$U" 2>/dev/null); now=""
+    28	  if [ "$s" != "$prev" ]; then
+    29	    if [ "$prev" = configured ] && [ "$s" = suspended ]; then
+    30	      sus=$(up); echo "flapmon $sus: host suspend" >> "$LOG"
+    31	    elif [ "$prev" = configured ]; then
+    32	      now=$(up)
+    33	    elif [ "$prev" = suspended ]; then
+    34	      t=$(up); d=$((t - ${sus:-$t}))
+    35	      if [ "$s" = configured ]; then echo "flapmon $t: host resume after ${d}s" >> "$LOG"
+    36	      elif [ -n "$sus" ] && [ "$d" -lt "$SUSP" ]; then now=$t
+    37	      else echo "flapmon $t: '$s' after ${d}s suspend (resume reset/unplug, not counted)" >> "$LOG"; fi
+    38	      sus=""
+    39	    fi
+    40	  fi
+    41	  if [ -n "$now" ]; then
+    42	    nt=""; cnt=0
+    43	    for t in $times $now; do [ $((now-t)) -le "$W" ] && { nt="$nt $t"; cnt=$((cnt+1)); }; done; times=$nt
+    44	    echo "flapmon $now: link drop ($s), $cnt in ${W}s" >> "$LOG"
+    45	    if [ "$cnt" -ge "$N" ]; then
+    46	      [ -f "$STOP" ] && exit 0
+    47	      echo "flapmon $now: FLAPPING -> rollback" >> "$LOG"
+    48	      try=1
+    49	      while :; do
+    50	        # r5 #6: only clear a marker we created, and never after a refusal (rc 4: another owner holds the mutex and
+    51	        # owns gadget.busy; it clears it itself under the mutex). rc 5 = stale generation: our composite is gone.
+    52	        mine=0; [ -e "$BUSY" ] || { touch "$BUSY"; mine=1; }
+    53	        "$@" 8>&-; rc=$?
+    54	        [ "$rc" = 4 ] || [ "$mine" = 0 ] || rm -f "$BUSY"
+    55	        [ "$rc" = 0 ] && exit 0
+    56	        [ "$rc" = 5 ] && { echo "flapmon $(up): rollback stale (rc 5, newer composite) -> exit" >> "$LOG"; exit 0; }
+    57	        [ "$rc" = 3 ] && { echo "flapmon $(up): rollback STUCK (rc 3, it escalated itself) -> no retry" >> "$LOG"; exit 1; }
+    58	        echo "flapmon $(up): rollback attempt $try failed rc=$rc" >> "$LOG"
+    59	        [ "$try" -ge "${MK20_FLAP_TRIES:-3}" ] && break
+    60	        try=$((try+1)); sleep "${MK20_FLAP_RETRY_S:-20}"
+    61	      done
+    62	      # still not stock: persist stock mode (flag file, read at boot) and hard-reset via the rescue watcher
+    63	      echo "flapmon $(up): rollback failed $try times -> ${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite} + reboot" >> "$LOG"
+    64	      touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync
+    65	      exit 1
+    66	    fi
+    67	  fi
+    68	  prev=$s; sleep "${MK20_FLAP_POLL:-0.3}"
+    69	done
+```
+=== firmware/release/sbin/mk20d
+```sh
+     1	#!/bin/sh
+     2	# shellcheck disable=SC3043
+     3	# MK20 Agent firmware single entry point (release tier). Launched by the rescue loader with
+     4	#   MK20_REL (verified tmpfs copy of this release), MK20_VERSION, MK20_HOME (/data/mk20).
+     5	#   mk20d boot      gates (kernel features, vendor hashes, config) -> composite ECM+HID+ADB+KD-bridge or stock
+     6	#                   ACM+KD(+adb) -> self-test (3 samples) -> confirm with the loader (or restore stock on failure)
+     7	#   mk20d health    JSON health report (stdout; also written to /tmp/mk20/health.json)
+     8	#   mk20d selftest  host-independent checks, PASS/FAIL/WARN lines, rc 0 = pass
+     9	#   mk20d config    effective configuration (mk20.conf + flag overrides) and warnings
+    10	#   mk20d maint     detached housekeeping loop started by boot (single instance: flock): log rotation
+    11	#                   (/data/mk20/logs), tmpfs bridge-log trim, periodic /tmp/mk20/health.json (MK20_MAINT_S=300 s)
+    12	#   mk20d version
+    13	# Gate policy: kernel not in kernel/ALLOWLIST -> NO USB changes at all (KD's stock ACM stays); kernel without ecm or
+    14	# vendor hash mismatch or config/flag -> stock ACM+KD+adb (adb with restore-to-serial on failure, like legacy adb.sh).
+    15	R=${MK20_ROOT:-}
+    16	REL=${MK20_REL:-$(cd "$(dirname "$0")/.." && pwd)}
+    17	V=${MK20_VERSION:-$(sed -n 's/^version=//p' "$REL/MANIFEST" 2>/dev/null)}
+    18	. "$REL/share/mk20lib.sh"
+    19	TM=$R/tmp/mk20; G=$R/sys/kernel/config/usb_gadget/g1; C=$G/configs/c.1
+    20	MOUNTS=${MK20_MOUNTS:-/proc/mounts}
+    21	mkdir -p "$TM" "$LOGDIR" "$MK20_HOME/state" 2>/dev/null
+    22	log() { mk20log "$1" mk20d "$2" "v=$V" "$3"; }
+    23	
+    24	p4sha() { [ -n "${MK20_P4_SHA:-}" ] && { echo "$MK20_P4_SHA"; return; }; [ -s "$TM/p4.sha" ] || sha256sum "$R/dev/by-name/boot" 2>/dev/null | cut -d' ' -f1 > "$TM/p4.sha"; cat "$TM/p4.sha"; }
+    25	kernel_line() { local p; p=$(p4sha); echo "$p" | grep -Eq '^[0-9a-f]{64}$' && awk -v p="$p" '$1==p && NF>=3 {print; exit}' "$MK20_HOME/kernel/ALLOWLIST" 2>/dev/null; }   # "<sha> <name> <features>"
+    26	kernel_has() { case ",$(kernel_line | cut -d' ' -f3)," in *",$1,"*) return 0;; esac; return 1; }
+    27	shim_mounted() { # $1=path: our KD shim (a tmpfs file bind-mounted exactly on a known vendor path)
+    28	  case "$1" in /data/appLunch.sh|/data/setusbconfig) ;; *) return 1;; esac
+    29	  awk -v f="$1" '$2==f && $3=="tmpfs" {ok=1} END{exit !ok}' "$MOUNTS" 2>/dev/null; }
+    30	vendor_check() { # prints "ok" or the first mismatch; all 4 vendor entries must be present and checked
+    31	  local h f n; n=0
+    32	  while read -r h f || [ -n "$h" ]; do
+    33	    [ -n "$h" ] || continue
+    34	    n=$((n+1))
+    35	    shim_mounted "$f" && continue
+    36	    [ "$(sha256sum "$R$f" 2>/dev/null | cut -d' ' -f1)" = "$h" ] || { echo "mismatch:$f"; return 1; }
+    37	  done < "$REL/share/vendor.sha256"
+    38	  [ "$n" -ge 4 ] || { echo "vendor list incomplete ($n)"; return 1; }
+    39	  echo ok
+    40	}
+    41	num() { case "$1" in ''|*[!0-9]*) echo 0;; *) echo "$1";; esac; }
+    42	kd_count() { pgrep -f '^/data/KeyboardDevice' | wc -l | tr -d ' '; }   # not -x: BusyBox 1.27 -x never matches KD (1.0.3 field failure)
+    43	composite_up() { [ -e "$C/ecm.usb0" ]; }
+    44	listening() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }   # exact local address
+    45	lock_held() { ( exec 5>"$1"; ! flock -n 5 ) 2>/dev/null; }   # a live instance holds the lock
+    46	wdt_armed() { ${MK20_UBUS:-ubus} call system watchdog 2>/dev/null | grep -q '"running"'; }
+    47	
+    48	selftest() { # FAIL = host-independent breakage. Composite rollback to stock is "degraded" (WARN): flapmon rolls back on
+    49	  # host-side USB flaps, and stock ACM+KD(+adb) stays reachable. With the composite up, the link-local rescue listener is
+    50	  # mandatory (1.1.0): it is the subnet-independent path, so a release that loses it must not be confirmed.
+    51	  local f n; f=0
+    52	  n=$(kd_count); [ "$n" = 1 ] && echo "PASS kd=1" || { echo "FAIL kd=$n"; f=1; }
+    53	  [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && echo "PASS udc bound" || { echo "FAIL udc unbound"; f=1; }
+    54	  [ -e "$R/dev/ttyGS0" ] && echo "PASS ttyGS0" || { echo "FAIL no ttyGS0"; f=1; }
+    55	  wdt_armed && echo "PASS watchdog armed" || { echo "FAIL watchdog not armed"; f=1; }
+    56	  if composite_up; then
+    57	    listening "$ECM_IP:$BRIDGE_PORT" && echo "PASS bridge $ECM_IP:$BRIDGE_PORT" || { echo "FAIL bridge not on $ECM_IP:$BRIDGE_PORT"; f=1; }
+    58	    listening "${MK20_LL_IP:-169.254.7.2}:$BRIDGE_PORT" && echo "PASS bridge link-local" || { echo "FAIL bridge not on link-local"; f=1; }
+    59	    listening "0.0.0.0:$BRIDGE_PORT" && { echo "FAIL bridge on 0.0.0.0"; f=1; }
+    60	    if [ -e "$C/hid.usb0" ]; then [ -e "$R/dev/hidg0" ] && echo "PASS hid" || { echo "FAIL no hidg0"; f=1; }; fi
+    61	  else echo "WARN composite down (stock ACM+KD$([ -e "$C/ffs.adb" ] && echo +adb))"
+    62	    for n in /data/appLunch.sh /data/setusbconfig; do shim_mounted "$n" && { echo "FAIL shim still mounted on $n with composite down"; f=1; }; done; fi
+    63	  n=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); case "$n" in ''|*[!0-9]*) ;; *) [ "$n" -lt 1024 ] && echo "WARN FAT free ${n} KiB";; esac
+    64	  return $f
+    65	}
+    66	
+    67	jstr() { # JSON string: drop control bytes, escape backslash and quote
+    68	  printf '"%s"' "$(printf '%s' "$1" | tr '\n\t' '  ' | LC_ALL=C tr -cd ' -~' | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+    69	jbool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
+    70	health() {
+    71	  local kl up fat dat mem links l st rc mounts
+    72	  cfg_load
+    73	  kl=$(kernel_line); up=$(cut -d. -f1 /proc/uptime)
+    74	  fat=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); dat=$(df -Pk "$MK20_HOME" 2>/dev/null | awk 'END{print $4}')
+    75	  mem=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+    76	  links=""; for l in "$C"/*usb0 "$C"/*adb; do [ -e "$l" ] && links="$links${l##*/} "; done
+    77	  st=$(selftest 2>/dev/null); rc=$?
+    78	  mounts=0; for l in /data/appLunch.sh /data/setusbconfig; do shim_mounted "$l" && mounts=$((mounts+1)); done
+    79	  {
+    80	    printf '{'
+    81	    printf '"version":%s,"uptime_s":%s,' "$(jstr "$V")" "$(num "$up")"
+    82	    printf '"kernel":{"p4":%s,"name":%s,"features":%s},' "$(jstr "$(p4sha)")" "$(jstr "$(echo "$kl" | cut -d' ' -f2)")" "$(jstr "$(echo "$kl" | cut -d' ' -f3)")"
+    83	    printf '"vendor":%s,' "$(jstr "$(vendor_check)")"
+    84	    printf '"usb":{"udc":%s,"state":%s,"functions":%s,"composite":%s},' "$(jstr "$(cat "$G/UDC" 2>/dev/null)")" \
+    85	      "$(jstr "$(cat "$R"/sys/class/udc/*/state 2>/dev/null | head -n 1)")" "$(jstr "$links")" "$(jbool composite_up)"
+    86	    printf '"net":{"usb0":%s,"mtu":%s,"subnet":%s,"bridge":%s,"hidg0_writable":%s},' "$(jstr "$(ifconfig usb0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')")" \
+    87	      "$(num "$(cat "$R/sys/class/net/usb0/mtu" 2>/dev/null)")" "$(jstr "$ECM_SUBNET")" "$(jbool listening "$ECM_IP:$BRIDGE_PORT")" "$(jbool test -w "$R/dev/hidg0")"
+    88	    printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,' "$(num "$(kd_count)")" "$(jbool pidof adbd)" \
+    89	      "$(jbool pgrep -f mk20-flapmon.sh)" "$(jbool lock_held "$TM/mk20d-maint.lock")" "$mounts"
+    90	    printf '"watchdog":%s,"mem_avail_kb":%s,"fat_free_kb":%s,"data_free_kb":%s,' "$(jbool wdt_armed)" "$(num "$mem")" "$(num "$fat")" "$(num "$dat")"
+    91	    printf '"release":{"good":%s,"pending":%s,"last_rollback":%s},' "$(jstr "$(head -n 1 "$MK20_HOME/state/good" 2>/dev/null)")" \
+    92	      "$(jstr "$(head -n 1 "$MK20_HOME/state/pending" 2>/dev/null)")" "$(jstr "$(head -n 1 "$MK20_HOME/state/last-rollback" 2>/dev/null)")"
+    93	    printf '"config":{"src":%s,"warnings":%s},' "$(jstr "$CFG_SRC")" "$(jstr "$CFG_WARN")"
+    94	    printf '"selftest":{"pass":%s,"detail":%s},' "$([ "$rc" = 0 ] && echo true || echo false)" "$(jstr "$st")"
+    95	    printf '"status":%s' "$(jstr "$(if [ "$rc" != 0 ]; then echo fail; elif echo "$st" | grep -q '^WARN'; then echo degraded; else echo ok; fi)")"
+    96	    printf '}\n'
+    97	  } > "$TM/health.json.tmp.$$" && mv -f "$TM/health.json.tmp.$$" "$TM/health.json" || { rm -f "$TM/health.json" "$TM/health.json.tmp.$$"; return 1; }
+    98	  cat "$TM/health.json"
+    99	}
+   100	
+   101	stock_adb() { # legacy adb.sh semantics: add adb beside ACM; on failure or lost ACM restore serial; bounded keepalive
+   102	  local rc
+   103	  sh "$REL/share/mk20-add-adb.sh" >> "$LOGDIR/gadget.log" 2>&1; rc=$?
+   104	  [ $rc = 0 ] || log WARN adb "add-adb rc=$rc -> restore serial"
+   105	  if [ $rc != 0 ] || [ ! -e "$R/dev/ttyGS0" ] || [ ! -e "$C/acm.usb0" ]; then
+   106	    killall adbd 2>/dev/null; [ -x "$R/data/setusbconfig" ] && "$R/data/setusbconfig" serial >> "$LOGDIR/gadget.log" 2>&1; fi
+   107	  [ "${MK20_ADB_KEEPALIVE:-1}" = 1 ] || return 0
+   108	  ( trap '' HUP INT; exec 5>"$TM/adb-keepalive.lock"; flock -n 5 || exit 0; n=0
+   109	    while [ $n -lt 5 ]; do sleep 30
+   110	      [ -f "$S/mk20-no-adb" ] && exit 0
+   111	      if [ ! -e "$C/ffs.adb" ] && pgrep -f KeyboardDevice >/dev/null; then sleep 10; n=$((n+1)); log INFO adb "keepalive re-add #$n"
+   112	        sh "$REL/share/mk20-add-adb.sh" >> "$LOGDIR/gadget.log" 2>&1 || { killall adbd 2>/dev/null; [ -x "$R/data/setusbconfig" ] && "$R/data/setusbconfig" serial; }; fi
+   113	    done ) </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- &
+   114	}
+   115	
+   116	case "${1:-}" in
+   117	boot)
+   118	  cfg_load
+   119	  log_rotate "$LOGDIR/gadget.log"
+   120	  log INFO boot "rel=$REL cfg=$CFG_SRC subnet=$ECM_SUBNET composite=$FEATURE_COMPOSITE hid=$FEATURE_HID adb=$FEATURE_ADB warn=$CFG_WARN"
+   121	  i=0; until [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && [ -e "$C/acm.usb0" ] && [ -e "$R/dev/ttyGS0" ] && pgrep -f KeyboardDevice >/dev/null; do
+   122	    i=$((i+1)); [ $i -gt 120 ] && { log WARN boot "KD/g1 not up after 120 s"; break; }; sleep 1; done
+   123	  sleep "${MK20_SETTLE:-20}"
+   124	  MODE=composite; why=""
+   125	  NOHID=0; [ "$FEATURE_HID" = 1 ] && kernel_has hid || NOHID=1
+   126	  NOADB=0; [ "$FEATURE_ADB" = 1 ] || NOADB=1   # composite only; the stock fallback always adds adb (FAT flag aside)
+   127	  [ "$FEATURE_COMPOSITE" = 1 ] || { MODE=stock; why="config/flag"; }
+   128	  kernel_has ecm || { MODE=stock; why="${why:+$why,}kernel '$(kernel_line | cut -d' ' -f2)' lacks ecm"; }
+   129	  vc=$(vendor_check) || { MODE=stock; why="${why:+$why,}vendor $vc"; }
+   130	  [ -n "$(kernel_line)" ] || { MODE=none; why="kernel $(p4sha) not in kernel/ALLOWLIST"; }
+   131	  rm -f "$TM/gadget.env"
+   132	  if [ $MODE = composite ]; then
+   133	    ( umask 077; printf 'MK20_ECM_IP=%s\nMK20_ECM_MASK=%s\nMK20_DEV_MAC=%s\nMK20_HOST_MAC=%s\nMK20_BRIDGE_PORT=%s\nMK20_FLAP_DROPS=%s\nMK20_FLAP_WINDOW=%s\nMK20_NOHID=%s\nMK20_NOADB=%s\n' \
+   134	      "$ECM_IP" "$ECM_MASK" "$ECM_DEV_MAC" "$ECM_HOST_MAC" "$BRIDGE_PORT" "$FLAP_DROPS" "$FLAP_WINDOW_S" "$NOHID" "$NOADB" > "$TM/gadget.env.tmp" ) \
+   135	      && mv -f "$TM/gadget.env.tmp" "$TM/gadget.env"
+   136	    cp -f "$REL/share/gadget.sh" "$TM/gadget-boot.sh"
+   137	    MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log MK20_ECM_IP=$ECM_IP MK20_ECM_MASK=$ECM_MASK \
+   138	      MK20_DEV_MAC=$ECM_DEV_MAC MK20_HOST_MAC=$ECM_HOST_MAC MK20_BRIDGE_PORT=$BRIDGE_PORT \
+   139	      MK20_FLAP_DROPS=$FLAP_DROPS MK20_FLAP_WINDOW=$FLAP_WINDOW_S MK20_NOHID=$NOHID MK20_NOADB=$NOADB \
+   140	      sh "$TM/gadget-boot.sh" --boot >> "$LOGDIR/gadget.log" 2>&1
+   141	    grc=$?
+   142	    log INFO gadget "rc=$grc status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null) nohid=$NOHID noadb=$NOADB ip=$ECM_IP"
+   143	  elif [ $MODE = stock ]; then
+   144	    SADB=1; [ -f "$S/mk20-no-adb" ] && SADB=0; kernel_has adb || SADB=0
+   145	    log WARN boot "composite skipped: $why -> stock ACM+KD$([ $SADB = 1 ] && echo +adb)"
+   146	    [ $SADB = 1 ] && stock_adb
+   147	  else log ERROR boot "$why -> no USB changes (stock ACM+KD only)"; fi
+   148	  sleep "${MK20_STABLE:-30}"
+   149	  # a gadget failsafe (flap rollback + adb re-add, up to ~2.5 min) in progress is not a failure: wait it out (cap)
+   150	  # The marker is set by flapmon BEFORE it launches a rollback and by cleanup(); a sample taken while (or just
+   151	  # before) it appears is retaken after the failsafe ends. Total wait capped (stays well under the loader deadline).
+   152	  w=0; busy_wait() { while [ -f "$TM/gadget.busy" ] && [ $w -lt "${MK20_BUSY_CAP:-150}" ]; do sleep 5; w=$((w+5)); done; }
+   153	  busy_wait; try=0; src=1; grc=${grc:-0}
+   154	  while [ $try -lt 3 ]; do
+   155	    try=$((try+1)); r=$(selftest); src=$?
+   156	    if [ -f "$TM/gadget.busy" ] && [ $w -lt "${MK20_BUSY_CAP:-150}" ]; then busy_wait; try=$((try-1)); continue; fi
+   157	    [ $src = 0 ] && break; [ $try = 3 ] || sleep "${MK20_SELFTEST_GAP:-10}"
+   158	  done
+   159	  [ $w -gt 0 ] && log INFO selftest "waited ${w}s for gadget failsafe"
+   160	  # On probation, a composite that failed its own setup (gadget rc!=0: ip/alias/bridge/bind -> die -> stock) is a
+   161	  # release failure, not "degraded": roll back. Host-caused flap rollbacks happen only after rc 0 and stay WARN.
+   162	  if [ $MODE = composite ] && [ "$grc" != 0 ] && [ "$(cat "$MK20_HOME/state/pending" 2>/dev/null)" = "$V" ]; then
+   163	    r="$r
+   164	FAIL composite setup rc=$grc during probation"; src=1; fi
+   165	  echo "$r" > "$TM/selftest.txt"; log INFO selftest "rc=$src try=$try mode=$MODE $(echo "$r" | tr '\n' ';')"
+   166	  # per-boot records: selftest-last.json + selftest-1..4.json (previous boots)
+   167	  ST=$MK20_HOME/state; for k in 3 2 1; do [ -f "$ST/selftest-$k.json" ] && mv -f "$ST/selftest-$k.json" "$ST/selftest-$((k+1)).json"; done
+   168	  [ -f "$ST/selftest-last.json" ] && mv -f "$ST/selftest-last.json" "$ST/selftest-1.json"
+   169	  # decide on the 3-sample result ($src) BEFORE the (slower) health record, which can never change it
+   170	  if [ $src = 0 ]; then
+   171	    if [ -f "$TM/rescue-loader.sh" ]; then sh "$TM/rescue-loader.sh" confirm "$V" && log INFO confirm "ok" || log INFO confirm "not pending/refused"; fi
+   172	  else log ERROR selftest "FAILED: not confirming; restoring stock ACM+KD+adb now"
+   173	    if [ -f "$TM/gadget-boot.sh" ] && composite_up; then
+   174	      # same contract as the confirm waiter: retry once (rc 3 = stuck, already escalated), then persist stock + reboot
+   175	      rbn() { MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rollback-now >> "$LOGDIR/gadget.log" 2>&1 6>&- 8>&- 9>&-; }
+   176	      rbn; rrc=$?
+   177	      if [ $rrc != 0 ] && [ $rrc != 3 ]; then log WARN selftest "rollback rc=$rrc; retrying once"; sleep "${MK20_RB_RETRY_S:-20}"; rbn; rrc=$?; fi
+   178	      if [ $rrc != 0 ] && [ $rrc != 3 ]; then log ERROR selftest "rollback failed twice (rc=$rrc) -> mk20-no-composite + reboot"
+   179	        touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync; fi
+   180	    fi; fi
+   181	  ( health ) > "$ST/selftest-last.json" 2>/dev/null
+   182	  if [ "${MK20_MAINT:-1}" = 1 ]; then
+   183	    export MK20_REL="$REL" MK20_VERSION="$V"
+   184	    ( trap '' HUP INT; exec sh "$REL/sbin/mk20d" maint </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) &
+   185	  fi
+   186	  ;;
+   187	health) health;;
+   188	maint)
+   189	  exec 5>"$TM/mk20d-maint.lock"; flock -n 5 || exit 0   # single instance for the lifetime of the loop
+   190	  log INFO maint "start pid=$$"
+   191	  while :; do
+   192	    cfg_load
+   193	    log_rotate "$LOGDIR/mk20d.log"; log_rotate "$LOGDIR/gadget.log"
+   194	    b=$TM/bridge.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }   # O_APPEND writers keep appending
+   195	    health > /dev/null 2>&1
+   196	    sleep "${MK20_MAINT_S:-300}" 5>&-   # the lock dies with this loop, not with an orphaned sleep
+   197	  done;;
+   198	selftest) cfg_load; selftest; exit $?;;
+   199	config) cfg_load; cfg_print;;
+   200	version) echo "$V";;
+   201	*) echo "usage: mk20d boot|health|selftest|config|maint|version"; exit 2;;
+   202	esac
+```

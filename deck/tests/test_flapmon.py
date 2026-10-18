@@ -133,3 +133,14 @@ def test_stale_rollback_rc5_exits_without_retry_or_escalation(dev, tmp_path, mon
                           drops=2, cmd=["sh", "-c", f"echo x >> {tmp_path}/tries; exit 5"])
     assert "stale (rc 5" in log and not busy and len((tmp_path / "tries").read_text().split()) == 1
     assert not (tmp_path / "nocomp").exists() and not (tmp_path / "reboot").exists()
+
+
+def test_refused_then_stale_clears_own_marker(dev, tmp_path, monkeypatch):
+    """GPT r7 MAJOR: ownership is sticky across retries (rc 4 -> rc 5 must not leak flapmon's marker)."""
+    monkeypatch.setattr(dev, "env", dict(dev.env, MK20_FLAP_TRIES="3", MK20_FLAP_RETRY_S="0",
+                                         MK20_FLAP_FLAG=str(tmp_path / "nocomp"), MK20_FLAP_REBOOT=str(tmp_path / "reboot")))
+    cmd = f"echo x >> {tmp_path}/tries; [ $(wc -l < {tmp_path}/tries) -ge 2 ] && exit 5; exit 4"
+    n, log, busy = run_fm(dev, tmp_path, [("default", 101), ("configured", 101), ("default", 102)],
+                          drops=2, cmd=["sh", "-c", cmd])
+    assert "failed rc=4" in log and "stale (rc 5" in log and not busy
+    assert not (tmp_path / "nocomp").exists()
