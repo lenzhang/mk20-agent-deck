@@ -90,11 +90,11 @@ kd_reap_orphans() {
 }
 kd_start() {
   if [ -n "$KDSVC" ]; then
-    $KDSVC start >>"$LOG" 2>&1; i=0
+    $KDSVC start >>"$LOG" 2>&1 7>&-; i=0
     while ! pgrep -f /data/KeyboardDevice >/dev/null && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
     pgrep -f /data/KeyboardDevice >/dev/null || log "WARN KD not up 20 s after procd start"
   else
-    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 ) & }
+    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 7>&- ) & }
   fi
   sleep 3; n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" -le 1 ] || { log "WARN $n KeyboardDevice processes"; kd_reap_orphans; }
 }
@@ -104,10 +104,10 @@ readd_adb() {
   H=$ADDADB; [ -f "$H" ] || return
   i=0; until [ -n "$(udc_now)" ] && [ -e $C/acm.usb0 ] && [ -e /dev/ttyGS0 ] && pgrep -f KeyboardDevice >/dev/null; do
     i=$((i+1)); [ $i -gt 60 ] && { log "readd_adb: g1 not ready"; return; }; sleep 1; done
-  sleep 5; cp -f $H /tmp/mk20-add-adb.sh; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 && log "adb re-added" || log "adb re-add FAILED"
+  sleep 5; cp -f $H /tmp/mk20-add-adb.sh; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 7>&- && log "adb re-added" || log "adb re-add FAILED"
   # KD's startup re-runs `setusbconfig serial` (drops ffs.adb) once or twice: keep re-adding for ~90 s
   n=0; while [ $n -lt 6 ]; do sleep 15; n=$((n+1)); [ -e $C/ffs.adb ] && continue
-    log "adb gone again (KD reset) -> re-add #$n"; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1; done
+    log "adb gone again (KD reset) -> re-add #$n"; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 7>&-; done
 }
 OK=0
 cleanup() {
@@ -127,55 +127,50 @@ cleanup() {
   kd_stop
   for m in /data/setusbconfig /data/appLunch.sh; do i=0; while grep -q " $m " /proc/mounts && [ $i -lt 5 ]; do umount $m 2>/dev/null || sleep 1; i=$((i+1)); done
     grep -q " $m " /proc/mounts && log "WARN still mounted: $m"; done
-  /data/setusbconfig serial >>"$LOG" 2>&1
+  /data/setusbconfig serial >>"$LOG" 2>&1 7>&-
   kd_start
   readd_adb
   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
   rm -f /tmp/mk20/gadget.busy
 }
 # rollback runs before any preflight so an abnormal state cannot block it
-# Rollback guard: flapmon, the confirm waiter and mk20d can all ask for --rollback-now. State in /tmp/mk20/rollback.once
-# (owner "pid starttime deadline", and "done"); every claim/reclaim/clear happens under flock on rollback.lock (fd 7),
-# which is closed again BEFORE cleanup runs, so daemons spawned by cleanup never inherit it. "done" is written only after
-# stock is verified (ACM linked, UDC bound, KD running) and every caller re-verifies: exit 0 always means stock is up.
-# A dead owner (pid gone or pid reused: start time differs) is reclaimed; a live owner past its 150-s deadline is
-# killed (that exact process) and then reclaimed. The composite path clears the guard only when no live owner exists.
-RB=/tmp/mk20/rollback.once; RBL=/tmp/mk20/rollback.lock
+# Transition mutex (1.1.4, r5): ONE flock (fd 7 on /tmp/mk20/transition.lock) is held for the WHOLE setup or the WHOLE
+# rollback, so they can never overlap (flapmon, the confirm waiter and mk20d may all ask for --rollback-now). Every
+# process spawned while it is held gets 7>&- (adbd, bridge loop, KD, add-adb, flapmon, confirm waiter), so only the
+# owner holds it and it is released when the owner exits. A rollback that finds stock verified is a no-op: exit 0
+# always means stock is up. Every lock step is checked (fail closed: no mutation without the mutex).
+# Owner-local bounded supervisor: the rollback runs cleanup in its own child and waits at most MK20_RB_TIMEOUT
+# (default 240 s); on timeout it stops, kills and reaps ITS OWN child tree before releasing the mutex. No caller ever
+# kills another owner; a waiter that cannot get the mutex in MK20_RB_LOCK_TRIES*0.25 s (default 300 s) gives up (rc 1).
+TL=/tmp/mk20/transition.lock
 stock_ok() { [ -e $C/acm.usb0 ] && [ ! -e $C/ecm.usb0 ] && [ ! -e $C/hid.usb0 ] && [ -n "$(udc_now)" ] &&
   [ -c /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && ! grep -qE ' /data/(setusbconfig|appLunch\.sh) ' /proc/mounts &&
   pgrep -f '^/data/KeyboardDevice' >/dev/null; }
 rb_status() { echo "$1" > /mnt/SDCARD/gadget-ecm-hid.status 2>/dev/null; }
 pstart() { awk '$3 != "Z" {print $22}' "/proc/$1/stat" 2>/dev/null; }   # empty if gone or a zombie
-now_s() { cut -d. -f1 /proc/uptime; }
-rb_lock() { mkdir -p /tmp/mk20; exec 7>"$RBL"; flock -x 7; }
-rb_unlock() { flock -u 7; exec 7>&-; }
-# owner_live: 0 = a live owner within its deadline holds the guard; 1 = no (live) owner
-owner_live() {
-  read -r op ost odl < "$RB/owner" 2>/dev/null || return 1
-  case "$op$ost$odl" in ''|*[!0-9]*) return 1;; esac
-  [ "$(pstart "$op")" = "$ost" ] || return 1
-  [ "$(now_s)" -lt "$odl" ] && return 0
-  log "rollback owner $op past its deadline -> killing it"; kill -9 "$op" 2>/dev/null
-  i=0; while [ "$(pstart "$op")" = "$ost" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done
-  [ "$(pstart "$op")" = "$ost" ] && return 0; return 1
+# tl_lock <tries>: take the transition mutex on fd 7 (tries 0.25 s apart; BusyBox flock has no -w). 1 = not held.
+tl_lock() {
+  mkdir -p "$(dirname "$TL")" 2>/dev/null || return 1
+  exec 7>"$TL" || return 1
+  n=0; until flock -n 7; do n=$((n+1)); [ "$n" -ge "$1" ] && { exec 7>&-; return 1; }; sleep 0.25; done
 }
+kids() { for d in /proc/[0-9]*; do [ "$(awk '/^PPid:/{print $2}' "$d/status" 2>/dev/null)" = "$1" ] && echo "${d#/proc/}"; done; }
+kill_tree() { kill -STOP "$1" 2>/dev/null; for k in $(kids "$1"); do kill_tree "$k"; done; kill -9 "$1" 2>/dev/null; }
 if [ "${1:-}" = --rollback-now ]; then
-  i=0
-  while :; do
-    rb_lock
-    if [ -f $RB/done ] && stock_ok; then rb_unlock; log "rollback already done (stock verified)"; exit 0; fi
-    if [ -d $RB ] && owner_live; then
-      rb_unlock; [ $i -ge 700 ] && { log "rollback owner still running after 175 s"; exit 1; }; sleep 0.25; i=$((i+1)); continue
-    fi
-    if stock_ok; then rm -rf $RB; rb_unlock; log "rollback requested but stock already verified"; exit 0; fi
-    rm -rf $RB; mkdir $RB && echo "$$ $(pstart $$) $(( $(now_s) + 150 ))" > $RB/owner; rb_unlock; break
-  done
-  log "rollback requested"; cleanup
+  tl_lock "${MK20_RB_LOCK_TRIES:-1200}" || { log "rollback: transition mutex not acquired (busy or lock error) -> refused"; exit 1; }
+  if stock_ok; then log "rollback already done (stock verified)"; exit 0; fi
+  log "rollback requested"
+  ( trap - EXIT INT TERM; cleanup ) </dev/null &
+  CP=$!; CST=$(pstart $CP); RBT=${MK20_RB_TIMEOUT:-240}; i=0
+  while [ -n "$CST" ] && [ "$(pstart $CP)" = "$CST" ] && [ $i -lt $((RBT*4)) ]; do sleep 0.25; i=$((i+1)); done
+  if [ -n "$CST" ] && [ "$(pstart $CP)" = "$CST" ]; then
+    log "rollback cleanup exceeded ${RBT}s -> killing own child tree $CP"; kill_tree $CP
+  fi
+  wait $CP 2>/dev/null
   i=0; while ! stock_ok && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done   # KD's own setusbconfig reset can lag
-  rb_lock
-  if stock_ok; then touch $RB/done; rb_unlock; log "rollback verified"; rb_status rollback-verified; exit 0; fi
-  rm -rf $RB; rb_unlock; rb_status rollback-NOT-verified
-  log "rollback NOT verified (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now) ttyGS0=$([ -L /dev/ttyGS0 ] && echo link || echo dev)) -> guard released"; exit 1
+  if stock_ok; then log "rollback verified"; rb_status rollback-verified; exit 0; fi
+  rb_status rollback-NOT-verified
+  log "rollback NOT verified (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now) ttyGS0=$([ -L /dev/ttyGS0 ] && echo link || echo dev)) -> mutex released"; exit 1
 fi
 
 # ---- preflight (nothing touched yet) ----
@@ -186,7 +181,7 @@ UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
 [ -x /bin/adbd ] || { log "ABORT no /bin/adbd"; exit 1; }
 grep -q '^usb_f_ecm ' /proc/modules || [ -f $ECMKO ] || { log "ABORT no $ECMKO"; exit 1; }
 [ -n "${MK20_REL:-}" ] && [ -f "$MK20_REL/share/flapmon.sh" ] || { log "ABORT no flapmon.sh (MK20_REL unset?)"; exit 1; }
-rb_lock; if [ -d $RB ] && [ ! -f $RB/done ] && owner_live; then rb_unlock; log "ABORT rollback in progress"; exit 1; fi; rb_unlock
+tl_lock "${MK20_SETUP_LOCK_TRIES:-40}" || { log "ABORT transition in progress (mutex busy) or lock error"; exit 1; }   # held until exit
 touch /tmp/mk20-flapmon-stop   # a re-run: any old flap monitor / confirm waiter exits (new ones start below)
 log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
 
@@ -225,7 +220,7 @@ echo "ECM+HID+ADB" > $C/strings/0x409/configuration 2>/dev/null
 if [ "$NOADB" = 0 ]; then
 mkdir -p /dev/usb-ffs/adb
 grep -q ' /dev/usb-ffs/adb ' /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb || die "mount ffs"
-/bin/adbd </dev/null >/tmp/adbd.log 2>&1 &
+/bin/adbd </dev/null >/tmp/adbd.log 2>&1 7>&- &
 i=0; while [ ! -e /dev/usb-ffs/adb/ep1 ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
 [ -e /dev/usb-ffs/adb/ep1 ] || die "adbd did not write FFS descriptors"
 fi
@@ -244,7 +239,7 @@ rm -f /tmp/mk20-bridge-stop
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
 mkdir -p /tmp/mk20
 [ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
-( trap '' HUP INT; exec sh -c "echo \$\$ > /tmp/mk20-bridge-loop.pid; while [ ! -f /tmp/mk20-bridge-stop ]; do $BR $BRIDGE_LISTEN --link /dev/ttyGS0; sleep 1; done" </dev/null >>/tmp/mk20/bridge.log 2>&1 ) &   # supervised (tmpfs log: an open FAT file blocks hardreset's remount ro)
+( trap '' HUP INT; exec sh -c "echo \$\$ > /tmp/mk20-bridge-loop.pid; while [ ! -f /tmp/mk20-bridge-stop ]; do $BR $BRIDGE_LISTEN --link /dev/ttyGS0; sleep 1; done" </dev/null >>/tmp/mk20/bridge.log 2>&1 7>&- ) &   # supervised (tmpfs log: an open FAT file blocks hardreset's remount ro)
 i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 [ -e /dev/ttyGS0 ] || die "bridge did not create /dev/ttyGS0"
 printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n' > /tmp/setusbconfig-noop; chmod 755 /tmp/setusbconfig-noop
@@ -263,7 +258,6 @@ pgrep -f KeyboardDevice >/dev/null || die "KD not running"
 # test hook (one-shot): prove the failure rollback with everything set up (bridge, shims, KD on PTY)
 if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
 rm -f /mnt/SDCARD/mk20-composite-ok
-rb_lock; owner_live || rm -rf $RB; rb_unlock   # never clear a live rollback owner
 OK=1
 log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_IP bridge=[$BRIDGE_LISTEN] kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
@@ -277,14 +271,14 @@ FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
 { [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh.new && mv -f /tmp/mk20-flapmon.sh.new /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
 ( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG"
   exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
-    sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 9>&- ) &
+    sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
 FP=$!; i=0; while [ ! -f /tmp/mk20/flapmon.ready ] && [ $i -lt 40 ] && kill -0 $FP 2>/dev/null; do sleep 0.25; i=$((i+1)); done
 [ -f /tmp/mk20/flapmon.ready ] && kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start (no lock/ready marker)"; }
 log "flap monitor started (pid $FP)"
 if [ "$MODE" = --boot ]; then
   touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
 fi
-( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 9>&- ) &
+( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 7>&- 9>&- ) &
 WP=$!; sleep 1; kill -0 $WP 2>/dev/null || [ -f /mnt/SDCARD/mk20-composite-ok ] || { OK=0; die "confirm waiter did not start -> rollback now"; }
 log "confirm window 180s started (pid $WP)"
 echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status

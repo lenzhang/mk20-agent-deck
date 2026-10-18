@@ -9,6 +9,8 @@
 # The busy marker is cleared after every rollback attempt. A failed rollback is retried (MK20_FLAP_TRIES, default 3,
 # MK20_FLAP_RETRY_S apart); if all fail, the persistent mk20-no-composite flag is set and the watcher hard-resets
 # (cmd-reboot), so the next boot runs stock until the flag is deleted.
+# The rollback command bounds itself (gadget.sh --rollback-now: transition mutex + owner-local supervisor that kills
+# and reaps its own cleanup tree after MK20_RB_TIMEOUT), so a hung rollback returns rc!=0 here and is retried/escalated.
 # Writes the ready marker (MK20_FLAP_READY, default /tmp/mk20/flapmon.ready) once the lock is held.
 # Test env: MK20_UPTIME_CMD (seconds), MK20_FLAP_POLL (default 0.3), MK20_BUSY, MK20_FLAP_LOCK, MK20_FLAP_SUSP_S.
 [ $# -ge 7 ] && [ "$6" = -- ] || { echo "usage: flapmon.sh state window drops log stopfile -- cmd..." >&2; exit 2; }
