@@ -1,3 +1,5 @@
+# OBSOLETE (M4): superseded by tcp_transport.connect_device() (all candidates bound to the MK20 interface) and the
+# "MK20 link-local" Mac service. Kept for reference only; not used by any current tool.
 # 127.0.0.1:17891 -> 169.254.7.2:17890 forced out a given interface (IP_BOUND_IF), for ECM link-local tests.
 import socket, sys, threading
 IF = sys.argv[1] if len(sys.argv) > 1 else "en13"

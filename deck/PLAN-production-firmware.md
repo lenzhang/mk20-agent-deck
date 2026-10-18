@@ -203,6 +203,6 @@ closed). MTU 478 is set before `usb0 up` and reported by health (over-MTU test).
 | M2 | mk20d entry point, health/self-test (kmsg), structured logs + rotation, whitelisted config, vendor hash gates, bridge bind usb0 |
 | M3 | Installer/updater + state machine + auto rollback, with power-cut injection |
 | M4 | Subnet switch to 172.30.250.0/24 shipped as 1.1.0 THROUGH the installer (real upgrade/rollback exercise) + Mac/daemon update | DONE 19:12 SGT: 1.1.0 + 1.1.1 good on HW, Mac en13 172.30.250.1 + MK20 link-local svc, daemon candidates (p0) |
-| M5 | Docs: RELEASE / INSTALL / RECOVERY + kernel/<sha>/RECOVERY.txt |
-| M6 | `make test` wiring everything (box) |
-| M7 | Hardware acceptance (2 runs) + host events + soak; then VNC milestone |
+| M5 | Docs: RELEASE / INSTALL / RECOVERY + kernel/<sha>/RECOVERY.txt | DONE 20:10 SGT: firmware/{RELEASE,INSTALL,RECOVERY}.md (Mac service changes + undo), kernel notes on device, tests/test_docs.py |
+| M6 | `make test` wiring everything (box) | DONE: shellcheck + py_compile + host pytest (28) + box pytest (240) green |
+| M7 | Hardware acceptance (2 runs) + host events + soak; then VNC milestone | IN PROGRESS: 1.1.3 accept PASS x2 after WDT reboots (20:06, 20:08 SGT); Serial off/on x3 OK; 24h soak started 20:11 SGT |

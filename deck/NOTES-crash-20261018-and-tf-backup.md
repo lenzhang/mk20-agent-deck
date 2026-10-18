@@ -412,3 +412,25 @@ the `adb` feature also disables it.
 **Known limitations**
 - The FAT boot partition is 8 MiB with about 1.28 MiB free. The selftest warns below 1 MiB.
 - The two MK20s share the fixed host MAC until per-unit MACs land. The host tool refuses when it sees two.
+
+
+## M5–M7: docs, make test, 1.1.3, acceptance, soak (19:12–20:12 SGT)
+
+- Docs: firmware/RELEASE.md, INSTALL.md (incl. Mac service changes and undo: `mk20_host_net.py linklocal-remove`,
+  `revert --force`, raw networksetup), RECOVERY.md levels 0–6; kernel-notes/<sha12>/RECOVERY.txt pushed to
+  /data/mk20/kernel/<sha12>/ (sha verified). tests/test_docs.py keeps docs and code consistent.
+- Reviews m5-m7 (GPT + Claude). Fixed: BLOCKER whole-card restore (never dd MK20_V1.0.img = PhoenixCard IMAGEWTY,
+  never pass live-221-parts/ to --whole-image; tf-restore-boot.sh now refuses dirs, IMAGEWTY and oversize images);
+  HID probe now writes two ALL-RELEASED reports (no key can latch), detached, never killed, `[ -c /dev/hidg0 ]`
+  guard; soak never writes HID and never kicks a connected bridge client (TCP only when netstat shows none);
+  flapmon: short suspend ending in reset/detach counts, long suspend (Mac sleep) not, flock single instance,
+  stopfile re-check, arg validation; gadget.sh --rollback-now once-guard; soak summary in finally (atomic),
+  rollbacks counted only if newer than at start, composite losses, process-group timeouts; doc errors
+  (stock/ep3 kernel = loader refuses 1.1.x releases; lunch.sh stub copy step; shasum cd; caffeinate).
+  Deferred MINORs: mk20d hid check `-e` vs `-c` (tests rely on regular files), test_docs config regex coverage.
+- 1.1.3 (sha 59a74c94…) installed through the installer, probation confirmed at 90 s; accept --reboot PASS x2.
+- Host events done: Serial service off/on x3 (no USB event, no rollback, accept PASS). Deferred to the user
+  (physical / interactive): Mac sleep/wake (pmset sleepnow fails 0xe00002e2), Mac reboot, replug, other port/hub.
+- tools/en-relay.py marked obsolete; its process stopped (no current tool uses it).
+- FAT free 1277 KiB of 8 MiB (headroom check >= 1024 KiB).
+- Soak: ~/mk20-backup/soak/soak-20261018-2011.{jsonl,summary.json}, 300 s interval, 24 h.

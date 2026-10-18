@@ -1,0 +1,949 @@
+You are reviewing milestones M5-M7 of the MK20 Agent firmware (Allwinner T113, BusyBox 1.27.2 ash on device; macOS host). Contents:
+(1) firmware 1.1.2: the USB flap monitor moved from an inline heredoc in gadget.sh into share/flapmon.sh (args: udc state file, window, drops, log, stopfile, -- rollback command); a host USB suspend (configured->suspended, e.g. Mac sleep) is logged and NOT counted as a flap. It must still roll back on real flaps (bus resets / detach: configured->default/not attached), never wedge, never double-rollback, and stop when the stopfile appears (gadget cleanup).
+(2) docs: firmware/RELEASE.md, INSTALL.md, RECOVERY.md, kernel-notes/*/RECOVERY.txt; tests/test_docs.py keeps docs consistent with code.
+(3) host tools: tools/mk20_accept.py (hardware acceptance, incl. HID shift tap via /dev/hidg0 and optional WDT reboot) and tools/mk20_soak.py (24h unattended health logger on the Mac; must never change device state, must not die on errors, must keep a summary).
+Report BLOCKER / MAJOR / MINOR with file:line and a concrete fix. Focus: flapmon state machine correctness (suspend/resume sequences seen on real musb UDCs: configured->suspended->configured, or suspended->default->addressed->configured after a resume reset; what if the host is unplugged while suspended?), the rollback command invocation/quoting in gadget.sh, BusyBox ash compatibility, docs that are wrong or dangerous (recovery steps that could brick or lose data), and soak/accept robustness (timeouts, adb hangs, the Shift tap when no host polls). Be concise.
+
+```diff
+diff --git a/deck/Makefile b/deck/Makefile
+index f75424e..c95f14a 100644
+--- a/deck/Makefile
++++ b/deck/Makefile
+@@ -1,5 +1,7 @@
+ test:
+-	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh 
++	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh
++	shellcheck -s bash -S warning tools/tf-identify.sh tools/tf-restore-boot.sh
++	python3 -m py_compile tools/mk20_accept.py tools/mk20_soak.py tools/mk20_host_net.py tools/tcp_transport.py
+ 	(cd tools && uv run --with pytest python -m pytest -q test_tcp_transport.py test_mk20_host_net.py)
+ 	MK20_TEST_BUSYBOX=$${MK20_TEST_BUSYBOX:-$$( [ -x /workspace/tools/bb127/busybox ] && echo /workspace/tools/bb127/busybox )} uv run --with pytest python -m pytest -q tests
+ 
+diff --git a/deck/firmware/VERSION b/deck/firmware/VERSION
+index 524cb55..45a1b3f 100644
+--- a/deck/firmware/VERSION
++++ b/deck/firmware/VERSION
+@@ -1 +1 @@
+-1.1.1
++1.1.2
+diff --git a/deck/firmware/release/share/gadget.sh b/deck/firmware/release/share/gadget.sh
+index a4c70b8..af23a7d 100755
+--- a/deck/firmware/release/share/gadget.sh
++++ b/deck/firmware/release/share/gadget.sh
+@@ -223,22 +223,13 @@ log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_I
+ # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
+ # within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
+ ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh)" ] || { OK=0; die "cannot stage rollback copy"; }
+-# flap monitor (both modes): >=5 configured->not-configured drops within 60 s -> rollback to ACM+KD+adb
++# flap monitor (both modes, share/flapmon.sh): >=5 configured->not-configured drops within 60 s -> rollback to
++# ACM+KD+adb. Host USB suspend (Mac sleep) is not a flap.
+ rm -f /tmp/mk20-flapmon-stop
+-cat > /tmp/mk20-flapmon.sh <<FM
+-U=/sys/class/udc/$UDC/state; prev=\$(cat \$U 2>/dev/null); times=""
+-while [ ! -f /tmp/mk20-flapmon-stop ]; do
+-  s=\$(cat \$U 2>/dev/null)
+-  if [ "\$prev" = configured ] && [ "\$s" != configured ]; then
+-    now=\$(cut -d. -f1 /proc/uptime); nt=""; cnt=0
+-    for t in \$times \$now; do [ \$((now-t)) -le $FLAP_WINDOW ] && { nt="\$nt \$t"; cnt=\$((cnt+1)); }; done; times=\$nt
+-    echo "flapmon \$now: link drop (\$s), \$cnt in ${FLAP_WINDOW}s" >> $LOG
+-    if [ \$cnt -ge $FLAP_DROPS ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; touch /tmp/mk20/gadget.busy; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
+-  fi
+-  prev=\$s; sleep 0.3
+-done
+-FM
+-( trap '' HUP INT; exec sh /tmp/mk20-flapmon.sh </dev/null >/dev/null 2>&1 9>&- ) &
++FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
++{ [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
++( trap '' HUP INT; exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
++    env MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG" sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 9>&- ) &
+ FP=$!; sleep 1; kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start"; }
+ log "flap monitor started (pid $FP)"
+ if [ "$MODE" = --boot ]; then
+diff --git a/deck/tools/en-relay.py b/deck/tools/en-relay.py
+index ff5ab56..3f75140 100644
+--- a/deck/tools/en-relay.py
++++ b/deck/tools/en-relay.py
+@@ -1,3 +1,5 @@
++# OBSOLETE (M4): superseded by tcp_transport.connect_device() (all candidates bound to the MK20 interface) and the
++# "MK20 link-local" Mac service. Kept for reference only; not used by any current tool.
+ # 127.0.0.1:17891 -> 169.254.7.2:17890 forced out a given interface (IP_BOUND_IF), for ECM link-local tests.
+ import socket, sys, threading
+ IF = sys.argv[1] if len(sys.argv) > 1 else "en13"
+diff --git a/deck/tools/mk20ctl-url.py b/deck/tools/mk20ctl-url.py
+index caf790d..46bb644 100644
+--- a/deck/tools/mk20ctl-url.py
++++ b/deck/tools/mk20ctl-url.py
+@@ -1,5 +1,6 @@
+ # Wrapper: lets MK20_PORT be a pyserial URL via the ECM PTY bridge, e.g. socket://172.30.250.2:17890 (firmware
+-# >= 1.1.0; 10.20.0.2 on 1.0.x). Link-local socket://169.254.7.2:17890 needs the MK20 interface (see en-relay.py).
++# >= 1.1.0; 10.20.0.2 on 1.0.x). Link-local 169.254.7.2 needs a socket bound to the MK20 interface: use
++# tcp_transport.connect_device() (pyserial socket:// URLs are unbound).
+ import runpy, sys, serial
+ _orig = serial.Serial
+ def _url(port, *a, **k):
+diff --git a/deck/firmware/release/share/flapmon.sh b/deck/firmware/release/share/flapmon.sh
+new file mode 100644
+index 0000000..3584956
+--- /dev/null
++++ b/deck/firmware/release/share/flapmon.sh
+@@ -0,0 +1,27 @@
++#!/bin/sh
++# MK20 flap monitor (1.1.2; was an inline heredoc in gadget.sh). Started detached by gadget.sh:
++#   flapmon.sh <udc-state-file> <window_s> <drops> <log> <stopfile> -- <rollback command...>
++# Counts configured -> (not configured) link drops; >= <drops> within <window_s> -> touch the gadget.busy marker and
++# run the rollback command once, then exit. A host USB SUSPEND (configured -> suspended, e.g. Mac sleep) is not a
++# flap: it is logged but not counted, and the resume path (suspended -> ... -> configured) is not counted either.
++# Test env: MK20_UPTIME_CMD (seconds), MK20_FLAP_POLL (default 0.3), MK20_BUSY (marker path).
++U=$1; W=$2; N=$3; LOG=$4; STOP=$5; shift 5; [ "${1:-}" = -- ] && shift
++BUSY=${MK20_BUSY:-/tmp/mk20/gadget.busy}
++up() { if [ -n "${MK20_UPTIME_CMD:-}" ]; then $MK20_UPTIME_CMD; else cut -d. -f1 /proc/uptime; fi; }
++prev=$(cat "$U" 2>/dev/null); times=""
++while [ ! -f "$STOP" ]; do
++  s=$(cat "$U" 2>/dev/null)
++  if [ "$prev" = configured ] && [ "$s" = suspended ]; then
++    echo "flapmon $(up): host suspend (not counted)" >> "$LOG"
++  elif [ "$prev" = configured ] && [ "$s" != configured ]; then
++    now=$(up); nt=""; cnt=0
++    for t in $times $now; do [ $((now-t)) -le "$W" ] && { nt="$nt $t"; cnt=$((cnt+1)); }; done; times=$nt
++    echo "flapmon $now: link drop ($s), $cnt in ${W}s" >> "$LOG"
++    if [ "$cnt" -ge "$N" ]; then
++      echo "flapmon $now: FLAPPING -> rollback" >> "$LOG"; touch "$BUSY"; "$@"; exit 0
++    fi
++  elif [ "$prev" = suspended ] && [ "$s" = configured ]; then
++    echo "flapmon $(up): host resume" >> "$LOG"
++  fi
++  prev=$s; sleep "${MK20_FLAP_POLL:-0.3}"
++done
+diff --git a/deck/tests/test_flapmon.py b/deck/tests/test_flapmon.py
+new file mode 100644
+index 0000000..d74d7d8
+--- /dev/null
++++ b/deck/tests/test_flapmon.py
+@@ -0,0 +1,52 @@
++"""share/flapmon.sh (1.1.2): flaps roll back, host suspend/resume does not."""
++import subprocess
++import time
++from pathlib import Path
++
++FM = Path(__file__).resolve().parents[1] / "firmware/release/share/flapmon.sh"
++
++
++def run_fm(dev, tmp_path, states, window=60, drops=5):
++    st, log, stop, mark, clock = (tmp_path / n for n in ("state", "fm.log", "stop", "rolled", "clock"))
++    st.write_text("configured\n"); clock.write_text("100\n")
++    env = dict(dev.env, MK20_FLAP_POLL="0.05", MK20_BUSY=str(tmp_path / "busy"),
++               MK20_UPTIME_CMD=f"cat {clock}")
++    p = subprocess.Popen(["sh", str(FM), str(st), str(window), str(drops), str(log), str(stop), "--",
++                          "sh", "-c", f"echo rollback > {mark}"], env=env)
++    time.sleep(0.3)
++    for s, t in states:
++        clock.write_text(f"{t}\n"); st.write_text(s + "\n"); time.sleep(0.25)
++        if p.poll() is not None:
++            break
++    stop.write_text(""); p.wait(timeout=5)
++    return mark.exists(), (log.read_text() if log.exists() else ""), (tmp_path / "busy").exists()
++
++
++def test_five_drops_in_window_roll_back(dev, tmp_path):
++    seq = []
++    for i in range(5):
++        seq += [("default", 101 + i), ("configured", 101 + i)]
++    rolled, log, busy = run_fm(dev, tmp_path, seq)
++    assert rolled and busy and "FLAPPING -> rollback" in log and "5 in 60s" in log
++
++
++def test_drops_outside_window_do_not_roll_back(dev, tmp_path):
++    seq = []
++    for i in range(6):
++        seq += [("not attached", 100 + 30 * i), ("configured", 100 + 30 * i)]
++    rolled, log, _ = run_fm(dev, tmp_path, seq)
++    assert not rolled and "3 in 60s" in log and "4 in 60s" not in log
++
++
++def test_host_suspend_is_not_a_flap(dev, tmp_path):
++    seq = []
++    for i in range(8):   # Mac sleep/wake x8 within the window, incl. a bus reset on resume
++        seq += [("suspended", 101 + i), ("default", 101 + i), ("configured", 101 + i)]
++    rolled, log, busy = run_fm(dev, tmp_path, seq)
++    assert not rolled and not busy
++    assert log.count("host suspend (not counted)") == 8 and "link drop" not in log
++
++
++def test_stopfile_ends_monitor(dev, tmp_path):
++    rolled, _, _ = run_fm(dev, tmp_path, [])
++    assert not rolled
+diff --git a/deck/tools/mk20_accept.py b/deck/tools/mk20_accept.py
+new file mode 100644
+index 0000000..0d82070
+--- /dev/null
++++ b/deck/tools/mk20_accept.py
+@@ -0,0 +1,197 @@
++#!/usr/bin/env python3
++"""MK20 hardware acceptance (M7). Runs on the Mac; needs MK20_ADB (MK20-only adb wrapper).
++
++  mk20_accept.py [--reboot] [--json OUT] [--no-hid]
++
++Checks (each PASS/FAIL, exit 1 if any FAIL):
++  adb shell; loader good==current, nothing pending; mk20d health status ok / composite / kd=1 / watchdog / selftest;
++  ping 172.30.250.2 via the MK20 interface; TCP to the bridge on the primary and on link-local 169.254.7.2 (both
++  bound to the MK20 interface); Protocol A getInfo over TCP (deviceVersion); HID: Mac sees the 1d6b:0104 keyboard
++  and a Left-Shift tap written to /dev/hidg0 is consumed by the host within 3 s; Mac route to the device not via a
++  TUN; FAT/mem headroom. --reboot first does one watcher hardreset (WDT) and checks hardreset.last fat_ro=y.
++Read-only apart from --reboot and the (harmless) Shift tap.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import re
++import shlex
++import subprocess
++import sys
++import time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++import tcp_transport as tt  # noqa: E402
++
++DEV_IP = os.environ.get("MK20_HOST", "172.30.250.2")
++LL_IP = "169.254.7.2"
++PORT = int(os.environ.get("MK20_BRIDGE_PORT", "17890"))
++
++
++def adb_cmd() -> list[str]:
++    a = os.environ.get("MK20_ADB")
++    if not a:
++        sys.exit("set MK20_ADB (MK20-only adb wrapper, never the watch)")
++    return shlex.split(os.path.expanduser(a))
++
++
++def sh(cmd: str, timeout: float = 20) -> tuple[int, str]:
++    try:
++        r = subprocess.run(adb_cmd() + ["shell", cmd], capture_output=True, text=True, timeout=timeout)
++        return r.returncode, r.stdout
++    except subprocess.TimeoutExpired:
++        return 124, ""
++
++
++class Run:
++    def __init__(self, quiet: bool = False):
++        self.results: list[dict] = []
++        self.quiet = quiet
++
++    def check(self, name: str, ok: bool, detail: str = "") -> bool:
++        self.results.append({"check": name, "pass": bool(ok), "detail": detail})
++        if not self.quiet:
++            print(f"{'PASS' if ok else 'FAIL'} {name}{(' - ' + detail) if detail else ''}", flush=True)
++        return ok
++
++    @property
++    def ok(self) -> bool:
++        return all(r["pass"] for r in self.results)
++
++
++def loader_status() -> dict:
++    _, out = sh("sh /data/mk20/rescue/loader.sh status")
++    d = dict(re.findall(r"(\w+)=(\S*)", out))
++    m = re.match(r"current=\S+ \d+ (\S+)", out)
++    d["current_v"] = m.group(1) if m else ""
++    d["raw"] = out.strip()
++    return d
++
++
++def health(v: str) -> dict:
++    _, out = sh(f"/data/mk20/releases/{v}/sbin/mk20d health", timeout=40)
++    try:
++        return json.loads(out.strip().splitlines()[-1])
++    except Exception:  # noqa: BLE001
++        return {}
++
++
++def wait_adb(present: bool, limit: float) -> bool:
++    end = time.time() + limit
++    while time.time() < end:
++        rc, out = sh("echo up", timeout=5)
++        if (rc == 0 and "up" in out) == present:
++            return True
++        time.sleep(3)
++    return False
++
++
++def do_reboot(run: Run) -> None:
++    _, up0 = sh("cut -d. -f1 /proc/uptime")
++    sh("touch /mnt/SDCARD/cmd-reboot && sync")
++    t0 = time.time()
++    run.check("reboot: device left USB", wait_adb(False, 120), f"{time.time() - t0:.0f}s")
++    run.check("reboot: adb back", wait_adb(True, 240), f"{time.time() - t0:.0f}s")
++    end = time.time() + 300
++    while time.time() < end:
++        st = loader_status()
++        if st.get("good") and not st.get("pending") and "mk20d confirm" in sh("tail -n 5 /data/mk20/logs/mk20d.log")[1]:
++            break
++        time.sleep(10)
++    _, up1 = sh("cut -d. -f1 /proc/uptime")
++    run.check("reboot: fresh boot", up1.strip().isdigit() and up0.strip().isdigit() and int(up1) < int(up0),
++              f"uptime {up0.strip()} -> {up1.strip()}")
++    _, hr = sh("cat /data/mk20/state/hardreset.last")
++    run.check("reboot: clean FAT ro remount", "fat_ro=y" in hr and "mount_hung=n" in hr, hr.strip())
++
++
++def tcp_bound(host: str, iface: str | None) -> tuple[bool, str]:
++    try:
++        t = tt.TcpTransport(host, PORT, 3, bound_if=iface)
++        src = t._s.getsockname()[0]
++        t.close()
++        return True, f"src {src}"
++    except OSError as e:
++        return False, str(e)
++
++
++def get_info() -> tuple[bool, str]:
++    env = dict(os.environ, MK20_PORT=f"socket://{DEV_IP}:{PORT}")
++    try:
++        r = subprocess.run(["uv", "run", "-q", "--with", "pyserial", "python", os.path.join(HERE, "mk20ctl-url.py"),
++                            "info"], capture_output=True, text=True, timeout=40, env=env)
++    except (subprocess.TimeoutExpired, OSError) as e:
++        return False, str(e)
++    m = re.search(r'"deviceVersion":\s*"([^"]+)"', r.stdout)
++    return bool(m), (m.group(1) if m else (r.stdout + r.stderr)[-200:])
++
++
++def hid(run: Run) -> None:
++    out = subprocess.run(["hidutil", "list"], capture_output=True, text=True).stdout
++    seen = any(re.search(r"0x1d6b\s+0x104\s+\S+\s+1\s+6\s", l) for l in out.splitlines())
++    run.check("hid: Mac enumerates 1d6b:0104 keyboard", seen)
++    # Left Shift down + up (report ID 1, 8 bytes). A write to hidg0 completes only when the host polls the endpoint.
++    cmd = ("( printf '\\001\\002\\000\\000\\000\\000\\000\\000\\000' > /dev/hidg0 && "
++           "printf '\\001\\000\\000\\000\\000\\000\\000\\000\\000' > /dev/hidg0 && echo HIDOK ) & p=$!; "
++           "i=0; while [ $i -lt 3 ] && kill -0 $p 2>/dev/null; do sleep 1; i=$((i+1)); done; "
++           "kill $p 2>/dev/null; wait $p 2>/dev/null; true")
++    _, o = sh(cmd, timeout=15)
++    run.check("hid: Shift tap consumed by host", "HIDOK" in o)
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--reboot", action="store_true")
++    ap.add_argument("--no-hid", action="store_true")
++    ap.add_argument("--json")
++    a = ap.parse_args()
++    run = Run()
++    t0 = time.strftime("%Y-%m-%d %H:%M:%S %Z")
++    print(f"MK20 acceptance {t0}")
++    rc, o = sh("echo adb-ok", timeout=10)
++    if not run.check("adb shell", rc == 0 and "adb-ok" in o):
++        return 1
++    if a.reboot:
++        do_reboot(run)
++    st = loader_status()
++    run.check("loader: good release current, none pending",
++              bool(st.get("good")) and st.get("current_v") == st.get("good") and not st.get("pending"), st["raw"])
++    v = st.get("good", "")
++    h = health(v) if v else {}
++    run.check("health: status ok", h.get("status") == "ok", f"v={h.get('version')} status={h.get('status')}")
++    run.check("health: composite + kd=1 + watchdog + selftest",
++              h.get("usb", {}).get("composite") is True and h.get("kd") == 1 and h.get("watchdog") is True
++              and h.get("selftest", {}).get("pass") is True, (h.get("selftest") or {}).get("detail", ""))
++    fat, mem = h.get("fat_free_kb", 0), h.get("mem_avail_kb", 0)
++    run.check("health: headroom (FAT >= 1024 KiB, mem >= 20 MiB)", fat >= 1024 and mem >= 20480, f"fat={fat} mem={mem}")
++    iface = tt.mk20_interface()
++    run.check("mac: MK20 interface present", bool(iface), str(iface))
++    r = subprocess.run(["route", "-n", "get", DEV_IP], capture_output=True, text=True).stdout
++    m = re.search(r"interface:\s*(\S+)", r)
++    rif = m.group(1) if m else None
++    run.check("mac: route to device via MK20 interface (not TUN)", rif == iface, f"{DEV_IP} -> {rif}")
++    p = subprocess.run(["ping", "-c", "3", "-i", "0.3", "-t", "5", DEV_IP], capture_output=True, text=True).stdout
++    m = re.search(r"([\d.]+)% packet loss", p)
++    loss = float(m.group(1)) if m else 100.0
++    m = re.search(r"= [\d.]+/([\d.]+)/", p)
++    run.check("ping device (primary)", loss == 0.0, f"loss={loss}% avg={m.group(1) if m else '?'}ms")
++    ok, d = tcp_bound(DEV_IP, iface)
++    run.check("tcp bridge primary (bound)", ok, d)
++    ok, d = tcp_bound(LL_IP, iface)
++    run.check("tcp bridge link-local 169.254.7.2 (bound)", ok, d)
++    ok, d = get_info()
++    run.check("protocol A getInfo over TCP", ok, d)
++    if not a.no_hid:
++        hid(run)
++    if a.json:
++        with open(a.json, "w") as f:
++            json.dump({"time": t0, "pass": run.ok, "results": run.results, "health": h}, f, indent=1)
++    print("RESULT", "PASS" if run.ok else "FAIL")
++    return 0 if run.ok else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/deck/tools/mk20_soak.py b/deck/tools/mk20_soak.py
+new file mode 100644
+index 0000000..6397836
+--- /dev/null
++++ b/deck/tools/mk20_soak.py
+@@ -0,0 +1,145 @@
++#!/usr/bin/env python3
++"""MK20 soak logger (M7). Runs on the Mac, unattended; needs MK20_ADB (MK20-only adb wrapper).
++
++  mk20_soak.py [--hours 24] [--interval 300] [--deep-every 12] [--out DIR]
++
++Every --interval s it appends one JSON line to <out>/soak-<start>.jsonl:
++  time, mk20d health subset (status, kd, composite, selftest, mem/FAT/data free, uptime, release), loader state,
++  KD pid (restart detection), log sizes, ping loss/rtt on 172.30.250.2, bound TCP connect on primary + link-local.
++Every --deep-every samples also: Protocol A getInfo over TCP and a HID Left-Shift tap (via mk20_accept helpers).
++Never changes device state (no reboots, no USB changes). On exit writes <out>/soak-<start>.summary.json with
++pass/fail counts, reboots seen (uptime drops), KD restarts, rollbacks, min memory, min FAT free.
++Stop early: kill the process (pid in <out>/soak.pid); the summary is still written.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import re
++import signal
++import subprocess
++import sys
++import time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++import mk20_accept as acc  # noqa: E402
++import tcp_transport as tt  # noqa: E402
++
++STOP = False
++
++
++def _stop(*_a):
++    global STOP
++    STOP = True
++
++
++def sample(deep: bool) -> dict:
++    s: dict = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "deep": deep}
++    rc, o = acc.sh("echo up", timeout=10)
++    s["adb"] = rc == 0 and "up" in o
++    if s["adb"]:
++        st = acc.loader_status()
++        s["loader"] = {k: st.get(k, "") for k in ("good", "pending", "current_v", "last_rollback")}
++        h = acc.health(st.get("good", "")) if st.get("good") else {}
++        s["health"] = {k: h.get(k) for k in ("status", "version", "uptime_s", "kd", "watchdog", "mem_avail_kb",
++                                             "fat_free_kb", "data_free_kb", "shim_mounts", "adbd", "flapmon")}
++        s["health"]["composite"] = (h.get("usb") or {}).get("composite")
++        s["health"]["selftest"] = (h.get("selftest") or {}).get("pass")
++        _, o = acc.sh("pgrep -f '^/data/KeyboardDevice' | head -n 1; "
++                      "du -k /data/mk20/logs /mnt/SDCARD/mk20/logs 2>/dev/null | awk '{print $1}' | tr '\\n' ' '; echo; "
++                      "wc -c < /tmp/mk20/bridge.log 2>/dev/null")
++        lines = o.strip().splitlines() + ["", "", ""]
++        s["kd_pid"] = lines[0].strip()
++        s["log_kb"] = lines[1].strip()
++        s["bridge_log_b"] = lines[2].strip()
++    iface = tt.mk20_interface()
++    s["iface"] = iface
++    p = subprocess.run(["ping", "-c", "3", "-i", "0.3", "-t", "5", acc.DEV_IP], capture_output=True, text=True).stdout
++    s["ping_loss"] = float((re.search(r"([\d.]+)% packet loss", p) or [None, "100"])[1])
++    s["ping_avg_ms"] = (re.search(r"= [\d.]+/([\d.]+)/", p) or [None, None])[1]
++    s["tcp_primary"] = acc.tcp_bound(acc.DEV_IP, iface)[0]
++    s["tcp_ll"] = acc.tcp_bound(acc.LL_IP, iface)[0]
++    if deep:
++        s["getinfo"] = acc.get_info()[0]
++        r = acc.Run(quiet=True)
++        acc.hid(r)
++        s["hid"] = all(x["pass"] for x in r.results)
++    h = s.get("health") or {}
++    s["ok"] = bool(s["adb"] and h.get("status") == "ok" and h.get("kd") == 1 and s["ping_loss"] == 0
++                   and s["tcp_primary"] and s["tcp_ll"] and s.get("getinfo", True) and s.get("hid", True))
++    return s
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--hours", type=float, default=24)
++    ap.add_argument("--interval", type=int, default=300)
++    ap.add_argument("--deep-every", type=int, default=12)
++    ap.add_argument("--out", default=os.path.expanduser("~/mk20-backup/soak"))
++    a = ap.parse_args()
++    os.makedirs(a.out, exist_ok=True)
++    stamp = time.strftime("%Y%m%d-%H%M")
++    jl, sm = os.path.join(a.out, f"soak-{stamp}.jsonl"), os.path.join(a.out, f"soak-{stamp}.summary.json")
++    with open(os.path.join(a.out, "soak.pid"), "w") as f:
++        f.write(f"{os.getpid()}\n")
++    signal.signal(signal.SIGTERM, _stop)
++    signal.signal(signal.SIGINT, _stop)
++    signal.signal(signal.SIGHUP, signal.SIG_IGN)
++    end = time.time() + a.hours * 3600
++    n = bad = reboots = kd_restarts = 0
++    last_up = last_kd = None
++    rollbacks = set()
++    min_mem = min_fat = None
++    first_fail = None
++    summary: dict = {"start": stamp, "samples": 0}
++    while not STOP and time.time() < end:
++        t = time.time()
++        try:
++            s = sample(deep=(n % a.deep_every == 0))
++        except Exception as e:  # noqa: BLE001 - a soak logger must not die
++            s = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "ok": False, "error": repr(e)}
++        n += 1
++        h = s.get("health") or {}
++        up = h.get("uptime_s")
++        if isinstance(up, int) and last_up is not None and up < last_up:
++            reboots += 1
++            s["event"] = "reboot"
++        last_up = up if isinstance(up, int) else last_up
++        kd = s.get("kd_pid")
++        if kd and last_kd and kd != last_kd and s.get("event") != "reboot":
++            kd_restarts += 1
++            s["event"] = (s.get("event", "") + " kd-restart").strip()
++        last_kd = kd or last_kd
++        lr = (s.get("loader") or {}).get("last_rollback")
++        if lr:
++            rollbacks.add(lr)
++        for k, cur in (("mem_avail_kb", "min_mem"), ("fat_free_kb", "min_fat")):
++            v = h.get(k)
++            if isinstance(v, int):
++                if cur == "min_mem":
++                    min_mem = v if min_mem is None else min(min_mem, v)
++                else:
++                    min_fat = v if min_fat is None else min(min_fat, v)
++        if not s.get("ok"):
++            bad += 1
++            first_fail = first_fail or s.get("time")
++        with open(jl, "a") as f:
++            f.write(json.dumps(s) + "\n")
++        summary = {"start": stamp, "samples": n, "failed": bad, "first_fail": first_fail, "reboots": reboots,
++                   "kd_restarts": kd_restarts, "rollbacks_seen": sorted(rollbacks), "min_mem_kb": min_mem,
++                   "min_fat_free_kb": min_fat, "last": s.get("time"), "running": True, "pid": os.getpid()}
++        with open(sm, "w") as f:
++            json.dump(summary, f, indent=1)
++        while not STOP and time.time() < min(end, t + a.interval):
++            time.sleep(1)
++    summary["running"] = False
++    summary["ended"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
++    with open(sm, "w") as f:
++        json.dump(summary, f, indent=1)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/deck/firmware/RECOVERY.md b/deck/firmware/RECOVERY.md
+new file mode 100644
+index 0000000..e4d5f7b
+--- /dev/null
++++ b/deck/firmware/RECOVERY.md
+@@ -0,0 +1,121 @@
++# MK20 Agent firmware: recovery
++
++Work from the top of this list down, and stop at the first level that works. Levels 1–3 need only adb, or a TF
++card reader if adb is gone. Level 5 needs the TF card in the Mac. Nothing here writes the rootfs (p5).
++(The P0 GD32/VIA backup and restore manual is `deck/RECOVERY.md`.)
++
++`$MK20_ADB` is `~/mk20-backup/mkadb.sh` (MK20 only, never the watch). "Reboot" always means one of:
++- `$MK20_ADB shell 'touch /mnt/SDCARD/cmd-reboot && sync'`: the watcher runs a hardreset through the WDT, about
++  30 s later; or
++- a USB power cycle (unplug and replug), which needs a human.
++
++Never use `reboot`: the soft reboot hangs on this board.
++
++## 0. Look first (read-only)
++
++```sh
++$MK20_ADB shell 'sh /data/mk20/rescue/loader.sh status'
++$MK20_ADB shell 'v=$(cat /data/mk20/state/good); /data/mk20/releases/$v/sbin/mk20d health'
++$MK20_ADB shell 'tail -n 30 /data/mk20/logs/mk20d.log /mnt/SDCARD/mk20/logs/loader.log /mnt/SDCARD/mk20/logs/watcher.log'
++$MK20_ADB shell 'cat /tmp/mk20/stub.status /data/mk20/state/hardreset.last /mnt/SDCARD/gadget-ecm-hid.status'
++python3 tools/mk20_host_net.py status       # Mac side: service, routes, device subnet, ping
++python3 tools/mk20_accept.py                # full read-only check
++```
++
++Symptoms and where to go:
++
++| symptom | likely cause | go to |
++|---|---|---|
++| ping to 172.30.250.2 fails, adb works | Mac/device subnet mismatch (device rolled back to 1.0.x) | `mk20_host_net.py sync` |
++| black KD screens, USB present | KD lost ttyGS0 (composite half-down) | 1 (`mk20-no-composite`) |
++| USB keeps re-enumerating | flap; flapmon rolls back to stock after 5 drops in 60 s (Mac sleep/suspend is not counted, 1.1.2+) | 0, then 1 |
++| `good=` empty / `stub: … mismatch` | release or rescue files corrupt | 2 / 3 |
++| nothing enumerates after a power cycle | boot image or kernel broken | 5 |
++
++## 1. Flag files (FAT `/mnt/SDCARD/`, read at boot; then reboot)
++
++| flag | effect |
++|---|---|
++| `mk20-no-composite` | release runs in stock mode: ACM + KD (+adb), no ECM/HID/bridge |
++| `mk20-gadget-nohid` | composite without HID (ECM + ADB + bridge); use it on the ep3-only kernel |
++| `mk20-no-adb` | no adb in any mode |
++| `mk20-no-release` | loader skips releases: legacy `boot-every/` jobs only (stock + adb keeper) |
++| `mk20-no-watch` | boot stub does nothing at all: pure vendor behaviour, no rescue watcher, no adb |
++
++Over adb: `$MK20_ADB shell 'touch /mnt/SDCARD/mk20-no-composite && sync'`, then reboot. Without adb, put the TF
++card in the Mac (the FAT volume mounts in Finder), create the empty file, eject cleanly, and put the card back.
++Delete the flag to undo.
++
++Commands the watcher polls for every 2 s:
++- `cmd-reboot`: hardreset.
++- `cmd-rollback`: switch to the other A/B slot, then hardreset.
++- `cmd-ping`: replies "pong" on ttyGS0.
++- `job.sh` with `job.sh.sha256`: verified one-shot job, 300 s cap.
++
++## 2. Roll back the release
++
++- **Automatic:** a pending release that fails its self-test, fails composite setup during probation (1.1.1+), or
++  isn't confirmed within 600 s rolls back to `good` with at most one hard reset. Proven on hardware with 1.0.3
++  rolling back to 1.0.2.
++- **Manual:** `$MK20_ADB shell 'touch /mnt/SDCARD/cmd-rollback && sync'`. The watcher runs `loader rollback` and
++  then a hardreset. Over a shell, `sh /data/mk20/rescue/loader.sh rollback`, then reboot.
++- Afterwards, align the Mac: `python3 tools/mk20_host_net.py sync`. In a mismatch, the bound link-local path to
++  169.254.7.2 still works.
++
++## 3. Uninstall the firmware, or remove the stub
++
++- `$MK20_ADB shell 'sh /data/mk20/rescue/loader.sh uninstall'`, then reboot. This moves the slots and state aside
++  (`/data/mk20/uninstalled-<ts>/`) and parks the legacy composite job. The next boot is stock ACM+KD+adb with the
++  rescue watcher.
++- **Remove the boot stub** (pure vendor, nothing of ours runs): delete `/mnt/SDCARD/lunch.sh`, over adb or on the
++  Mac with a TF reader, or create `mk20-no-watch`. The vendor `qt_app1` only runs the stub if the file exists.
++- The rescue copies are checksum-verified. The stub tries `/data/mk20/rescue` first and falls back to
++  `/mnt/SDCARD/mk20`. A checksum *mismatch* runs nothing; fix it with `tools/mk20-rescue-update.sh`.
++
++## 4. overlayDir: write any file at the next boot (TF reader, no adb needed)
++
++The vendor `/etc/init.d/qt_app1` copies `/mnt/SDCARD/overlayDir/*` onto `/` at **every** boot, then empties the
++directory. This happens before `lunch.sh` runs.
++
++With the TF card in the Mac, make the target path under `overlayDir/`. For example, to restore a vendor file from
++backup: `overlayDir/data/appLunch.sh`, or `overlayDir/data/mk20/rescue/watcher.sh` together with its `.sha256`.
++Eject and boot. The copy is a single shot and `overlayDir` is empty again afterwards.
++
++- Vendor originals for comparison: the hashes in `share/vendor.sha256`; the backups are in `~/mk20-backup/`.
++- Security note: anyone with the TF card gets root this way. That is inherent to the vendor image. Keep physical
++  custody of the card.
++
++## 5. Kernel (boot image, p4) restore from the Mac
++
++Kernel images. All are 6451200 B and all report `uname` #221, so identify them **by sha only**:
++
++| name | p4 sha256 | features | Mac copy | device copy |
++|---|---|---|---|---|
++| stock | `9ac68ed98a70a3b5211dc8a25cf9427afdc54543ebfe003337c77032929029a8` | acm,adb | `~/mk20-backup/tf/live-221-parts/p4.img` | `/data/mk20/kernel/9ac68ed98a70/boot.img`, `/mnt/SDCARD/boot-stock.img` |
++| ep3 | `f2a19d3cb8fddc7f177cb518bb64e69645fadd3ce1b1422c4f056db39e4ee4c0` | acm,adb,ecm | `~/mk20-backup/tf/patched-ep3/p4-patched-ep3int.img` | `/data/mk20/kernel/f2a19d3cb8fd/boot.img` |
++| ep5out (running) | `7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc` | acm,adb,ecm,hid | `~/mk20-backup/tf/patched-ep5out/p4-patched-ep3int-ep5out.img` | `/data/mk20/kernel/7326d9e5ab9f/boot.img` |
++
++Steps:
++1. Power off and take the TF card out. Put it in the Mac's reader.
++2. Run `bash tools/tf-identify.sh` and note `diskN`. `tf-restore-boot.sh` refuses internal disks, anything not
++   3–5 GB, and an s4 that isn't exactly 6451200 B.
++3. Rehearse first: `bash tools/tf-restore-boot.sh --disk diskN --image ~/mk20-backup/tf/live-221-parts/p4.img
++   --slice s4 --dry-run`.
++4. Run the same command without `--dry-run`. It asks for sudo, writes slice **s4 only**, and reads back the sha.
++5. Eject, put the card back, and power on.
++   - **Stock kernel:** releases see an unknown or `acm,adb` p4 and make no composite. You get stock ACM+KD+adb.
++   - **Patched kernel:** re-flash `p4-patched-ep3int-ep5out.img` the same way.
++
++Whole card (last resort): `bash tools/tf-restore-boot.sh --disk diskN --whole-image <img> [--dry-run]`. Images:
++- the live #221 partitions, `~/mk20-backup/tf/live-221-parts/` (SHA256SUMS; p6 UDISK isn't in the backup, so
++  `/data` comes back empty);
++- the vendor image `MK20_V1.0.img`.
++
++Per-kernel notes are on the device in `/data/mk20/kernel/<sha12>/RECOVERY.txt` (source:
++`firmware/kernel-notes/`).
++
++## 6. Mac network (undo the M4 changes)
++
++See INSTALL.md §5. In short: `python3 tools/mk20_host_net.py linklocal-remove` removes the "MK20 link-local"
++service, and `revert --force` sets Serial back to 10.20.0.1/24. The service order before M4 is in
++`~/mk20-backup/netservices-before-m4.txt`. No other service was changed, and the mihomo config wasn't touched.
+diff --git a/deck/firmware/INSTALL.md b/deck/firmware/INSTALL.md
+new file mode 100644
+index 0000000..e18023b
+--- /dev/null
++++ b/deck/firmware/INSTALL.md
+@@ -0,0 +1,144 @@
++# MK20 Agent firmware: install, upgrade, Mac setup
++
++All commands run on the Mac from `deck/` unless marked **device**. Every device command goes through adb aimed at
++the MK20 **only**:
++
++```sh
++export MK20_ADB=~/mk20-backup/mkadb.sh   # picks the MK20 transport; never the watch (WATCH-SERIAL / 192.168.88.103)
++```
++
++House rules:
++- Never `killall adbd` in a foreground adb shell.
++- Never soft `reboot` (it hangs on this board). Reboots go through the watcher (`cmd-reboot`, which triggers a
++  hardreset through the WDT).
++- Anything that changes USB runs detached, with a rollback that restores ACM+KD.
++
++## 1. Prerequisites (once)
++
++- Back up first:
++  - TF partitions: `~/mk20-backup/tf/live-221-parts/`, with sha values in NOTES-crash-20261018-and-tf-backup.md.
++  - `/data`: use `tar -X tools/backup-exclude.txt`. This keeps `/data/mk20/secrets/` (the VNC password) on the
++    device.
++- Kernel inventory on the device: `/data/mk20/kernel/<sha12>/{boot.img,MANIFEST,RECOVERY.txt}` plus `ALLOWLIST`
++  (`<p4 sha256> <name> <features>`). mk20d makes no USB changes on a p4 that isn't listed.
++- Host tools: Python 3 and `uv` (for pyserial), `adb`. For the test suite, the box with BusyBox 1.27.2 at
++  `/workspace/tools/bb127/busybox`.
++
++## 2. First install (from the ad-hoc v3.5 layout)
++
++1. **Rescue tier:** build first (`make release` creates `out/rescue/` with `.sha256` files), then:
++   ```sh
++   sh tools/mk20-rescue-update.sh out/rescue loader.sh hardreset.sh watcher.sh lunch.sh
++   ```
++   Each file goes to `/data/mk20/rescue/` and then `/mnt/SDCARD/mk20/`, verified before the atomic rename, so one
++   valid copy always exists. The FAT `lunch.sh` stub starts the first verified watcher at boot.
++2. **First release:** `sh tools/mk20-install.sh out/mk20-fw-<v>.tar --reboot --wait`.
++3. **Legacy jobs:** once a release launches, the watcher skips `boot-every/`. The old composite job is parked in
++   `/mnt/SDCARD/mk20/boot-every.disabled/`; `loader uninstall` also does this. `boot-every/adb.sh` stays as the
++   legacy-mode adb keeper.
++
++## 3. Upgrade (normal path)
++
++```sh
++shasum -a 256 -c ~/mk20-backup/releases/mk20-fw-<v>.tar.sha256
++sh tools/mk20-install.sh ~/mk20-backup/releases/mk20-fw-<v>.tar --reboot --wait
++```
++
++- The installer pins the tarball sha and pushes it to `/data/mk20/incoming/upload.tar`. It then runs the
++  verified rescue loader: `loader install`, which makes a private copy, checks the sha and free space, validates
++  the tar listing, extracts into `.incoming-<v>`, compares the file set with the MANIFEST, and atomically renames
++  to `releases/<v>`. Then `switch` marks the release **pending** and the loader prunes old releases.
++- `--reboot` drops `cmd-reboot` on the FAT; the watcher's hardreset reboots the board about 30 s later.
++- **Probation:** the loader boots the pending release, and mk20d runs a self-test (KD=1, UDC, ttyGS0, watchdog,
++  bridge on the ECM IP and 169.254.7.2, HID). A pass means `confirm`, so the release becomes good. Any of these
++  roll back automatically to the previous good release, with no host needed:
++  - the self-test fails;
++  - the composite fails its own setup during probation (1.1.1+);
++  - nothing confirms within 600 s.
++- If the installer refuses with "is pending", the previous install hasn't been booted yet. Reboot, or let
++  probation finish.
++
++Check:
++
++```sh
++$MK20_ADB shell 'sh /data/mk20/rescue/loader.sh status'          # current=.. good=<v> pending= ...
++$MK20_ADB shell '/data/mk20/releases/<v>/sbin/mk20d health'       # JSON, "status":"ok"
++$MK20_ADB shell 'cat /data/mk20/state/hardreset.last'             # fat_ro=y mount_hung=n (clean FAT remount)
++```
++
++Logs: `/data/mk20/logs/{mk20d,gadget}.log` (rotated), `/mnt/SDCARD/mk20/logs/{loader,watcher}.log`, and
++`/tmp/mk20/bridge.log`.
++
++Uninstall (back to stock ACM+KD+adb with the rescue watcher): **device** `sh /data/mk20/rescue/loader.sh
++uninstall`, then reboot through the watcher.
++
++## 4. Configuration (optional)
++
++`/data/mk20/config/mk20.conf` is a whitelist of `KEY=VALUE` lines. It is never sourced, and invalid lines are
++ignored with a warning (`mk20d config` shows the effective values).
++
++| key | default | range |
++|---|---|---|
++| `ECM_SUBNET` | `172.30.250.0/24` (1.1.0+) | a /24 network address; device .2, Mac .1 |
++| `ECM_DEV_MAC` / `ECM_HOST_MAC` | `02:11:22:33:44:55` / `02:11:22:33:44:56` | unicast MAC |
++| `FEATURE_COMPOSITE` `FEATURE_HID` `FEATURE_ADB` | 1 | 0/1 |
++| `BRIDGE_PORT` | 17890 | 1024–65535 |
++| `FLAP_DROPS` / `FLAP_WINDOW_S` | 5 / 60 | 2–50 / 10–600 |
++| `LOG_MAX_KB` / `LOG_KEEP` | 256 / 3 | 16–4096 / 1–9 |
++
++Flag files on the FAT (`/mnt/SDCARD/…`) override the config: `mk20-no-composite`, `mk20-no-adb`,
++`mk20-gadget-nohid`. See RECOVERY.md for the rescue flags.
++
++## 5. Mac setup (M4, firmware 1.1.0+)
++
++The ECM link is the Mac network service whose hardware address is **02:11:22:33:44:56** (here: en13, service
++"Serial"). `tools/mk20_host_net.py` changes **only** that service. Every change is verified (`route get` must use
++the MK20 interface, and ping must answer) and restored in full on failure or Ctrl-C.
++
++```sh
++python3 tools/mk20_host_net.py status       # read-only
++python3 tools/mk20_host_net.py sync         # Mac side := device's active subnet (read over adb). Use after any up/downgrade
++python3 tools/mk20_host_net.py apply        # 172.30.250.1/24; refuses unless the device is confirmed on 172.30.250.0/24
++python3 tools/mk20_host_net.py linklocal    # add "MK20 link-local" = 169.254.7.1/16 on the same port
++```
++
++State on this Mac (since 19:01 SGT, 2026-10-18):
++- **Serial** (en13): manual 172.30.250.1 / 255.255.255.0, no router, so the default route is untouched.
++- **MK20 link-local** (en13, same hardware port): manual 169.254.7.1 / 255.255.0.0. This is a second service, at
++  position 5 in the service order. Link-local traffic for other networks still uses the primary interface (en0).
++- Service order before M4: `~/mk20-backup/netservices-before-m4.txt`.
++
++**Undo:**
++
++```sh
++python3 tools/mk20_host_net.py linklocal-remove      # removes the "MK20 link-local" service only
++python3 tools/mk20_host_net.py revert --force        # Serial back to 10.20.0.1/24 (the 1.0.x address)
++# by hand, equivalent:
++networksetup -removenetworkservice "MK20 link-local"
++networksetup -setmanual Serial 10.20.0.1 255.255.255.0
++```
++
++`revert` without `--force` refuses unless the device actually runs a 1.0.x subnet. On a 1.1.x device you'd lose the
++primary path, but the link-local path still works.
++
++**TUN (mihomo or any other):** mihomo's `tun.route-exclude-address` already includes 172.16.0.0/12 and
++10.0.0.0/8, so nothing needs changing. Check with `route -n get 172.30.250.2`, which should say `interface: en13`.
++The daemon and the host tools also pin their sockets to the MK20 interface (`IP_BOUND_IF`), so a TUN can't
++capture them even without the exclude.
++
++**Daemon and tools:** these follow the device automatically.
++- The daemon (`feature/p0-mvp`, `mk20deck/transport.py`) tries 172.30.250.2, then 10.20.0.2, then 169.254.7.2,
++  all bound to the interface.
++- `tools/tcp_transport.py connect_device()` tries 172.30.250.2, then 169.254.7.2.
++- `mk20ctl` over TCP:
++  `MK20_PORT=socket://172.30.250.2:17890 uv run --with pyserial python tools/mk20ctl-url.py info`.
++
++## 6. Acceptance check and soak
++
++```sh
++python3 tools/mk20_accept.py [--reboot] [--json out.json]   # checks + HID Shift tap; --reboot = one WDT reboot cycle first
++nohup python3 tools/mk20_soak.py --hours 24 --interval 300 > ~/mk20-backup/soak/soak.out 2>&1 &   # unattended
++```
++
++The soak writes `~/mk20-backup/soak/soak-<start>.jsonl` (one sample every 5 min) and a `.summary.json` that it
++keeps up to date. Stop it with `kill $(cat ~/mk20-backup/soak/soak.pid)`; the summary is still written.
+diff --git a/deck/firmware/RELEASE.md b/deck/firmware/RELEASE.md
+new file mode 100644
+index 0000000..1e3aaa6
+--- /dev/null
++++ b/deck/firmware/RELEASE.md
+@@ -0,0 +1,76 @@
++# MK20 Agent firmware: releases
++
++Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27.2). The firmware is a userland
++layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
++see RECOVERY.md level 5).
++
++## What is a release
++
++A release lives in `/data/mk20/releases/<semver>/`:
++
++| path | what |
++|---|---|
++| `sbin/mk20d` | entry point: gates, gadget launch, self-test, confirm, `health`, `selftest`, `config`, `maint`, `version` |
++| `share/mk20lib.sh` | whitelisted config loader (`/data/mk20/config/mk20.conf`, never sourced) + structured logs/rotation |
++| `share/gadget.sh` | ECM + HID + ADB composite, PTY↔TCP bridge, rollback to stock ACM+KD |
++| `share/flapmon.sh` | flap monitor (1.1.2+): ≥5 link drops in 60 s → rollback; host USB suspend is not a flap |
++| `share/mk20-add-adb.sh` | stock-mode adb add (fallback) |
++| `share/vendor.sha256` | expected hashes of the 4 vendor files the KD shims depend on |
++| `bin/ttygs_tcp_bridge` | static ARM PTY↔TCP bridge (bound to `usb0`, explicit `--listen` only) |
++| `lib/usb_f_ecm.ko` | ECM function module for the #221 kernel |
++| `MANIFEST` | `name/version/build/kernels` header, `--`, then `sha256 mode path` for every file |
++
++The **rescue tier** (`watcher.sh`, `hardreset.sh`, `loader.sh`, `lunch.sh` stub) is *not* part of any release. It
++lives in `/data/mk20/rescue/` and `/mnt/SDCARD/mk20/`, each file with a `.sha256` next to it. It is updated
++separately with `tools/mk20-rescue-update.sh`.
++
++## Versioning
++
++- `MAJOR.MINOR.PATCH`, each part 0–999 (`firmware/VERSION`, one line).
++- PATCH: fixes with no behaviour change visible to the host. MINOR: host-visible change, such as the default
++  subnet, new knobs or new self-test gates. MAJOR: a layout or rescue-protocol change that needs a newer loader.
++- Never rebuild a released version with different content. Bump PATCH instead. The installer reuses an identical
++  installed version and refuses a pending one.
++- `firmware/KERNELS` lists the p4 sha256 values a release supports. These are copied into the MANIFEST
++  `kernels=` line. At run time, mk20d also needs `/data/mk20/kernel/ALLOWLIST` to name the running p4 and its
++  features.
++
++## Build
++
++```sh
++cd deck
++make test                                   # shellcheck + box tests (BusyBox 1.27.2) + host tests: must be green
++sh tools/mk20-release-build.sh firmware out <build-id>   # or: make release (build id = git short sha)
++# -> out/mk20-fw-<v>/ , out/mk20-fw-<v>.tar , out/mk20-fw-<v>.tar.sha256 , out/rescue/ (+ .sha256)
++```
++
++The build needs GNU tar and GNU stat (the box, or any Linux). It is reproducible: same tree and build id give the
++same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
++
++## Release checklist
++
++1. `make test` is green on the box.
++2. Code review of the milestone diff: check the mihomo AI route first (US-Exit-Hy2), then the reviews in
++   `deck/reviews/`. Fix every BLOCKER and MAJOR before building.
++3. Build. Copy the `.tar` and `.tar.sha256` to the Mac (`~/mk20-backup/releases/`) and check them with
++   `shasum -a 256 -c`.
++4. Install on hardware (INSTALL.md §3) with `--reboot`. Watch for `good=<v>` in `loader status` and a
++   `mk20d health` status of `ok`.
++5. Run the acceptance script (`tools/mk20_accept.py`, INSTALL.md §6).
++6. Commit and push: the code, the review files, and the NOTES entry with the hardware evidence.
++
++## Changelog
++
++| version | date (SGT) | changes |
++|---|---|---|
++| 1.0.0 | 2026-10-18 | M1: first release layout (A/B slots, MANIFEST, loader, rescue tier) |
++| 1.0.1 | 2026-10-18 | M1 review fixes (upgrade 1.0.0 → 1.0.1 on hardware at 17:35) |
++| 1.0.2 | 2026-10-18 | M2: mk20d (gates, health/self-test, logs, whitelisted config), bridge bound to usb0. **Bug:** an inline comment disabled bridge cleanup in gadget.sh rollback |
++| 1.0.3 | 2026-10-18 | M2/M3 review fixes. **Bug:** `pgrep -x KeyboardDevice` never matches on BusyBox 1.27, so the self-test failed and the release auto-rolled back to 1.0.2 (rollback proven on hardware) |
++| 1.0.4 | 2026-10-18 | KD count via `pgrep -f '^/data/KeyboardDevice'`, cleanup fix, installer/prune/uninstall |
++| 1.1.0 | 2026-10-18 | M4: default subnet 172.30.250.0/24 (device .2, Mac .1); link-local listener 169.254.7.2 required by self-test |
++| 1.1.1 | 2026-10-18 | During probation, a composite setup failure (gadget rc≠0) is a self-test FAIL, so the release rolls back |
++| 1.1.2 | 2026-10-18 | M7: flap monitor moved to `share/flapmon.sh` (unit-tested); a host USB suspend/resume (Mac sleep) is logged, not counted as a flap |
++
++Decision record: adb stays on in stock fallback even when the vendor hashes don't match (remote reachability wins).
++See NOTES-crash-20261018-and-tf-backup.md, "Decision (user, 18:32 SGT)".
+diff --git a/deck/tests/test_docs.py b/deck/tests/test_docs.py
+new file mode 100644
+index 0000000..fe410cc
+--- /dev/null
++++ b/deck/tests/test_docs.py
+@@ -0,0 +1,56 @@
++"""M5/M6: the firmware docs must match the code (paths, flags, config defaults, kernel table)."""
++import re
++from pathlib import Path
++
++D = Path(__file__).resolve().parents[1]
++FW = D / "firmware"
++DOCS = {n: (FW / n).read_text() for n in ("RELEASE.md", "INSTALL.md", "RECOVERY.md")}
++CODE = "\n".join(p.read_text() for p in list((FW / "release").rglob("*.sh")) + [FW / "release/sbin/mk20d"]
++                 + list((FW / "rescue").glob("*.sh")))
++
++
++def test_referenced_tools_exist():
++    for name, text in DOCS.items():
++        for t in set(re.findall(r"tools/([A-Za-z0-9_.-]+\.(?:sh|py|txt))", text)):
++            assert (D / "tools" / t).is_file(), f"{name} references missing tools/{t}"
++
++
++def test_flag_files_are_implemented():
++    flags = set(re.findall(r"^\| `(mk20-[a-z-]+)` \|", DOCS["RECOVERY.md"], re.M))
++    assert {"mk20-no-composite", "mk20-no-adb", "mk20-gadget-nohid", "mk20-no-release", "mk20-no-watch"} <= flags
++    for f in flags:
++        assert f in CODE, f"documented flag {f} not read by any firmware script"
++    for c in ("cmd-reboot", "cmd-rollback", "cmd-ping", "job.sh"):
++        assert c in DOCS["RECOVERY.md"] and c in CODE
++
++
++def test_config_defaults_match_mk20lib():
++    lib = (FW / "release/share/mk20lib.sh").read_text()
++    doc = DOCS["INSTALL.md"]
++    for key, val in (("ECM_SUBNET", "172.30.250.0/24"), ("BRIDGE_PORT", "17890"), ("FLAP_DROPS", "5"),
++                     ("FLAP_WINDOW_S", "60"), ("LOG_MAX_KB", "256"), ("LOG_KEEP", "3")):
++        assert re.search(rf"\b{key}={re.escape(val)}\b", lib), key
++        assert f"`{key}`" in doc and val in doc, key
++    for key in re.findall(r"^    ([A-Z_]+)\) v_", lib, re.M):
++        assert key in doc, f"config key {key} undocumented"
++
++
++def test_kernel_table_matches_notes_and_allowlist():
++    table = dict(re.findall(r"^\| (\w+)(?: \(running\))? \| `([0-9a-f]{64})` \|", DOCS["RECOVERY.md"], re.M))
++    assert set(table) == {"stock", "ep3", "ep5out"}
++    for name, sha in table.items():
++        note = FW / "kernel-notes" / sha[:12] / "RECOVERY.txt"
++        assert note.is_file() and sha in note.read_text() and name in note.read_text()
++    for sha in re.findall(r"^[0-9a-f]{64}$", (FW / "KERNELS").read_text(), re.M):
++        assert sha in table.values(), f"KERNELS sha {sha[:12]} missing from RECOVERY.md kernel table"
++
++
++def test_changelog_has_current_version():
++    v = (FW / "VERSION").read_text().strip()
++    assert f"| {v} |" in DOCS["RELEASE.md"], f"RELEASE.md changelog lacks {v}"
++
++
++def test_mac_undo_documented():
++    for name in ("INSTALL.md", "RECOVERY.md"):
++        assert "linklocal-remove" in DOCS[name] and "revert --force" in DOCS[name]
++    assert "networksetup -removenetworkservice \"MK20 link-local\"" in DOCS["INSTALL.md"]
+```

@@ -1,5 +1,8 @@
 # MK20 备份与恢复手册（P0）
 
+> T113 固件（mk20d / release / rescue tier / 内核 p4 / Mac 网络服务）的恢复见 `firmware/RECOVERY.md`；
+> 安装与升级见 `firmware/INSTALL.md`，版本与构建见 `firmware/RELEASE.md`。
+
 P0 **不写** GD32 固件、不改 T113 系统镜像（PRD §2.3/§4）。下面的工具和步骤是
 「改 VIA / 刷机之前先留后路」。**所有写入都要显式参数，默认只演练**；真正执行前
 先经用户确认。

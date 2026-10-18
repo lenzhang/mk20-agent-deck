@@ -1,0 +1,11 @@
+MK20 kernel ep3  (p4 sha256 f2a19d3cb8fddc7f177cb518bb64e69645fadd3ce1b1422c4f056db39e4ee4c0, 6451200 bytes, uname "Linux 5.4.61 #221": identify by sha only)
+features: acm,adb,ecm
+ep3 ISO->INT patch. ECM works, HID (ep5out) does not. Not in firmware/KERNELS: the loader refuses 1.1.x releases,
+so flag files (incl. mk20-gadget-nohid) have no effect; you get stock ACM+KD (+adb via the legacy keeper).
+
+Restore this p4 from a Mac (TF card in reader; see deck/firmware/RECOVERY.md level 5):
+  bash tools/tf-identify.sh                  # -> diskN (restore refuses internal / non 3-5 GB disks)
+  bash tools/tf-restore-boot.sh --disk diskN --image ~/mk20-backup/tf/patched-ep3/p4-patched-ep3int.img --slice s4 --dry-run
+  bash tools/tf-restore-boot.sh --disk diskN --image ~/mk20-backup/tf/patched-ep3/p4-patched-ep3int.img --slice s4
+Device copy: /data/mk20/kernel/f2a19d3cb8fd/boot.img (same sha). Check: sha256sum boot.img
+Always keep the stock image (9ac68ed98a70...) restorable: it is the known-good fallback.

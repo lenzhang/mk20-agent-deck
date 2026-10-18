@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mac: restore MK20 TF — whole card OR a named slice (boot partition).
 # Usage:
-#   tf-restore-boot.sh --disk diskN --whole-image IMG [--dry-run]
+#   tf-restore-boot.sh --disk diskN --whole-image IMG [--dry-run]   (raw dd image of THIS card only; never IMAGEWTY)
 #   tf-restore-boot.sh --disk diskN --image boot-stock.img [--slice s4] [--dry-run]
 #   MK20 TF layout: s1 SDCARD(FAT) s2 env s3 env-redund s4 BOOT (6451200 B) s5 rootfs s6 UDISK.
 #   The slice must be EXACTLY the image size (full 6451200-B stock p4 backup; never the prefix-only staged images).
@@ -39,6 +39,11 @@ diskutil list "$BLK"
 diskutil list "$BLK" | grep -qiE 'ESP32|ESP-' && die "looks like ESP32"
 if [[ -n "$WHOLE" ]]; then
   SRC="$WHOLE"; DEST="$RAW"
+  [[ -d "$SRC" ]] && die "$SRC is a directory (per-partition backup?); --whole-image needs a raw whole-card dd image"
+  [[ -f "$SRC" ]] || die "missing $SRC"
+  [[ "$(head -c 8 "$SRC")" == IMAGEWTY ]] && die "$SRC is an Allwinner PhoenixCard image; flash it with PhoenixCard/OpenixCard, never dd"
+  WBYTES=$(wc -c <"$SRC" | tr -d ' ')
+  (( WBYTES <= SIZE )) || die "image ($WBYTES B) larger than card ($SIZE B)"
 elif [[ -n "$IMAGE" ]]; then
   SLICE="${SLICE:-s4}"
   [[ "$SLICE" == s4 ]] || die "MK20 boot partition is s4 (got $SLICE); refusing"

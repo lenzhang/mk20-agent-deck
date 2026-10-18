@@ -134,7 +134,9 @@ cleanup() {
   rm -f /tmp/mk20/gadget.busy
 }
 # rollback runs before any preflight so an abnormal state cannot block it
-if [ "${1:-}" = --rollback-now ]; then log "rollback requested"; trap cleanup EXIT; exit 1; fi
+# once-guard: flapmon, the confirm waiter and mk20d can all ask; only the first undoes (cleared when a composite is up)
+if [ "${1:-}" = --rollback-now ]; then mkdir -p /tmp/mk20; mkdir /tmp/mk20/rollback.once 2>/dev/null || { log "rollback already done/running"; exit 0; }
+  log "rollback requested"; trap cleanup EXIT; exit 1; fi
 
 # ---- preflight (nothing touched yet) ----
 UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
@@ -143,6 +145,8 @@ UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
 [ "${1:-}" = --rollback-now ] || [ -x $BR ] || { log "ABORT $BR missing: KD would lose ttyGS0 (black screens)"; exit 1; }
 [ -x /bin/adbd ] || { log "ABORT no /bin/adbd"; exit 1; }
 grep -q '^usb_f_ecm ' /proc/modules || [ -f $ECMKO ] || { log "ABORT no $ECMKO"; exit 1; }
+[ -n "${MK20_REL:-}" ] && [ -f "$MK20_REL/share/flapmon.sh" ] || { log "ABORT no flapmon.sh (MK20_REL unset?)"; exit 1; }
+touch /tmp/mk20-flapmon-stop   # a re-run: any old flap monitor / confirm waiter exits (new ones start below)
 log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
 
 trap cleanup EXIT
@@ -218,33 +222,26 @@ pgrep -f KeyboardDevice >/dev/null || die "KD not running"
 # test hook (one-shot): prove the failure rollback with everything set up (bridge, shims, KD on PTY)
 if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
 rm -f /mnt/SDCARD/mk20-composite-ok
+rmdir /tmp/mk20/rollback.once 2>/dev/null
 OK=1
 log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_IP bridge=[$BRIDGE_LISTEN] kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
 # within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
 ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh)" ] || { OK=0; die "cannot stage rollback copy"; }
-# flap monitor (both modes): >=5 configured->not-configured drops within 60 s -> rollback to ACM+KD+adb
+# flap monitor (both modes, share/flapmon.sh): >=5 configured->not-configured drops within 60 s -> rollback to
+# ACM+KD+adb. Host USB suspend (Mac sleep) is not a flap.
 rm -f /tmp/mk20-flapmon-stop
-cat > /tmp/mk20-flapmon.sh <<FM
-U=/sys/class/udc/$UDC/state; prev=\$(cat \$U 2>/dev/null); times=""
-while [ ! -f /tmp/mk20-flapmon-stop ]; do
-  s=\$(cat \$U 2>/dev/null)
-  if [ "\$prev" = configured ] && [ "\$s" != configured ]; then
-    now=\$(cut -d. -f1 /proc/uptime); nt=""; cnt=0
-    for t in \$times \$now; do [ \$((now-t)) -le $FLAP_WINDOW ] && { nt="\$nt \$t"; cnt=\$((cnt+1)); }; done; times=\$nt
-    echo "flapmon \$now: link drop (\$s), \$cnt in ${FLAP_WINDOW}s" >> $LOG
-    if [ \$cnt -ge $FLAP_DROPS ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; touch /tmp/mk20/gadget.busy; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
-  fi
-  prev=\$s; sleep 0.3
-done
-FM
-( trap '' HUP INT; exec sh /tmp/mk20-flapmon.sh </dev/null >/dev/null 2>&1 9>&- ) &
+FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
+{ [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
+( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG"
+  exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
+    sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 9>&- ) &
 FP=$!; sleep 1; kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start"; }
 log "flap monitor started (pid $FP)"
 if [ "$MODE" = --boot ]; then
   touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
 fi
-( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 9>&- ) &
+( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 9>&- ) &
 WP=$!; sleep 1; kill -0 $WP 2>/dev/null || { OK=0; die "confirm waiter did not start -> rollback now"; }
 log "confirm window 180s started (pid $WP)"
 echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status
