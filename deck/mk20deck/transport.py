@@ -1,6 +1,12 @@
 """Byte transports: real CDC-ACM serial port and an in-process mock device."""
 from __future__ import annotations
 
+import logging
+import os
+import re
+import socket
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -19,19 +25,148 @@ class Transport(Protocol):
     def close(self) -> None: ...
 
 
+# ECM+HID+ADB composite: KD is reachable through the on-device PTY<->TCP bridge (no ACM port then).
+# MK20_TCP=host:port overrides, MK20_TCP=off disables. Device 10.20.0.2 / Mac 10.20.0.1 on the ECM link.
+DEFAULT_TCP = "10.20.0.2:17890"
+# Fixed host-side MAC of the device's ECM function (gadget host_addr) -> finds the ECM interface by MAC.
+ECM_HOST_MAC = "02:11:22:33:44:56"
+IP_BOUND_IF = 25  # macOS <netinet/in.h>; scoped routing: packets leave via this interface even if a TUN owns the route
+log = logging.getLogger(__name__)
+_route_warned: set[str] = set()
+
+
+def ecm_interface() -> str | None:
+    """Name of the interface carrying the MK20 ECM link (MK20_ECM_IF overrides; else matched by MAC)."""
+    v = os.environ.get("MK20_ECM_IF")
+    if v:
+        return v
+    mac = os.environ.get("MK20_ECM_MAC", ECM_HOST_MAC).lower()
+    try:
+        out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=3).stdout
+    except Exception:  # noqa: BLE001
+        return None
+    cur = None
+    for line in out.splitlines():
+        m = re.match(r"^([A-Za-z0-9]+):", line)
+        if m:
+            cur = m.group(1)
+        elif cur and re.search(r"\bether " + re.escape(mac) + r"\b", line.lower()):
+            return cur
+    return None
+
+
+def route_check(host: str) -> str | None:
+    """Warn (once per host) if the OS route to the device goes through a TUN (utun*) instead of the ECM link.
+
+    The daemon binds its socket to the ECM interface anyway, so it keeps working; other tools (ping, ssh, adb over
+    TCP) would be captured. Never modifies proxy configs - it only prints the rule to add.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.run(["route", "-n", "get", host], capture_output=True, text=True, timeout=3).stdout
+    except Exception:  # noqa: BLE001
+        return None
+    m = re.search(r"interface:\s*(\S+)", out)
+    iface = m.group(1) if m else None
+    if not iface or not iface.startswith("utun"):
+        return None
+    net = ".".join(host.split(".")[:3]) + ".0/24"
+    msg = (f"route to MK20 {host} goes via {iface} (VPN/proxy TUN), not the ECM link. The deck daemon binds to the "
+           f"ECM interface so it still works, but add a bypass for {net} to your TUN tool, e.g. "
+           f"mihomo/Clash: tun.route-exclude-address: [{net}]; Surge: tun-excluded-routes = {net} (and skip-proxy); "
+           f"sing-box: route_exclude_address: [\"{net}\"]; Tailscale/WireGuard: keep {net} out of AllowedIPs.")
+    if host not in _route_warned:
+        _route_warned.add(host)
+        log.warning(msg)
+    return msg
+
+
+def _bound_socket(host: str, port: int, timeout: float) -> socket.socket:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    iface = ecm_interface() if sys.platform == "darwin" and not host.startswith("127.") and host != "localhost" else None
+    if iface:
+        try:
+            s.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, socket.if_nametoindex(iface))
+        except OSError:
+            pass  # interface vanished (replug): fall back to the routing table
+    try:
+        s.connect((host, port))
+    except BaseException:
+        s.close()
+        raise
+    return s
+
+
+def tcp_target() -> str | None:
+    v = os.environ.get("MK20_TCP", DEFAULT_TCP).strip()
+    return None if v.lower() in ("", "off", "0", "no") else v
+
+
+def tcp_reachable(target: str, timeout: float = 0.5) -> bool:
+    host, _, port = target.rpartition(":")
+    try:
+        _bound_socket(host, int(port), timeout).close()
+    except OSError:
+        return False
+    route_check(host)
+    return True
+
+
 def find_ports() -> list[str]:
-    """Return candidate CDC-ACM device paths by VID/PID (needs pyserial)."""
+    """Return candidate ports: ``tcp://`` bridge first when the ECM link answers, then CDC-ACM by VID/PID."""
+    out: list[str] = []
+    t = tcp_target()
+    if t and tcp_reachable(t):
+        out.append(f"tcp://{t}")
     try:
         from serial.tools import list_ports
     except ImportError:  # pragma: no cover
-        return []
-    out = []
+        return out
+    acm = []
     for p in list_ports.comports():
         if (p.vid, p.pid) in USB_IDS:
-            out.append(p.device)
+            acm.append(p.device)
     # macOS exposes both /dev/tty.* and /dev/cu.*; prefer cu.* (no DCD wait).
-    out.sort(key=lambda d: (0 if "/cu." in d else 1, d))
-    return out
+    acm.sort(key=lambda d: (0 if "/cu." in d else 1, d))
+    return out + acm
+
+
+class TcpTransport:
+    """Protocol A over the device's PTY<->TCP bridge (one client at a time; a new client replaces the old)."""
+
+    def __init__(self, target: str) -> None:
+        host, _, port = target.removeprefix("tcp://").rpartition(":")
+        self._s = _bound_socket(host, int(port), 3)  # bound to the ECM interface: TUN-proof
+        self._s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        self.port = f"tcp://{host}:{port}"
+
+    def write(self, data: bytes) -> None:
+        self._s.settimeout(5)
+        self._s.sendall(data)
+
+    def read(self, timeout: float) -> bytes:
+        self._s.settimeout(max(timeout, 0.001))
+        try:
+            d = self._s.recv(65536)
+        except (socket.timeout, TimeoutError):
+            return b""
+        if not d:
+            raise OSError(57, "bridge closed the connection")
+        return d
+
+    def close(self) -> None:
+        try:
+            self._s.close()
+        except Exception:
+            pass
+
+
+def open_transport(port: str):
+    """``tcp://host:port`` -> TcpTransport, anything else -> SerialTransport."""
+    return TcpTransport(port) if port.startswith("tcp://") else SerialTransport(port)
 
 
 class SerialTransport:

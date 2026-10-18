@@ -94,3 +94,35 @@ Writes beyond images need `--allow-device-writes` (only `--backlight N` today).
 Report: `~/.config/mk20-agent-deck/devtest/<time>/devtest.{md,json}` with a suggested config block.
 
 Backup / recovery (VIA restore, GD32 DFU, T113 TF image): see `RECOVERY.md`.
+
+## Transport: ECM/TCP first, ACM fallback (P2 composite)
+
+With the P2 firmware setup the MK20 boots as **USB ECM (network) + HID (keyboard + absolute pointer) + ADB**,
+and KeyboardDevice is reached through an on-device PTY↔TCP bridge instead of the CDC-ACM port.
+`find_ports()` therefore returns `tcp://10.20.0.2:17890` first when the bridge answers, then any CDC-ACM
+`/dev/cu.*` port (stock / rollback mode). `open_transport()` picks `TcpTransport` or `SerialTransport`.
+
+- Addressing: device `10.20.0.2/24` on `usb0` (plus link-local alias `169.254.7.2/16`), Mac `10.20.0.1/24`.
+  Fixed MACs (device `02:11:22:33:44:55`, host side `02:11:22:33:44:56`) keep macOS on the same `enN`
+  interface and its saved settings. One-time Mac setup (no router, so the default route is untouched):
+  `networksetup -setmanual "<ECM service, e.g. Serial>" 10.20.0.1 255.255.255.0`.
+- Env: `MK20_TCP=host:port` (override) / `MK20_TCP=off` (ACM only); `MK20_ECM_IF=en13` or
+  `MK20_ECM_MAC=…` to pick the interface explicitly.
+- The bridge serves one client at a time and a new client replaces the old one (so a probe or `mk20ctl`
+  over TCP kicks the daemon; it reconnects).
+
+### VPN / proxy TUN compatibility (any TUN, not only mihomo)
+
+TUN-mode proxies (mihomo/Clash, Surge, sing-box, some VPNs) install broad routes on a `utun` interface.
+The deck daemon is TUN-proof by itself:
+
+1. It finds the ECM interface by its fixed MAC and **binds its socket to it** (`IP_BOUND_IF`, macOS's
+   `SO_BINDTODEVICE`), so packets to the MK20 leave via the ECM link even if a TUN owns the route.
+2. On connect it runs a **self-check** (`route -n get <device-ip>`): if the route goes via `utun*` it logs a
+   warning with the bypass to add, e.g. mihomo/Clash `tun.route-exclude-address: [10.20.0.0/24]`,
+   Surge `tun-excluded-routes = 10.20.0.0/24` (+ `skip-proxy`), sing-box `route_exclude_address`,
+   WireGuard/Tailscale: keep the subnet out of AllowedIPs. It **never modifies proxy configs**.
+   Other tools (ping, ssh, `adb connect`) are not bound and do need that bypass.
+3. Most TUNs already exclude RFC1918 ranges (this Mac's mihomo excludes `10.0.0.0/8`, so no change was
+   needed). If `10.20.0.0/24` collides with a corporate network, the device also answers on link-local
+   `169.254.7.2` (bind to the ECM interface; macOS otherwise routes 169.254/16 via the primary interface).

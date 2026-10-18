@@ -38,7 +38,7 @@ def build_controller(cfg: DeckConfig, adapters, sim: bool = False) -> Controller
 def cmd_run(args) -> int:
     from .hw.power import PowerMonitor
     from .supervisor import Supervisor, default_renderer_factory
-    from .transport import SerialTransport, find_ports
+    from .transport import find_ports, open_transport
 
     cfg = load_config(args.config)
     if args.port:
@@ -47,7 +47,7 @@ def cmd_run(args) -> int:
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    Supervisor(ctl, find_ports, SerialTransport, default_renderer_factory(cfg), cfg,
+    Supervisor(ctl, find_ports, open_transport, default_renderer_factory(cfg), cfg,
                power=PowerMonitor.default()).run(stop)
     return 0
 
@@ -107,7 +107,7 @@ def cmd_devtest(args) -> int:
     from .hw.devtest import ConsolePrompter, DevTest, DevTestOptions, HeadlessPrompter, step_plan
     from .hw.power import PowerMonitor
     from .hw.usbenum import enumerate_usb
-    from .transport import SerialTransport, find_ports
+    from .transport import find_ports, open_transport
 
     if args.headless:
         # guided entirely on the device: host mode starts with backlight 0, so a
@@ -139,7 +139,7 @@ def cmd_devtest(args) -> int:
               f"每步 {opts.step_timeout:.0f}s；HID 监视={'on' if hid_monitor else 'off'}；输出 {out}", flush=True)
         for i, st in enumerate(step_plan(opts), 1):
             print(f"  {i:2}. {st}", flush=True)
-    t = DevTest(opts, HeadlessPrompter() if args.headless else ConsolePrompter(), out, find_ports, SerialTransport,
+    t = DevTest(opts, HeadlessPrompter() if args.headless else ConsolePrompter(), out, find_ports, open_transport,
                 enumerate_usb=enumerate_usb, port_users=_port_users, via_open=via_open, power=PowerMonitor.default(),
                 hid_monitor=hid_monitor)
     rep = t.run()
