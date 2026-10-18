@@ -36,10 +36,13 @@ boot)
     MK20_REL=$REL sh "$TM/gadget-boot.sh" --boot >> "$LOG" 2>&1; log "gadget --boot rc=$? status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null)"
   fi
   sleep "${MK20_STABLE:-30}"
-  r=$(selftest); rc=$?; echo "$r" > "$TM/selftest.txt"; log "selftest rc=$rc: $(echo "$r" | tr '\n' ' ')"
+  # sample up to 3x (a flap rollback in progress briefly stops KD: degraded, not failed)
+  for try in 1 2 3; do r=$(selftest); rc=$?; [ $rc = 0 ] && break; sleep 10; done
+  echo "$r" > "$TM/selftest.txt"; log "selftest rc=$rc (try $try): $(echo "$r" | tr '\n' ' ')"
   if [ $rc = 0 ]; then
     if [ -f "$TM/rescue-loader.sh" ]; then sh "$TM/rescue-loader.sh" confirm "$V" && log "confirmed $V" || log "confirm $V: not pending / refused"; fi
-  else log "selftest FAILED: not confirming (pending release rolls back on next boot)"; fi
+  else log "selftest FAILED: not confirming; restoring stock ACM+KD+adb now (pending release rolls back on next boot)"
+    [ -f "$TM/gadget-boot.sh" ] && MK20_REL=$REL sh "$TM/gadget-boot.sh" --rollback-now >> "$LOG" 2>&1; fi
   ;;
 selftest) selftest; exit $?;;
 version) echo "$V";;

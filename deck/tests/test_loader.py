@@ -62,6 +62,10 @@ def test_first_install_unconfirmed_goes_stock(dev):
     setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0")
     assert dev.run(L, "boot").returncode == 0
     assert dev.run(L, "boot").returncode == 11
+    # third boot must NOT run the failed release as trusted
+    assert dev.run(L, "boot").returncode == 11
+    # re-installing it explicitly gives it a new probation
+    assert dev.run(L, "switch", "1.0.0").returncode in (0, 1)
 
 
 def test_corrupt_pending_rolls_back(dev):
@@ -99,14 +103,22 @@ def test_kernel_changed_after_install_good_is_stock(dev):
 def test_garbage_slots(dev):
     setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "confirm", "1.0.0")
     setup_rel(dev, "1.0.1"); dev.run(L, "switch", "1.0.1"); dev.run(L, "confirm", "1.0.1")
-    st = dev.run(L, "status").stdout; assert "1.0.1" in st.split("current=")[1].split()[2]
-    # corrupt the newest slot -> the other one is used
+    st = dev.run(L, "status").stdout
     newest = "A" if "current=A" in st else "B"
-    dev.p(f"data/mk20/slots/{newest}").write_text("gen=99\nversion=../../x\n")
-    assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0"
     other = "B" if newest == "A" else "A"
-    dev.p(f"data/mk20/slots/{other}").write_text("")
+    # newest slot corrupt -> pick finds 1.0.0, which is not good -> the loader re-points to good (1.0.1)
+    dev.p(f"data/mk20/slots/{newest}").write_text("gen=99\nversion=../../x\n")
+    assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.1"
+    for s in ("A", "B"):
+        dev.p(f"data/mk20/slots/{s}").write_text("")
     assert dev.run(L, "boot").returncode == 11
+
+
+def test_non_good_non_pending_never_runs(dev):
+    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "confirm", "1.0.0")
+    setup_rel(dev, "1.0.1"); dev.run(L, "switch", "1.0.1")
+    dev.p("data/mk20/state/pending").unlink()      # e.g. lost state
+    assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0"
 
 
 def test_slot_checksum_tamper(dev):
@@ -139,8 +151,17 @@ def test_switch_refusals(dev):
 def test_manual_rollback(dev):
     setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "confirm", "1.0.0")
     setup_rel(dev, "1.0.1"); dev.run(L, "switch", "1.0.1"); dev.run(L, "confirm", "1.0.1")
-    r = dev.run(L, "rollback"); assert r.returncode == 0, r.stdout
+    r = dev.run(L, "rollback"); assert r.returncode == 0 and "pending" in r.stdout, r.stdout
     assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0"
+    assert dev.read("data/mk20/state/pending") == "1.0.0"       # older release runs on probation
+
+
+def test_manual_rollback_to_good_from_pending(dev):
+    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "confirm", "1.0.0")
+    setup_rel(dev, "1.0.1"); dev.run(L, "switch", "1.0.1")
+    r = dev.run(L, "rollback"); assert r.returncode == 0 and "1.0.0" in r.stdout
+    assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0"
+    assert dev.read("data/mk20/state/pending") is None
 
 
 def test_deadline_resets_once(dev):
@@ -157,3 +178,36 @@ def test_deadline_noop_when_confirmed(dev):
     hr = dev.tmp / "hr.sh"; hr.write_text(f'echo reset >> {dev.mock}/resets\n')
     dev.run(L, "deadline", "1.0.0", env={"MK20_DEADLINE": "50", "MK20_HR": f"sh {hr}"})
     assert not (dev.mock / "resets").exists()
+
+
+def test_symlink_in_release_rejected(dev):
+    d = setup_rel(dev, "1.0.0")
+    tgt = dev.tmp / "outside.txt"; tgt.write_text((d / "share/payload.txt").read_text())
+    (d / "share/payload.txt").unlink(); (d / "share/payload.txt").symlink_to(tgt)
+    r = dev.run(L, "switch", "1.0.0"); assert r.returncode == 1 and "symlink" in r.stdout
+
+
+def test_crash_between_pending_and_slot_flip(dev):
+    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
+    setup_rel(dev, "1.0.1")
+    # simulate: pending written, slot never flipped
+    dev.p("data/mk20/state/pending").write_text("1.0.1\n"); dev.p("data/mk20/state/attempts").write_text("0\n")
+    assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0"
+    assert dev.read("data/mk20/state/pending") is None
+    assert dev.run(L, "switch", "1.0.1").returncode == 0
+
+
+def test_kernels_any_rejected(dev):
+    setup_rel(dev, "1.0.0", kernels=("any",)) if False else None
+    d = build_release(dev.tmp, "1.0.0")
+    m = d / "MANIFEST"; m.write_text(m.read_text().replace("kernels=" + P4, "kernels=any"))
+    install_files(dev, d, "1.0.0")
+    r = dev.run(L, "switch", "1.0.0"); assert r.returncode == 1 and "kernel" in r.stdout
+
+
+def test_duplicate_manifest_path_rejected(dev):
+    d = build_release(dev.tmp, "1.0.0")
+    m = d / "MANIFEST"; lines = m.read_text().splitlines()
+    m.write_text("\n".join(lines + [lines[-1]]) + "\n")
+    install_files(dev, d, "1.0.0")
+    r = dev.run(L, "switch", "1.0.0"); assert r.returncode == 1 and "duplicate" in r.stdout

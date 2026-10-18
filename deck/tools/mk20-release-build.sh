@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build an MK20 Agent firmware release (runs on the box/Linux; GNU tar).
+# Build an MK20 Agent firmware release. Host-only: needs GNU coreutils stat + GNU tar (the box / any Linux).
 #   mk20-release-build.sh <firmware-dir> <outdir> [build-id]
 # <firmware-dir> holds VERSION, KERNELS (allowed p4 sha256, one per line), release/ (payload) and rescue/.
 # Output in <outdir>:
@@ -8,12 +8,16 @@
 #   rescue/                 rescue set with .sha256 files (watcher.sh, hardreset.sh, loader.sh, lunch.sh)
 set -eu
 FW=$1; OUT=$2; BID=${3:-dev}
-V=$(cat "$FW/VERSION"); echo "$V" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || { echo "bad VERSION $V" >&2; exit 1; }
+[ "$(wc -l < "$FW/VERSION")" -le 1 ] || { echo "VERSION must be one line" >&2; exit 1; }
+echo "$BID" | grep -Eq '^[A-Za-z0-9._-]{1,40}$' || { echo "bad build id" >&2; exit 1; }
+V=$(head -n 1 "$FW/VERSION"); echo "$V" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || { echo "bad VERSION $V" >&2; exit 1; }
 K=$(grep -E '^[0-9a-f]{64}$' "$FW/KERNELS" | paste -sd, -); [ -n "$K" ] || { echo "no KERNELS" >&2; exit 1; }
 D=$OUT/mk20-fw-$V; rm -rf "$D" "$OUT/rescue"; mkdir -p "$D" "$OUT/rescue"
 (cd "$FW/release" && find . -type f | sed 's#^\./##' | LC_ALL=C sort) > "$OUT/.files"
 while read -r f; do
   case "$f" in *' '*|*..*) echo "unsafe name $f" >&2; exit 1;; esac
+  printf '%s' "$f" | LC_ALL=C grep -q '[^A-Za-z0-9._/-]' && { echo "unsafe chars in $f" >&2; exit 1; }
+  [ -L "$FW/release/$f" ] && { echo "symlink not allowed: $f" >&2; exit 1; }
   mkdir -p "$D/$(dirname "$f")"; cp -p "$FW/release/$f" "$D/$f"
 done < "$OUT/.files"
 {

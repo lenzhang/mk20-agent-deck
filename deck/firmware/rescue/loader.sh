@@ -20,8 +20,9 @@ mkdir -p "$SL" "$ST" "$T" "$S/mk20/logs" 2>/dev/null
 up() { if [ -n "${MK20_UPTIME_CMD:-}" ]; then $MK20_UPTIME_CMD; else cut -d. -f1 /proc/uptime; fi; }
 log() { echo "$(up) loader $*" >> "$LOG" 2>/dev/null; }
 sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
-is_semver() { echo "$1" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; }
-is_hex64() { echo "$1" | grep -Eq '^[0-9a-f]{64}$'; }
+oneline() { [ "$(printf '%s' "$1" | wc -l)" = 0 ]; }
+is_semver() { oneline "$1" && echo "$1" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; }
+is_hex64() { oneline "$1" && echo "$1" | grep -Eq '^[0-9a-f]{64}$'; }
 is_num() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ ${#1} -le 9 ]; }
 wstate() { # $1=file $2=value: tmp + fsync + rename (ext4)
   printf '%s\n' "$2" > "$1.tmp" && sync && mv -f "$1.tmp" "$1" && sync; }
@@ -52,7 +53,8 @@ slot_write() { # $1=version: write the inactive (lower/invalid) slot with gen = 
   if [ "$ga" -le "$gb" ]; then t=A; n=$((gb+1)); else t=B; n=$((ga+1)); fi
   { printf 'gen=%s\nversion=%s\nmanifest_sha=%s\n' "$n" "$1" "$m"
     printf 'sum=%s\n' "$(printf 'gen=%s\nversion=%s\nmanifest_sha=%s\n' "$n" "$1" "$m" | sha256sum | cut -d' ' -f1)"; } > "$SL/.$t.tmp" || return 1
-  sync; mv -f "$SL/.$t.tmp" "$SL/$t"; sync
+  sync; mv -f "$SL/.$t.tmp" "$SL/$t" || return 1; sync
+  [ "$(slot_read $t)" = "$n $1" ] || { log "slot $t write did not verify"; return 1; }
   log "slot $t <- $1 (gen $n)"
 }
 p4sha() {
@@ -66,45 +68,62 @@ verify_release() {
   is_semver "$v" && [ -f "$M" ] || { echo "no manifest"; return 1; }
   [ "$(kv version "$M")" = "$v" ] || { echo "manifest version mismatch"; return 1; }
   k=$(kv kernels "$M"); p=$(p4sha)
-  case ",$k," in *",$p,"*|",any,") ;; *) echo "kernel $p not in allow-list"; return 2;; esac
-  [ -n "$dest" ] && { rm -rf "$dest"; mkdir -p "$dest" || return 1; cp -f "$M" "$dest/MANIFEST"; }
+  is_hex64 "$p" || { echo "cannot read running p4 sha"; return 2; }
+  case ",$k," in *",$p,"*) ;; *) echo "kernel $p not in allow-list"; return 2;; esac
+  if [ -n "$dest" ]; then rm -rf "$dest"; [ ! -e "$dest" ] && mkdir -p "$dest" && cp "$M" "$dest/MANIFEST" || { echo "cannot stage $dest"; return 1; }; fi
   n=0
   # file lines: "<sha256> <octal mode> <relative path>" after the "--" separator
   sed -n '/^--$/,$p' "$M" | sed 1d > "$T/.mf.$$"
+  if LC_ALL=C grep -q '[^ -~]' "$T/.mf.$$"; then echo "control/non-ASCII chars in manifest"; rm -f "$T/.mf.$$"; return 1; fi
+  [ "$(cut -d' ' -f3 "$T/.mf.$$" | sort | uniq -d | wc -l)" = 0 ] || { echo "duplicate paths"; rm -f "$T/.mf.$$"; return 1; }
+  grep -q ' sbin/mk20d$' "$T/.mf.$$" || { echo "sbin/mk20d not listed"; rm -f "$T/.mf.$$"; return 1; }
   while read -r fs fm fp; do
     [ -n "$fs" ] || continue
     is_hex64 "$fs" || { echo "bad sha line"; rm -f "$T/.mf.$$"; return 1; }
-    case "$fp" in ''|/*|*..*|*' '*) echo "unsafe path $fp"; rm -f "$T/.mf.$$"; return 1;; esac
-    case "$fm" in [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;; *) echo "bad mode $fm"; rm -f "$T/.mf.$$"; return 1;; esac
+    case "$fp" in ''|/*|*..*|*' '*|*//*|./*) echo "unsafe path $fp"; rm -f "$T/.mf.$$"; return 1;; esac
+    case "$fm" in [0-7][0-7][0-7]) ;; *) echo "bad mode $fm (no setuid/sticky)"; rm -f "$T/.mf.$$"; return 1;; esac
+    [ -f "$d/$fp" ] && [ ! -L "$d/$fp" ] || { echo "missing or symlink $fp"; rm -f "$T/.mf.$$"; return 1; }
     [ "$(sha "$d/$fp")" = "$fs" ] || { echo "sha mismatch $fp"; rm -f "$T/.mf.$$"; return 1; }
-    if [ -n "$dest" ]; then mkdir -p "$dest/$(dirname "$fp")"; cp -f "$d/$fp" "$dest/$fp"
-      [ "$(sha "$dest/$fp")" = "$fs" ] || { echo "copy mismatch $fp"; rm -f "$T/.mf.$$"; return 1; }; chmod "$fm" "$dest/$fp"; fi
+    if [ -n "$dest" ]; then
+      mkdir -p "$dest/$(dirname "$fp")" && cp "$d/$fp" "$dest/$fp" && [ "$(sha "$dest/$fp")" = "$fs" ] && chmod "$fm" "$dest/$fp" \
+        || { echo "copy failed/mismatch $fp"; rm -f "$T/.mf.$$"; return 1; }; fi
     n=$((n+1))
   done < "$T/.mf.$$"
   rm -f "$T/.mf.$$"
   [ "$n" -gt 0 ] || { echo "empty manifest"; return 1; }
-  [ -f "$d/sbin/mk20d" ] || { echo "no sbin/mk20d"; return 1; }
+  if [ -n "$dest" ]; then [ -f "$dest/sbin/mk20d" ] || { echo "no sbin/mk20d"; return 1; }; else [ -f "$d/sbin/mk20d" ] || { echo "no sbin/mk20d"; return 1; }; fi
   echo "ok $n files"
 }
 installed_any() { [ -f "$SL/A" ] || [ -f "$SL/B" ]; }   # a slot was ever written
 # rollback_to_good <reason> -> 0 if switched (sets CUR), 1 if impossible
 rollback_to_good() {
   g=$(rstate good); bad=$CUR
-  wstate "$ST/failed-$bad" "$1"; rm -f "$ST/pending" "$ST/attempts"
-  if is_semver "$g" && [ "$g" != "$bad" ] && [ -f "$REL/$g/MANIFEST" ]; then
-    slot_write "$g" && { log "ROLLBACK $bad -> $g: $1"; wstate "$ST/last-rollback" "$bad->$g $1"; CUR=$g; return 0; }
+  wstate "$ST/failed-$bad" "$1"
+  # flip the slot FIRST; pending is cleared only once good is committed (a crash in between re-runs this rollback)
+  if is_semver "$g" && [ "$g" != "$bad" ] && [ -f "$REL/$g/MANIFEST" ] && slot_write "$g"; then
+    rm -f "$ST/pending" "$ST/attempts"; log "ROLLBACK $bad -> $g: $1"; wstate "$ST/last-rollback" "$bad->$g $1"; CUR=$g; return 0
   fi
+  rm -f "$ST/pending" "$ST/attempts"   # failed-$bad stays: it can never run as trusted (only good runs non-pending)
   log "ROLLBACK $bad impossible (good='$g'): $1"; wstate "$ST/last-rollback" "$bad->none $1"; return 1
 }
 
 cmd=${1:-status}
 case "$cmd" in
 boot)
+  exec 7>"$T/loader.lock"; flock -n 7 || { log "boot: another loader is running"; exit 13; }
   [ -f "$S/mk20-no-release" ] && { log "flag mk20-no-release -> legacy"; exit 12; }
   P=$(pick) || { if installed_any; then log "no valid slot -> stock+rescue"; exit 11; fi; log "no release installed -> legacy"; exit 10; }
   CUR=${P##* }; PEND=$(rstate pending)
+  GOOD=$(rstate good)
+  if [ -n "$PEND" ] && { [ "$CUR" != "$PEND" ] || [ "$PEND" = "$GOOD" ]; }; then log "stale pending $PEND (current $CUR) cleared"; rm -f "$ST/pending" "$ST/attempts"; PEND=""; fi
+  # INVARIANT: a release runs either as `good` or as `pending` on probation. Anything else -> good, else stock.
+  if [ "$CUR" != "$PEND" ] && [ "$CUR" != "$GOOD" ]; then
+    log "current $CUR is neither good ('$GOOD') nor pending -> switching to good"
+    if is_semver "$GOOD" && [ -f "$REL/$GOOD/MANIFEST" ] && [ ! -f "$ST/failed-$GOOD" ] && slot_write "$GOOD"; then CUR=$GOOD; else log "no good release -> stock+rescue"; exit 11; fi
+  fi
   if [ "$CUR" = "$PEND" ]; then
-    a=$(rstate attempts); is_num "$a" || a=0; a=$((a+1)); wstate "$ST/attempts" "$a"   # counted BEFORE launch
+    a=$(rstate attempts); is_num "$a" || a=0; a=$((a+1))
+    wstate "$ST/attempts" "$a" && [ "$(rstate attempts)" = "$a" ] || { log "cannot record attempt (ro /data?) -> stock+rescue"; exit 11; }   # counted BEFORE launch
     log "pending $CUR attempt $a"
     if [ "$a" -gt "${MK20_MAX_ATTEMPTS:-1}" ]; then rollback_to_good "not confirmed after $((a-1)) attempt(s)" || exit 11; fi
   fi
@@ -117,10 +136,11 @@ boot)
   fi
   log "launch $CUR ($r)"
   wstate "$T/release-active" "$CUR"
-  ( trap '' HUP INT; MK20_REL=$T/rel MK20_VERSION=$CUR MK20_HOME=$B exec sh "$T/rel/sbin/mk20d" boot </dev/null >>"$LOG" 2>&1 ) &
+  ( trap '' HUP INT; MK20_REL=$T/rel MK20_VERSION=$CUR MK20_HOME=$B exec sh "$T/rel/sbin/mk20d" boot </dev/null >/dev/null 2>&1 7>&- ) &
   if [ "$CUR" = "$(rstate pending)" ]; then
     cp -f "$0" "$T/loader-deadline.sh" 2>/dev/null
-    ( trap '' HUP INT; exec sh "$T/loader-deadline.sh" deadline "$CUR" </dev/null >/dev/null 2>&1 ) &
+    dl=$(( $(up) + 480 )); [ "$dl" -lt "$DEADLINE" ] && dl=$DEADLINE
+    ( trap '' HUP INT; MK20_DEADLINE=$dl exec sh "$T/loader-deadline.sh" deadline "$CUR" </dev/null >/dev/null 2>&1 7>&- ) &
   fi
   exit 0;;
 deadline)
@@ -131,12 +151,17 @@ deadline)
   done
   [ "$(rstate pending)" = "$v" ] || exit 0
   [ -f "$ST/deadline-reset-$v" ] && { log "deadline $v: reset already used -> no reset (next boot rolls back)"; exit 0; }
-  wstate "$ST/deadline-reset-$v" "$(up)"; log "deadline $v: not confirmed by ${DEADLINE}s -> one hard reset"
-  ${MK20_HR:-sh $S/mk20/hardreset.sh} loader-deadline
+  wstate "$ST/deadline-reset-$v" "$(up)" && [ -f "$ST/deadline-reset-$v" ] || { log "deadline $v: cannot record reset marker -> no reset"; exit 0; }
+  log "deadline $v: not confirmed by ${DEADLINE}s -> one hard reset"
+  if [ -n "${MK20_HR:-}" ]; then $MK20_HR loader-deadline
+  elif [ -f "$T/rescue-hardreset.sh" ]; then sh "$T/rescue-hardreset.sh" loader-deadline
+  else log "deadline $v: no verified hardreset staged -> no reset (next boot rolls back)"; fi
   exit 0;;
 confirm)
   v=${2:-}; is_semver "$v" || exit 1
-  if [ "$(rstate pending)" = "$v" ]; then wstate "$ST/good" "$v"; rm -f "$ST/pending" "$ST/attempts"; log "confirmed $v (good)"; exit 0; fi
+  if [ "$(rstate pending)" = "$v" ]; then
+    wstate "$ST/good" "$v" && [ "$(rstate good)" = "$v" ] || { log "confirm $v: cannot write good"; exit 1; }
+    rm -f "$ST/pending" "$ST/attempts"; log "confirmed $v (good)"; exit 0; fi
   [ "$(rstate good)" = "$v" ] && exit 0
   log "confirm $v refused (pending='$(rstate pending)')"; exit 1;;
 switch)
@@ -145,15 +170,22 @@ switch)
   P=$(pick); [ "${P##* }" = "$v" ] && { echo "refused: $v already current"; exit 1; }
   r=$(verify_release "$v") || { echo "refused: $r"; exit 1; }
   # first install ever: no good yet -> the current (if any) becomes good implicitly only via confirm
-  slot_write "$v" || { echo "slot write failed"; exit 1; }
-  wstate "$ST/pending" "$v"; wstate "$ST/attempts" 0; rm -f "$ST/deadline-reset-$v" "$ST/failed-$v"
+  # pending is recorded BEFORE the slot flips: a crash in between leaves a stale pending (cleared at boot), never an
+  # unconfirmed release running as if it were good
+  rm -f "$ST/deadline-reset-$v" "$ST/failed-$v"; wstate "$ST/attempts" 0; wstate "$ST/pending" "$v"
+  slot_write "$v" || { rm -f "$ST/pending" "$ST/attempts"; echo "slot write failed"; exit 1; }
   echo "ok: $v pending"; exit 0;;
 rollback)
-  P=$(pick) || { echo "no current"; exit 1; }; cur=${P##* }; sl=${P%% *}
+  # manual: back to `good` if current is not good; otherwise to the other slot's version ON PROBATION (pending)
+  P=$(pick) || { echo "no current"; exit 1; }; cur=${P##* }; sl=${P%% *}; g=$(rstate good)
+  if is_semver "$g" && [ "$g" != "$cur" ] && [ -f "$REL/$g/MANIFEST" ]; then
+    slot_write "$g" || exit 1; rm -f "$ST/pending" "$ST/attempts"; wstate "$ST/last-rollback" "$cur->$g manual"
+    log "manual rollback $cur -> $g (good)"; echo "ok: $cur -> $g"; exit 0; fi
   [ "$sl" = A ] && o=B || o=A; O=$(slot_read $o) || { echo "no valid other slot"; exit 1; }
   ov=${O##* }; [ "$ov" != "$cur" ] || { echo "other slot is the same version"; exit 1; }
-  slot_write "$ov" || exit 1; rm -f "$ST/pending" "$ST/attempts"; wstate "$ST/last-rollback" "$cur->$ov manual"
-  log "manual rollback $cur -> $ov"; echo "ok: $cur -> $ov"; exit 0;;
+  [ -f "$ST/failed-$ov" ] && { echo "other slot $ov is marked failed"; exit 1; }
+  wstate "$ST/attempts" 0; wstate "$ST/pending" "$ov"; slot_write "$ov" || { rm -f "$ST/pending" "$ST/attempts"; exit 1; }
+  wstate "$ST/last-rollback" "$cur->$ov manual (probation)"; log "manual rollback $cur -> $ov (pending)"; echo "ok: $cur -> $ov (pending)"; exit 0;;
 verify) verify_release "${2:-}"; exit $?;;
 status)
   echo "current=$(pick 2>/dev/null) good=$(rstate good) pending=$(rstate pending) attempts=$(rstate attempts) active=$(cat "$T/release-active" 2>/dev/null) last_rollback=$(rstate last-rollback)"; exit 0;;

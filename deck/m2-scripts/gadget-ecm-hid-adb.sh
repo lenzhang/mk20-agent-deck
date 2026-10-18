@@ -1,5 +1,5 @@
 #!/bin/sh
-# v3.6 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+# v3.7 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
 # (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
 # Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
 # NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
@@ -41,7 +41,7 @@ MODE=${1:-}
 if [ "$MODE" != --run ] && [ "$MODE" != --boot ] && [ "$MODE" != --rollback-now ]; then
   Q=/mnt/SDCARD/job.sh; [ -e $Q ] && { echo "watcher queue busy ($Q exists)"; exit 1; }
   A=--run; [ "${1:-}" = --rollback-queued ] && A=--rollback-now
-  echo "sh $(readlink -f "$0") $A" > $Q.tmp
+  echo "MK20_REL=${MK20_REL:-} sh $(readlink -f "$0") $A" > $Q.tmp
   sha256sum $Q.tmp | awk '{print $1"  job.sh"}' > $Q.sha256.tmp; mv -f $Q.tmp $Q; mv -f $Q.sha256.tmp $Q.sha256
   echo "queued to watcher"; exit 0
 fi
@@ -166,8 +166,9 @@ ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only
 ifconfig usb0 10.20.0.2 netmask 255.255.255.0 up 2>>"$LOG" || die "usb0 ip"; ifconfig usb0:1 169.254.7.2 netmask 255.255.0.0 up 2>>"$LOG"
 rm -f /tmp/mk20-bridge-stop
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
+mkdir -p /tmp/mk20
 [ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
-( trap '' HUP INT; exec sh -c "echo \$\$ > /tmp/mk20-bridge-loop.pid; while [ ! -f /tmp/mk20-bridge-stop ]; do $BR --listen 0.0.0.0:17890 --link /dev/ttyGS0; sleep 1; done" </dev/null >>"$LOG" 2>&1 ) &   # supervised
+( trap '' HUP INT; exec sh -c "echo \$\$ > /tmp/mk20-bridge-loop.pid; while [ ! -f /tmp/mk20-bridge-stop ]; do $BR --listen 0.0.0.0:17890 --link /dev/ttyGS0; sleep 1; done" </dev/null >>/tmp/mk20/bridge.log 2>&1 ) &   # supervised (tmpfs log: an open FAT file blocks hardreset's remount ro)
 i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 [ -e /dev/ttyGS0 ] || die "bridge did not create /dev/ttyGS0"
 printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n' > /tmp/setusbconfig-noop; chmod 755 /tmp/setusbconfig-noop

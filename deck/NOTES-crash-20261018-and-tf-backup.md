@@ -264,3 +264,33 @@
   - 17:11: hardreset v2.2 WDT reboot OK (adb back in 61 s, composite + confirm at 88 s).
 - Box tests: `make test` (shellcheck + 38 pytest: loader slots/attempts/rollback/verify/kernel gate/path traversal,
   stub fallbacks, hardreset guards + lock wait, watcher kill_tree + verified copies, reproducible build).
+
+## 17:38 SGT: M1 code review (both models: GPT "NOT GO", Claude "not ready") -> fixes -> 1.0.1 live
+- Reviews: reviews/m1-*.md (AI route checked 17:14). Applied:
+  - State machine invariant: a release runs only as `good` or as `pending` on probation. A failed first install
+    can never run as trusted on boot 3+. `switch` writes pending BEFORE the slot flip. Stale pending is cleared.
+    rollback_to_good flips the slot before clearing pending; slot writes are read back. Manual rollback goes to
+    good, else the other slot ON PROBATION.
+  - ro-/data guard: if the attempt counter or good can't be written -> no launch (rc 11) / confirm fails.
+  - Deadline = max(600 s, launch + 480 s); it uses only the verified tmpfs hardreset staged by the watcher.
+  - MANIFEST: kernels=any removed; p4 sha must be 64-hex. Duplicate paths, control chars, symlinks/non-regular
+    files, setuid modes and an unlisted sbin/mk20d are rejected. Every copy step is checked. Single-line
+    VERSION/build id in the build tool (GNU host-only, documented).
+  - Watcher:
+    - verified copies capture one digest -> fresh tmpfs file -> hash -> rename. job.sh staged bytes re-verified.
+    - Command/job files must be removable (no reset loop on a ro FAT).
+    - kill_tree = freeze, TERM, 2 s, KILL; deferred while kwrite.lock is held (never kills a p4 dd).
+    - Loader rc 11 runs only adb.sh, no legacy mutations.
+    - FAT log budget: logs > 64 KiB trimmed every ~60 s; emergency trim below 1 MiB free.
+  - Stub: a checksum MISMATCH never runs. Only a legacy watcher with no .sha256 runs, flagged UNVERIFIED. A 60 s
+    liveness check starts the verified FAT watcher if the ext4 one never reaches its main loop.
+  - mk20d: self-test sampled 3x. On failure it restores stock ACM+KD+adb immediately.
+  - gadget v3.7: bridge loop logs to tmpfs (it held a FAT file open, so remount ro was always EBUSY). Queued jobs
+    keep MK20_REL.
+- Tests: 88 (+shellcheck). Includes a power-cut matrix (crash at the 1st..8th mv/sync inside switch / boot /
+  boot / confirm / rollback -> the next two boots satisfy the invariant), plus stub liveness, TERM-ignoring
+  descendants, the third-boot case, kernels=any and duplicate paths.
+- Hardware 17:35: real upgrade 1.0.0 -> 1.0.1 via `loader switch` + WDT reboot -> pending attempt 1 -> composite
+  OK -> self-test PASS -> confirmed good at 89 s. No FAT files open now (the next reset should remount ro cleanly).
+- Open for M2/M3: tests still run under host busybox 1.37 + util-linux flock (1.27 pinned only via the flock shim).
+  Watcher main loop, mk20d and gadget have no fake-configfs tests yet. FAT-writer lock. Structured logs.

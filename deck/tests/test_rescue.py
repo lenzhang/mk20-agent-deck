@@ -42,11 +42,19 @@ def test_stub_falls_back_to_fat_when_ext4_corrupt(dev):
     assert wait_text(dev.mock / "watcher.ran").startswith("fat ")
 
 
-def test_stub_unverified_fallback_keeps_recovery(dev):
-    put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"), good_sha=False)
+def test_stub_legacy_watcher_without_sha_runs_flagged(dev):
+    put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"))
+    dev.p("mnt/SDCARD/mk20/watcher.sh.sha256").unlink()
     dev.run(STUB)
     assert wait_text(dev.mock / "watcher.ran").startswith("fat ")
     assert "UNVERIFIED" in dev.read("tmp/mk20/stub.status")
+
+
+def test_stub_never_runs_mismatched_watcher(dev):
+    put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"), good_sha=False)
+    dev.run(STUB); time.sleep(0.5)
+    assert not (dev.mock / "watcher.ran").exists()
+    assert "mismatch" in dev.read("tmp/mk20/stub.status")
 
 
 def test_stub_kill_switch(dev):
@@ -163,3 +171,24 @@ def test_hardreset_refuses_magicclose(dev):
     shim = dev.tmp / "ubus2"; shim.write_text('#!/bin/sh\ncase "$*" in "call system watchdog") echo \'{"status":"running","timeout":16,"magicclose":true}\';; esac\n'); shim.chmod(0o755)
     r = dev.run(HR, "t", env={"MK20_UBUS": str(shim), "MK20_HR_NOSLEEP": "1"})
     assert r.returncode == 10
+
+
+def test_watcher_kill_tree_term_ignoring(dev, tmp_path):
+    script = tmp_path / "t.sh"
+    script.write_text(f'''
+MK20_WATCHER_LIB=1 . {W}
+( sh -c 'trap "" TERM; sleep 30 & echo $! > {tmp_path}/gc; trap "" TERM; wait' ) & jp=$!
+sleep 0.5
+kill_tree $jp
+sleep 0.3
+kill -0 $(cat {tmp_path}/gc) 2>/dev/null && echo ALIVE || echo DEAD
+''')
+    r = dev.run(script)
+    assert "DEAD" in r.stdout, r.stdout + r.stderr
+
+
+def test_stub_liveness_falls_back_to_fat(dev):
+    put_rescue(dev, "data/mk20/rescue", "exit 0\n")          # verified but broken: never writes watch.pid
+    put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"))
+    dev.run(STUB, env={"MK20_STUB_LIVENESS": "1"})
+    assert wait_text(dev.mock / "watcher.ran", t=6).startswith("fat ")

@@ -1,0 +1,9 @@
+READ ONLY code review: do not modify files or run git/shell commands. Target: Allwinner T113, Tina Linux, BusyBox v1.27.2 ash
+(flock only -sxun; no setsid/nohup/pkill; sleep takes fractions), /mnt/SDCARD = 8 MiB FAT (nearly full), /data = ext4.
+Soft reboot hangs; resets only via hardreset.sh (stop procd watchdog pings). Read deck/reviews/m1.diff (M1 milestone),
+then deck/firmware/rescue/{lunch.sh,watcher.sh,loader.sh,hardreset.sh}, deck/firmware/release/sbin/mk20d,
+deck/tools/mk20-release-build.sh, deck/tests/*.py and deck/PLAN-production-firmware.md §11 (requirements).
+Focus: can any path leave the board without remote recovery (no watcher/adb) or in a reset loop; A/B slot and state
+machine correctness (pending/attempts/good/rollback, crash at any write); MANIFEST verification bypasses (path, symlink,
+TOCTOU, injection via file names or slot contents); busybox ash portability; test gaps. Rank BLOCKER/MAJOR/MINOR with
+file:line and a concrete fix. Max ~700 words, markdown.

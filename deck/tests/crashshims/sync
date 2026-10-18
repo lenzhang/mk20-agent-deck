@@ -1,0 +1,7 @@
+#!/bin/sh
+# fault injection: the Nth mv/sync call (counted across both) kills the calling script (simulated power cut)
+if [ -n "${MOCK_CRASH_AT:-}" ]; then
+  n=$(( $(cat "$MOCK_DIR/crash.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$MOCK_DIR/crash.n"
+  [ "$n" = "$MOCK_CRASH_AT" ] && { echo "$0 $*" > "$MOCK_DIR/crashed"; kill -9 $PPID; exit 137; }
+fi
+exec busybox sync "$@"

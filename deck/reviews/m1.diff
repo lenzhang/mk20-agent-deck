@@ -1,0 +1,1265 @@
+diff --git a/deck/Makefile b/deck/Makefile
+new file mode 100644
+index 0000000..6e539c3
+--- /dev/null
++++ b/deck/Makefile
+@@ -0,0 +1,8 @@
++test:
++	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh
++	uv run --with pytest python -m pytest -q tests
++
++release:
++	sh tools/mk20-release-build.sh firmware out $$(git rev-parse --short HEAD 2>/dev/null || echo dev)
++
++.PHONY: test release
+diff --git a/deck/firmware/KERNELS b/deck/firmware/KERNELS
+new file mode 100644
+index 0000000..55d55fa
+--- /dev/null
++++ b/deck/firmware/KERNELS
+@@ -0,0 +1 @@
++7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc
+diff --git a/deck/firmware/VERSION b/deck/firmware/VERSION
+new file mode 100644
+index 0000000..3eefcb9
+--- /dev/null
++++ b/deck/firmware/VERSION
+@@ -0,0 +1 @@
++1.0.0
+diff --git a/deck/firmware/release/sbin/mk20d b/deck/firmware/release/sbin/mk20d
+new file mode 100755
+index 0000000..7e4b060
+--- /dev/null
++++ b/deck/firmware/release/sbin/mk20d
+@@ -0,0 +1,47 @@
++#!/bin/sh
++# MK20 Agent firmware single entry point (release tier). Launched by the rescue loader with
++#   MK20_REL (verified tmpfs copy of this release), MK20_VERSION, MK20_HOME (/data/mk20).
++#   mk20d boot      bring up features (composite ECM+HID+ADB+KD-bridge, else ACM+KD+adb), self-test, confirm
++#   mk20d selftest  host-independent checks, prints PASS/FAIL lines, rc 0 = pass
++#   mk20d version
++# M1 scope: composite boot (same behaviour as boot-every/composite.sh) + minimal self-test + loader confirm.
++# M2 adds: config file, health JSON, structured logs + rotation, vendor hash gates.
++R=${MK20_ROOT:-}
++REL=${MK20_REL:-$(cd "$(dirname "$0")/.." && pwd)}
++V=${MK20_VERSION:-$(sed -n 's/^version=//p' "$REL/MANIFEST" 2>/dev/null)}
++S=$R/mnt/SDCARD; TM=$R/tmp/mk20; LOG=$S/mk20/logs/mk20d.log
++G=$R/sys/kernel/config/usb_gadget/g1
++mkdir -p "$TM" "$S/mk20/logs" 2>/dev/null
++log() { echo "$(cut -d' ' -f1 /proc/uptime) mk20d[$V] $*" >> "$LOG" 2>/dev/null; }
++
++selftest() {
++  f=0
++  n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" = 1 ] && echo "PASS kd=1" || { echo "FAIL kd=$n"; f=1; }
++  [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && echo "PASS udc bound" || { echo "FAIL udc unbound"; f=1; }
++  [ -e "$R/dev/ttyGS0" ] && echo "PASS ttyGS0" || { echo "FAIL no ttyGS0"; f=1; }
++  ubus call system watchdog 2>/dev/null | grep -q '"running"' && echo "PASS watchdog armed" || { echo "FAIL watchdog not armed"; f=1; }
++  return $f
++}
++
++case "${1:-}" in
++boot)
++  log "boot start (rel=$REL)"
++  i=0; until [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && [ -e "$G/configs/c.1/acm.usb0" ] && [ -e "$R/dev/ttyGS0" ] && pgrep -f KeyboardDevice >/dev/null; do
++    i=$((i+1)); [ $i -gt 120 ] && { log "KD/g1 not up after 120 s"; break; }; sleep 1; done
++  sleep "${MK20_SETTLE:-20}"
++  if [ -f "$S/mk20-no-composite" ]; then
++    log "composite disabled by flag -> ACM+KD+adb"; sh "$REL/share/mk20-add-adb.sh" >> "$LOG" 2>&1
++  else
++    cp -f "$REL/share/gadget.sh" "$TM/gadget-boot.sh"
++    MK20_REL=$REL sh "$TM/gadget-boot.sh" --boot >> "$LOG" 2>&1; log "gadget --boot rc=$? status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null)"
++  fi
++  sleep "${MK20_STABLE:-30}"
++  r=$(selftest); rc=$?; echo "$r" > "$TM/selftest.txt"; log "selftest rc=$rc: $(echo "$r" | tr '\n' ' ')"
++  if [ $rc = 0 ]; then
++    if [ -f "$TM/rescue-loader.sh" ]; then sh "$TM/rescue-loader.sh" confirm "$V" && log "confirmed $V" || log "confirm $V: not pending / refused"; fi
++  else log "selftest FAILED: not confirming (pending release rolls back on next boot)"; fi
++  ;;
++selftest) selftest; exit $?;;
++version) echo "$V";;
++*) echo "usage: mk20d boot|selftest|version"; exit 2;;
++esac
+diff --git a/deck/firmware/release/share/gadget.sh b/deck/firmware/release/share/gadget.sh
+new file mode 100755
+index 0000000..e4e4b8c
+--- /dev/null
++++ b/deck/firmware/release/share/gadget.sh
+@@ -0,0 +1,219 @@
++#!/bin/sh
++# v3.6 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
++# (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
++# Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
++# NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
++#
++# EP budget: f_hid (5.4) ALWAYS takes INT IN + INT OUT. ECM notify INT IN + HID IN/OUT = 3 INT:
++#   ep3 (INT, patched), ep4 (INT), ep5out (bulk+INT, patched). Bulk: ep1 pair (ECM), ep2 pair (ADB).
++#   ACM cannot also fit, so KD's ttyGS0 is replaced by a PTY<->TCP bridge (/data/ttygs_tcp_bridge).
++#   Link order matters (configfs binds in link order): ECM, then HID, then ffs.adb.
++#
++# Safety (v3, per GPT-5.6 review 2026-10-18):
++#  - adbd is started BEFORE the UDC is bound (FunctionFS needs descriptors first, else -ENODEV).
++#  - HID report_length 9 (report ID 1 keyboard = 1 ID + 8 bytes; pointer = 1 + 5).
++#  - EXIT trap: on ANY failure it unbinds, unlinks and removes our functions, restores stock serial
++#    (/data/setusbconfig serial) and restarts KeyboardDevice.
++#  - Stale links in g1/configs/c.1 are removed before reuse.
++#  - KD is stopped via its procd service (no respawn race) and restarted at the end. setusbconfig is
++#    shadowed by a tmpfs no-op bind mount (gone at reboot), so KD's restart does not wipe the composite.
++#  - KD gets a filtered `dmesg` (PATH shim via bind-mounted appLunch.sh) so its USB-reset hack does not fire on
++#    f_hid's harmless -EOPNOTSUPP for SET_IDLE/SET_REPORT (root cause of the 3 s flapping, 2026-10-18 15:53).
++#  - v3.2 boot mode (--boot, run by boot-every/composite.sh in the watcher): no host confirmation; instead a
++#    detached flap monitor polls /sys/class/udc/<udc>/state and rolls back if the link drops >=5 times in 60 s.
++#    Any rollback (failure, flapping, --rollback) ends in stock ACM + KD + adb (mk20-add-adb.sh).
++#  - Addressing: usb0 10.20.0.2/24 (Mac en "Serial" manual 10.20.0.1/24) + alias 169.254.7.2/16; fixed MACs.
++#  - It must NEVER run inside an adb shell (it kills adbd; adbd kills the session group). It queues itself to the watcher.
++set -u
++LOG=/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log
++G=/sys/kernel/config/usb_gadget/g1
++C=$G/configs/c.1
++# release mode (firmware >= 1.0.0): the loader exports MK20_REL (verified tmpfs copy of the release)
++if [ -n "${MK20_REL:-}" ]; then export MK20_REL; BR=$MK20_REL/bin/ttygs_tcp_bridge; ECMKO=$MK20_REL/lib/usb_f_ecm.ko; ADDADB=$MK20_REL/share/mk20-add-adb.sh
++else BR=/data/ttygs_tcp_bridge; ECMKO=/data/mk20/usb_f_ecm.ko; ADDADB=/mnt/SDCARD/mk20/mk20-add-adb.sh; fi
++mkdir -p /mnt/SDCARD/mk20/logs
++log() { echo "gadget $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
++
++# Launch: adbd kills the whole process group of an adb shell when it ends (trap HUP does not help) and
++# this busybox has no setsid, so we hand ourselves to the watcher job queue (runs outside adb/ACM sessions).
++if [ "${1:-}" = --rollback ]; then set -- --rollback-queued; fi   # adb-safe: rollback also goes via the watcher
++MODE=${1:-}
++if [ "$MODE" != --run ] && [ "$MODE" != --boot ] && [ "$MODE" != --rollback-now ]; then
++  Q=/mnt/SDCARD/job.sh; [ -e $Q ] && { echo "watcher queue busy ($Q exists)"; exit 1; }
++  A=--run; [ "${1:-}" = --rollback-queued ] && A=--rollback-now
++  echo "sh $(readlink -f "$0") $A" > $Q.tmp
++  sha256sum $Q.tmp | awk '{print $1"  job.sh"}' > $Q.sha256.tmp; mv -f $Q.tmp $Q; mv -f $Q.sha256.tmp $Q.sha256
++  echo "queued to watcher"; exit 0
++fi
++
++KDSVC=/etc/init.d/qt_app2   # procd service (CMD=/data/appLunch.sh). NOT qt_app1 (plain sh, kills adbd)
++[ -x $KDSVC ] || KDSVC=""
++udc_now() { cat $G/UDC 2>/dev/null; }
++# KD start: via procd only when the service exists (a manual fallback raced procd -> TWO KD processes, 16:17).
++# KD stop: procd may respawn appLunch.sh right after `stop`; killing that sh later orphaned its fresh KD
++# (PPid 1) -> TWO KD after rollback (16:17 and 16:20). Kill appLunch.sh first, then KD, until both stay gone.
++kd_stop() {
++  [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1
++  i=0; while [ $i -lt 15 ]; do
++    for p in $(pgrep -f /data/appLunch.sh); do kill $p 2>/dev/null; done
++    killall KeyboardDevice 2>/dev/null; sleep 1
++    pgrep -f /data/KeyboardDevice >/dev/null || pgrep -f /data/appLunch.sh >/dev/null || { sleep 1; pgrep -f /data/KeyboardDevice >/dev/null || pgrep -f /data/appLunch.sh >/dev/null || return 0; }
++    i=$((i+1)); done
++  killall -9 KeyboardDevice 2>/dev/null; log "WARN kd_stop: KD/appLunch still alive after 15 s (sent KILL)"
++}
++# reap any KD whose parent is not appLunch.sh (orphan from a respawn race)
++kd_reap_orphans() {
++  for p in $(pgrep -f /data/KeyboardDevice); do pp=$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null)
++    grep -q appLunch /proc/$pp/cmdline 2>/dev/null || { kill $p 2>/dev/null; log "reaped orphan KD $p (ppid $pp)"; }; done
++}
++kd_start() {
++  if [ -n "$KDSVC" ]; then
++    $KDSVC start >>"$LOG" 2>&1; i=0
++    while ! pgrep -f /data/KeyboardDevice >/dev/null && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
++    pgrep -f /data/KeyboardDevice >/dev/null || log "WARN KD not up 20 s after procd start"
++  else
++    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 ) & }
++  fi
++  sleep 3; n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" -le 1 ] || { log "WARN $n KeyboardDevice processes"; kd_reap_orphans; }
++}
++# after a rollback: stock KD has re-run `setusbconfig serial` (ACM only) -> add adb back like boot-every/adb.sh
++readd_adb() {
++  [ -f /mnt/SDCARD/mk20-no-adb ] && return
++  H=$ADDADB; [ -f "$H" ] || return
++  i=0; until [ -n "$(udc_now)" ] && [ -e $C/acm.usb0 ] && [ -e /dev/ttyGS0 ] && pgrep -f KeyboardDevice >/dev/null; do
++    i=$((i+1)); [ $i -gt 60 ] && { log "readd_adb: g1 not ready"; return; }; sleep 1; done
++  sleep 5; cp -f $H /tmp/mk20-add-adb.sh; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 && log "adb re-added" || log "adb re-add FAILED"
++  # KD's startup re-runs `setusbconfig serial` (drops ffs.adb) once or twice: keep re-adding for ~90 s
++  n=0; while [ $n -lt 6 ]; do sleep 15; n=$((n+1)); [ -e $C/ffs.adb ] && continue
++    log "adb gone again (KD reset) -> re-add #$n"; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1; done
++}
++OK=0
++cleanup() {
++  [ "$OK" = 1 ] && return
++  log "FAILSAFE: undo composite"
++  touch /tmp/mk20-flapmon-stop
++  killall adbd 2>/dev/null
++  echo "" > $G/UDC 2>/dev/null
++  for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
++  rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
++  touch /tmp/mk20-bridge-stop; [ -f /tmp/mk20-bridge-loop.pid ] && kill "$(cat /tmp/mk20-bridge-loop.pid)" 2>/dev/null; killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
++  # KD may hold the dead PTY: restart it cleanly on real ttyGS0
++  # unmount the shims only after KD + appLunch.sh have exited (a running sh keeps its script busy -> EBUSY)
++  kd_stop
++  for m in /data/setusbconfig /data/appLunch.sh; do i=0; while grep -q " $m " /proc/mounts && [ $i -lt 5 ]; do umount $m 2>/dev/null || sleep 1; i=$((i+1)); done
++    grep -q " $m " /proc/mounts && log "WARN still mounted: $m"; done
++  /data/setusbconfig serial >>"$LOG" 2>&1
++  kd_start
++  readd_adb
++  log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
++}
++# rollback runs before any preflight so an abnormal state cannot block it
++if [ "${1:-}" = --rollback-now ]; then log "rollback requested"; trap cleanup EXIT; exit 1; fi
++
++# ---- preflight (nothing touched yet) ----
++UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
++[ -n "$UDC" ] || { log "ABORT no udc"; exit 1; }
++[ -d $G ] && [ -d $C ] || { log "ABORT no g1 (KD has not configured USB yet)"; exit 1; }
++[ "${1:-}" = --rollback-now ] || [ -x $BR ] || { log "ABORT $BR missing: KD would lose ttyGS0 (black screens)"; exit 1; }
++[ -x /bin/adbd ] || { log "ABORT no /bin/adbd"; exit 1; }
++grep -q '^usb_f_ecm ' /proc/modules || [ -f $ECMKO ] || { log "ABORT no $ECMKO"; exit 1; }
++log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
++
++trap cleanup EXIT
++trap 'exit 1' INT TERM
++trap '' HUP
++die() { log "FAIL $*"; exit 1; }
++
++# ---- stop KD (via procd so it is not respawned mid-change) and adbd ----
++kd_stop; killall adbd 2>/dev/null; sleep 1
++pgrep -f /data/KeyboardDevice >/dev/null && die "KD still running/respawned after stop"
++# ---- unbind + clean stale links ----
++i=0; while [ -n "$(udc_now)" ] && [ $i -lt 10 ]; do echo "" > $G/UDC 2>/dev/null; sleep 0.3; i=$((i+1)); done
++[ -z "$(udc_now)" ] || die "cannot unbind"
++for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
++# ---- functions ----
++grep -q '^usb_f_ecm ' /proc/modules || insmod $ECMKO 2>>"$LOG" || die "insmod ecm"
++mkdir -p $G/functions/ecm.usb0 || die "mkdir ecm"
++echo "02:11:22:33:44:55" > $G/functions/ecm.usb0/dev_addr 2>/dev/null
++echo "02:11:22:33:44:56" > $G/functions/ecm.usb0/host_addr 2>/dev/null
++NOHID=0; [ -f /mnt/SDCARD/mk20-gadget-nohid ] && NOHID=1   # ECM+ADB+bridge only (works on the ep3-only kernel)
++if [ $NOHID = 0 ]; then
++mkdir -p $G/functions/hid.usb0 || die "mkdir hid"
++echo 1 > $G/functions/hid.usb0/protocol; echo 1 > $G/functions/hid.usb0/subclass
++echo 9 > $G/functions/hid.usb0/report_length || die "report_length"
++printf '\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0\x05\x01\x09\x02\xa1\x01\x85\x02\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x03\x05\x01\x09\x30\x09\x31\x16\x00\x00\x26\xff\x7f\x75\x10\x95\x02\x81\x02\xc0\xc0' > /tmp/hid.desc
++cat /tmp/hid.desc > $G/functions/hid.usb0/report_desc || die "report_desc"
++fi
++mkdir -p $G/functions/ffs.adb || die "mkdir ffs.adb"
++# link order: ECM, HID, ADB
++ln -s $G/functions/ecm.usb0 $C/ecm.usb0 || die "link ecm"
++[ $NOHID = 1 ] || ln -s $G/functions/hid.usb0 $C/hid.usb0 || die "link hid"
++ln -s $G/functions/ffs.adb $C/ffs.adb || die "link adb"
++echo "ECM+HID+ADB" > $C/strings/0x409/configuration 2>/dev/null
++# ---- adbd BEFORE bind (writes FFS descriptors; stock adbd then binds g1/UDC itself) ----
++mkdir -p /dev/usb-ffs/adb
++grep -q ' /dev/usb-ffs/adb ' /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb || die "mount ffs"
++/bin/adbd </dev/null >/tmp/adbd.log 2>&1 &
++i=0; while [ ! -e /dev/usb-ffs/adb/ep1 ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
++[ -e /dev/usb-ffs/adb/ep1 ] || die "adbd did not write FFS descriptors"
++i=0; while [ -z "$(udc_now)" ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
++if [ -z "$(udc_now)" ]; then echo "$UDC" > $G/UDC 2>>"$LOG" || die "bind"; fi
++[ "$(udc_now)" = "$UDC" ] || die "UDC not bound"
++sleep 1
++[ $NOHID = 1 ] || [ -e /dev/hidg0 ] || die "no /dev/hidg0"
++[ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
++ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
++ifconfig usb0 10.20.0.2 netmask 255.255.255.0 up 2>>"$LOG" || die "usb0 ip"; ifconfig usb0:1 169.254.7.2 netmask 255.255.0.0 up 2>>"$LOG"
++rm -f /tmp/mk20-bridge-stop
++# ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
++[ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
++( trap '' HUP INT; exec sh -c "echo \$\$ > /tmp/mk20-bridge-loop.pid; while [ ! -f /tmp/mk20-bridge-stop ]; do $BR --listen 0.0.0.0:17890 --link /dev/ttyGS0; sleep 1; done" </dev/null >>"$LOG" 2>&1 ) &   # supervised
++i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
++[ -e /dev/ttyGS0 ] || die "bridge did not create /dev/ttyGS0"
++printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n' > /tmp/setusbconfig-noop; chmod 755 /tmp/setusbconfig-noop
++mount --bind /tmp/setusbconfig-noop /data/setusbconfig || die "shadow setusbconfig"
++# ROOT CAUSE of the 15:40 flapping (found 15:53): KD's UsbCDCStateThread runs `dmesg -c` every 3 s and, if the
++# output contains "ERR: Operation not supported", reads usbc0/usb_device = full USB rmmod/insmod. sunxi_udc prints
++# that line whenever a function's setup() returns -EOPNOTSUPP; f_hid (5.4) does that for SET_IDLE / SET_REPORT on
++# ep0, which macOS sends to a keyboard -> reset every ~3 s. Fix: give KD a PATH-first `dmesg` that drops that line.
++mkdir -p /tmp/mk20-shim
++printf '#!/bin/sh\n/bin/busybox dmesg "$@" | /bin/busybox grep -v "ERR: Operation not supported"\n' > /tmp/mk20-shim/dmesg; chmod 755 /tmp/mk20-shim/dmesg
++umount /data/appLunch.sh 2>/dev/null; sed 's#^source /data/qt_env.sh#source /data/qt_env.sh; export PATH=/tmp/mk20-shim:$PATH#' /data/appLunch.sh > /tmp/appLunch-shim.sh; chmod 755 /tmp/appLunch-shim.sh
++grep -q mk20-shim /tmp/appLunch-shim.sh || die "dmesg shim sed"
++mount --bind /tmp/appLunch-shim.sh /data/appLunch.sh || die "shadow appLunch"
++kd_start
++pgrep -f KeyboardDevice >/dev/null || die "KD not running"
++# test hook (one-shot): prove the failure rollback with everything set up (bridge, shims, KD on PTY)
++if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
++rm -f /mnt/SDCARD/mk20-composite-ok
++OK=1
++log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=10.20.0.2 kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
++# host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
++# within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
++ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh)" ] || { OK=0; die "cannot stage rollback copy"; }
++# flap monitor (both modes): >=5 configured->not-configured drops within 60 s -> rollback to ACM+KD+adb
++rm -f /tmp/mk20-flapmon-stop
++cat > /tmp/mk20-flapmon.sh <<FM
++U=/sys/class/udc/$UDC/state; prev=\$(cat \$U 2>/dev/null); times=""
++while [ ! -f /tmp/mk20-flapmon-stop ]; do
++  s=\$(cat \$U 2>/dev/null)
++  if [ "\$prev" = configured ] && [ "\$s" != configured ]; then
++    now=\$(cut -d. -f1 /proc/uptime); nt=""; cnt=0
++    for t in \$times \$now; do [ \$((now-t)) -le 60 ] && { nt="\$nt \$t"; cnt=\$((cnt+1)); }; done; times=\$nt
++    echo "flapmon \$now: link drop (\$s), \$cnt in 60s" >> $LOG
++    if [ \$cnt -ge 5 ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; MK20_REL=${MK20_REL:-} sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
++  fi
++  prev=\$s; sleep 0.3
++done
++FM
++( trap '' HUP INT; exec sh /tmp/mk20-flapmon.sh </dev/null >/dev/null 2>&1 9>&- ) &
++FP=$!; sleep 1; kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start"; }
++log "flap monitor started (pid $FP)"
++if [ "$MODE" = --boot ]; then
++  touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
++fi
++( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; sleep 2; i=\$((i+1)); done; sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 9>&- ) &
++WP=$!; sleep 1; kill -0 $WP 2>/dev/null || { OK=0; die "confirm waiter did not start -> rollback now"; }
++log "confirm window 180s started (pid $WP)"
++echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status
++exit 0
+diff --git a/deck/firmware/release/share/mk20-add-adb.sh b/deck/firmware/release/share/mk20-add-adb.sh
+new file mode 100755
+index 0000000..4efe429
+--- /dev/null
++++ b/deck/firmware/release/share/mk20-add-adb.sh
+@@ -0,0 +1,37 @@
++#!/bin/sh
++# mk20-add-adb v2: add FunctionFS adb beside the existing ACM (KD keeps ttyGS0).
++# Root cause of v1 failures (2026-10-18): adbd binds the UDC itself (set_udc); our extra
++# `echo UDC` got EBUSY and was treated as FAIL -> restore. Also ffs.adb must be linked in c.1.
++# Sequence: kill adbd -> unbind UDC -> link ffs.adb -> mount functionfs -> start adbd (binds)
++#           -> only if UDC still empty after eps appear, bind it ourselves (EBUSY ignored).
++LOG=${LOG:-/mnt/SDCARD/mk20/logs/adb-helper.log}
++G=/sys/kernel/config/usb_gadget/g1
++log() { echo "add-adb $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
++udc() { cat "$G/UDC" 2>/dev/null; }
++adbd_up() { pidof adbd >/dev/null 2>&1 || pgrep adbd >/dev/null 2>&1; }
++# NEVER run this from an adb shell in the foreground: killing adbd kills the caller mid-way
++# (UDC left unbound). From adb: queue it to the watcher (job.sh) - adbd kills the session process group; no setsid here.
++[ -d "$G" ] || { log "FAIL no g1"; exit 1; }
++UDC_NAME=$(ls /sys/class/udc 2>/dev/null | head -n1); [ -n "$UDC_NAME" ] || { log "FAIL no udc"; exit 1; }
++
++if [ -e "$G/configs/c.1/ffs.adb" ] && [ -n "$(udc)" ] && adbd_up; then
++  log "already composite (links: $(ls $G/configs/c.1 | tr '\n' ' ')) adbd=$(pidof adbd); ok"; exit 0
++fi
++log "BEGIN udc=$(udc) links=$(ls $G/configs/c.1 2>/dev/null | tr '\n' ' ')"
++killall adbd 2>/dev/null; sleep 1
++echo "" > "$G/UDC" 2>/dev/null
++i=0; while [ -n "$(udc)" ] && [ $i -lt 20 ]; do echo "" > "$G/UDC" 2>/dev/null; usleep 200000; i=$((i+1)); done
++[ -z "$(udc)" ] || { log "FAIL UDC still bound: $(udc)"; exit 6; }
++mkdir -p "$G/functions/ffs.adb" /dev/usb-ffs/adb
++[ -e "$G/configs/c.1/ffs.adb" ] || ln -s "$G/functions/ffs.adb" "$G/configs/c.1/ffs.adb" 2>>"$LOG" || { log "FAIL ln"; exit 7; }
++grep -q " /dev/usb-ffs/adb " /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb 2>>"$LOG" || { log "FAIL ffs mount"; exit 3; }
++[ -e "$G/configs/c.1/acm.usb0" ] || log "WARN acm.usb0 not linked"
++/bin/adbd </dev/null >/tmp/adbd.log 2>&1 &
++i=0; while [ $i -lt 40 ]; do [ -n "$(udc)" ] && break; usleep 200000; i=$((i+1)); done
++if [ -z "$(udc)" ]; then
++  if [ -e /dev/usb-ffs/adb/ep1 ]; then echo "$UDC_NAME" > "$G/UDC" 2>>"$LOG"; sleep 1; fi
++fi
++[ "$(udc)" = "$UDC_NAME" ] || { log "FAIL UDC not bound after adbd (got '$(udc)')"; exit 2; }
++adbd_up || { log "FAIL adbd died"; exit 9; }
++log "OK UDC=$(udc) links=$(ls $G/configs/c.1 | tr '\n' ' ') adbd=$(pidof adbd) eps=$(ls /dev/usb-ffs/adb | tr '\n' ' ')"
++exit 0
+diff --git a/deck/firmware/rescue/hardreset.sh b/deck/firmware/rescue/hardreset.sh
+new file mode 100644
+index 0000000..ac76b34
+--- /dev/null
++++ b/deck/firmware/rescue/hardreset.sh
+@@ -0,0 +1,55 @@
++#!/bin/sh
++# MK20 remote HARD reset v2.2 (soft `reboot` hangs on this board).
++# Why reboot hangs: ARM machine_restart() uses arm_pm_restart = psci_sys_reset (PSCI SYSTEM_RESET), which never
++# returns here, and the reboot notifiers stop the sunxi WDT first. So: procd keeps the sunxi WDT armed (16 s,
++# ping 5 s); we stop procd's pings -> the hardware WDT resets the SoC. No kernel restart path, no PSCI.
++# v2 (production plan M0.5):
++#  - refuses (exit 10, "needs power-cycle") if procd's watchdog is not armed: sysrq-b would hit the same PSCI hang
++#  - waits for the kernel-write lock (bootswap/postswap dd of p4) so a reset never tears a boot-partition write
++#  - flushes and remounts the FAT read-only before the pings stop (every reset is otherwise an unclean FAT stop)
++# v2.1: busybox 1.27 flock has NO -w (v2 `flock -w` errored -> false "lock held" refusal -> the old v2 watcher
++#   fell back to `reboot` -> PSCI hang, power-cycle needed, 16:37). Now: poll `flock -n`. remount ro is bounded
++#   (backgrounded, 5 s) so it can never block the reset.
++# v2.2 (M0.5 review): fd 9 (watcher lock) closed at entry; the remount helper does not inherit fd 8 and is killed
++#   if it hangs (then no RW remount is attempted while it may still complete).
++# Env for tests: MK20_ROOT (path prefix), MK20_HR_NOSLEEP=1.
++R=${MK20_ROOT:-}
++UBUS=${MK20_UBUS:-ubus}
++S=$R/mnt/SDCARD; L=$S/mk20/logs/hardreset.log; LOCK=$R/tmp/mk20/kwrite.lock
++mkdir -p "$S/mk20/logs" "$R/tmp/mk20" 2>/dev/null
++log() { echo "hardreset $(cut -d' ' -f1 /proc/uptime): $*" >> "$L" 2>/dev/null; sync; }
++exec 9>&- </dev/null >/dev/null 2>&1   # no inherited watcher lock; no FAT stdout (would block remount ro)
++log "begin by ${1:-?}"
++[ -n "$R" ] && [ -z "${MK20_UBUS:-}" ] && { log "REFUSED: test root without MK20_UBUS (would stop the real watchdog)"; exit 13; }
++W=$($UBUS call system watchdog 2>&1 | tr -d '\n\t '); log "wdt: $W"
++wdt_ok() { case "$1" in *'"status":"running"'*) ;; *) return 1;; esac; case "$1" in *'"magicclose":true'*) return 1;; esac
++  t=$(echo "$1" | sed -n 's/.*"timeout":\([0-9]*\).*/\1/p'); [ -n "$t" ] && [ "$t" -lt 40 ]; }
++wdt_ok "$W" || { log "REFUSED: procd watchdog not armed/usable -> remote reset impossible, needs power-cycle"; exit 10; }
++# kernel-write lock: bootswap/postswap hold it (fd 8) while writing p4
++exec 8>"$LOCK"
++i=0; while ! flock -n 8; do i=$((i+1)); [ $i -gt 600 ] && { log "REFUSED: kernel-write lock held >600 s (p4 write in progress?)"; exit 11; }
++  [ $i = 1 ] && log "waiting for kernel-write lock"; sleep 1; done
++W=$($UBUS call system watchdog 2>&1 | tr -d '\n\t '); wdt_ok "$W" || { log "REFUSED: watchdog changed while waiting: $W"; exit 10; }
++log "lock ok; stopping writers, remount FAT ro, stop WDT pings"
++# guarantee: pings stop within 12 s even if sync/remount wedge on the card (keeps fd 8 = lock held until reset)
++( exec 9>&-; sleep 12; $UBUS call system watchdog '{"stop":true}' ) & TP=$!
++# diagnostics: who still holds files on the FAT (would make remount ro EBUSY)
++for f in "$R"/proc/[0-9]*/fd/*; do l=$(readlink "$f" 2>/dev/null); case "$l" in "$S"/*) echo "${f#"$R"/proc/} $l";; esac; done > "$R/tmp/mk20/hr-fatfds" 2>/dev/null
++sync
++rm -f "$R/tmp/mk20/hr-ro"; ( exec 8>&-; mount -o remount,ro "$S" 2>/dev/null && touch "$R/tmp/mk20/hr-ro" ) & mp=$!
++i=0; while kill -0 $mp 2>/dev/null && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done
++MHUNG=n; kill -0 $mp 2>/dev/null && { kill -9 $mp 2>/dev/null; MHUNG=y; }
++[ -f "$R/tmp/mk20/hr-ro" ] && RO=y || RO=n
++sync
++$UBUS call system watchdog '{"stop":true}' >/dev/null 2>&1
++# FAT may be ro now: log to tmpfs (and FAT if still rw)
++echo "hardreset: pings stopped (fat_ro=$RO), expect reset <=16 s" > "$R/tmp/mk20/hardreset.last"
++[ "$RO" = n ] && log "pings stopped (FAT remount ro failed, synced); expect reset <=16 s"
++[ "${MK20_HR_NOSLEEP:-}" = 1 ] && { kill $TP 2>/dev/null; exit 0; }
++sleep 40
++# Still alive: the WDT did not fire (should not happen with status=running). Re-enable pings so the board keeps
++# working, put FAT back rw, report. No sysrq-b (same PSCI hang).
++kill $TP 2>/dev/null; $UBUS call system watchdog '{"stop":false}' >/dev/null 2>&1
++[ "$RO" = y ] && [ "$MHUNG" = n ] && { ( exec 8>&-; mount -o remount,rw "$S" 2>/dev/null ) & rp=$!; sleep 3; kill -9 $rp 2>/dev/null; }
++log "ERROR: still alive 40 s after stopping pings; pings re-enabled, FAT rw again; needs power-cycle"
++exit 12
+diff --git a/deck/firmware/rescue/loader.sh b/deck/firmware/rescue/loader.sh
+new file mode 100644
+index 0000000..71a88bb
+--- /dev/null
++++ b/deck/firmware/rescue/loader.sh
+@@ -0,0 +1,161 @@
++#!/bin/sh
++# MK20 Agent firmware: release loader (rescue tier, not part of any release).
++#   boot            pick the active release (A/B pointer slots), handle pending/attempts/rollback, verify every
++#                   file against MANIFEST, copy to tmpfs, launch `sbin/mk20d boot` detached.
++#                   rc 0 = release launched, 10 = no release installed (legacy mode), 11 = releases present but
++#                   none runnable (stock + rescue), 12 = disabled by flag
++#   confirm <v>     mark pending release <v> good (called by mk20d after its self-test passes)
++#   switch <v>      make installed release <v> current + pending (installer); refuses while one is pending
++#   rollback        make the other valid slot current (manual, cmd-rollback); clears pending
++#   deadline <v>    (internal) one hard reset if pending <v> is not confirmed by MK20_DEADLINE s uptime
++#   status          print state
++#   verify <v>      verify release <v> (no copy)
++# Layout (ext4): /data/mk20/{releases/<semver>/,slots/{A,B},state/}. Busybox 1.27 ash compatible.
++# Test env: MK20_ROOT (path prefix), MK20_P4_SHA, MK20_UPTIME_CMD, MK20_DEADLINE, MK20_HR (hardreset cmd).
++R=${MK20_ROOT:-}
++B=$R/data/mk20; REL=$B/releases; SL=$B/slots; ST=$B/state
++S=$R/mnt/SDCARD; T=$R/tmp/mk20; LOG=$S/mk20/logs/loader.log
++DEADLINE=${MK20_DEADLINE:-600}
++mkdir -p "$SL" "$ST" "$T" "$S/mk20/logs" 2>/dev/null
++up() { if [ -n "${MK20_UPTIME_CMD:-}" ]; then $MK20_UPTIME_CMD; else cut -d. -f1 /proc/uptime; fi; }
++log() { echo "$(up) loader $*" >> "$LOG" 2>/dev/null; }
++sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
++is_semver() { echo "$1" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; }
++is_hex64() { echo "$1" | grep -Eq '^[0-9a-f]{64}$'; }
++is_num() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ ${#1} -le 9 ]; }
++wstate() { # $1=file $2=value: tmp + fsync + rename (ext4)
++  printf '%s\n' "$2" > "$1.tmp" && sync && mv -f "$1.tmp" "$1" && sync; }
++rstate() { [ -f "$ST/$1" ] && head -n 1 "$ST/$1" 2>/dev/null; }
++kv() { sed -n "s/^$1=//p" "$2" 2>/dev/null | head -n 1; }
++
++# slot_read A|B -> "gen version" if the slot is valid (checksum, semver, manifest digest matches)
++slot_read() {
++  f=$SL/$1; [ -f "$f" ] || return 1
++  [ "$(wc -c < "$f")" -le 512 ] || return 1
++  g=$(kv gen "$f"); v=$(kv version "$f"); m=$(kv manifest_sha "$f"); s=$(kv sum "$f")
++  is_num "$g" && is_semver "$v" && is_hex64 "$m" || return 1
++  c=$(printf 'gen=%s\nversion=%s\nmanifest_sha=%s\n' "$g" "$v" "$m" | sha256sum | cut -d' ' -f1)
++  [ "$c" = "$s" ] || return 1
++  [ "$(sha "$REL/$v/MANIFEST")" = "$m" ] || return 1
++  echo "$g $v"
++}
++# pick -> "slot gen version" of the highest valid generation
++pick() {
++  a=$(slot_read A); b=$(slot_read B); ga=${a%% *}; gb=${b%% *}
++  if [ -n "$a" ] && { [ -z "$b" ] || [ "$ga" -ge "$gb" ]; }; then echo "A $a"; return 0; fi
++  [ -n "$b" ] && { echo "B $b"; return 0; }
++  return 1
++}
++slot_write() { # $1=version: write the inactive (lower/invalid) slot with gen = max+1
++  m=$(sha "$REL/$1/MANIFEST"); is_hex64 "$m" || return 1
++  a=$(slot_read A); b=$(slot_read B); ga=${a%% *}; gb=${b%% *}; ga=${ga:-0}; gb=${gb:-0}
++  if [ "$ga" -le "$gb" ]; then t=A; n=$((gb+1)); else t=B; n=$((ga+1)); fi
++  { printf 'gen=%s\nversion=%s\nmanifest_sha=%s\n' "$n" "$1" "$m"
++    printf 'sum=%s\n' "$(printf 'gen=%s\nversion=%s\nmanifest_sha=%s\n' "$n" "$1" "$m" | sha256sum | cut -d' ' -f1)"; } > "$SL/.$t.tmp" || return 1
++  sync; mv -f "$SL/.$t.tmp" "$SL/$t"; sync
++  log "slot $t <- $1 (gen $n)"
++}
++p4sha() {
++  [ -n "${MK20_P4_SHA:-}" ] && { echo "$MK20_P4_SHA"; return; }
++  [ -s "$T/p4.sha" ] || sha "$R/dev/by-name/boot" > "$T/p4.sha"
++  cat "$T/p4.sha"
++}
++# verify_release <v> [dest]: every MANIFEST file (sha, safe relative path); kernel allow-list; optional verified copy
++verify_release() {
++  v=$1; d=$REL/$v; M=$d/MANIFEST; dest=${2:-}
++  is_semver "$v" && [ -f "$M" ] || { echo "no manifest"; return 1; }
++  [ "$(kv version "$M")" = "$v" ] || { echo "manifest version mismatch"; return 1; }
++  k=$(kv kernels "$M"); p=$(p4sha)
++  case ",$k," in *",$p,"*|",any,") ;; *) echo "kernel $p not in allow-list"; return 2;; esac
++  [ -n "$dest" ] && { rm -rf "$dest"; mkdir -p "$dest" || return 1; cp -f "$M" "$dest/MANIFEST"; }
++  n=0
++  # file lines: "<sha256> <octal mode> <relative path>" after the "--" separator
++  sed -n '/^--$/,$p' "$M" | sed 1d > "$T/.mf.$$"
++  while read -r fs fm fp; do
++    [ -n "$fs" ] || continue
++    is_hex64 "$fs" || { echo "bad sha line"; rm -f "$T/.mf.$$"; return 1; }
++    case "$fp" in ''|/*|*..*|*' '*) echo "unsafe path $fp"; rm -f "$T/.mf.$$"; return 1;; esac
++    case "$fm" in [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;; *) echo "bad mode $fm"; rm -f "$T/.mf.$$"; return 1;; esac
++    [ "$(sha "$d/$fp")" = "$fs" ] || { echo "sha mismatch $fp"; rm -f "$T/.mf.$$"; return 1; }
++    if [ -n "$dest" ]; then mkdir -p "$dest/$(dirname "$fp")"; cp -f "$d/$fp" "$dest/$fp"
++      [ "$(sha "$dest/$fp")" = "$fs" ] || { echo "copy mismatch $fp"; rm -f "$T/.mf.$$"; return 1; }; chmod "$fm" "$dest/$fp"; fi
++    n=$((n+1))
++  done < "$T/.mf.$$"
++  rm -f "$T/.mf.$$"
++  [ "$n" -gt 0 ] || { echo "empty manifest"; return 1; }
++  [ -f "$d/sbin/mk20d" ] || { echo "no sbin/mk20d"; return 1; }
++  echo "ok $n files"
++}
++installed_any() { [ -f "$SL/A" ] || [ -f "$SL/B" ]; }   # a slot was ever written
++# rollback_to_good <reason> -> 0 if switched (sets CUR), 1 if impossible
++rollback_to_good() {
++  g=$(rstate good); bad=$CUR
++  wstate "$ST/failed-$bad" "$1"; rm -f "$ST/pending" "$ST/attempts"
++  if is_semver "$g" && [ "$g" != "$bad" ] && [ -f "$REL/$g/MANIFEST" ]; then
++    slot_write "$g" && { log "ROLLBACK $bad -> $g: $1"; wstate "$ST/last-rollback" "$bad->$g $1"; CUR=$g; return 0; }
++  fi
++  log "ROLLBACK $bad impossible (good='$g'): $1"; wstate "$ST/last-rollback" "$bad->none $1"; return 1
++}
++
++cmd=${1:-status}
++case "$cmd" in
++boot)
++  [ -f "$S/mk20-no-release" ] && { log "flag mk20-no-release -> legacy"; exit 12; }
++  P=$(pick) || { if installed_any; then log "no valid slot -> stock+rescue"; exit 11; fi; log "no release installed -> legacy"; exit 10; }
++  CUR=${P##* }; PEND=$(rstate pending)
++  if [ "$CUR" = "$PEND" ]; then
++    a=$(rstate attempts); is_num "$a" || a=0; a=$((a+1)); wstate "$ST/attempts" "$a"   # counted BEFORE launch
++    log "pending $CUR attempt $a"
++    if [ "$a" -gt "${MK20_MAX_ATTEMPTS:-1}" ]; then rollback_to_good "not confirmed after $((a-1)) attempt(s)" || exit 11; fi
++  fi
++  r=$(verify_release "$CUR" "$T/rel"); rc=$?
++  if [ $rc != 0 ]; then
++    log "verify $CUR failed: $r"
++    if [ "$CUR" = "$(rstate pending)" ] && rollback_to_good "verify: $r"; then
++      r=$(verify_release "$CUR" "$T/rel") || { log "verify good $CUR failed: $r -> stock+rescue"; exit 11; }
++    else exit 11; fi
++  fi
++  log "launch $CUR ($r)"
++  wstate "$T/release-active" "$CUR"
++  ( trap '' HUP INT; MK20_REL=$T/rel MK20_VERSION=$CUR MK20_HOME=$B exec sh "$T/rel/sbin/mk20d" boot </dev/null >>"$LOG" 2>&1 ) &
++  if [ "$CUR" = "$(rstate pending)" ]; then
++    cp -f "$0" "$T/loader-deadline.sh" 2>/dev/null
++    ( trap '' HUP INT; exec sh "$T/loader-deadline.sh" deadline "$CUR" </dev/null >/dev/null 2>&1 ) &
++  fi
++  exit 0;;
++deadline)
++  v=${2:-}; is_semver "$v" || exit 1
++  while [ "$(up)" -lt "$DEADLINE" ]; do
++    [ "$(rstate pending)" = "$v" ] || exit 0
++    sleep "${MK20_POLL:-5}"
++  done
++  [ "$(rstate pending)" = "$v" ] || exit 0
++  [ -f "$ST/deadline-reset-$v" ] && { log "deadline $v: reset already used -> no reset (next boot rolls back)"; exit 0; }
++  wstate "$ST/deadline-reset-$v" "$(up)"; log "deadline $v: not confirmed by ${DEADLINE}s -> one hard reset"
++  ${MK20_HR:-sh $S/mk20/hardreset.sh} loader-deadline
++  exit 0;;
++confirm)
++  v=${2:-}; is_semver "$v" || exit 1
++  if [ "$(rstate pending)" = "$v" ]; then wstate "$ST/good" "$v"; rm -f "$ST/pending" "$ST/attempts"; log "confirmed $v (good)"; exit 0; fi
++  [ "$(rstate good)" = "$v" ] && exit 0
++  log "confirm $v refused (pending='$(rstate pending)')"; exit 1;;
++switch)
++  v=${2:-}; is_semver "$v" || { echo "bad version"; exit 1; }
++  [ -n "$(rstate pending)" ] && { echo "refused: $(rstate pending) is pending"; exit 1; }
++  P=$(pick); [ "${P##* }" = "$v" ] && { echo "refused: $v already current"; exit 1; }
++  r=$(verify_release "$v") || { echo "refused: $r"; exit 1; }
++  # first install ever: no good yet -> the current (if any) becomes good implicitly only via confirm
++  slot_write "$v" || { echo "slot write failed"; exit 1; }
++  wstate "$ST/pending" "$v"; wstate "$ST/attempts" 0; rm -f "$ST/deadline-reset-$v" "$ST/failed-$v"
++  echo "ok: $v pending"; exit 0;;
++rollback)
++  P=$(pick) || { echo "no current"; exit 1; }; cur=${P##* }; sl=${P%% *}
++  [ "$sl" = A ] && o=B || o=A; O=$(slot_read $o) || { echo "no valid other slot"; exit 1; }
++  ov=${O##* }; [ "$ov" != "$cur" ] || { echo "other slot is the same version"; exit 1; }
++  slot_write "$ov" || exit 1; rm -f "$ST/pending" "$ST/attempts"; wstate "$ST/last-rollback" "$cur->$ov manual"
++  log "manual rollback $cur -> $ov"; echo "ok: $cur -> $ov"; exit 0;;
++verify) verify_release "${2:-}"; exit $?;;
++status)
++  echo "current=$(pick 2>/dev/null) good=$(rstate good) pending=$(rstate pending) attempts=$(rstate attempts) active=$(cat "$T/release-active" 2>/dev/null) last_rollback=$(rstate last-rollback)"; exit 0;;
++*) echo "usage: $0 boot|confirm <v>|switch <v>|rollback|deadline <v>|status|verify <v>"; exit 2;;
++esac
+diff --git a/deck/firmware/rescue/lunch.sh b/deck/firmware/rescue/lunch.sh
+new file mode 100644
+index 0000000..656e870
+--- /dev/null
++++ b/deck/firmware/rescue/lunch.sh
+@@ -0,0 +1,27 @@
++#!/bin/sh
++# MK20 boot stub v2 (FAT /mnt/SDCARD/lunch.sh; qt_app1 copies it to /data/lunch.sh and runs it synchronously, so it
++# must return at once). Starts the RESCUE watcher only; the watcher runs the release loader later (after KD).
++# Rescue home candidates, first whose watcher.sh matches its .sha256 wins: /data/mk20/rescue (ext4), /mnt/SDCARD/mk20.
++# If none verifies, the FAT watcher runs unverified (v1 behaviour): remote recovery beats integrity here.
++# Disable everything: /mnt/SDCARD/mk20-no-watch (or delete this file).
++R=${MK20_ROOT:-}
++[ -f "$R/mnt/SDCARD/mk20-no-watch" ] && exit 0
++mkdir -p "$R/tmp/mk20" 2>/dev/null
++for H in "$R/data/mk20/rescue" "$R/mnt/SDCARD/mk20"; do
++  W=$H/watcher.sh
++  [ -f "$W" ] && [ -f "$W.sha256" ] || continue
++  e=$(cut -d' ' -f1 "$W.sha256" 2>/dev/null)
++  T=$R/tmp/mk20-watcher.$$.sh
++  cp -f "$W" "$T" 2>/dev/null || continue
++  [ "$(sha256sum "$T" 2>/dev/null | cut -d' ' -f1)" = "$e" ] || { rm -f "$T"; continue; }
++  echo "stub: rescue home $H (verified)" > "$R/tmp/mk20/stub.status"
++  ( sh "$T" "$H" </dev/null >/dev/null 2>&1 & )
++  exit 0
++done
++W=$R/mnt/SDCARD/mk20/watcher.sh
++[ -f "$W" ] || exit 0
++T=$R/tmp/mk20-watcher.$$.sh
++cp -f "$W" "$T" 2>/dev/null || exit 0
++echo "stub: UNVERIFIED fallback $W" > "$R/tmp/mk20/stub.status"
++( sh "$T" "$R/mnt/SDCARD/mk20" </dev/null >/dev/null 2>&1 & )
++exit 0
+diff --git a/deck/firmware/rescue/watcher.sh b/deck/firmware/rescue/watcher.sh
+new file mode 100644
+index 0000000..125e559
+--- /dev/null
++++ b/deck/firmware/rescue/watcher.sh
+@@ -0,0 +1,141 @@
++#!/bin/sh
++# MK20 rescue watcher v3 (rescue tier: never part of a release). Started by the boot stub as: sh <tmp copy> <home>
++# where <home> holds the verified rescue set {watcher.sh, hardreset.sh, loader.sh}(+.sha256).
++# Polls /mnt/SDCARD every 2 s:
++#   cmd-reboot        -> hardreset (WDT); refused -> report, keep running (never `reboot`: PSCI hang)
++#   cmd-rollback      -> loader rollback (other A/B slot) + hardreset
++#   cmd-ping          -> pong over ttyGS0
++#   job.sh(+.sha256)  -> verify, run once (300 s cap, whole process tree killed on timeout), log, emit
++# Boot: boot-once jobs; then the release loader (rc 0 = release launched -> legacy boot-every skipped);
++# otherwise legacy boot-every jobs; boot-delayed after ~120 s.
++# Kill switch: /mnt/SDCARD/mk20-no-watch. Test env: MK20_ROOT, MK20_WATCHER_LIB=1 (define functions only).
++R=${MK20_ROOT:-}
++S=$R/mnt/SDCARD
++D=$S/mk20
++H=${1:-$D}
++L=$D/logs
++TM=$R/tmp/mk20
++mkdir -p "$L" "$TM" 2>/dev/null
++WLOG=$L/watcher.log
++log() { echo "$(cut -d' ' -f1 /proc/uptime) $*" >> "$WLOG"; }
++
++shaok() { # $1=file ; expects $1.sha256 with hex first field
++  [ -f "$1" ] && [ -f "$1.sha256" ] || return 1
++  e=$(awk '{print $1}' "$1.sha256"); g=$(sha256sum "$1" | awk '{print $1}')
++  [ -n "$e" ] && [ "$e" = "$g" ]
++}
++# children of a pid (field 4 of /proc/<pid>/stat, after the "(comm)" which may contain spaces)
++kids() { for s in /proc/[0-9]*/stat; do pp=$(sed 's/.*) //' "$s" 2>/dev/null | cut -d' ' -f2); [ "$pp" = "$1" ] && { p=${s#/proc/}; echo "${p%/stat}"; }; done; }
++kill_tree() { kill -STOP "$1" 2>/dev/null; for c in $(kids "$1"); do kill_tree "$c"; done; kill "$1" 2>/dev/null; kill -CONT "$1" 2>/dev/null; }
++# verified copy of a rescue script into tmpfs; prints the copy path
++rescue_copy() { # $1=name
++  f=$H/$1; shaok "$f" || return 1
++  c=$TM/rescue-$1; cp -f "$f" "$c" || return 1
++  [ "$(sha256sum "$c" | awk '{print $1}')" = "$(awk '{print $1}' "$f.sha256")" ] || return 1
++  echo "$c"
++}
++do_hardreset() { # $1=by
++  if c=$(rescue_copy hardreset.sh); then sh "$c" "$1"; rc=$?
++  elif [ -f "$D/hardreset.sh" ]; then log "rescue hardreset unverified; using $D/hardreset.sh"; sh "$D/hardreset.sh" "$1"; rc=$?
++  else rc=9; fi
++  log "hardreset returned rc=$rc (no reset happened)"
++  echo "reboot FAILED rc=$rc (see logs/hardreset.log); power-cycle needed" > "$TM/rb"; emit "$TM/rb" reboot-failed
++}
++
++emit() { # $1=file $2=tag
++  f=$1; tag=$2
++  j=0; while [ ! -e "$R/dev/ttyGS0" ] && [ $j -lt 60 ]; do sleep 1; j=$((j+1)); done
++  [ -e "$R/dev/ttyGS0" ] || { log "emit $tag: no ttyGS0"; return; }
++  { printf '\n@@MK20 BEGIN %s@@\n' "$tag"; tail -c 16384 "$f"; printf '\n@@MK20 END %s@@\n' "$tag"; } > "$TM/emit.$$" 2>/dev/null
++  ( exec cat "$TM/emit.$$" >> "$R/dev/ttyGS0" 2>/dev/null 9>&- ) & cp=$!
++  ( exec 9>&-; sleep 10; kill $cp 2>/dev/null ) & kp=$!
++  wait $cp 2>/dev/null; kill $kp 2>/dev/null
++  rm -f "$TM/emit.$$"
++}
++
++N=0
++runjob() { # $1=src script  $2=tag   (moves src away first => once)
++  N=$((N+1)); tag="$2-$N"
++  r=$TM/run-$tag.sh; out=$L/$2.log
++  mv -f "$1" "$r"; rm -f "$1.sha256"
++  log "run $tag"
++  { echo "== $tag uptime=$(cut -d' ' -f1 /proc/uptime)"; } > "$out"
++  ( exec sh "$r" >> "$out" 2>&1 </dev/null 9>&- ) & jp=$!
++  ( exec 9>&-; i=0; while [ $i -lt "${MK20_JOB_TIMEOUT:-300}" ]; do sleep 1; kill -0 $jp 2>/dev/null || exit 0; i=$((i+1)); done
++    kill_tree $jp; echo "TIMEOUT: killed job process tree" >> "$out" ) & kp=$!
++  wait $jp 2>/dev/null; rc=$?; kill $kp 2>/dev/null; echo "rc=$rc" >> "$out"
++  [ "$(wc -c < "$out")" -gt 65536 ] && tail -c 65536 "$out" > "$out.t" && mv "$out.t" "$out"
++  sync
++  emit "$out" "$tag"
++  log "done $tag"
++}
++
++[ "${MK20_WATCHER_LIB:-}" = 1 ] && return 0 2>/dev/null
++
++exec 9>"$TM/watch.lock"
++flock -n 9 || exit 0
++echo $$ > "$TM/watch.pid"
++[ -f "$WLOG" ] && [ "$(wc -c < "$WLOG")" -gt 32768 ] && tail -c 8192 "$WLOG" > "$WLOG.t" && mv "$WLOG.t" "$WLOG"
++log "watcher v3 start pid=$$ home=$H"
++
++wait_kd() { i=0; while ! pgrep -f KeyboardDevice >/dev/null 2>&1 && [ $i -lt 90 ]; do sleep 1; i=$((i+1)); done; sleep 8; }
++
++(
++  exec 9>&-
++  wait_kd
++  for f in "$D"/boot-once/*.sh; do
++    [ -f "$f" ] || continue
++    if shaok "$f"; then runjob "$f" "boot-$(basename "$f" .sh)"
++    else log "boot-once sha FAIL $f"; mv -f "$f" "$f.bad"; fi
++  done
++  lrc=99
++  if c=$(rescue_copy loader.sh); then sh "$c" boot >> "$L/loader.log" 2>&1; lrc=$?; log "loader rc=$lrc"
++  else log "no verified loader in $H (legacy mode)"; fi
++  if [ "$lrc" != 0 ]; then
++    for f in "$D"/boot-every/*.sh; do
++      [ -f "$f" ] || continue
++      [ -f "$S/mk20-no-bootevery" ] && break
++      if shaok "$f"; then cp -f "$f" "$TM/every-$(basename "$f")"; cp -f "$f.sha256" "$TM/every-$(basename "$f").sha256"
++        runjob "$TM/every-$(basename "$f")" "every-$(basename "$f" .sh)"
++      else log "boot-every sha FAIL $f"; fi
++    done
++  fi
++  sleep 110
++  for f in "$D"/boot-delayed/*.sh; do
++    [ -f "$f" ] || continue
++    [ -f "$S/mk20-no-watch" ] && break
++    if shaok "$f"; then runjob "$f" "delayed-$(basename "$f" .sh)"
++    else log "delayed sha FAIL $f"; mv -f "$f" "$f.bad"; fi
++  done
++  echo "watcher alive pid=$$ uptime=$(cut -d' ' -f1 /proc/uptime) uname=$(uname -r) loader_rc=$lrc" > "$TM/hb"
++  emit "$TM/hb" heartbeat
++) &
++
++while :; do
++  [ -f "$S/mk20-no-watch" ] && { log "kill switch; exit"; exit 0; }
++  if [ -f "$S/cmd-reboot" ]; then
++    rm -f "$S/cmd-reboot"; log "cmd-reboot"; echo "rebooting $(cut -d' ' -f1 /proc/uptime)" > "$TM/rb"
++    emit "$TM/rb" reboot; sync; sleep 1
++    do_hardreset watcher
++  fi
++  if [ -f "$S/cmd-rollback" ]; then
++    rm -f "$S/cmd-rollback"; log "cmd-rollback"
++    if c=$(rescue_copy loader.sh); then sh "$c" rollback > "$TM/rbk" 2>&1; rc=$?; else echo "no verified loader" > "$TM/rbk"; rc=9; fi
++    emit "$TM/rbk" rollback; [ $rc = 0 ] && { sync; do_hardreset rollback; }
++  fi
++  if [ -f "$S/cmd-ping" ]; then
++    rm -f "$S/cmd-ping"
++    echo "pong pid=$$ uptime=$(cut -d' ' -f1 /proc/uptime) kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pgrep -x adbd) home=$H" > "$TM/pong"
++    emit "$TM/pong" ping
++  fi
++  if [ -f "$S/job.sh" ] && [ -f "$S/job.sh.sha256" ]; then
++    if shaok "$S/job.sh"; then runjob "$S/job.sh" job
++    else
++      sleep 2
++      if shaok "$S/job.sh"; then runjob "$S/job.sh" job
++      else log "job sha FAIL"; mv -f "$S/job.sh" "$S/job.sh.bad"; rm -f "$S/job.sh.sha256"
++        echo "job sha256 mismatch" > "$TM/jb"; emit "$TM/jb" job-shafail; fi
++    fi
++  fi
++  sleep 2
++done
+diff --git a/deck/tests/conftest.py b/deck/tests/conftest.py
+new file mode 100644
+index 0000000..3cb4008
+--- /dev/null
++++ b/deck/tests/conftest.py
+@@ -0,0 +1,88 @@
++import os, shutil, subprocess, pathlib, hashlib, pytest
++
++DECK = pathlib.Path(__file__).resolve().parents[1]
++FW = DECK / "firmware"
++SHIMS = pathlib.Path(__file__).parent / "shims"
++P4 = "7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc"
++
++
++def _bbdir(tmp):
++    """PATH dir of busybox applet symlinks so scripts run against busybox tools, not GNU coreutils."""
++    d = tmp / "bb"
++    d.mkdir()
++    bb = shutil.which("busybox")
++    for a in subprocess.run([bb, "--list"], capture_output=True, text=True).stdout.split():
++        if a in ("flock", "mount", "pgrep", "ubus"):
++            continue
++        (d / a).symlink_to(bb)
++    return d
++
++
++class Dev:
++    def __init__(self, tmp):
++        self.tmp = tmp
++        self.root = tmp / "root"
++        self.mock = tmp / "mock"
++        self.mock.mkdir()
++        for p in ["data/mk20", "mnt/SDCARD/mk20/logs", "tmp/mk20", "dev/by-name"]:
++            (self.root / p).mkdir(parents=True, exist_ok=True)
++        self.bb = _bbdir(tmp)
++        self.env = {
++            "PATH": f"{SHIMS}:{self.bb}:/usr/bin:/bin",
++            "MK20_ROOT": str(self.root),
++            "MOCK_DIR": str(self.mock),
++            "MK20_P4_SHA": P4,
++            "MK20_UPTIME_CMD": "echo 100",
++            "MK20_UBUS": "ubus",
++            "HOME": str(tmp),
++        }
++
++    def run(self, script, *args, env=None, timeout=60):
++        e = dict(self.env)
++        if env:
++            e.update(env)
++        return subprocess.run(["busybox", "sh", str(script), *args], env=e, capture_output=True, text=True, timeout=timeout)
++
++    def p(self, rel):
++        return self.root / rel
++
++    def read(self, rel):
++        f = self.p(rel)
++        return f.read_text().strip() if f.exists() else None
++
++
++@pytest.fixture
++def dev(tmp_path):
++    return Dev(tmp_path)
++
++
++def sha(path):
++    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
++
++
++def build_release(tmp, version, mk20d_body='echo "$MK20_VERSION boot" >> "$MK20_ROOT/tmp/mk20/mk20d.ran"\n',
++                  kernels=(P4,), extra=None):
++    """Build a test release with the real build tool; returns the release dir."""
++    src = tmp / f"src-{version}"
++    (src / "release/sbin").mkdir(parents=True)
++    (src / "release/share").mkdir()
++    (src / "VERSION").write_text(version + "\n")
++    (src / "KERNELS").write_text("\n".join(kernels) + "\n")
++    (src / "release/sbin/mk20d").write_text("#!/bin/sh\n" + mk20d_body)
++    (src / "release/sbin/mk20d").chmod(0o755)
++    (src / "release/share/payload.txt").write_text(f"payload {version}\n")
++    for k, v in (extra or {}).items():
++        f = src / "release" / k
++        f.parent.mkdir(parents=True, exist_ok=True)
++        f.write_text(v)
++    shutil.copytree(FW / "rescue", src / "rescue")
++    out = tmp / f"out-{version}"
++    r = subprocess.run(["sh", str(DECK / "tools/mk20-release-build.sh"), str(src), str(out), "test"], capture_output=True, text=True)
++    assert r.returncode == 0, r.stderr
++    return out / f"mk20-fw-{version}"
++
++
++def install_files(dev, reldir, version):
++    dst = dev.p(f"data/mk20/releases/{version}")
++    shutil.copytree(reldir, dst)
++    return dst
+diff --git a/deck/tests/shims/flock b/deck/tests/shims/flock
+new file mode 100755
+index 0000000..31c8b5d
+--- /dev/null
++++ b/deck/tests/shims/flock
+@@ -0,0 +1,4 @@
++#!/bin/sh
++# BusyBox 1.27.2 flock semantics: only -s -x -u -n; anything else is a usage error (the M0.5 bug).
++for a in "$@"; do case "$a" in -w|-w*|--timeout*|-E*|-o) echo "flock: invalid option -- 'w'" >&2; exit 1;; esac; done
++exec /usr/bin/flock "$@"
+diff --git a/deck/tests/shims/mount b/deck/tests/shims/mount
+new file mode 100755
+index 0000000..da9598f
+--- /dev/null
++++ b/deck/tests/shims/mount
+@@ -0,0 +1,2 @@
++#!/bin/sh
++echo "$*" >> "$MOCK_DIR/mount.calls"; exit "${MOCK_MOUNT_RC:-0}"
+diff --git a/deck/tests/shims/pgrep b/deck/tests/shims/pgrep
+new file mode 100755
+index 0000000..54a4bc8
+--- /dev/null
++++ b/deck/tests/shims/pgrep
+@@ -0,0 +1,3 @@
++#!/bin/sh
++# mock: prints $MOCK_DIR/pgrep.out lines (pids) if present
++[ -s "$MOCK_DIR/pgrep.out" ] && { cat "$MOCK_DIR/pgrep.out"; exit 0; }; exit 1
+diff --git a/deck/tests/shims/ubus b/deck/tests/shims/ubus
+new file mode 100755
+index 0000000..1820b53
+--- /dev/null
++++ b/deck/tests/shims/ubus
+@@ -0,0 +1,7 @@
++#!/bin/sh
++# mock: state in $MOCK_DIR/wdt (running|offline); calls logged to $MOCK_DIR/ubus.calls
++echo "$*" >> "$MOCK_DIR/ubus.calls"
++case "$*" in
++  "call system watchdog") printf '{\n\t"status": "%s",\n\t"timeout": 16\n}\n' "$(cat "$MOCK_DIR/wdt" 2>/dev/null || echo offline)";;
++esac
++exit 0
+diff --git a/deck/tests/test_loader.py b/deck/tests/test_loader.py
+new file mode 100644
+index 0000000..89744ab
+--- /dev/null
++++ b/deck/tests/test_loader.py
+@@ -0,0 +1,159 @@
++import time, pathlib
++from conftest import FW, P4, build_release, install_files, sha
++
++L = FW / "rescue/loader.sh"
++
++
++def setup_rel(dev, v, **kw):
++    return install_files(dev, build_release(dev.tmp, v, **kw), v)
++
++
++def wait_file(p, t=5):
++    end = time.time() + t
++    while time.time() < end:
++        if pathlib.Path(p).exists():
++            return True
++        time.sleep(0.05)
++    return False
++
++
++def test_no_release_is_legacy(dev):
++    assert dev.run(L, "boot").returncode == 10
++
++
++def test_flag_disables(dev):
++    setup_rel(dev, "1.0.0"); assert dev.run(L, "switch", "1.0.0").returncode == 0
++    dev.p("mnt/SDCARD/mk20-no-release").touch()
++    assert dev.run(L, "boot").returncode == 12
++
++
++def test_install_boot_confirm(dev):
++    setup_rel(dev, "1.0.0")
++    r = dev.run(L, "switch", "1.0.0"); assert r.returncode == 0, r.stdout
++    assert dev.read("data/mk20/state/pending") == "1.0.0"
++    r = dev.run(L, "boot"); assert r.returncode == 0, dev.read("mnt/SDCARD/mk20/logs/loader.log")
++    assert dev.read("data/mk20/state/attempts") == "1"
++    assert dev.read("tmp/mk20/release-active") == "1.0.0"
++    assert wait_file(dev.p("tmp/mk20/mk20d.ran"))
++    # verified tmpfs copy matches the release
++    assert sha(dev.p("tmp/mk20/rel/share/payload.txt")) == sha(dev.p("data/mk20/releases/1.0.0/share/payload.txt"))
++    assert dev.run(L, "confirm", "1.0.0").returncode == 0
++    assert dev.read("data/mk20/state/good") == "1.0.0"
++    assert dev.read("data/mk20/state/pending") is None
++    assert dev.run(L, "boot").returncode == 0
++    assert dev.read("data/mk20/state/attempts") is None
++
++
++def test_unconfirmed_pending_rolls_back_to_good(dev):
++    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    setup_rel(dev, "1.0.1"); assert dev.run(L, "switch", "1.0.1").returncode == 0
++    assert dev.run(L, "boot").returncode == 0
++    assert dev.read("tmp/mk20/release-active") == "1.0.1"
++    # no confirm -> next boot rolls back without another reset
++    assert dev.run(L, "boot").returncode == 0
++    assert dev.read("tmp/mk20/release-active") == "1.0.0"
++    assert dev.read("data/mk20/state/pending") is None
++    assert dev.p("data/mk20/state/failed-1.0.1").exists()
++    assert "1.0.1->1.0.0" in dev.read("data/mk20/state/last-rollback")
++    assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0"
++
++
++def test_first_install_unconfirmed_goes_stock(dev):
++    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0")
++    assert dev.run(L, "boot").returncode == 0
++    assert dev.run(L, "boot").returncode == 11
++
++
++def test_corrupt_pending_rolls_back(dev):
++    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    d = setup_rel(dev, "1.0.1"); dev.run(L, "switch", "1.0.1")
++    (d / "share/payload.txt").write_text("tampered\n")
++    assert dev.run(L, "boot").returncode == 0
++    assert dev.read("tmp/mk20/release-active") == "1.0.0"
++    assert "sha mismatch" in dev.read("data/mk20/state/last-rollback")
++
++
++def test_corrupt_good_is_stock(dev):
++    d = setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    (d / "sbin/mk20d").write_text("#!/bin/sh\necho evil\n")
++    assert dev.run(L, "boot").returncode == 11
++
++
++def test_missing_file_is_stock(dev):
++    d = setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    (d / "share/payload.txt").unlink()
++    assert dev.run(L, "boot").returncode == 11
++
++
++def test_kernel_not_allowed(dev):
++    setup_rel(dev, "1.0.0", kernels=("0" * 64,))
++    r = dev.run(L, "switch", "1.0.0"); assert r.returncode == 1 and "kernel" in r.stdout
++    assert dev.run(L, "boot").returncode == 10
++
++
++def test_kernel_changed_after_install_good_is_stock(dev):
++    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    assert dev.run(L, "boot", env={"MK20_P4_SHA": "9" * 64}).returncode == 11
++
++
++def test_garbage_slots(dev):
++    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "confirm", "1.0.0")
++    setup_rel(dev, "1.0.1"); dev.run(L, "switch", "1.0.1"); dev.run(L, "confirm", "1.0.1")
++    st = dev.run(L, "status").stdout; assert "1.0.1" in st.split("current=")[1].split()[2]
++    # corrupt the newest slot -> the other one is used
++    newest = "A" if "current=A" in st else "B"
++    dev.p(f"data/mk20/slots/{newest}").write_text("gen=99\nversion=../../x\n")
++    assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0"
++    other = "B" if newest == "A" else "A"
++    dev.p(f"data/mk20/slots/{other}").write_text("")
++    assert dev.run(L, "boot").returncode == 11
++
++
++def test_slot_checksum_tamper(dev):
++    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0")
++    for s in ("A", "B"):
++        f = dev.p(f"data/mk20/slots/{s}")
++        if f.exists():
++            f.write_text(f.read_text().replace("gen=1", "gen=7"))
++    assert dev.run(L, "boot").returncode == 11
++
++
++def test_unsafe_manifest_path(dev):
++    d = build_release(dev.tmp, "1.0.0")
++    m = d / "MANIFEST"
++    m.write_text(m.read_text() + f"{'0'*64} 644 ../../etc/passwd\n")
++    install_files(dev, d, "1.0.0")
++    r = dev.run(L, "switch", "1.0.0"); assert r.returncode == 1 and "unsafe path" in r.stdout
++
++
++def test_switch_refusals(dev):
++    setup_rel(dev, "1.0.0"); setup_rel(dev, "1.0.1")
++    assert dev.run(L, "switch", "1.0.0").returncode == 0
++    assert "pending" in dev.run(L, "switch", "1.0.1").stdout
++    dev.run(L, "confirm", "1.0.0")
++    assert "already current" in dev.run(L, "switch", "1.0.0").stdout
++    assert dev.run(L, "switch", "../1.0.0").returncode == 1
++    assert dev.run(L, "switch", "9.9.9").returncode == 1
++
++
++def test_manual_rollback(dev):
++    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "confirm", "1.0.0")
++    setup_rel(dev, "1.0.1"); dev.run(L, "switch", "1.0.1"); dev.run(L, "confirm", "1.0.1")
++    r = dev.run(L, "rollback"); assert r.returncode == 0, r.stdout
++    assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0"
++
++
++def test_deadline_resets_once(dev):
++    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0")
++    hr = dev.tmp / "hr.sh"; hr.write_text(f'echo reset >> {dev.mock}/resets\n')
++    env = {"MK20_DEADLINE": "50", "MK20_HR": f"sh {hr}"}
++    assert dev.run(L, "deadline", "1.0.0", env=env).returncode == 0
++    assert dev.run(L, "deadline", "1.0.0", env=env).returncode == 0
++    assert (dev.mock / "resets").read_text().count("reset") == 1
++
++
++def test_deadline_noop_when_confirmed(dev):
++    setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "confirm", "1.0.0")
++    hr = dev.tmp / "hr.sh"; hr.write_text(f'echo reset >> {dev.mock}/resets\n')
++    dev.run(L, "deadline", "1.0.0", env={"MK20_DEADLINE": "50", "MK20_HR": f"sh {hr}"})
++    assert not (dev.mock / "resets").exists()
+diff --git a/deck/tests/test_rescue.py b/deck/tests/test_rescue.py
+new file mode 100644
+index 0000000..c74dad2
+--- /dev/null
++++ b/deck/tests/test_rescue.py
+@@ -0,0 +1,165 @@
++import os, subprocess, time, shutil, hashlib, pathlib, signal
++import pytest
++from conftest import FW, DECK, sha
++
++STUB = FW / "rescue/lunch.sh"
++HR = FW / "rescue/hardreset.sh"
++W = FW / "rescue/watcher.sh"
++
++
++def put_rescue(dev, home, body, good_sha=True):
++    h = dev.p(home); h.mkdir(parents=True, exist_ok=True)
++    (h / "watcher.sh").write_text(body)
++    s = sha(h / "watcher.sh") if good_sha else "0" * 64
++    (h / "watcher.sh.sha256").write_text(f"{s}  watcher.sh\n")
++
++
++def marker_body(dev, tag):
++    return f'echo "{tag} $1" > {dev.mock}/watcher.ran\n'
++
++
++def wait_text(p, t=5):
++    end = time.time() + t
++    while time.time() < end:
++        if p.exists() and p.read_text().strip():
++            return p.read_text().strip()
++        time.sleep(0.05)
++    return None
++
++
++def test_stub_prefers_ext4_rescue(dev):
++    put_rescue(dev, "data/mk20/rescue", marker_body(dev, "ext4"))
++    put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"))
++    t0 = time.time(); assert dev.run(STUB).returncode == 0; assert time.time() - t0 < 2
++    assert wait_text(dev.mock / "watcher.ran").startswith("ext4 ")
++    assert "verified" in dev.read("tmp/mk20/stub.status")
++
++
++def test_stub_falls_back_to_fat_when_ext4_corrupt(dev):
++    put_rescue(dev, "data/mk20/rescue", marker_body(dev, "ext4"), good_sha=False)
++    put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"))
++    dev.run(STUB)
++    assert wait_text(dev.mock / "watcher.ran").startswith("fat ")
++
++
++def test_stub_unverified_fallback_keeps_recovery(dev):
++    put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"), good_sha=False)
++    dev.run(STUB)
++    assert wait_text(dev.mock / "watcher.ran").startswith("fat ")
++    assert "UNVERIFIED" in dev.read("tmp/mk20/stub.status")
++
++
++def test_stub_kill_switch(dev):
++    put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"))
++    dev.p("mnt/SDCARD/mk20-no-watch").touch()
++    dev.run(STUB); time.sleep(0.5)
++    assert not (dev.mock / "watcher.ran").exists()
++
++
++def test_hardreset_refuses_without_watchdog(dev):
++    (dev.mock / "wdt").write_text("offline")
++    r = dev.run(HR, "test", env={"MK20_HR_NOSLEEP": "1"})
++    assert r.returncode == 10
++    assert "stop" not in (dev.mock / "ubus.calls").read_text()
++    assert "REFUSED" in dev.read("mnt/SDCARD/mk20/logs/hardreset.log")
++
++
++def test_hardreset_stops_pings_and_remounts(dev):
++    (dev.mock / "wdt").write_text("running")
++    r = dev.run(HR, "test", env={"MK20_HR_NOSLEEP": "1"})
++    assert r.returncode == 0, dev.read("mnt/SDCARD/mk20/logs/hardreset.log")
++    calls = (dev.mock / "ubus.calls").read_text()
++    assert '{"stop":true}' in calls
++    assert "remount,ro" in (dev.mock / "mount.calls").read_text()
++
++
++def test_hardreset_waits_for_kernel_write_lock(dev):
++    (dev.mock / "wdt").write_text("running")
++    lock = dev.p("tmp/mk20/kwrite.lock")
++    holder = subprocess.Popen(["/usr/bin/flock", str(lock), "sleep", "2.5"])
++    time.sleep(0.3)
++    t0 = time.time()
++    r = dev.run(HR, "test", env={"MK20_HR_NOSLEEP": "1"})
++    holder.wait()
++    assert r.returncode == 0
++    assert time.time() - t0 >= 2.0          # waited for the dd holder
++    assert "waiting for kernel-write lock" in dev.read("mnt/SDCARD/mk20/logs/hardreset.log")
++
++
++def test_no_script_uses_flock_w():
++    for f in list((FW / "rescue").glob("*.sh")) + list((DECK / "m2-scripts/remote").rglob("*.sh")):
++        for line in f.read_text().splitlines():
++            code = line.split("#", 1)[0]
++            assert "flock -w" not in code, f"{f}: {line}"
++
++
++def test_watcher_kill_tree(dev, tmp_path):
++    # job that spawns a grandchild; kill_tree must take down the whole tree
++    script = tmp_path / "t.sh"
++    script.write_text(f'''
++MK20_WATCHER_LIB=1 . {W}
++( sh -c 'sleep 30 & echo $! > {tmp_path}/gc; wait' ) & jp=$!
++sleep 0.5
++kill_tree $jp
++sleep 0.3
++kill -0 $(cat {tmp_path}/gc) 2>/dev/null && echo ALIVE || echo DEAD
++''')
++    r = dev.run(script)
++    assert "DEAD" in r.stdout, r.stdout + r.stderr
++
++
++def test_watcher_rescue_copy_verifies(dev, tmp_path):
++    h = dev.p("data/mk20/rescue"); h.mkdir(parents=True)
++    (h / "loader.sh").write_text("echo hi\n")
++    (h / "loader.sh.sha256").write_text(f"{sha(h/'loader.sh')}  loader.sh\n")
++    script = tmp_path / "t.sh"
++    script.write_text(f'''
++set -- {h}
++MK20_WATCHER_LIB=1 . {W}
++rescue_copy loader.sh && echo OK1
++echo tamper >> {h}/loader.sh
++rescue_copy loader.sh || echo REFUSED
++''')
++    r = dev.run(script)
++    assert "OK1" in r.stdout and "REFUSED" in r.stdout, r.stdout + r.stderr
++
++
++def test_build_reproducible_and_manifest(tmp_path):
++    outs = []
++    for i in (1, 2):
++        o = tmp_path / f"o{i}"
++        r = subprocess.run(["sh", str(DECK / "tools/mk20-release-build.sh"), str(FW), str(o), "t"], capture_output=True, text=True)
++        assert r.returncode == 0, r.stderr
++        outs.append(o)
++    v = (FW / "VERSION").read_text().strip()
++    a, b = (o / f"mk20-fw-{v}.tar" for o in outs)
++    assert a.read_bytes() == b.read_bytes()
++    m = (outs[0] / f"mk20-fw-{v}/MANIFEST").read_text().split("--\n", 1)[1]
++    for line in m.strip().splitlines():
++        s, mode, p = line.split()
++        assert hashlib.sha256((outs[0] / f"mk20-fw-{v}" / p).read_bytes()).hexdigest() == s
++    for f in ("watcher.sh", "hardreset.sh", "loader.sh", "lunch.sh"):
++        assert (outs[0] / "rescue" / f"{f}.sha256").read_text().split()[0] == sha(outs[0] / "rescue" / f)
++
++
++SH_FILES = sorted(set(list((FW).rglob("*.sh")) + [FW / "release/sbin/mk20d", DECK / "tools/mk20-release-build.sh"]))
++
++
++@pytest.mark.parametrize("f", SH_FILES, ids=lambda p: str(p.relative_to(DECK)))
++def test_shellcheck(f):
++    r = subprocess.run(["shellcheck", "-s", "sh", "-S", "warning", str(f)], capture_output=True, text=True)
++    assert r.returncode == 0, r.stdout
++
++
++def test_hardreset_refuses_in_test_root_without_ubus_override(dev):
++    (dev.mock / "wdt").write_text("running")
++    env = dict(dev.env); env.pop("MK20_UBUS")
++    r = subprocess.run(["busybox", "sh", str(HR), "t"], env={**env, "MK20_HR_NOSLEEP": "1"}, capture_output=True, text=True)
++    assert r.returncode == 13
++
++
++def test_hardreset_refuses_magicclose(dev):
++    (dev.mock / "wdt").write_text("running")
++    shim = dev.tmp / "ubus2"; shim.write_text('#!/bin/sh\ncase "$*" in "call system watchdog") echo \'{"status":"running","timeout":16,"magicclose":true}\';; esac\n'); shim.chmod(0o755)
++    r = dev.run(HR, "t", env={"MK20_UBUS": str(shim), "MK20_HR_NOSLEEP": "1"})
++    assert r.returncode == 10
+diff --git a/deck/tools/mk20-release-build.sh b/deck/tools/mk20-release-build.sh
+new file mode 100755
+index 0000000..89ff212
+--- /dev/null
++++ b/deck/tools/mk20-release-build.sh
+@@ -0,0 +1,32 @@
++#!/bin/sh
++# Build an MK20 Agent firmware release (runs on the box/Linux; GNU tar).
++#   mk20-release-build.sh <firmware-dir> <outdir> [build-id]
++# <firmware-dir> holds VERSION, KERNELS (allowed p4 sha256, one per line), release/ (payload) and rescue/.
++# Output in <outdir>:
++#   mk20-fw-<v>/            release dir (payload + MANIFEST), installed on the device as /data/mk20/releases/<v>/
++#   mk20-fw-<v>.tar(.sha256) reproducible tarball of that dir (host pins this sha256 at install time)
++#   rescue/                 rescue set with .sha256 files (watcher.sh, hardreset.sh, loader.sh, lunch.sh)
++set -eu
++FW=$1; OUT=$2; BID=${3:-dev}
++V=$(cat "$FW/VERSION"); echo "$V" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || { echo "bad VERSION $V" >&2; exit 1; }
++K=$(grep -E '^[0-9a-f]{64}$' "$FW/KERNELS" | paste -sd, -); [ -n "$K" ] || { echo "no KERNELS" >&2; exit 1; }
++D=$OUT/mk20-fw-$V; rm -rf "$D" "$OUT/rescue"; mkdir -p "$D" "$OUT/rescue"
++(cd "$FW/release" && find . -type f | sed 's#^\./##' | LC_ALL=C sort) > "$OUT/.files"
++while read -r f; do
++  case "$f" in *' '*|*..*) echo "unsafe name $f" >&2; exit 1;; esac
++  mkdir -p "$D/$(dirname "$f")"; cp -p "$FW/release/$f" "$D/$f"
++done < "$OUT/.files"
++{
++  echo "name=mk20-agent-firmware"; echo "version=$V"; echo "build=$BID"; echo "kernels=$K"; echo "--"
++  while read -r f; do
++    m=$(stat -c '%a' "$D/$f"); case "$m" in 7??|6??|5??|4??) ;; *) m=644;; esac
++    echo "$(sha256sum "$D/$f" | cut -d' ' -f1) $m $f"
++  done < "$OUT/.files"
++} > "$D/MANIFEST"
++rm -f "$OUT/.files"
++tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C "$OUT" -cf "$OUT/mk20-fw-$V.tar" "mk20-fw-$V"
++(cd "$OUT" && sha256sum "mk20-fw-$V.tar" > "mk20-fw-$V.tar.sha256")
++for f in watcher.sh hardreset.sh loader.sh lunch.sh; do
++  cp -p "$FW/rescue/$f" "$OUT/rescue/$f"; (cd "$OUT/rescue" && sha256sum "$f" | awk -v n="$f" '{print $1"  "n}' > "$f.sha256")
++done
++echo "built $V ($BID): $(cut -d' ' -f1 "$OUT/mk20-fw-$V.tar.sha256")  files=$(sed -n '/^--$/,$p' "$D/MANIFEST" | sed 1d | wc -l)"
