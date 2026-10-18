@@ -4,13 +4,15 @@
   mk20_accept.py [--reboot] [--json OUT] [--no-hid]
 
 Checks (each PASS/FAIL, exit 1 if any FAIL):
-  adb shell; loader good==current, nothing pending; mk20d health status ok / composite / kd=1 / watchdog / selftest;
-  ping 172.30.250.2 via the MK20 interface; TCP to the bridge on the primary and on link-local 169.254.7.2 (both
-  bound to the MK20 interface); Protocol A getInfo over TCP (deviceVersion); HID: Mac sees the 1d6b:0104 keyboard
-  and two all-released reports written to /dev/hidg0 are consumed by the host within 5 s (detached, never killed); Mac route to the device not via a
-  TUN; FAT/mem headroom. --reboot first does one watcher hardreset (WDT) and checks hardreset.last fat_ro=y.
+  adb shell; loader good==current, nothing pending; mk20d health status ok / composite / kd=1 / watchdog / selftest
+  (the device-side HID check is mk20d's self-test "PASS hid"); ping 172.30.250.2 and link-local 169.254.7.2, both
+  bound to the MK20 interface; device netstat shows the bridge listening on primary + link-local; HID: the Mac
+  enumerates the 1d6b:0104 keyboard (hidutil list; enumeration only, nothing is written to /dev/hidg0; --no-hid
+  skips it); Mac route to the device not via a TUN; FAT/mem headroom. --reboot first does one watcher hardreset (WDT)
+  and checks hardreset.last fat_ro=y.
 Read-only by default (writes nothing to the device). Opt-in: --reboot (one WDT reboot); --tcp (maintenance only:
-active bridge connects + getInfo, evicts a client that attaches during the probe).
+active bridge connects + Protocol A getInfo, both bound to the MK20 interface; skipped while a client is connected,
+but can still evict one that attaches during the probe).
 """
 from __future__ import annotations
 

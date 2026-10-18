@@ -25,3 +25,9 @@ def test_clients_unknown_fails_closed(monkeypatch):
 def test_getinfo_refuses_unbound():
     ok, d = acc.get_info(None)
     assert not ok and "unbound" in d
+
+
+def test_module_doc_does_not_claim_hid_writes():
+    import mk20_accept
+    doc = mk20_accept.__doc__
+    assert "enumeration only" in doc and "reports written" not in doc and "consumed by the host" not in doc

@@ -108,7 +108,9 @@ Kernel images. All are 6451200 B and all report `uname` #221, so identify them *
 Steps:
 1. Power off and take the TF card out. Put it in the Mac's reader. If macOS offers "Initialize…", click **Ignore**.
 2. Run `bash tools/tf-identify.sh` and note `diskN`. `tf-restore-boot.sh` refuses internal disks, anything not
-   3–5 GB, and an s4 that isn't exactly 6451200 B.
+   3–5 GB, an s4 that isn't exactly 6451200 B, and any card whose GPT isn't exactly the MK20 layout
+   (`tools/tf_gpt_check.py`: protective MBR, GPT 1.0 geometry, slots 1–6 type/start/size/attributes/name). It reads
+   the card's partition tables with sudo first, so even `--dry-run` asks for your password.
 3. Rehearse first: `bash tools/tf-restore-boot.sh --disk diskN --image ~/mk20-backup/tf/live-221-parts/p4.img
    --slice s4 --dry-run`.
 4. Run the same command without `--dry-run`. It asks for sudo, writes slice **s4 only**, and reads back the sha.

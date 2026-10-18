@@ -5,8 +5,11 @@
 #   tf-restore-boot.sh --disk diskN --image boot-stock.img [--slice s4] [--dry-run]
 #   MK20 TF layout: s1 SDCARD(FAT) s2 env s3 env-redund s4 BOOT (6451200 B) s5 rootfs s6 UDISK.
 #   The slice must be EXACTLY the image size (full 6451200-B stock p4 backup; never the prefix-only staged images).
-# Safety: refuses Internal disks; size ~3–5GB; never ESP32.
+# Safety: refuses Internal disks; size ~3–5GB; never ESP32; both modes require the exact MK20 GPT layout
+#   (tf_gpt_check.py: the image for --whole-image, the card itself for --slice).
 set -euo pipefail
+GPT_CHECK="$(cd "$(dirname "$0")" && pwd)/tf_gpt_check.py"
+[[ -f "$GPT_CHECK" ]] || { echo "ERROR: missing $GPT_CHECK" >&2; exit 1; }
 DISK=""; IMAGE=""; WHOLE=""; SLICE=""; DRY=0
 EXPECTED_MIN_BYTES=$((3*1000*1000*1000))
 EXPECTED_MAX_BYTES=$((5*1000*1000*1000))
@@ -19,7 +22,7 @@ while [[ $# -gt 0 ]]; do
     --whole-image) WHOLE="${2:?}"; shift 2;;
     --slice) SLICE="${2:?}"; shift 2;;
     --dry-run) DRY=1; shift;;
-    -h|--help) sed -n '1,12p' "$0"; exit 0;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0;;
     *) die "unknown arg $1";;
   esac
 done
@@ -46,47 +49,8 @@ if [[ -n "$WHOLE" ]]; then
   # a whole-card dd image of THIS card is exactly the card size; anything smaller (e.g. p4.img) would land at LBA0
   (( WBYTES == SIZE )) || die "image ($WBYTES B) != card ($SIZE B): not a whole-card dd image of this card"
   [[ "$(dd if="$SRC" bs=1 skip=510 count=2 2>/dev/null | xxd -p)" == 55aa ]] || die "no MBR/GPT boot signature at LBA0"
-  # read-only GPT check: both headers + CRCs, exactly 6 partitions, MK20 p1-p5 boundaries and p6 start
-  python3 - "$SRC" <<'PY' || die "not an MK20 GPT layout (see above); refusing"
-import struct, sys, zlib
-# MK20 card layout (from the live #221 card): slots 1-6 in this order, exact start + length
-EXPECT = [(41464, 65536), (107000, 504), (107504, 504), (108008, 12600), (120608, 2097152), (2217760, 5644512)]
-f = open(sys.argv[1], "rb"); f.seek(0, 2); nlba = f.tell() // 512
-if nlba < 2217760 + 5644512 + 34: sys.exit("image smaller than the MK20 layout")
-def hdr(lba):
-    f.seek(lba * 512); h = f.read(512)
-    if h[:8] != b"EFI PART": sys.exit(f"no GPT header at LBA {lba}")
-    hs = struct.unpack_from("<I", h, 12)[0]
-    if hs < 92 or hs > 512: sys.exit(f"bad GPT header size {hs} at LBA {lba}")
-    z = bytearray(h[:hs]); z[16:20] = b"\0\0\0\0"
-    if zlib.crc32(bytes(z)) & 0xFFFFFFFF != struct.unpack_from("<I", h, 16)[0]: sys.exit(f"GPT header CRC bad at LBA {lba}")
-    cur, alt, first, last = struct.unpack_from("<QQQQ", h, 24); guid = h[56:72]
-    ent, n, es, ecrc = struct.unpack_from("<QIII", h, 72)
-    if es != 128 or not 6 <= n <= 1024: sys.exit(f"unexpected GPT entry geometry n={n} size={es}")
-    f.seek(ent * 512); e = f.read(n * es)
-    if len(e) != n * es or zlib.crc32(e) & 0xFFFFFFFF != ecrc: sys.exit(f"GPT entries CRC bad (header LBA {lba})")
-    return dict(cur=cur, alt=alt, first=first, last=last, guid=guid, ent=ent, n=n, e=e)
-P = hdr(1)
-if P["cur"] != 1 or P["alt"] != nlba - 1 or P["ent"] != 2: sys.exit("primary GPT geometry does not match the image size")
-B = hdr(nlba - 1)
-tbl = (P["n"] * 128 + 511) // 512
-if B["cur"] != nlba - 1 or B["alt"] != 1 or B["ent"] != nlba - 1 - tbl: sys.exit("backup GPT geometry wrong")
-for k in ("first", "last", "guid", "n", "e"):
-    if P[k] != B[k]: sys.exit(f"primary/backup GPT differ in {k}")
-if P["first"] < 2 + tbl or P["last"] > nlba - 2 - tbl or P["first"] > P["last"]: sys.exit("usable LBA range out of bounds")
-e = P["e"]; used = []
-for i in range(P["n"]):
-    ent = e[i * 128:(i + 1) * 128]
-    if ent[:16] == b"\0" * 16: continue
-    a, b = struct.unpack_from("<QQ", ent, 32); used.append((i + 1, a, b))
-if [u[0] for u in used] != [1, 2, 3, 4, 5, 6]: sys.exit(f"partition slots {[u[0] for u in used]}, MK20 uses exactly 1-6")
-prev_end = P["first"] - 1
-for (slot, a, b), (s0, n0) in zip(used, EXPECT):
-    if b < a or a <= prev_end or b > P["last"]: sys.exit(f"p{slot} extent {a}-{b} out of order/bounds")
-    if a != s0 or b - a + 1 != n0: sys.exit(f"p{slot} {a}+{b - a + 1} != MK20 {s0}+{n0}")
-    prev_end = b
-print("GPT ok: slots 1-6 = MK20 layout, primary+backup headers/tables valid and identical")
-PY
+  # read-only: exact MK20 TF layout (protective MBR, GPT 1.0 geometry, slots 1-6 type/start/size/attr/name)
+  python3 "$GPT_CHECK" "$SRC" || die "not the exact MK20 GPT layout (see above); refusing"
   [[ -f "$SRC.sha256" ]] || die "missing $SRC.sha256 (write it when you make the image: shasum -a 256 IMG > IMG.sha256)"
   WANT=$(awk '{print $1; exit}' "$SRC.sha256")
   [[ "$WANT" =~ ^[0-9a-f]{64}$ ]] || die "bad $SRC.sha256"
@@ -97,6 +61,14 @@ elif [[ -n "$IMAGE" ]]; then
   DEST="/dev/r${DISK}${SLICE}"   # /dev/rdiskNs4
   SSIZE=$(diskutil info -plist "/dev/${DISK}${SLICE}" | awk '/<key>TotalSize<\/key>/{getline; gsub(/<[^>]+>/,""); print}' | tr -d '[:space:]')
   [[ "$SSIZE" == 6451200 ]] || die "slice ${DISK}${SLICE} size $SSIZE != 6451200 (not the MK20 boot partition)"
+  # read-only: the card itself must carry the exact MK20 layout (so s4 really is the MK20 boot partition)
+  (( SIZE % 512 == 0 )) || die "card size $SIZE not a multiple of 512"
+  NLBA=$(( SIZE / 512 ))
+  TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
+  info "Reading the card's partition tables (read-only, sudo)..."
+  sudo dd if="$RAW" of="$TMPD/head" bs=512 count=41464 2>/dev/null || die "cannot read card head"
+  sudo dd if="$RAW" of="$TMPD/tail" bs=512 skip=$(( NLBA - 3 )) count=3 2>/dev/null || die "cannot read card tail"
+  python3 "$GPT_CHECK" --card "$TMPD/head" "$TMPD/tail" "$NLBA" || die "card is not the exact MK20 GPT layout (see above); refusing"
   [[ -f "$SRC" ]] && [[ "$(wc -c <"$SRC" | tr -d ' ')" == "$SSIZE" ]] || die "image size must equal slice size $SSIZE (use the full stock p4 backup)"
   # only the three known MK20 kernels (RECOVERY.md level 5)
   case "$(shasum -a 256 "$SRC" | awk '{print $1}')" in
