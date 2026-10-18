@@ -1,0 +1,96 @@
+[
+ {
+  "name": "mode_short_cycle_long_l4",
+  "group": "paging",
+  "desc": "模式键短按循环模式，长按 ≥600 ms 进 L4，回L1 键返回",
+  "steps": [
+   {
+    "mark": "t"
+   },
+   {
+    "press": "MODE",
+    "hold": 100
+   },
+   {
+    "expect": {
+     "mode_changed": true,
+     "page": "L1"
+    }
+   },
+   {
+    "press": "MODE",
+    "hold": 650
+   },
+   {
+    "expect": {
+     "page": "L4"
+    }
+   },
+   {
+    "press": "BACK"
+   },
+   {
+    "expect": {
+     "page": "L1"
+    }
+   }
+  ]
+ },
+ {
+  "name": "knob_paging",
+  "group": "paging",
+  "desc": "K2 短按 L1↔L4；K1 长按进 L4；K2 长按回 L1（旋钮码 100/103）",
+  "steps": [
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "expect": {
+     "page": "L4"
+    }
+   },
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "expect": {
+     "page": "L1"
+    }
+   },
+   {
+    "knob": "K1",
+    "action": "down"
+   },
+   {
+    "wait": 650
+   },
+   {
+    "knob": "K1",
+    "action": "up"
+   },
+   {
+    "expect": {
+     "page": "L4"
+    }
+   },
+   {
+    "knob": "K2",
+    "action": "down"
+   },
+   {
+    "wait": 650
+   },
+   {
+    "knob": "K2",
+    "action": "up"
+   },
+   {
+    "expect": {
+     "page": "L1"
+    }
+   }
+  ]
+ }
+]

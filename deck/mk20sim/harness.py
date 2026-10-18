@@ -96,6 +96,8 @@ class Sim:
         self.daemon = Daemon(self.controller, self.renderer, link=None, clock=self.clock,
                              knob_map=dict(DEFAULT_KNOB_MAP), sink=self._sink, poll_interval=3600)
         self._seen_log = 0
+        self.observer: Callable[["Sim", float], None] | None = None  # (sim, sim_dt) after each tick
+        self.highlight: set[str] = set()  # names currently held (for UI replay)
         self._last = (self.controller.page, self.controller.mode, self.controller.ptt_held)
         self.step(force=True)
 
@@ -146,10 +148,18 @@ class Sim:
         return dc - 1 + b, dr - 1 + b
 
     def down(self, name: str) -> None:
+        self.highlight.add(name.upper())
         self.raw(*self._fw(name), True)
+        self._observe(0)
 
     def up(self, name: str) -> None:
         self.raw(*self._fw(name), False)
+        self.highlight.discard(name.upper())
+        self._observe(0)
+
+    def _observe(self, dt: float) -> None:
+        if self.observer:
+            self.observer(self, dt)
 
     def knob(self, k: str | int, action: str, n: int = 1) -> None:
         """k = 'K1'/'K2'; action = 'cw'|'ccw'|'down'|'up'|'press' (press = tap)."""
@@ -161,11 +171,18 @@ class Sim:
             return
         if action in ("down", "up"):
             code = KNOB_CODES[(f"K{ki}", "press")]
+            (self.highlight.add if action == "down" else self.highlight.discard)(f"K{ki}")
             self.raw(code, code, action == "down")
+            self._observe(0)
             return
         code = KNOB_CODES[(f"K{ki}", action)]
-        for _ in range(n):
+        for i in range(n):
+            self.highlight.add(f"K{ki}")
             self.raw(code, code, True)  # one pressed:true per detent, no release
+            self._observe(0)
+            self.highlight.discard(f"K{ki}")
+            if i < n - 1:
+                self.wait(30)
 
     # ------------------------------------------------------------- DSL
     def wait(self, ms: float) -> None:
@@ -175,8 +192,10 @@ class Sim:
             return
         end = self.fake.t + ms / 1000
         while self.fake.t < end:  # 10 ms ticks so long-press thresholds fire on time
-            self.fake.advance(min(0.01, end - self.fake.t))
+            dt = min(0.01, end - self.fake.t)
+            self.fake.advance(dt)
             self.step()
+            self._observe(dt)
 
     def press(self, name: str, hold_ms: float = 50) -> None:
         self.down(name)

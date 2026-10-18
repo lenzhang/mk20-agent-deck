@@ -1,0 +1,15 @@
+{
+ "name": "demo_failure_expected_l4",
+ "group": "drafts",
+ "desc": "演示失败用例（故意失败，展示失败步骤/截图）",
+ "steps": [
+  {
+   "press": "A2"
+  },
+  {
+   "expect": {
+    "page": "L4"
+   }
+  }
+ ]
+}

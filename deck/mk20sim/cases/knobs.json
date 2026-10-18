@@ -1,0 +1,70 @@
+[
+ {
+  "name": "k1_rotate_effort",
+  "group": "knobs",
+  "desc": "K1 旋转 3 格 → 对选中会话调 effort 3 次（码 102）",
+  "steps": [
+   {
+    "press": "A1"
+   },
+   {
+    "knob": "K1",
+    "action": "cw",
+    "n": 3
+   },
+   {
+    "expect": {
+     "agent_calls": {
+      "set_effort": 3
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "k2_rotate_scroll_only",
+  "group": "knobs",
+  "desc": "K2 旋转只滚动副屏，不改选中",
+  "steps": [
+   {
+    "press": "A1"
+   },
+   {
+    "mark": "t"
+   },
+   {
+    "knob": "K2",
+    "action": "cw",
+    "n": 2
+   },
+   {
+    "expect": {
+     "scroll": 2,
+     "selected_changed": false
+    }
+   }
+  ]
+ },
+ {
+  "name": "unmapped_knob_code_ignored",
+  "group": "knobs",
+  "desc": "未映射的 ≥100 码不会落到键阵",
+  "steps": [
+   {
+    "raw": [
+     106,
+     106,
+     true
+    ]
+   },
+   {
+    "expect": {
+     "agent_calls": {
+      "*": 0
+     },
+     "page": "L1"
+    }
+   }
+  ]
+ }
+]

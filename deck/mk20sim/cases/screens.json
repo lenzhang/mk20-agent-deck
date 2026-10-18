@@ -1,0 +1,22 @@
+[
+ {
+  "name": "screen_sink_sizes",
+  "group": "screens",
+  "desc": "屏幕捕获：键 128×128、副屏 428×142、有帧输出",
+  "steps": [
+   {
+    "expect": {
+     "key_image_size": [
+      128,
+      128
+     ],
+     "sub_image_size": [
+      428,
+      142
+     ],
+     "frames_min": 1
+    }
+   }
+  ]
+ }
+]

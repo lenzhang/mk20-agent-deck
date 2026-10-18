@@ -1,0 +1,125 @@
+[
+ {
+  "name": "single_tap_selects",
+  "group": "gestures",
+  "desc": "单击 Agent 键只选中，不聚焦（PRD §6.3）",
+  "steps": [
+   {
+    "press": "A1"
+   },
+   {
+    "expect": {
+     "selected": true,
+     "agent_calls": {
+      "focus": 0
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "double_tap_focus",
+  "group": "gestures",
+  "desc": "同键双击 ≤350 ms 追加聚焦",
+  "steps": [
+   {
+    "press": "A1",
+    "hold": 40
+   },
+   {
+    "mark": "t"
+   },
+   {
+    "wait": 100
+   },
+   {
+    "press": "A1",
+    "hold": 40
+   },
+   {
+    "expect": {
+     "agent_call_within_ms": {
+      "name": "focus",
+      "ms": 350
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "slow_double_tap_no_focus",
+  "group": "gestures",
+  "desc": "间隔 400 ms 不算双击",
+  "steps": [
+   {
+    "press": "A1",
+    "hold": 40
+   },
+   {
+    "wait": 400
+   },
+   {
+    "press": "A1",
+    "hold": 40
+   },
+   {
+    "expect": {
+     "agent_calls": {
+      "focus": 0
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "stop_short_press_hints",
+  "group": "gestures",
+  "desc": "停止键短按只提示，不执行（长按 ≥600 ms 才执行）",
+  "steps": [
+   {
+    "press": "A1"
+   },
+   {
+    "press": "STOP",
+    "hold": 100
+   },
+   {
+    "expect": {
+     "agent_calls": {
+      "stop": 0
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "ptt_hold_hid",
+  "group": "gestures",
+  "desc": "PTT 按住 → Right Option down/up（只记录不发送）",
+  "steps": [
+   {
+    "down": "PTT"
+   },
+   {
+    "wait": 300
+   },
+   {
+    "expect": {
+     "ptt": true
+    }
+   },
+   {
+    "up": "PTT"
+   },
+   {
+    "expect": {
+     "ptt": false,
+     "hid": [
+      "RightOption down",
+      "RightOption up"
+     ]
+    }
+   }
+  ]
+ }
+]
