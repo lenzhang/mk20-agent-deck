@@ -59,6 +59,8 @@ cleanup() {
   rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
   umount /data/setusbconfig 2>/dev/null
   killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
+  # KD may hold the dead PTY: restart it cleanly on real ttyGS0
+  [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1; killall KeyboardDevice 2>/dev/null; sleep 1
   /data/setusbconfig serial >>"$LOG" 2>&1
   kd_start
   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
@@ -81,15 +83,18 @@ grep -q '^usb_f_ecm ' /proc/modules || insmod $ECMKO 2>>"$LOG" || die "insmod ec
 mkdir -p $G/functions/ecm.usb0 || die "mkdir ecm"
 echo "02:11:22:33:44:55" > $G/functions/ecm.usb0/dev_addr 2>/dev/null
 echo "02:11:22:33:44:56" > $G/functions/ecm.usb0/host_addr 2>/dev/null
+NOHID=0; [ -f /mnt/SDCARD/mk20-gadget-nohid ] && NOHID=1   # ECM+ADB+bridge only (works on the ep3-only kernel)
+if [ $NOHID = 0 ]; then
 mkdir -p $G/functions/hid.usb0 || die "mkdir hid"
 echo 1 > $G/functions/hid.usb0/protocol; echo 1 > $G/functions/hid.usb0/subclass
 echo 9 > $G/functions/hid.usb0/report_length || die "report_length"
 printf '\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0\x05\x01\x09\x02\xa1\x01\x85\x02\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x03\x05\x01\x09\x30\x09\x31\x16\x00\x00\x26\xff\x7f\x75\x10\x95\x02\x81\x02\xc0\xc0' > /tmp/hid.desc
 cat /tmp/hid.desc > $G/functions/hid.usb0/report_desc || die "report_desc"
+fi
 mkdir -p $G/functions/ffs.adb || die "mkdir ffs.adb"
 # link order: ECM, HID, ADB
 ln -s $G/functions/ecm.usb0 $C/ecm.usb0 || die "link ecm"
-ln -s $G/functions/hid.usb0 $C/hid.usb0 || die "link hid"
+[ $NOHID = 1 ] || ln -s $G/functions/hid.usb0 $C/hid.usb0 || die "link hid"
 ln -s $G/functions/ffs.adb $C/ffs.adb || die "link adb"
 echo "ECM+HID+ADB" > $C/strings/0x409/configuration 2>/dev/null
 # ---- adbd BEFORE bind (writes FFS descriptors; stock adbd then binds g1/UDC itself) ----
@@ -102,7 +107,7 @@ i=0; while [ -z "$(udc_now)" ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
 if [ -z "$(udc_now)" ]; then echo "$UDC" > $G/UDC 2>>"$LOG" || die "bind"; fi
 [ "$(udc_now)" = "$UDC" ] || die "UDC not bound"
 sleep 1
-[ -e /dev/hidg0 ] || die "no /dev/hidg0"
+[ $NOHID = 1 ] || [ -e /dev/hidg0 ] || die "no /dev/hidg0"
 [ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
 ifconfig usb0 169.254.7.2 netmask 255.255.0.0 up 2>>"$LOG"; ifconfig usb0:1 192.168.7.2 netmask 255.255.255.0 up 2>>"$LOG"
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
