@@ -1,5 +1,5 @@
 #!/bin/sh
-# v3.7 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+# v3.8 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
 # (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
 # Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
 # NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
@@ -25,13 +25,20 @@
 #  - Addressing: usb0 10.20.0.2/24 (Mac en "Serial" manual 10.20.0.1/24) + alias 169.254.7.2/16; fixed MACs.
 #  - It must NEVER run inside an adb shell (it kills adbd; adbd kills the session group). It queues itself to the watcher.
 set -u
-LOG=/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log
+LOG=${MK20_GADGET_LOG:-/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log}
+# v3.8 knobs (set by mk20d from mk20.conf; defaults = the proven v3.7 behaviour)
+ECM_IP=${MK20_ECM_IP:-10.20.0.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
+DEV_MAC=${MK20_DEV_MAC:-02:11:22:33:44:55}; HOST_MAC=${MK20_HOST_MAC:-02:11:22:33:44:56}
+BRIDGE_PORT=${MK20_BRIDGE_PORT:-}   # set (mk20d >= 1.0.2): bridge binds the usb0 addresses only (ECM IP + link-local alias); unset: legacy 0.0.0.0:17890
+BRIDGE_LISTEN="--listen 0.0.0.0:17890"
+FLAP_DROPS=${MK20_FLAP_DROPS:-5}; FLAP_WINDOW=${MK20_FLAP_WINDOW:-60}
+NOADB=${MK20_NOADB:-0}; [ -f /mnt/SDCARD/mk20-no-adb ] && NOADB=1
 G=/sys/kernel/config/usb_gadget/g1
 C=$G/configs/c.1
 # release mode (firmware >= 1.0.0): the loader exports MK20_REL (verified tmpfs copy of the release)
 if [ -n "${MK20_REL:-}" ]; then export MK20_REL; BR=$MK20_REL/bin/ttygs_tcp_bridge; ECMKO=$MK20_REL/lib/usb_f_ecm.ko; ADDADB=$MK20_REL/share/mk20-add-adb.sh
 else BR=/data/ttygs_tcp_bridge; ECMKO=/data/mk20/usb_f_ecm.ko; ADDADB=/mnt/SDCARD/mk20/mk20-add-adb.sh; fi
-mkdir -p /mnt/SDCARD/mk20/logs
+mkdir -p "$(dirname "$LOG")" /mnt/SDCARD/mk20/logs
 log() { echo "gadget $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
 
 # Launch: adbd kills the whole process group of an adb shell when it ends (trap HUP does not help) and
@@ -41,7 +48,7 @@ MODE=${1:-}
 if [ "$MODE" != --run ] && [ "$MODE" != --boot ] && [ "$MODE" != --rollback-now ]; then
   Q=/mnt/SDCARD/job.sh; [ -e $Q ] && { echo "watcher queue busy ($Q exists)"; exit 1; }
   A=--run; [ "${1:-}" = --rollback-queued ] && A=--rollback-now
-  echo "MK20_REL=${MK20_REL:-} sh $(readlink -f "$0") $A" > $Q.tmp
+  echo "MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh $(readlink -f "$0") $A" > $Q.tmp
   sha256sum $Q.tmp | awk '{print $1"  job.sh"}' > $Q.sha256.tmp; mv -f $Q.tmp $Q; mv -f $Q.sha256.tmp $Q.sha256
   echo "queued to watcher"; exit 0
 fi
@@ -78,7 +85,7 @@ kd_start() {
 }
 # after a rollback: stock KD has re-run `setusbconfig serial` (ACM only) -> add adb back like boot-every/adb.sh
 readd_adb() {
-  [ -f /mnt/SDCARD/mk20-no-adb ] && return
+  [ "$NOADB" = 1 ] && return
   H=$ADDADB; [ -f "$H" ] || return
   i=0; until [ -n "$(udc_now)" ] && [ -e $C/acm.usb0 ] && [ -e /dev/ttyGS0 ] && pgrep -f KeyboardDevice >/dev/null; do
     i=$((i+1)); [ $i -gt 60 ] && { log "readd_adb: g1 not ready"; return; }; sleep 1; done
@@ -134,9 +141,9 @@ for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
 # ---- functions ----
 grep -q '^usb_f_ecm ' /proc/modules || insmod $ECMKO 2>>"$LOG" || die "insmod ecm"
 mkdir -p $G/functions/ecm.usb0 || die "mkdir ecm"
-echo "02:11:22:33:44:55" > $G/functions/ecm.usb0/dev_addr 2>/dev/null
-echo "02:11:22:33:44:56" > $G/functions/ecm.usb0/host_addr 2>/dev/null
-NOHID=0; [ -f /mnt/SDCARD/mk20-gadget-nohid ] && NOHID=1   # ECM+ADB+bridge only (works on the ep3-only kernel)
+echo "$DEV_MAC" > $G/functions/ecm.usb0/dev_addr 2>/dev/null
+echo "$HOST_MAC" > $G/functions/ecm.usb0/host_addr 2>/dev/null
+NOHID=${MK20_NOHID:-0}; [ -f /mnt/SDCARD/mk20-gadget-nohid ] && NOHID=1   # ECM+ADB+bridge only (works on the ep3-only kernel)
 if [ $NOHID = 0 ]; then
 mkdir -p $G/functions/hid.usb0 || die "mkdir hid"
 echo 1 > $G/functions/hid.usb0/protocol; echo 1 > $G/functions/hid.usb0/subclass
@@ -144,18 +151,20 @@ echo 9 > $G/functions/hid.usb0/report_length || die "report_length"
 printf '\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0\x05\x01\x09\x02\xa1\x01\x85\x02\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x03\x05\x01\x09\x30\x09\x31\x16\x00\x00\x26\xff\x7f\x75\x10\x95\x02\x81\x02\xc0\xc0' > /tmp/hid.desc
 cat /tmp/hid.desc > $G/functions/hid.usb0/report_desc || die "report_desc"
 fi
-mkdir -p $G/functions/ffs.adb || die "mkdir ffs.adb"
+[ "$NOADB" = 1 ] || mkdir -p $G/functions/ffs.adb || die "mkdir ffs.adb"
 # link order: ECM, HID, ADB
 ln -s $G/functions/ecm.usb0 $C/ecm.usb0 || die "link ecm"
 [ $NOHID = 1 ] || ln -s $G/functions/hid.usb0 $C/hid.usb0 || die "link hid"
-ln -s $G/functions/ffs.adb $C/ffs.adb || die "link adb"
+[ "$NOADB" = 1 ] || ln -s $G/functions/ffs.adb $C/ffs.adb || die "link adb"
 echo "ECM+HID+ADB" > $C/strings/0x409/configuration 2>/dev/null
 # ---- adbd BEFORE bind (writes FFS descriptors; stock adbd then binds g1/UDC itself) ----
+if [ "$NOADB" = 0 ]; then
 mkdir -p /dev/usb-ffs/adb
 grep -q ' /dev/usb-ffs/adb ' /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb || die "mount ffs"
 /bin/adbd </dev/null >/tmp/adbd.log 2>&1 &
 i=0; while [ ! -e /dev/usb-ffs/adb/ep1 ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
 [ -e /dev/usb-ffs/adb/ep1 ] || die "adbd did not write FFS descriptors"
+fi
 i=0; while [ -z "$(udc_now)" ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
 if [ -z "$(udc_now)" ]; then echo "$UDC" > $G/UDC 2>>"$LOG" || die "bind"; fi
 [ "$(udc_now)" = "$UDC" ] || die "UDC not bound"
@@ -163,12 +172,15 @@ sleep 1
 [ $NOHID = 1 ] || [ -e /dev/hidg0 ] || die "no /dev/hidg0"
 [ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
 ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
-ifconfig usb0 10.20.0.2 netmask 255.255.255.0 up 2>>"$LOG" || die "usb0 ip"; ifconfig usb0:1 169.254.7.2 netmask 255.255.0.0 up 2>>"$LOG"
+ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG" || die "usb0 ip"
+if [ -n "$BRIDGE_PORT" ]; then BRIDGE_LISTEN="--listen $ECM_IP:$BRIDGE_PORT"; fi
+if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then [ -n "$BRIDGE_PORT" ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
+else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
 rm -f /tmp/mk20-bridge-stop
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
 mkdir -p /tmp/mk20
 [ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
-( trap '' HUP INT; exec sh -c "echo \$\$ > /tmp/mk20-bridge-loop.pid; while [ ! -f /tmp/mk20-bridge-stop ]; do $BR --listen 0.0.0.0:17890 --link /dev/ttyGS0; sleep 1; done" </dev/null >>/tmp/mk20/bridge.log 2>&1 ) &   # supervised (tmpfs log: an open FAT file blocks hardreset's remount ro)
+( trap '' HUP INT; exec sh -c "echo \$\$ > /tmp/mk20-bridge-loop.pid; while [ ! -f /tmp/mk20-bridge-stop ]; do $BR $BRIDGE_LISTEN --link /dev/ttyGS0; sleep 1; done" </dev/null >>/tmp/mk20/bridge.log 2>&1 ) &   # supervised (tmpfs log: an open FAT file blocks hardreset's remount ro)
 i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 [ -e /dev/ttyGS0 ] || die "bridge did not create /dev/ttyGS0"
 printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n' > /tmp/setusbconfig-noop; chmod 755 /tmp/setusbconfig-noop
@@ -188,7 +200,7 @@ pgrep -f KeyboardDevice >/dev/null || die "KD not running"
 if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
 rm -f /mnt/SDCARD/mk20-composite-ok
 OK=1
-log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=10.20.0.2 kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
+log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_IP bridge=[$BRIDGE_LISTEN] kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
 # within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
 ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh)" ] || { OK=0; die "cannot stage rollback copy"; }
@@ -200,9 +212,9 @@ while [ ! -f /tmp/mk20-flapmon-stop ]; do
   s=\$(cat \$U 2>/dev/null)
   if [ "\$prev" = configured ] && [ "\$s" != configured ]; then
     now=\$(cut -d. -f1 /proc/uptime); nt=""; cnt=0
-    for t in \$times \$now; do [ \$((now-t)) -le 60 ] && { nt="\$nt \$t"; cnt=\$((cnt+1)); }; done; times=\$nt
-    echo "flapmon \$now: link drop (\$s), \$cnt in 60s" >> $LOG
-    if [ \$cnt -ge 5 ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; MK20_REL=${MK20_REL:-} sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
+    for t in \$times \$now; do [ \$((now-t)) -le $FLAP_WINDOW ] && { nt="\$nt \$t"; cnt=\$((cnt+1)); }; done; times=\$nt
+    echo "flapmon \$now: link drop (\$s), \$cnt in ${FLAP_WINDOW}s" >> $LOG
+    if [ \$cnt -ge $FLAP_DROPS ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
   fi
   prev=\$s; sleep 0.3
 done
@@ -213,7 +225,7 @@ log "flap monitor started (pid $FP)"
 if [ "$MODE" = --boot ]; then
   touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
 fi
-( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; sleep 2; i=\$((i+1)); done; sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 9>&- ) &
+( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 9>&- ) &
 WP=$!; sleep 1; kill -0 $WP 2>/dev/null || { OK=0; die "confirm waiter did not start -> rollback now"; }
 log "confirm window 180s started (pid $WP)"
 echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status

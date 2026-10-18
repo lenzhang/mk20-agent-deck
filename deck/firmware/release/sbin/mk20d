@@ -1,50 +1,131 @@
 #!/bin/sh
 # MK20 Agent firmware single entry point (release tier). Launched by the rescue loader with
 #   MK20_REL (verified tmpfs copy of this release), MK20_VERSION, MK20_HOME (/data/mk20).
-#   mk20d boot      bring up features (composite ECM+HID+ADB+KD-bridge, else ACM+KD+adb), self-test, confirm
-#   mk20d selftest  host-independent checks, prints PASS/FAIL lines, rc 0 = pass
+#   mk20d boot      gates (kernel features, vendor hashes, config) -> composite ECM+HID+ADB+KD-bridge or stock
+#                   ACM+KD+adb -> self-test (3 samples) -> confirm with the loader (or restore stock on failure)
+#   mk20d health    JSON health report (stdout; also written to /tmp/mk20/health.json)
+#   mk20d selftest  host-independent checks, PASS/FAIL lines, rc 0 = pass
+#   mk20d config    effective configuration (mk20.conf + flag overrides) and warnings
+#   mk20d maint     detached housekeeping loop started by boot: log rotation (/data/mk20/logs), tmpfs bridge-log
+#                   trim, periodic /tmp/mk20/health.json (every MK20_MAINT_S=300 s)
 #   mk20d version
-# M1 scope: composite boot (same behaviour as boot-every/composite.sh) + minimal self-test + loader confirm.
-# M2 adds: config file, health JSON, structured logs + rotation, vendor hash gates.
 R=${MK20_ROOT:-}
 REL=${MK20_REL:-$(cd "$(dirname "$0")/.." && pwd)}
 V=${MK20_VERSION:-$(sed -n 's/^version=//p' "$REL/MANIFEST" 2>/dev/null)}
-S=$R/mnt/SDCARD; TM=$R/tmp/mk20; LOG=$S/mk20/logs/mk20d.log
-G=$R/sys/kernel/config/usb_gadget/g1
-mkdir -p "$TM" "$S/mk20/logs" 2>/dev/null
-log() { echo "$(cut -d' ' -f1 /proc/uptime) mk20d[$V] $*" >> "$LOG" 2>/dev/null; }
+. "$REL/share/mk20lib.sh"
+TM=$R/tmp/mk20; G=$R/sys/kernel/config/usb_gadget/g1; C=$G/configs/c.1
+MOUNTS=${MK20_MOUNTS:-/proc/mounts}
+mkdir -p "$TM" "$LOGDIR" "$MK20_HOME/state" 2>/dev/null
+log() { mk20log "$1" mk20d "$2" "v=$V" "$3"; }
 
-selftest() {
+p4sha() { [ -n "${MK20_P4_SHA:-}" ] && { echo "$MK20_P4_SHA"; return; }; [ -s "$TM/p4.sha" ] || sha256sum "$R/dev/by-name/boot" 2>/dev/null | cut -d' ' -f1 > "$TM/p4.sha"; cat "$TM/p4.sha"; }
+kernel_line() { p=$(p4sha); grep "^$p " "$MK20_HOME/kernel/ALLOWLIST" 2>/dev/null | head -n 1; }   # "<sha> <name> <features>"
+kernel_has() { case ",$(kernel_line | cut -d' ' -f3)," in *",$1,"*) return 0;; esac; return 1; }
+vendor_check() { # prints "ok" or the first mismatch; bind-mounted files (our shims) are skipped
+  while read -r h f; do
+    [ -n "$h" ] || continue
+    if grep -q " $f " "$MOUNTS" 2>/dev/null; then continue; fi
+    [ "$(sha256sum "$R$f" 2>/dev/null | cut -d' ' -f1)" = "$h" ] || { echo "mismatch:$f"; return 1; }
+  done < "$REL/share/vendor.sha256"
+  echo ok
+}
+kd_count() { pgrep -f /data/KeyboardDevice | wc -l | tr -d ' '; }
+composite_up() { [ -e "$C/ecm.usb0" ]; }
+bridge_listening() { netstat -ltn 2>/dev/null | grep -q ":$BRIDGE_PORT "; }
+wdt_armed() { ${MK20_UBUS:-ubus} call system watchdog 2>/dev/null | grep -q '"running"'; }
+
+selftest() { # FAIL = host-independent breakage; composite rollback is "degraded", not a failure
   f=0
-  n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" = 1 ] && echo "PASS kd=1" || { echo "FAIL kd=$n"; f=1; }
+  n=$(kd_count); [ "$n" = 1 ] && echo "PASS kd=1" || { echo "FAIL kd=$n"; f=1; }
   [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && echo "PASS udc bound" || { echo "FAIL udc unbound"; f=1; }
   [ -e "$R/dev/ttyGS0" ] && echo "PASS ttyGS0" || { echo "FAIL no ttyGS0"; f=1; }
-  ubus call system watchdog 2>/dev/null | grep -q '"running"' && echo "PASS watchdog armed" || { echo "FAIL watchdog not armed"; f=1; }
+  wdt_armed && echo "PASS watchdog armed" || { echo "FAIL watchdog not armed"; f=1; }
+  if composite_up; then
+    bridge_listening && echo "PASS bridge :$BRIDGE_PORT" || { echo "FAIL bridge not listening"; f=1; }
+    if [ -e "$C/hid.usb0" ]; then [ -e "$R/dev/hidg0" ] && echo "PASS hid" || { echo "FAIL no hidg0"; f=1; }; fi
+  else echo "INFO composite down (stock ACM+KD$([ -e "$C/ffs.adb" ] && echo +adb))"; fi
   return $f
+}
+
+jstr() { printf '"%s"' "$(printf '%s' "$1" | tr -d '"\\' | tr '\n\t' '  ')"; }
+health() {
+  cfg_load
+  kl=$(kernel_line); up=$(cut -d' ' -f1 /proc/uptime)
+  fat=$(df -k "$S" 2>/dev/null | awk 'NR==2{print $4}'); dat=$(df -k "$MK20_HOME" 2>/dev/null | awk 'NR==2{print $4}')
+  mem=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+  links=""; for l in "$C"/*usb0 "$C"/*adb; do [ -e "$l" ] && links="$links${l##*/} "; done
+  st=$(selftest 2>/dev/null); rc=$?
+  mounts=$(grep -c -E ' /data/(appLunch.sh|setusbconfig) ' "$MOUNTS")
+  {
+    printf '{'
+    printf '"version":%s,"uptime_s":%s,' "$(jstr "$V")" "${up%.*}"
+    printf '"kernel":{"p4":%s,"name":%s,"features":%s},' "$(jstr "$(p4sha)")" "$(jstr "$(echo "$kl" | cut -d' ' -f2)")" "$(jstr "$(echo "$kl" | cut -d' ' -f3)")"
+    printf '"vendor":%s,' "$(jstr "$(vendor_check)")"
+    printf '"usb":{"udc":%s,"state":%s,"functions":%s,"composite":%s},' "$(jstr "$(cat "$G/UDC" 2>/dev/null)")" \
+      "$(jstr "$(cat "$R"/sys/class/udc/*/state 2>/dev/null | head -n 1)")" "$(jstr "$links")" "$(composite_up && echo true || echo false)"
+    printf '"net":{"usb0":%s,"mtu":%s,"subnet":%s,"bridge":%s,"hidg0_writable":%s},' "$(jstr "$(ifconfig usb0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')")" \
+      "$(cat "$R/sys/class/net/usb0/mtu" 2>/dev/null || echo 0)" "$(jstr "$ECM_SUBNET")" "$(bridge_listening && echo true || echo false)" "$([ -w "$R/dev/hidg0" ] && echo true || echo false)"
+    printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,' "$(kd_count)" "$(pidof adbd >/dev/null && echo true || echo false)" \
+      "$(pgrep -f mk20-flapmon.sh >/dev/null && echo true || echo false)" "$(kill -0 "$(cat "$TM/mk20d-maint.pid" 2>/dev/null)" 2>/dev/null && echo true || echo false)" "$mounts"
+    printf '"watchdog":%s,"mem_avail_kb":%s,"fat_free_kb":%s,"data_free_kb":%s,' "$(wdt_armed && echo true || echo false)" "${mem:-0}" "${fat:-0}" "${dat:-0}"
+    printf '"release":{"good":%s,"pending":%s,"last_rollback":%s},' "$(jstr "$(cat "$MK20_HOME/state/good" 2>/dev/null)")" \
+      "$(jstr "$(cat "$MK20_HOME/state/pending" 2>/dev/null)")" "$(jstr "$(cat "$MK20_HOME/state/last-rollback" 2>/dev/null)")"
+    printf '"config":{"src":%s,"warnings":%s},' "$(jstr "$CFG_SRC")" "$(jstr "$CFG_WARN")"
+    printf '"selftest":{"pass":%s,"detail":%s}' "$([ $rc = 0 ] && echo true || echo false)" "$(jstr "$st")"
+    printf '}\n'
+  } > "$TM/health.json.tmp" && mv -f "$TM/health.json.tmp" "$TM/health.json"
+  cat "$TM/health.json"
 }
 
 case "${1:-}" in
 boot)
-  log "boot start (rel=$REL)"
-  i=0; until [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && [ -e "$G/configs/c.1/acm.usb0" ] && [ -e "$R/dev/ttyGS0" ] && pgrep -f KeyboardDevice >/dev/null; do
-    i=$((i+1)); [ $i -gt 120 ] && { log "KD/g1 not up after 120 s"; break; }; sleep 1; done
+  cfg_load
+  log_rotate "$LOGDIR/gadget.log"
+  log INFO boot "rel=$REL cfg=$CFG_SRC subnet=$ECM_SUBNET composite=$FEATURE_COMPOSITE hid=$FEATURE_HID adb=$FEATURE_ADB warn=$CFG_WARN"
+  i=0; until [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && [ -e "$C/acm.usb0" ] && [ -e "$R/dev/ttyGS0" ] && pgrep -f KeyboardDevice >/dev/null; do
+    i=$((i+1)); [ $i -gt 120 ] && { log WARN boot "KD/g1 not up after 120 s"; break; }; sleep 1; done
   sleep "${MK20_SETTLE:-20}"
-  if [ -f "$S/mk20-no-composite" ]; then
-    log "composite disabled by flag -> ACM+KD+adb"; sh "$REL/share/mk20-add-adb.sh" >> "$LOG" 2>&1
-  else
+  MODE=composite; why=""
+  [ "$FEATURE_COMPOSITE" = 1 ] || { MODE=stock; why="config/flag"; }
+  kernel_has ecm || { MODE=stock; why="${why:+$why,}kernel $(kernel_line | cut -d' ' -f2) lacks ecm"; }
+  vc=$(vendor_check) || { MODE=stock; why="${why:+$why,}vendor $vc"; }
+  NOHID=0; [ "$FEATURE_HID" = 1 ] && kernel_has hid || NOHID=1
+  NOADB=0; [ "$FEATURE_ADB" = 1 ] || NOADB=1
+  if [ $MODE = composite ]; then
     cp -f "$REL/share/gadget.sh" "$TM/gadget-boot.sh"
-    MK20_REL=$REL sh "$TM/gadget-boot.sh" --boot >> "$LOG" 2>&1; log "gadget --boot rc=$? status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null)"
+    MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log MK20_ECM_IP=$ECM_IP MK20_ECM_MASK=$ECM_MASK \
+      MK20_DEV_MAC=$ECM_DEV_MAC MK20_HOST_MAC=$ECM_HOST_MAC MK20_BRIDGE_PORT=$BRIDGE_PORT \
+      MK20_FLAP_DROPS=$FLAP_DROPS MK20_FLAP_WINDOW=$FLAP_WINDOW_S MK20_NOHID=$NOHID MK20_NOADB=$NOADB \
+      sh "$TM/gadget-boot.sh" --boot >> "$LOGDIR/gadget.log" 2>&1
+    log INFO gadget "rc=$? status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null) nohid=$NOHID noadb=$NOADB ip=$ECM_IP"
+  else
+    log WARN boot "composite skipped: $why -> stock ACM+KD$([ $NOADB = 0 ] && echo +adb)"
+    [ $NOADB = 0 ] && sh "$REL/share/mk20-add-adb.sh" >> "$LOGDIR/gadget.log" 2>&1
   fi
   sleep "${MK20_STABLE:-30}"
-  # sample up to 3x (a flap rollback in progress briefly stops KD: degraded, not failed)
-  for try in 1 2 3; do r=$(selftest); rc=$?; [ $rc = 0 ] && break; sleep 10; done
-  echo "$r" > "$TM/selftest.txt"; log "selftest rc=$rc (try $try): $(echo "$r" | tr '\n' ' ')"
+  for try in 1 2 3; do r=$(selftest); rc=$?; [ $rc = 0 ] && break; [ $try = 3 ] || sleep "${MK20_SELFTEST_GAP:-10}"; done
+  echo "$r" > "$TM/selftest.txt"; log INFO selftest "rc=$rc try=$try mode=$MODE $(echo "$r" | tr '\n' ';')"
+  health > "$MK20_HOME/state/selftest-last.json" 2>/dev/null
   if [ $rc = 0 ]; then
-    if [ -f "$TM/rescue-loader.sh" ]; then sh "$TM/rescue-loader.sh" confirm "$V" && log "confirmed $V" || log "confirm $V: not pending / refused"; fi
-  else log "selftest FAILED: not confirming; restoring stock ACM+KD+adb now (pending release rolls back on next boot)"
-    [ -f "$TM/gadget-boot.sh" ] && MK20_REL=$REL sh "$TM/gadget-boot.sh" --rollback-now >> "$LOG" 2>&1; fi
+    if [ -f "$TM/rescue-loader.sh" ]; then sh "$TM/rescue-loader.sh" confirm "$V" && log INFO confirm "ok" || log INFO confirm "not pending/refused"; fi
+  else log ERROR selftest "FAILED: not confirming; restoring stock ACM+KD+adb now"
+    [ -f "$TM/gadget-boot.sh" ] && composite_up && MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rollback-now >> "$LOGDIR/gadget.log" 2>&1; fi
+  if [ "${MK20_MAINT:-1}" = 1 ] && ! kill -0 "$(cat "$TM/mk20d-maint.pid" 2>/dev/null)" 2>/dev/null; then
+    export MK20_REL="$REL" MK20_VERSION="$V"
+    ( trap '' HUP INT; exec sh "$REL/sbin/mk20d" maint </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- ) &
+  fi
   ;;
-selftest) selftest; exit $?;;
+health) health;;
+maint)
+  cfg_load; echo $$ > "$TM/mk20d-maint.pid"; log INFO maint "start pid=$$"
+  while :; do
+    log_rotate "$LOGDIR/mk20d.log"; log_rotate "$LOGDIR/gadget.log"
+    b=$TM/bridge.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
+    health > /dev/null 2>&1
+    sleep "${MK20_MAINT_S:-300}"
+  done;;
+selftest) cfg_load; selftest; exit $?;;
+config) cfg_load; cfg_print;;
 version) echo "$V";;
-*) echo "usage: mk20d boot|selftest|version"; exit 2;;
+*) echo "usage: mk20d boot|health|selftest|config|maint|version"; exit 2;;
 esac
