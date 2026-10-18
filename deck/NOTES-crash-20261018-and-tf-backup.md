@@ -45,3 +45,36 @@
 - zImage decompressor prefix (15884 B) and tail identical. piggy length identical (5413726).
 - Decompressed Image diffs: exactly 0xd326d8 0x32->0x38, 0xd326f5 0x01->0x03.
 - Expected full-partition sha after the write: f2a19d3cb8fddc7f177cb518bb64e69645fadd3ce1b1422c4f056db39e4ee4c0
+
+## 14:0x kernel-only test: PASSED, patched ep3 kernel is the new baseline
+- p4 = f2a19d3cb8fddc7f177cb518bb64e69645fadd3ce1b1422c4f056db39e4ee4c0. Host confirmed at ~14:07 SGT
+  (SHOW_JPG test pattern seen by the user, KD getInfo V2.32).
+- Copies: Mac ~/mk20-backup/tf/patched-ep3/p4-patched-ep3int.img, box /workspace/mk20-backup/tf/patched-ep3/,
+  device /data/mk20/boot-baseline.img (+.sha256). Stock copies (FAT, /data, Mac, box) are unchanged.
+- ep3 is INT on hardware: the host-side config descriptor shows the ACM notify endpoint at **0x83** attr 3
+  (the stock kernel used 0x84).
+
+## postswap auto-revert did not fire: root cause + fix
+- This Tina busybox has **no setsid and no nohup**. v1 started the 600 s confirm wait with
+  `setsid sh -c ...` and its stderr went to /dev/null, so the detached waiter never started. The log
+  stopped at "waiting up to 600s".
+- Fix: start the waiter as `( trap '' HUP INT; exec sh -c ... ) &`, reparented to init once the job exits,
+  then check it is alive with `kill -0`. If the detach fails, revert immediately. Tested on the device
+  in a sandbox (fake p4 under /data): timeout -> revert -> stock sha. Also tested in a Mac simulation.
+- Related: **adbd kills the whole process group of an adb shell session** when it ends (trap HUP is not
+  enough). So "detached" scripts started from adb die too. Long-running USB scripts (gadget v3,
+  ecm-bind-test) now queue themselves into the watcher (`/mnt/SDCARD/job.sh` + sha). That is the likely
+  mechanism of the 12:52 crash.
+
+## ECM bind test on the patched kernel (ecm-bind-test.sh, via watcher, auto-rollback)
+- usb_f_ecm.ko insmod OK. ACM + ADB + ECM bound. Host config:
+  - ACM notify 0x83 INT
+  - ACM bulk 0x81/0x01
+  - ADB 0x02/0x82
+  - ECM notify 0x84 INT
+  - ECM data 0x85/0x05 (ep5 pair)
+- macOS created en13 (02:11:22:33:44:56, active, 100baseTX).
+- **Traffic: device->host OK** (all 7 frames the device sent reached the host). **host->device FAILED:**
+  the host sent 114 frames and usb0 got 1 RX. So bulk OUT on **ep5out** delivered only the first transfer.
+  ep1/ep2 OUT are fine (ACM, ADB). Suspect the ep5out DMA/double-FIFO RX path.
+- The rollback after the 180 s keep window worked: ACM + ADB restored, KD and adbd unchanged, getInfo OK.

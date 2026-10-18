@@ -17,7 +17,7 @@
 #  - Stale links in g1/configs/c.1 are removed before reuse.
 #  - KD is stopped via its procd service (no respawn race) and restarted at the end. setusbconfig is
 #    shadowed by a tmpfs no-op bind mount (gone at reboot), so KD's restart does not wipe the composite.
-#  - It must NEVER run in the foreground of an adb shell (it kills adbd). It re-execs itself detached.
+#  - It must NEVER run inside an adb shell (it kills adbd; adbd kills the session group). It queues itself to the watcher.
 set -u
 LOG=/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log
 G=/sys/kernel/config/usb_gadget/g1
@@ -27,10 +27,13 @@ ECMKO=/data/mk20/usb_f_ecm.ko
 mkdir -p /mnt/SDCARD/mk20/logs
 log() { echo "gadget $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
 
-# detach (adb-session-safe): killall adbd below would otherwise kill our own controlling session
-if [ "${MK20_DETACHED:-0}" != 1 ]; then
-  MK20_DETACHED=1 setsid sh "$0" "$@" </dev/null >/dev/null 2>&1 &
-  echo "detached; see $LOG"; exit 0
+# Launch: adbd kills the whole process group of an adb shell when it ends (trap HUP does not help) and
+# this busybox has no setsid, so we hand ourselves to the watcher job queue (runs outside adb/ACM sessions).
+if [ "${1:-}" != --run ]; then
+  Q=/mnt/SDCARD/job.sh; [ -e $Q ] && { echo "watcher queue busy ($Q exists)"; exit 1; }
+  echo "sh $(readlink -f "$0") --run" > $Q.tmp
+  sha256sum $Q.tmp | awk '{print $1"  job.sh"}' > $Q.sha256.tmp; mv -f $Q.tmp $Q; mv -f $Q.sha256.tmp $Q.sha256
+  echo "queued to watcher"; exit 0
 fi
 
 # ---- preflight (nothing touched yet) ----
@@ -45,7 +48,7 @@ log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
 
 udc_now() { cat $G/UDC 2>/dev/null; }
 kd_start() { if [ -n "$KDSVC" ]; then $KDSVC start >>"$LOG" 2>&1; fi; sleep 3
-  pgrep -f KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && (setsid /data/KeyboardDevice </dev/null >/dev/null 2>&1 &); }; }
+  pgrep -f KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 ) & }; }
 OK=0
 cleanup() {
   [ "$OK" = 1 ] && return
@@ -61,7 +64,8 @@ cleanup() {
   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
 }
 trap cleanup EXIT
-trap 'exit 1' INT TERM HUP
+trap 'exit 1' INT TERM
+trap '' HUP
 die() { log "FAIL $*"; exit 1; }
 
 # ---- stop KD (via procd so it is not respawned mid-change) and adbd ----
@@ -103,7 +107,7 @@ ip link set usb0 up 2>>"$LOG" || ifconfig usb0 up 2>>"$LOG"
 ip addr add 192.168.7.2/24 dev usb0 2>>"$LOG" || ifconfig usb0 192.168.7.2 netmask 255.255.255.0 2>>"$LOG"
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
 [ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
-setsid $BR --listen 0.0.0.0:17890 --link /dev/ttyGS0 </dev/null >>"$LOG" 2>&1 &
+( trap '' HUP INT; exec $BR --listen 0.0.0.0:17890 --link /dev/ttyGS0 </dev/null >>"$LOG" 2>&1 ) &
 i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 [ -e /dev/ttyGS0 ] || die "bridge did not create /dev/ttyGS0"
 printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n' > /tmp/setusbconfig-noop; chmod 755 /tmp/setusbconfig-noop

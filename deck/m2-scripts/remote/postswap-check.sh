@@ -41,5 +41,9 @@ cat > /tmp/mk20-confirm.sh <<EOC
 i=0; while [ \$i -lt 300 ]; do [ -f $S/mk20-swap-ok ] && { echo "post confirmed by host at \$(cut -d' ' -f1 /proc/uptime)" >> $L; echo "patched-confirmed" > $ST; sync; exit 0; }; sleep 2; i=\$((i+1)); done
 echo "no host confirmation" >> $L
 EOC
-( exec 9>&-; setsid sh -c "sh /tmp/mk20-confirm.sh; [ -f $S/mk20-swap-ok ] || sh $0 --revert-timeout" </dev/null >/dev/null 2>&1 & )
+# NOTE: this Tina busybox has NO setsid/nohup (v1 used setsid -> detach silently never ran, 2026-10-18).
+# Portable detach: background subshell ignoring HUP/INT; it is reparented to init when this job exits.
+cp -f "$0" /tmp/mk20-postswap.sh
+( trap '' HUP INT; exec sh -c "sh /tmp/mk20-confirm.sh; [ -f $S/mk20-swap-ok ] || sh /tmp/mk20-postswap.sh --revert-timeout" </dev/null >/dev/null 2>&1 9>&- ) &
+sleep 1; kill -0 $! 2>/dev/null && log "confirm-wait detached pid=$!" || { log "DETACH FAILED -> revert now (failsafe)"; revert "could not start confirm wait"; }
 exit 0

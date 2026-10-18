@@ -10,7 +10,7 @@ log() { echo "add-adb $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
 udc() { cat "$G/UDC" 2>/dev/null; }
 adbd_up() { pidof adbd >/dev/null 2>&1 || pgrep adbd >/dev/null 2>&1; }
 # NEVER run this from an adb shell in the foreground: killing adbd kills the caller mid-way
-# (UDC left unbound). From adb use:  setsid sh mk20-add-adb.sh </dev/null >/dev/null 2>&1 &
+# (UDC left unbound). From adb: queue it to the watcher (job.sh) - adbd kills the session process group; no setsid here.
 [ -d "$G" ] || { log "FAIL no g1"; exit 1; }
 UDC_NAME=$(ls /sys/class/udc 2>/dev/null | head -n1); [ -n "$UDC_NAME" ] || { log "FAIL no udc"; exit 1; }
 
