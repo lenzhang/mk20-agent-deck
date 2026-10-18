@@ -1,4 +1,5 @@
 #!/bin/sh
+# DEPRECATED (2026-10-18): uses reboot, which hangs in PSCI on this board. Do not reuse; see firmware/rescue/hardreset.sh.
 # In-place boot partition swap via lunch.sh (root, one-shot).
 # Layout (GPT review fix): fat SDCARD is only 8MiB — cannot hold BOTH new+stock.
 #   - Stage NEW on UDISK:  /mnt/UDISK/boot-new.img (+ .sha256)

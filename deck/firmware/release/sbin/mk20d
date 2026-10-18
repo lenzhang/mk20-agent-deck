@@ -1,0 +1,47 @@
+#!/bin/sh
+# MK20 Agent firmware single entry point (release tier). Launched by the rescue loader with
+#   MK20_REL (verified tmpfs copy of this release), MK20_VERSION, MK20_HOME (/data/mk20).
+#   mk20d boot      bring up features (composite ECM+HID+ADB+KD-bridge, else ACM+KD+adb), self-test, confirm
+#   mk20d selftest  host-independent checks, prints PASS/FAIL lines, rc 0 = pass
+#   mk20d version
+# M1 scope: composite boot (same behaviour as boot-every/composite.sh) + minimal self-test + loader confirm.
+# M2 adds: config file, health JSON, structured logs + rotation, vendor hash gates.
+R=${MK20_ROOT:-}
+REL=${MK20_REL:-$(cd "$(dirname "$0")/.." && pwd)}
+V=${MK20_VERSION:-$(sed -n 's/^version=//p' "$REL/MANIFEST" 2>/dev/null)}
+S=$R/mnt/SDCARD; TM=$R/tmp/mk20; LOG=$S/mk20/logs/mk20d.log
+G=$R/sys/kernel/config/usb_gadget/g1
+mkdir -p "$TM" "$S/mk20/logs" 2>/dev/null
+log() { echo "$(cut -d' ' -f1 /proc/uptime) mk20d[$V] $*" >> "$LOG" 2>/dev/null; }
+
+selftest() {
+  f=0
+  n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" = 1 ] && echo "PASS kd=1" || { echo "FAIL kd=$n"; f=1; }
+  [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && echo "PASS udc bound" || { echo "FAIL udc unbound"; f=1; }
+  [ -e "$R/dev/ttyGS0" ] && echo "PASS ttyGS0" || { echo "FAIL no ttyGS0"; f=1; }
+  ubus call system watchdog 2>/dev/null | grep -q '"running"' && echo "PASS watchdog armed" || { echo "FAIL watchdog not armed"; f=1; }
+  return $f
+}
+
+case "${1:-}" in
+boot)
+  log "boot start (rel=$REL)"
+  i=0; until [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && [ -e "$G/configs/c.1/acm.usb0" ] && [ -e "$R/dev/ttyGS0" ] && pgrep -f KeyboardDevice >/dev/null; do
+    i=$((i+1)); [ $i -gt 120 ] && { log "KD/g1 not up after 120 s"; break; }; sleep 1; done
+  sleep "${MK20_SETTLE:-20}"
+  if [ -f "$S/mk20-no-composite" ]; then
+    log "composite disabled by flag -> ACM+KD+adb"; sh "$REL/share/mk20-add-adb.sh" >> "$LOG" 2>&1
+  else
+    cp -f "$REL/share/gadget.sh" "$TM/gadget-boot.sh"
+    MK20_REL=$REL sh "$TM/gadget-boot.sh" --boot >> "$LOG" 2>&1; log "gadget --boot rc=$? status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null)"
+  fi
+  sleep "${MK20_STABLE:-30}"
+  r=$(selftest); rc=$?; echo "$r" > "$TM/selftest.txt"; log "selftest rc=$rc: $(echo "$r" | tr '\n' ' ')"
+  if [ $rc = 0 ]; then
+    if [ -f "$TM/rescue-loader.sh" ]; then sh "$TM/rescue-loader.sh" confirm "$V" && log "confirmed $V" || log "confirm $V: not pending / refused"; fi
+  else log "selftest FAILED: not confirming (pending release rolls back on next boot)"; fi
+  ;;
+selftest) selftest; exit $?;;
+version) echo "$V";;
+*) echo "usage: mk20d boot|selftest|version"; exit 2;;
+esac

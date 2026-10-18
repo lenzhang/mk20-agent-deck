@@ -49,6 +49,7 @@ sync
 fi
 [ $SKIPBK = 1 ] && PSHA=$(awk '{print $1}' $S/boot-stock.img.sha256)   # revert target = stock
 if [ -f $S/boot-swap.dry ]; then echo "DRY-RUN OK (no write)"; echo "dry-ok part=$PART sha=$PSHA" > $ST; sync; exit 0; fi
+ubus call system watchdog 2>/dev/null | grep -q '"running"' || fail "watchdog not running (reset in flight?) - not writing p4"
 echo "WRITING new boot"
 dd if=$NEW of=$DEV bs=1M conv=fsync 2>&1 || { dd if=$STOCK of=$DEV bs=1M conv=fsync; sync; fail "dd write error -> stock restored"; }; sync
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null  # readback from media, not page cache
@@ -56,10 +57,17 @@ R=$(head -c $NS $DEV | sha256sum | awk '{print $1}'); echo "readback=$R"
 if [ "$R" != "$E" ]; then [ "$(sha256sum $STOCK | awk '{print $1}')" = "$PSHA" ] || fail "readback mismatch AND stock copy bad - DO NOT REBOOT, pull TF"; dd if=$STOCK of=$DEV bs=1M conv=fsync; sync; fail "readback mismatch -> stock restored"; fi
 # stage the one-shot post-boot check for the patched kernel (auto-revert on failure / no host confirm)
 PC=/data/mk20/postswap-check.sh
-if [ -f $PC ]; then mkdir -p $S/mk20/boot-once; cp -f $PC $S/mk20/boot-once/postswap-check.sh
-  sha256sum $S/mk20/boot-once/postswap-check.sh | awk '{print $1"  postswap-check.sh"}' > $S/mk20/boot-once/postswap-check.sh.sha256
-  echo "staged postswap-check"; else echo "WARNING: no $PC (no auto-revert)"; fi
+restore_stock() { dd if=$STOCK of=$DEV bs=1M conv=fsync; sync; echo 3 > /proc/sys/vm/drop_caches; [ "$(head -c $PART $DEV | sha256sum | awk '{print $1}')" = "$PSHA" ]; }
+BO=$S/mk20/boot-once; mkdir -p $BO
+if cp -f $PC $BO/.postswap.tmp && sha256sum $BO/.postswap.tmp | awk '{print $1"  postswap-check.sh"}' > $BO/.postswap.sha.tmp \
+   && [ "$(sha256sum $BO/.postswap.tmp | awk '{print $1}')" = "$(sha256sum $PC | awk '{print $1}')" ] \
+   && mv -f $BO/.postswap.tmp $BO/postswap-check.sh && mv -f $BO/.postswap.sha.tmp $BO/postswap-check.sh.sha256 && sync; then
+  echo "staged postswap-check"
+else
+  rm -f $BO/.postswap.tmp $BO/.postswap.sha.tmp
+  restore_stock && fail "could not stage postswap-check (FAT full/ro?) -> stock restored, no reset" || fail "staging failed AND stock restore readback bad - DO NOT REBOOT, pull TF"
+fi
 rm -f $S/mk20-swap-ok
 echo "ok-rebooting" > $ST; sync
 if [ -f $S/boot-swap.noreboot ]; then rm -f $S/boot-swap.noreboot; echo "ok-power-cycle-now" > $ST; sync; echo "write verified; NO reboot (soft reboot hangs): user must power-cycle"; exit 0; fi
-echo "write verified; hard reset (WDT) in 3s"; sleep 3; exec 8>&-; sh $S/mk20/hardreset.sh bootswap; echo "hardreset rc=$? -> power-cycle needed"; echo "ok-power-cycle-now" > $ST; sync
+echo "write verified; hard reset (WDT) in 3s"; sleep 3; exec 8>&-; sh $S/mk20/hardreset.sh bootswap; hrc=$?; echo "hardreset rc=$hrc -> power-cycle needed"; echo "ok-power-cycle-now" > $ST; sync; exit 3

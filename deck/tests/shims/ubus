@@ -1,0 +1,7 @@
+#!/bin/sh
+# mock: state in $MOCK_DIR/wdt (running|offline); calls logged to $MOCK_DIR/ubus.calls
+echo "$*" >> "$MOCK_DIR/ubus.calls"
+case "$*" in
+  "call system watchdog") printf '{\n\t"status": "%s",\n\t"timeout": 16\n}\n' "$(cat "$MOCK_DIR/wdt" 2>/dev/null || echo offline)";;
+esac
+exit 0

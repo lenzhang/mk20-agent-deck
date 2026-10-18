@@ -1,0 +1,3 @@
+#!/bin/sh
+# mock: prints $MOCK_DIR/pgrep.out lines (pids) if present
+[ -s "$MOCK_DIR/pgrep.out" ] && { cat "$MOCK_DIR/pgrep.out"; exit 0; }; exit 1

@@ -1,0 +1,151 @@
+diff --git a/deck/m2-scripts/remote/bootswap.sh b/deck/m2-scripts/remote/bootswap.sh
+index 4827667..7ed6184 100644
+--- a/deck/m2-scripts/remote/bootswap.sh
++++ b/deck/m2-scripts/remote/bootswap.sh
+@@ -34,6 +34,8 @@ if [ -f $S/boot-stock.img.sha256 ] && [ ! -f $S/boot-swap.rebackup ]; then
+     echo "current p4 = recorded baseline $BL; stock copies kept"; SKIPBK=1
+   else fail "partition sha $PSHA != recorded stock $O nor baseline; refusing (touch boot-swap.rebackup to override)"; fi
+ fi
++# kernel-write lock (fd 8): hardreset.sh waits for it, so no reset can tear a p4 write. Held until exit.
++mkdir -p /tmp/mk20; exec 8>/tmp/mk20/kwrite.lock; flock -n 8 || fail "kernel-write lock busy"
+ if [ $SKIPBK = 0 ]; then
+ rm -f $STOCK
+ FREE=$(( $(df -k $S | awk 'NR==2{print $4}') * 1024 )); echo "SDCARD free=$FREE need=$((PART+131072))"
+@@ -60,4 +62,4 @@ if [ -f $PC ]; then mkdir -p $S/mk20/boot-once; cp -f $PC $S/mk20/boot-once/post
+ rm -f $S/mk20-swap-ok
+ echo "ok-rebooting" > $ST; sync
+ if [ -f $S/boot-swap.noreboot ]; then rm -f $S/boot-swap.noreboot; echo "ok-power-cycle-now" > $ST; sync; echo "write verified; NO reboot (soft reboot hangs): user must power-cycle"; exit 0; fi
+-echo "write verified; rebooting in 3s"; sleep 3; reboot
++echo "write verified; hard reset (WDT) in 3s"; sleep 3; exec 8>&-; sh $S/mk20/hardreset.sh bootswap; echo "hardreset rc=$? -> power-cycle needed"; echo "ok-power-cycle-now" > $ST; sync
+diff --git a/deck/m2-scripts/remote/hardreset.sh b/deck/m2-scripts/remote/hardreset.sh
+index 37a42f0..fc617f1 100644
+--- a/deck/m2-scripts/remote/hardreset.sh
++++ b/deck/m2-scripts/remote/hardreset.sh
+@@ -1,22 +1,42 @@
+ #!/bin/sh
+-# MK20 remote HARD reset (soft `reboot` hangs on this board).
+-# Why reboot hangs: ARM machine_restart() uses arm_pm_restart = psci_sys_reset (PSCI SYSTEM_RESET to the
+-# secure firmware), which never returns here. Before that, the kernel's reboot notifiers stop the sunxi
+-# WDT (watchdog_reboot_notifier / sunxi_wdt_shutdown), so nothing recovers the hung CPU.
+-# Method: procd keeps the sunxi WDT armed (ubus: timeout 16 s, ping every 5 s). We sync and tell procd to
+-# stop pinging -> the hardware WDT resets the SoC within ~16 s. No kernel restart path, no PSCI.
+-# Fallback after 30 s: sysrq s,u,b (emergency_restart skips the notifiers, so the still-armed WDT fires
+-# even if PSCI hangs).
+-L=/mnt/SDCARD/mk20/logs/hardreset.log
+-log() { echo "hardreset $(cut -d' ' -f1 /proc/uptime): $*" >> $L; sync; }
++# MK20 remote HARD reset v2.1 (soft `reboot` hangs on this board).
++# Why reboot hangs: ARM machine_restart() uses arm_pm_restart = psci_sys_reset (PSCI SYSTEM_RESET), which never
++# returns here, and the reboot notifiers stop the sunxi WDT first. So: procd keeps the sunxi WDT armed (16 s,
++# ping 5 s); we stop procd's pings -> the hardware WDT resets the SoC. No kernel restart path, no PSCI.
++# v2 (production plan M0.5):
++#  - refuses (exit 2, "needs power-cycle") if procd's watchdog is not armed: sysrq-b would hit the same PSCI hang
++#  - waits for the kernel-write lock (bootswap/postswap dd of p4) so a reset never tears a boot-partition write
++#  - flushes and remounts the FAT read-only before the pings stop (every reset is otherwise an unclean FAT stop)
++# v2.1: busybox 1.27 flock has NO -w (v2 `flock -w` errored -> false "lock held" refusal -> the old v2 watcher
++#   fell back to `reboot` -> PSCI hang, power-cycle needed, 16:37). Now: poll `flock -n`. remount ro is bounded
++#   (backgrounded, 5 s) so it can never block the reset.
++# Env for tests: MK20_ROOT (path prefix), MK20_HR_NOSLEEP=1.
++R=${MK20_ROOT:-}
++S=$R/mnt/SDCARD; L=$S/mk20/logs/hardreset.log; LOCK=$R/tmp/mk20/kwrite.lock
++mkdir -p "$S/mk20/logs" "$R/tmp/mk20" 2>/dev/null
++log() { echo "hardreset $(cut -d' ' -f1 /proc/uptime): $*" >> "$L" 2>/dev/null; sync; }
+ log "begin by ${1:-?}"
+-W=$(ubus call system watchdog 2>&1 | tr -d '\n\t '); log "wdt before: $W"
+-case "$W" in *'"status":"running"'*) ;; *) log "WARNING: procd watchdog not running; going straight to sysrq";; esac
+-sync; sync
+-case "$W" in *'"status":"running"'*) ubus call system watchdog '{"stop":true}' >/dev/null 2>&1; log "procd WDT pings stopped; expect reset in <=16 s";; esac
++W=$(ubus call system watchdog 2>&1 | tr -d '\n\t '); log "wdt: $W"
++case "$W" in *'"status":"running"'*) ;; *) log "REFUSED: procd watchdog not armed -> remote reset impossible, needs power-cycle"; exit 2;; esac
++# kernel-write lock: bootswap/postswap hold it (fd 8) while writing p4
++exec 8>"$LOCK"
++i=0; while ! flock -n 8; do i=$((i+1)); [ $i -gt 600 ] && { log "REFUSED: kernel-write lock held >600 s (p4 write in progress?)"; exit 3; }
++  [ $i = 1 ] && log "waiting for kernel-write lock"; sleep 1; done
++log "lock ok; stopping writers, remount FAT ro, stop WDT pings"
+ sync
+-sleep 30
+-log "still alive after 30 s -> sysrq fallback"
+-echo 1 > /proc/sys/kernel/sysrq
+-echo s > /proc/sysrq-trigger; sleep 2; echo u > /proc/sysrq-trigger; sleep 1; echo b > /proc/sysrq-trigger
+-sleep 30; log "sysrq b returned?!"
++rm -f "$R/tmp/mk20/hr-ro"; ( mount -o remount,ro "$S" 2>/dev/null && touch "$R/tmp/mk20/hr-ro" ) & mp=$!
++i=0; while kill -0 $mp 2>/dev/null && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done
++[ -f "$R/tmp/mk20/hr-ro" ] && RO=y || RO=n
++sync
++ubus call system watchdog '{"stop":true}' >/dev/null 2>&1
++# FAT may be ro now: log to tmpfs (and FAT if still rw)
++echo "hardreset: pings stopped (fat_ro=$RO), expect reset <=16 s" > "$R/tmp/mk20/hardreset.last"
++[ "$RO" = n ] && log "pings stopped (FAT remount ro failed, synced); expect reset <=16 s"
++[ "${MK20_HR_NOSLEEP:-}" = 1 ] && exit 0
++sleep 40
++# Still alive: the WDT did not fire (should not happen with status=running). Re-enable pings so the board keeps
++# working, put FAT back rw, report. No sysrq-b (same PSCI hang).
++ubus call system watchdog '{"stop":false}' >/dev/null 2>&1
++mount -o remount,rw "$S" 2>/dev/null
++log "ERROR: still alive 40 s after stopping pings; pings re-enabled, FAT rw again; needs power-cycle"
++exit 4
+diff --git a/deck/m2-scripts/remote/jobs/kernel-inventory.sh b/deck/m2-scripts/remote/jobs/kernel-inventory.sh
+new file mode 100644
+index 0000000..93f66f4
+--- /dev/null
++++ b/deck/m2-scripts/remote/jobs/kernel-inventory.sh
+@@ -0,0 +1,20 @@
++#!/bin/sh
++# M0.5: versioned kernel (boot partition p4) inventory on ext4: /data/mk20/kernel/<sha12>/{boot.img,MANIFEST}
++# + ALLOWLIST (full sha -> name -> features). Copies only; legacy paths stay for bootswap/postswap.
++K=/data/mk20/kernel; mkdir -p $K
++add() { # $1=src $2=name $3=features $4=notes
++  [ -f "$1" ] || { echo "missing $1"; return 1; }
++  h=$(sha256sum "$1" | awk '{print $1}'); d=$K/${h%${h#????????????}}
++  mkdir -p "$d"
++  if [ ! -f "$d/boot.img" ] || [ "$(sha256sum "$d/boot.img" | awk '{print $1}')" != "$h" ]; then cp -f "$1" "$d/boot.img.tmp" && sync && mv -f "$d/boot.img.tmp" "$d/boot.img"; fi
++  { echo "name=$2"; echo "sha256=$h"; echo "size=$(wc -c < "$1")"; echo "features=$3"; echo "source=$1"; echo "notes=$4"
++    echo "kernel=Linux 5.4.61 #221 (uname identical on all variants: identify by p4 sha256 only)"; } > "$d/MANIFEST"
++  grep -v "^$h " $K/ALLOWLIST 2>/dev/null > $K/ALLOWLIST.tmp; echo "$h $2 $3" >> $K/ALLOWLIST.tmp; mv -f $K/ALLOWLIST.tmp $K/ALLOWLIST
++  echo "added $2 $h -> $d"
++}
++add /data/mk20/boot-stock.img stock acm,adb "vendor stock p4 (also /mnt/SDCARD/boot-stock.img)"
++add /data/mk20/boot-baseline-ep3.img ep3 acm,adb,ecm "ep3 ISO->INT patch (HID ep5out not usable)"
++add /data/mk20/boot-baseline.img ep5out acm,adb,ecm,hid "ep3 ISO->INT + ep5out INT; current baseline"
++sync
++P=$(sha256sum /dev/by-name/boot | awk '{print $1}'); echo "running p4=$P -> $(grep "^$P " $K/ALLOWLIST | cut -d' ' -f2-)"
++cat $K/ALLOWLIST; ls -la $K/*/
+diff --git a/deck/m2-scripts/remote/postswap-check.sh b/deck/m2-scripts/remote/postswap-check.sh
+index c345b12..5d89ef6 100644
+--- a/deck/m2-scripts/remote/postswap-check.sh
++++ b/deck/m2-scripts/remote/postswap-check.sh
+@@ -12,10 +12,11 @@ revert() {
+   log "REVERT: $*"; rm -f $S/mk20/boot-once/postswap-check.sh*
+   SRC=""; for c in $STOCK $STOCK2; do [ -f $c ] && [ "$(sha256sum $c | awk '{print $1}')" = "$PS" ] && { SRC=$c; break; }; done
+   [ -n "$SRC" ] || { log "NO VALID STOCK COPY - leave as is; pull TF + tf-restore-boot.sh --slice s4"; echo "revert-failed-no-stock: $*" > $ST; sync; exit 1; }
++  mkdir -p /tmp/mk20; exec 8>/tmp/mk20/kwrite.lock; flock -n 8 || log "WARN kernel-write lock busy; writing anyway (revert has priority)"
+   dd if=$SRC of=$DEV bs=1M conv=fsync 2>&1 | tail -1 >> $L; sync; echo 3 > /proc/sys/vm/drop_caches
+   R=$(sha256sum $DEV | awk '{print $1}')
+   if [ "$R" = "$PS" ]; then log "stock restored ($R)"; echo "reverted: $*" > $ST; else log "RESTORE READBACK BAD $R"; echo "revert-readback-bad: $*" > $ST; fi
+-  sync; log "rebooting (soft reboot may hang: power-cycle)"; sleep 2; reboot -f
++  sync; exec 8>&-; log "hard reset (WDT)"; sleep 2; sh $S/mk20/hardreset.sh postswap; log "hardreset rc=$? -> power-cycle needed"
+   exit 1
+ }
+ [ "${1:-}" = "--revert-timeout" ] && revert "no host confirmation within 600s"
+diff --git a/deck/m2-scripts/remote/watcher.sh b/deck/m2-scripts/remote/watcher.sh
+index f51c15d..14b27d0 100644
+--- a/deck/m2-scripts/remote/watcher.sh
++++ b/deck/m2-scripts/remote/watcher.sh
+@@ -1,5 +1,5 @@
+ #!/bin/sh
+-# MK20 watcher v2 — polls /mnt/SDCARD every 2s. Started by lunch stub.
++# MK20 watcher v2.1 — polls /mnt/SDCARD every 2s. Started by lunch stub.
+ #   cmd-reboot                      -> sync + hardware WDT reset (hardreset.sh), reboot as fallback
+ #   job.sh + job.sh.sha256          -> verify, run once (300s cap), log, emit over ttyGS0
+ #   mk20/boot-once/*.sh(+.sha256)   -> run once at boot (after KD up), emit log
+@@ -89,8 +89,9 @@ while :; do
+     rm -f $S/cmd-reboot; log "cmd-reboot"; echo "rebooting $(cut -d' ' -f1 /proc/uptime)" > /tmp/mk20/rb
+     emit /tmp/mk20/rb reboot; sync; sleep 1
+     # soft reboot hangs in PSCI on this board -> hardware WDT reset (see hardreset.sh); reboot only as last resort
+-    [ -f $D/hardreset.sh ] && sh $D/hardreset.sh watcher
+-    reboot
++    # no `reboot` fallback: it hangs in PSCI too. hardreset v2 refuses (rc 2/3) when unsafe -> report, keep running.
++    if [ -f $D/hardreset.sh ]; then sh $D/hardreset.sh watcher; rc=$?; else rc=9; fi
++    log "hardreset returned rc=$rc (no reset happened)"; echo "reboot FAILED rc=$rc (see logs/hardreset.log); power-cycle needed" > /tmp/mk20/rb; emit /tmp/mk20/rb reboot-failed
+   fi
+   if [ -f $S/cmd-ping ]; then
+     rm -f $S/cmd-ping

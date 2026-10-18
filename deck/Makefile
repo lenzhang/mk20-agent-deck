@@ -1,0 +1,8 @@
+test:
+	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh
+	uv run --with pytest python -m pytest -q tests
+
+release:
+	sh tools/mk20-release-build.sh firmware out $$(git rev-parse --short HEAD 2>/dev/null || echo dev)
+
+.PHONY: test release

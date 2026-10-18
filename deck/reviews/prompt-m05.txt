@@ -1,0 +1,8 @@
+READ ONLY code review: do not modify files or run git commands. Target: Allwinner T113, Tina Linux, BusyBox v1.27.2
+(ash; flock has only -sxun, no -w; no setsid/nohup/pkill; sleep accepts fractions). Read deck/reviews/m05.diff (the M0.5
+milestone diff), then the full files deck/m2-scripts/remote/{hardreset.sh,watcher.sh,bootswap.sh,postswap-check.sh,
+jobs/kernel-inventory.sh} and deck/PLAN-production-firmware.md §11. Context: soft `reboot` hangs (PSCI); reset works
+only by stopping procd's watchdog pings (16 s HW WDT). A previous version used `flock -w` and bricked-until-power-cycle.
+Find: correctness bugs (busybox ash portability, fd leaks to children, lock semantics, races, exit codes), any path that
+can still end in a hang or a reset during a p4 dd, unsafe behaviour of remount ro, and log/FAT issues. Rank findings
+(BLOCKER/MAJOR/MINOR) with file:line and a concrete fix. Max ~600 words, markdown.

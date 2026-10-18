@@ -234,3 +234,33 @@
   modified 2026-09-13 11:16. The password set "today" may not have been applied, or the env value differs.
   -> user: re-enter the VNC password in Screen Sharing settings and press OK (or confirm the env value). Then rerun
   `/data/mk20/vnc_authcheck 10.20.0.1 5900 /data/mk20/secrets/vnc.pass`.
+
+## 17:12 SGT: M0.5 review fixes + M1 (release layout, rescue tier, loader) live on hardware
+- VNC (16:56): after the user re-set the password, `vnc_authcheck` from the T113 -> AUTH OK 3840x2160 bpp=32.
+- M0.5 code review (both models, AI route checked; reviews/m05-*.md). Applied:
+  - postswap revert: never bypasses the kernel-write lock (300 s poll, else abort with p4 untouched); requires the
+    watchdog running; dd rc + readback checked with 1 retry; NO reset on a bad readback (status DO-NOT-POWER-OFF);
+    boot-once re-arm removed only after a verified restore.
+  - bootswap: postswap staging is verified + atomic before any reset (else stock restored, no reset); watchdog check
+    before the write; exit 3 after a refused reset.
+  - hardreset v2.2: no inherited fds/FAT stdout; refuses with magicclose or timeout >= 40 (rc 10/11/12/13, never
+    2); re-checks after the lock wait; a 12 s background timer stops pings even if sync/remount wedge; remount
+    helper killed if hung; RW remount only after a successful RO; test-root guard (MK20_UBUS).
+  - kernel-inventory: copies verified, nonzero exit on failure. Deprecated reboot-based legacy scripts marked.
+  - Still open (planned for M2): remount ro is still EBUSY (the bridge loop keeps gadget-ecm-hid.log open; move
+    to tmpfs in the 1.1.0 gadget), log size budget on FAT, FAT-writer lock.
+- M1 on device:
+  - Stub v2 at /mnt/SDCARD/lunch.sh (v1 kept at mk20/lunch.sh.v1).
+  - Rescue set (watcher v3, hardreset v2.2, loader) in /data/mk20/rescue AND /mnt/SDCARD/mk20, each with .sha256.
+  - Release 1.0.0 in /data/mk20/releases/1.0.0 (MANIFEST: 5 files, kernel allow-list = ep5out).
+  - A/B slots in /data/mk20/slots; state in /data/mk20/state.
+  - Legacy boot-every/composite.sh moved to boot-every.disabled/; adb.sh stays as the fallback when the loader rc != 0.
+- Hardware results:
+  - 17:00: stub verified ext4 rescue -> loader: pending 1.0.0 attempt 1 -> launch -> mk20d: composite OK ->
+    self-test PASS (kd=1, udc, ttyGS0, watchdog) -> confirmed good at 87 s.
+  - 17:04 fault test: ext4 watcher.sh.sha256 corrupted + 1.0.1 pending with a tampered file. Stub fell back to the
+    FAT rescue (verified) -> loader "verify 1.0.1 failed: sha mismatch" -> ROLLBACK 1.0.1 -> 1.0.0 (slot A gen 3)
+    -> composite up, self-test PASS. Restored afterwards; 1.0.1 removed.
+  - 17:11: hardreset v2.2 WDT reboot OK (adb back in 61 s, composite + confirm at 88 s).
+- Box tests: `make test` (shellcheck + 38 pytest: loader slots/attempts/rollback/verify/kernel gate/path traversal,
+  stub fallbacks, hardreset guards + lock wait, watcher kill_tree + verified copies, reproducible build).

@@ -1,5 +1,5 @@
 #!/bin/sh
-# v3.5 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+# v3.6 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
 # (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
 # Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
 # NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
@@ -28,8 +28,9 @@ set -u
 LOG=/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log
 G=/sys/kernel/config/usb_gadget/g1
 C=$G/configs/c.1
-BR=/data/ttygs_tcp_bridge
-ECMKO=/data/mk20/usb_f_ecm.ko
+# release mode (firmware >= 1.0.0): the loader exports MK20_REL (verified tmpfs copy of the release)
+if [ -n "${MK20_REL:-}" ]; then export MK20_REL; BR=$MK20_REL/bin/ttygs_tcp_bridge; ECMKO=$MK20_REL/lib/usb_f_ecm.ko; ADDADB=$MK20_REL/share/mk20-add-adb.sh
+else BR=/data/ttygs_tcp_bridge; ECMKO=/data/mk20/usb_f_ecm.ko; ADDADB=/mnt/SDCARD/mk20/mk20-add-adb.sh; fi
 mkdir -p /mnt/SDCARD/mk20/logs
 log() { echo "gadget $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
 
@@ -78,7 +79,7 @@ kd_start() {
 # after a rollback: stock KD has re-run `setusbconfig serial` (ACM only) -> add adb back like boot-every/adb.sh
 readd_adb() {
   [ -f /mnt/SDCARD/mk20-no-adb ] && return
-  H=/mnt/SDCARD/mk20/mk20-add-adb.sh; [ -f $H ] || return
+  H=$ADDADB; [ -f "$H" ] || return
   i=0; until [ -n "$(udc_now)" ] && [ -e $C/acm.usb0 ] && [ -e /dev/ttyGS0 ] && pgrep -f KeyboardDevice >/dev/null; do
     i=$((i+1)); [ $i -gt 60 ] && { log "readd_adb: g1 not ready"; return; }; sleep 1; done
   sleep 5; cp -f $H /tmp/mk20-add-adb.sh; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 && log "adb re-added" || log "adb re-add FAILED"
@@ -95,7 +96,7 @@ cleanup() {
   echo "" > $G/UDC 2>/dev/null
   for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
   rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
-  touch /tmp/mk20-bridge-stop; [ -f /tmp/mk20-bridge-loop.pid ] && kill $(cat /tmp/mk20-bridge-loop.pid) 2>/dev/null; killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
+  touch /tmp/mk20-bridge-stop; [ -f /tmp/mk20-bridge-loop.pid ] && kill "$(cat /tmp/mk20-bridge-loop.pid)" 2>/dev/null; killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
   # KD may hold the dead PTY: restart it cleanly on real ttyGS0
   # unmount the shims only after KD + appLunch.sh have exited (a running sh keeps its script busy -> EBUSY)
   kd_stop
@@ -200,7 +201,7 @@ while [ ! -f /tmp/mk20-flapmon-stop ]; do
     now=\$(cut -d. -f1 /proc/uptime); nt=""; cnt=0
     for t in \$times \$now; do [ \$((now-t)) -le 60 ] && { nt="\$nt \$t"; cnt=\$((cnt+1)); }; done; times=\$nt
     echo "flapmon \$now: link drop (\$s), \$cnt in 60s" >> $LOG
-    if [ \$cnt -ge 5 ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
+    if [ \$cnt -ge 5 ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; MK20_REL=${MK20_REL:-} sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
   fi
   prev=\$s; sleep 0.3
 done

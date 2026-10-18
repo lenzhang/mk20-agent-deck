@@ -1,4 +1,5 @@
 #!/bin/sh
+# DEPRECATED (2026-10-18): uses reboot, which hangs in PSCI on this board. Do not reuse; see firmware/rescue/hardreset.sh.
 # Mark boot-swap failed so next lunch/boot restores stock from SDCARD.
 touch /mnt/SDCARD/boot-swap-fail
 # Re-arm lunch with the backup copy of the swap script if present

@@ -9,13 +9,19 @@ PS=$(awk '{print $1}' $S/boot-stock.img.sha256 2>/dev/null)
 DEV=$(readlink -f /dev/by-name/boot)
 log() { echo "post $(cut -d' ' -f1 /proc/uptime): $*" | tee -a $L; }
 revert() {
-  log "REVERT: $*"; rm -f $S/mk20/boot-once/postswap-check.sh*
+  log "REVERT: $*"   # boot-once re-arm is removed only after a verified restore
   SRC=""; for c in $STOCK $STOCK2; do [ -f $c ] && [ "$(sha256sum $c | awk '{print $1}')" = "$PS" ] && { SRC=$c; break; }; done
   [ -n "$SRC" ] || { log "NO VALID STOCK COPY - leave as is; pull TF + tf-restore-boot.sh --slice s4"; echo "revert-failed-no-stock: $*" > $ST; sync; exit 1; }
-  mkdir -p /tmp/mk20; exec 8>/tmp/mk20/kwrite.lock; flock -n 8 || log "WARN kernel-write lock busy; writing anyway (revert has priority)"
-  dd if=$SRC of=$DEV bs=1M conv=fsync 2>&1 | tail -1 >> $L; sync; echo 3 > /proc/sys/vm/drop_caches
+  # never bypass the kernel-write lock: wait up to 300 s, else abort WITHOUT touching p4 (recovery stays armed)
+  mkdir -p /tmp/mk20; exec 8>/tmp/mk20/kwrite.lock; i=0
+  while ! flock -n 8; do i=$((i+1)); [ $i -gt 300 ] && { log "ABORT revert: kernel-write lock busy >300 s; p4 untouched"; echo "revert-lock-busy: $*" > $ST; sync; exit 1; }; sleep 1; done
+  ubus call system watchdog 2>/dev/null | grep -q '"running"' || { log "ABORT revert: watchdog not running (a reset may be in flight); p4 untouched"; exit 1; }
+  for try in 1 2; do dd if=$SRC of=$DEV bs=1M conv=fsync > /tmp/mk20/revert-dd.log 2>&1; drc=$?; tail -n 1 /tmp/mk20/revert-dd.log >> $L
+    sync; echo 3 > /proc/sys/vm/drop_caches; [ $drc = 0 ] && [ "$(sha256sum $DEV | awk '{print $1}')" = "$PS" ] && break; log "revert dd try $try failed (rc=$drc)"; done
+  sync; echo 3 > /proc/sys/vm/drop_caches
   R=$(sha256sum $DEV | awk '{print $1}')
-  if [ "$R" = "$PS" ]; then log "stock restored ($R)"; echo "reverted: $*" > $ST; else log "RESTORE READBACK BAD $R"; echo "revert-readback-bad: $*" > $ST; fi
+  if [ $drc = 0 ] && [ "$R" = "$PS" ]; then log "stock restored ($R)"; echo "reverted: $*" > $ST; rm -f $S/mk20/boot-once/postswap-check.sh*
+  else log "RESTORE FAILED dd_rc=$drc readback=$R -> NO reset (would boot a partial p4); pull TF + tf-restore-boot.sh --slice s4"; echo "revert-readback-bad-DO-NOT-POWER-OFF: $*" > $ST; sync; exit 1; fi
   sync; exec 8>&-; log "hard reset (WDT)"; sleep 2; sh $S/mk20/hardreset.sh postswap; log "hardreset rc=$? -> power-cycle needed"
   exit 1
 }

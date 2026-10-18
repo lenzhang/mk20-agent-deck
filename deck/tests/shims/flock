@@ -1,0 +1,4 @@
+#!/bin/sh
+# BusyBox 1.27.2 flock semantics: only -s -x -u -n; anything else is a usage error (the M0.5 bug).
+for a in "$@"; do case "$a" in -w|-w*|--timeout*|-E*|-o) echo "flock: invalid option -- 'w'" >&2; exit 1;; esac; done
+exec /usr/bin/flock "$@"
