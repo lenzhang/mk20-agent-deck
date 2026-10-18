@@ -17,6 +17,8 @@
 #  - Stale links in g1/configs/c.1 are removed before reuse.
 #  - KD is stopped via its procd service (no respawn race) and restarted at the end. setusbconfig is
 #    shadowed by a tmpfs no-op bind mount (gone at reboot), so KD's restart does not wipe the composite.
+#  - KD gets a filtered `dmesg` (PATH shim via bind-mounted appLunch.sh) so its USB-reset hack does not fire on
+#    f_hid's harmless -EOPNOTSUPP for SET_IDLE/SET_REPORT (root cause of the 3 s flapping, 2026-10-18 15:53).
 #  - It must NEVER run inside an adb shell (it kills adbd; adbd kills the session group). It queues itself to the watcher.
 set -u
 LOG=/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log
@@ -51,7 +53,7 @@ cleanup() {
   echo "" > $G/UDC 2>/dev/null
   for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
   rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
-  umount /data/setusbconfig 2>/dev/null
+  umount /data/setusbconfig 2>/dev/null; umount /data/appLunch.sh 2>/dev/null
   touch /tmp/mk20-bridge-stop; [ -f /tmp/mk20-bridge-loop.pid ] && kill $(cat /tmp/mk20-bridge-loop.pid) 2>/dev/null; killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
   # KD may hold the dead PTY: restart it cleanly on real ttyGS0
   [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1; killall KeyboardDevice 2>/dev/null; sleep 1
@@ -125,6 +127,15 @@ i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 [ -e /dev/ttyGS0 ] || die "bridge did not create /dev/ttyGS0"
 printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n' > /tmp/setusbconfig-noop; chmod 755 /tmp/setusbconfig-noop
 mount --bind /tmp/setusbconfig-noop /data/setusbconfig || die "shadow setusbconfig"
+# ROOT CAUSE of the 15:40 flapping (found 15:53): KD's UsbCDCStateThread runs `dmesg -c` every 3 s and, if the
+# output contains "ERR: Operation not supported", reads usbc0/usb_device = full USB rmmod/insmod. sunxi_udc prints
+# that line whenever a function's setup() returns -EOPNOTSUPP; f_hid (5.4) does that for SET_IDLE / SET_REPORT on
+# ep0, which macOS sends to a keyboard -> reset every ~3 s. Fix: give KD a PATH-first `dmesg` that drops that line.
+mkdir -p /tmp/mk20-shim
+printf '#!/bin/sh\n/bin/busybox dmesg "$@" | /bin/busybox grep -v "ERR: Operation not supported"\n' > /tmp/mk20-shim/dmesg; chmod 755 /tmp/mk20-shim/dmesg
+umount /data/appLunch.sh 2>/dev/null; sed 's#^source /data/qt_env.sh#source /data/qt_env.sh; export PATH=/tmp/mk20-shim:$PATH#' /data/appLunch.sh > /tmp/appLunch-shim.sh; chmod 755 /tmp/appLunch-shim.sh
+grep -q mk20-shim /tmp/appLunch-shim.sh || die "dmesg shim sed"
+mount --bind /tmp/appLunch-shim.sh /data/appLunch.sh || die "shadow appLunch"
 kd_start
 pgrep -f KeyboardDevice >/dev/null || die "KD not running"
 rm -f /mnt/SDCARD/mk20-composite-ok

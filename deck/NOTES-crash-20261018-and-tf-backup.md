@@ -143,3 +143,23 @@
   patched ep5out INT OUT) is the prime suspect.
 - Rolled back via --rollback at uptime 367: FAILSAFE done, ACM+KD up, adb re-added by keepalive, getInfo OK, no flaps.
 - Logs: deck/logs-mac-usb-flap-20261018-1540.txt, deck/logs-dm-flap-20261018-1543.txt.
+
+## 15:45-15:57 SGT: ROOT CAUSE of the composite flapping + working ECM+HID+ADB composite
+- Isolation (deck/m2-scripts/hid-bind-test.sh, ACM+ADB+HID, no ECM, auto-rollback, live `cat /proc/kmsg` to SD,
+  Mac `log stream` to ~/mk20-backup/remote-logs/usb-hid-*.log via ~/mk20-backup/hidtest-run.sh):
+  - full HID, KD running: 34 host disconnects / 40 s -> flapping reproduced WITHOUT ECM.
+  - full HID, KD stopped: 0 rmmod -> KD is the trigger.
+- Device-side cycle: CONFIGURED -> "ERR: Operation not supported" -> ~2.5 s later usb manager rmmod/insmod.
+  hw_scan_debug showed the scan thread idle, so the rmmod came from a read of usbc0/usb_device (device_chose()).
+- KeyboardDevice (not stripped) UsbCDCStateThread::run(): loop { QProcess("dmesg -c"); if output contains
+  "ERR: Operation not supported" -> usbCdcDeviceError() -> `cat .../usbc0@0/usb_device` (USB re-init); sleep(3) }.
+  (This is also why dmesg kept being empty.) sunxi_udc prints that line whenever a gadget setup() returns
+  -EOPNOTSUPP; tina f_hid 5.4 stalls SET_REPORT on ep0 and SET_IDLE (unknown request), which macOS sends to a
+  boot keyboard. ep5out / INT endpoints are NOT the problem. f_hid 5.4 has no no_out_endpoint option.
+- Fix (no kernel change): KD gets a PATH-first `dmesg` shim that filters that one line
+  (/tmp/mk20-shim/dmesg; /data/appLunch.sh bind-mounted with `export PATH=/tmp/mk20-shim:$PATH` after qt_env).
+  ACM+HID test with shim: only KD's one-off startup reset, then stable.
+- gadget-ecm-hid-adb.sh v3.1 (sha 37682d13…) includes the shim (+ umount in cleanup). Full composite 15:55:
+  one KD-startup reconnect at 15:55:39, then stable; ECM ping 30/30 (0.7-1.8 ms), getInfo over TCP V2.32,
+  SHOW_JPG over TCP ACKed, adb OK, HID pointer moved the Mac cursor +6,+6 px exactly, shift tap OK.
+  Confirmed (mk20-composite-ok) at uptime 1094.
