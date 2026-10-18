@@ -1,4 +1,4 @@
-# MK20 Agent enhanced firmware: production plan (draft v0.1, 2026-10-18)
+# MK20 Agent enhanced firmware: production plan (v0.2, 2026-10-18; v0.1 reviewed GO-with-conditions by both models, conditions folded in (§11))
 
 Scope: turn the P2 device-side work (patched stock kernel, ECM+HID+ADB composite, KD over a PTY-TCP bridge,
 watchdog hard reset, watcher/boot jobs) into a versioned, installable, recoverable product. The first target is
@@ -111,3 +111,98 @@ Then: VNC milestone (PRD §14 R-CU-1) on top of the packaged base.
 - Bricking risk stays limited to userland (stub is tiny and unchanged in contract; kernel path separate).
 - KD behaviour (dmesg-c USB reset, setusbconfig at start) is undocumented vendor logic: the shims are part of
   the release and covered by the self-test.
+
+## 11. v0.2 changes from the reviews (reviews/production-plan-*.md, AI route US-Exit-Hy2 checked 16:19)
+Both reviewers: GO-with-conditions. These rules override §2-§9 where they conflict.
+
+**Storage (verified 16:30).** /mnt/SDCARD is an 8 MiB FAT with 1.36 MiB free (boot-stock.img alone is 6.2 MiB).
+/data sits on the UDISK ext4 overlay with 2.5 GB free. Changes:
+- releases/, pointers, state/ and kernel/ move to `/data/mk20/` (ext4: real atomic rename + fsync).
+- FAT keeps only: the lunch.sh stub, flag files, the stock boot image and size-capped logs (max 256 KiB total).
+  Keep at least 1 MiB free; the self-test fails "degraded" below that.
+- Vendor /data backup done 16:33: Mac ~/mk20-backup/data-p6-20261018/ (upper + rom tars, SHA256SUMS);
+  box /workspace/mk20-backup/data-p6-20261018/ (vendor files + rom tar).
+  - KeyboardDevice 25d8a404…  appLunch.sh a52a7938…  setusbconfig 0ad94f70…  qt_env.sh ad412634…
+
+**Rescue tier is outside the releases.** The stub always starts a fixed, separately sha-checked rescue watcher
+first. That watcher handles job.sh, cmd-reboot, cmd-rollback, cmd-no-release, plus hardreset.sh. Only then is the
+release launched in the background. A bad release, or both releases bad, never removes remote recovery. The stub
+does no more foreground work than v1 (qt_app1 waits on it).
+
+**Pointers / state machine.**
+- Pointers: two slots (A/B) on ext4. Each holds generation, version, MANIFEST sha256 and a self-checksum. Write
+  and fsync the inactive slot; boot picks the highest valid generation. Strict semver regex; no paths.
+- Install steps: verify the tarball against the host-pinned sha256 (MANIFEST digest trusted only via that pin;
+  signing before any second unit), then every file, then rename `.incoming-<v>` -> `<v>`, fsync, switch the slot.
+  - Never install over `current` or `good`. Refuse an install while one is pending.
+  - Clean stale `.incoming-*` at boot.
+- States: pending -> (stub increments and flushes the attempt counter BEFORE launch) -> self-test -> confirmed
+  (= `good`) | rolled-back.
+  - Rollback target is `good` (last confirmed), not `previous`.
+  - No pass by 600 s uptime counts as a fail.
+  - At most ONE automatic reset per pending install, recorded before it fires. If `good` also fails: stay on stock
+    ACM+KD+adb with the rescue watcher. No reset loop.
+- Fail vs degraded: rollback only on host-independent checks (exactly 1 KD, mk20d alive, UDC bound, ttyGS0/bridge
+  present, procd watchdog armed). No host / Mac asleep / composite flap-rollback = "degraded", not "failed". Host
+  confirmation (KD request over TCP) upgrades probation to "confirmed+host" when available.
+
+**Resets and kernel writes exclude each other.**
+- A /tmp lock is held by kernel writers (bootswap/postswap dd). Every reset path (cmd-reboot, auto-rollback,
+  hardreset) waits for it.
+- Only one pending item (kernel OR userland) at a time.
+- bootswap/postswap use hardreset.sh instead of reboot / reboot -f (both hit the PSCI hang).
+- hardreset.sh: stop FAT writers, `sync`, `mount -o remount,ro /mnt/SDCARD`, then stop the watchdog pings.
+  It refuses (and logs "needs power-cycle") if the procd watchdog is not armed, because sysrq-b goes through the
+  same hanging PSCI path.
+- Watcher job timeout must kill the whole job (process group/pid list), and gadget transitions must be bounded.
+
+**Compatibility set.** An exact full-p4 sha256 allow-list, recorded once at boot (uname is #221 for all three),
+maps each kernel to its features:
+- stock 9ac68ed9: ACM + adb
+- ep3 (sha in kernel/ inventory): no HID
+- ep5out 7326d9e5: full composite
+An unknown kernel gets no USB changes at all. KD shims enable only when the vendor hashes above match (fail
+closed). MTU 478 is set before `usb0 up` and reported by health (over-MTU test). Health reads /dev/kmsg, never
+`dmesg`, because KD's `dmesg -c` empties the ring.
+
+**Config.** mk20.conf is parsed against a key whitelist, never sourced.
+
+**Network/security.**
+- ECM default subnet 172.30.250.0/24 (device .2, Mac .1). Both reviewers reject 172.31/16 (AWS default VPC).
+- GPT preferred link-local-only. Rejected as default: macOS routes 169.254/16 via the primary interface only, and
+  Screen Sharing (VNC milestone) cannot be interface-bound. Link-local 169.254.7.2 stays as the rescue/discovery
+  alias.
+- Host preflight falls back to link-local if an existing route of /24 or narrower overlaps.
+- 10.20.0.2 alias kept only until the daemon update ships, then removed.
+- Bridge and status port bind to usb0 addresses only (today 0.0.0.0:17890, an unauthenticated KD/root path if
+  Wi-Fi is ever up).
+- Re-check mihomo for 172.30/16 (excluded via 172.16.0.0/12) with `route -n get`, TUN on.
+- Later units: MACs derived from the SoC SID; per-unit /24.
+
+**Added acceptance tests.**
+- Power-cut (hardreset) injection at every install/pointer/counter step, ≥20 cycles. Pass = working release, or
+  stock with a live rescue watcher; `fsck_msdos -n` clean after a TF pull.
+- Corrupt/empty/`../` pointer, missing MANIFEST, corrupt .ko/bridge/gadget, full FAT, both releases bad (cmd-ping
+  still answers).
+- Each release on all 3 kernels; postswap revert while an install is pending; forced failure on current AND good
+  -> at most one reset.
+- Intentional SET_IDLE/SET_REPORT -> no usbc0 reload. Then rollback -> no bind mounts, stock setusbconfig works,
+  exactly 1 KD (proven manually 16:21 with gadget v3.5).
+- Host events: Mac sleep/wake ×10, Mac reboot, replug, other port/hub, charger-only power. None may cause a false
+  rollback (decide: a USB suspend is not a flap).
+- 10 consecutive WDT boots; 24 h soak (TCP+ADB+HID, KD restarts, log rotation) with bounded memory and FAT usage.
+- Migration from the ad-hoc v3.5 layout disables the old boot-every jobs in the same switch. Uninstall returns the
+  device to stock.
+
+**Milestone order (v0.2).**
+| M | Deliverable |
+|---|---|
+| M0 | Plan + 2 reviews (done) |
+| M0.5 | Baseline hashes + /data backup (done); kernel/ inventory on ext4; rehearsed TF restore (USER: TF pull); reset/kernel-write lock; hardreset remount-ro + watchdog-armed guard; bootswap/postswap -> hardreset |
+| M1 | Box test harness (fake sysfs/configfs, mocked busybox, fault injection) + shellcheck, THEN stub v2 + rescue tier + release layout + A/B pointers + MANIFEST + build tool |
+| M2 | mk20d entry point, health/self-test (kmsg), structured logs + rotation, whitelisted config, vendor hash gates, bridge bind usb0 |
+| M3 | Installer/updater + state machine + auto rollback, with power-cut injection |
+| M4 | Subnet switch to 172.30.250.0/24 shipped as 1.1.0 THROUGH the installer (real upgrade/rollback exercise) + Mac/daemon update |
+| M5 | Docs: RELEASE / INSTALL / RECOVERY + kernel/<sha>/RECOVERY.txt |
+| M6 | `make test` wiring everything (box) |
+| M7 | Hardware acceptance (2 runs) + host events + soak; then VNC milestone |
