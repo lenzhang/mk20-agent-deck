@@ -125,3 +125,21 @@
 - Implementation: remote/hardreset.sh (sync; ubus watchdog stop; HW WDT reset <=16 s; fallback after 30 s sysrq s,u,b).
   watcher.sh cmd-reboot now calls it (reboot only as last resort) => `mk20ctl reboot` uses it from the next boot
   (running watcher is a /tmp copy). Deployed to SD: watcher fd24a6cf…, hardreset ce61e3df…; backup watcher.sh.bak-pre-hardreset.
+
+## 15:37-15:45 SGT: WDT hard reset PROVEN, ep5out confirmed, full composite flaps -> rolled back
+- hardreset.sh via watcher job at uptime 6322.7 (procd WDT pings stopped) -> USB dropped 15:38:02, ACM back 15:38:36
+  (34 s after drop), getInfo V2.32 OK. Clean cold-like boot (uptime restarted, postswap ran). `mk20ctl reboot` uses it
+  from now on (new watcher active since this boot).
+- ep5out kernel confirmed by host at uptime 52 (status patched-confirmed), p4 = 7326d9e5…; device baseline updated
+  (/data/mk20/boot-baseline.img = ep5out; previous ep3 kept as boot-baseline-ep3.img). Backups: Mac
+  ~/mk20-backup/tf/patched-ep5out/, box /workspace/mk20-backup/tf/patched-ep5out/. mk20-no-bootevery removed (adb at boot).
+- Full composite (ECM+HID+ADB+bridge) bound OK (links ecm.usb0 hid.usb0 ffs.adb, /dev/hidg0, usb0 mtu 478).
+  HID works: absolute pointer report moved the Mac cursor exactly +6,+6 px; shift tap written OK. Confirmed at uptime 202.
+- BUT the link flapped from the first second: Mac log shows "terminateDevice … hardware connection lost" every ~3 s
+  (device-side disconnect), alternating enumerations, transaction errors on 0x81/0x82/0x84 then ep0/0x83, ep0 stalls.
+  Device dmesg: sunxi usb manager `rmmod_device_driver`/`insmod_device_driver` (+ "get power supply failed") per cycle;
+  something clears dmesg so only the last cycle survives. en13 never got IPv4 (DHCP/linklocal never settled) -> ECM ping
+  and TCP bridge untested. The no-HID composite (ECM+ADB) was stable >1 h, so the HID function (ep4 INT IN and/or
+  patched ep5out INT OUT) is the prime suspect.
+- Rolled back via --rollback at uptime 367: FAILSAFE done, ACM+KD up, adb re-added by keepalive, getInfo OK, no flaps.
+- Logs: deck/logs-mac-usb-flap-20261018-1540.txt, deck/logs-dm-flap-20261018-1543.txt.

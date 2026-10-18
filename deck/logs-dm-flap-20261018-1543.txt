@@ -1,0 +1,28 @@
+[  345.753886] 
+[  345.753886] rmmod_device_driver
+[  345.753886] 
+[  345.753913] rmmod_device_driver()222 WARN: get power supply failed
+[  345.754172] android_work: sent uevent USB_STATE=DISCONNECTED
+[  345.755278] 
+[  345.755278] insmod_device_driver
+[  345.755278] 
+[  345.917433] sunxi_set_cur_vol_work()397 WARN: get power supply failed
+[  345.980027] android_work: sent uevent USB_STATE=CONNECTED
+[  345.989447] configfs-gadget gadget: high-speed config #1: c
+[  345.989744] android_work: sent uevent USB_STATE=CONFIGURED
+[  345.990713] android_work: sent uevent USB_STATE=DISCONNECTED
+[  345.991458] regulator-dummy: Underflow of regulator enable count
+[  345.991719] read descriptors
+[  345.991742] read strings
+[  346.351096] sunxi_set_cur_vol_work()397 WARN: get power supply failed
+[  346.407540] android_work: sent uevent USB_STATE=CONNECTED
+[  346.417244] configfs-gadget gadget: high-speed config #1: c
+[  346.417533] android_work: sent uevent USB_STATE=CONFIGURED
+[  346.435009] ERR: Operation not supported
+[  346.435077] handle_ep0: ep0 setup end
+[  346.440116] IPv6: ADDRCONF(NETDEV_CHANGE): usb0: link becomes ready
+[  346.444782] handle_ep0: ep0 setup end
+[  346.499281] handle_ep0: ep0 setup end
+[  346.500039] handle_ep0: ep0 setup end
+[  346.500431] handle_ep0: ep0 setup end
+[  346.531328] handle_ep0: ep0 setup end
