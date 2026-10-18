@@ -38,17 +38,8 @@ if [ "${1:-}" != --run ] && [ "${1:-}" != --rollback-now ]; then
   echo "queued to watcher"; exit 0
 fi
 
-# ---- preflight (nothing touched yet) ----
-UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
-[ -n "$UDC" ] || { log "ABORT no udc"; exit 1; }
-[ -d $G ] && [ -d $C ] || { log "ABORT no g1 (KD has not configured USB yet)"; exit 1; }
-[ "${1:-}" = --rollback-now ] || [ -x $BR ] || { log "ABORT $BR missing: KD would lose ttyGS0 (black screens)"; exit 1; }
-[ -x /bin/adbd ] || { log "ABORT no /bin/adbd"; exit 1; }
-grep -q '^usb_f_ecm ' /proc/modules || [ -f $ECMKO ] || { log "ABORT no $ECMKO"; exit 1; }
 KDSVC=/etc/init.d/qt_app2   # procd service (CMD=/data/appLunch.sh). NOT qt_app1 (plain sh, kills adbd)
 [ -x $KDSVC ] || KDSVC=""
-log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
-
 udc_now() { cat $G/UDC 2>/dev/null; }
 kd_start() { if [ -n "$KDSVC" ]; then $KDSVC start >>"$LOG" 2>&1; fi; sleep 3
   pgrep -f KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 ) & }; }
@@ -68,8 +59,19 @@ cleanup() {
   kd_start
   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
 }
+# rollback runs before any preflight so an abnormal state cannot block it
+if [ "${1:-}" = --rollback-now ]; then log "rollback requested"; trap cleanup EXIT; exit 1; fi
+
+# ---- preflight (nothing touched yet) ----
+UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+[ -n "$UDC" ] || { log "ABORT no udc"; exit 1; }
+[ -d $G ] && [ -d $C ] || { log "ABORT no g1 (KD has not configured USB yet)"; exit 1; }
+[ "${1:-}" = --rollback-now ] || [ -x $BR ] || { log "ABORT $BR missing: KD would lose ttyGS0 (black screens)"; exit 1; }
+[ -x /bin/adbd ] || { log "ABORT no /bin/adbd"; exit 1; }
+grep -q '^usb_f_ecm ' /proc/modules || [ -f $ECMKO ] || { log "ABORT no $ECMKO"; exit 1; }
+log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
+
 trap cleanup EXIT
-if [ "${1:-}" = --rollback-now ]; then log "rollback requested (no host confirm)"; KDSVC=${KDSVC:-/etc/init.d/qt_app2}; exit 1; fi
 trap 'exit 1' INT TERM
 trap '' HUP
 die() { log "FAIL $*"; exit 1; }
@@ -125,12 +127,14 @@ printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n'
 mount --bind /tmp/setusbconfig-noop /data/setusbconfig || die "shadow setusbconfig"
 kd_start
 pgrep -f KeyboardDevice >/dev/null || die "KD not running"
+rm -f /mnt/SDCARD/mk20-composite-ok
 OK=1
 log "OK UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=192.168.7.2 kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
-echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status
 # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
 # within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
-rm -f /mnt/SDCARD/mk20-composite-ok; ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh
+ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh)" ] || { OK=0; die "cannot stage rollback copy"; }
 ( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; sleep 2; i=\$((i+1)); done; sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 9>&- ) &
-log "confirm window 180s started (pid $!)"
+WP=$!; sleep 1; kill -0 $WP 2>/dev/null || { OK=0; die "confirm waiter did not start -> rollback now"; }
+log "confirm window 180s started (pid $WP)"
+echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status
 exit 0
