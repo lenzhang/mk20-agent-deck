@@ -95,3 +95,19 @@
   - The bridge drops data instead of blocking when the client is slow.
 - postswap re-arms itself in boot-once until the swap is confirmed or reverted (a power cycle no longer
   disarms it). bootswap now refuses to run without postswap-check.sh.
+
+## 14:44 first composite run (no-HID: ECM + ADB + KD over the PTY<->TCP bridge) on the ep3 kernel: OK, confirmed
+- gadget v3 queued via the watcher. Links: ecm.usb0 + ffs.adb (no ACM). KD restarted on /dev/ttyGS0, a
+  symlink to /dev/pts/0. setusbconfig is shadowed. MTU is 478.
+- Mac en13 169.254.x.x <-> device 169.254.7.2: ping 0 % loss. `mk20ctl info` over TCP (deck/tools/en-relay.py
+  binds to en13, then mk20ctl-url.py with socket://127.0.0.1:17891) returned V2.32. SHOW_JPG
+  ("ECM+TCP 网络通道 OK") was ACKed by the device. adb works alongside. Confirmed with mk20-composite-ok.
+- Both composite reviews (deck/reviews/composite-*.md): (c) no-HID GO. GPT's (a) was conditional
+  (noreboot + independent verification), Opus's (a) was GO-with-conditions. Both say (b) the full
+  composite is NO-GO until the swap is confirmed and the no-HID run has passed.
+
+## 14:47 second swap written live (bootswap job, noreboot): boot-221-ep3int-ep5out.img
+- readback 1fc8525a…; full p4 = 7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc.
+  Stock copies kept; the baseline (ep3) is backed up at /data/mk20/boot-baseline.img + Mac + box.
+- postswap (re-arming) is staged in boot-once. mk20-no-bootevery is set for the first boot. The status
+  is "ok-power-cycle-now". On failure, or with no confirmation in 600 s, it auto-reverts to **stock**.
