@@ -161,3 +161,22 @@ def test_unkillable_setup_tree_escalates_rc3(dev, tmp_path):
     finally:
         p = _pid(tmp_path, "hung-setusbconfig.sh")
         p and subprocess.run(["kill", "-9", str(p)])
+
+
+def test_failed_setup_unverified_escalates_and_keeps_rc1(dev, tmp_path):
+    """Opus r8 BLOCKER: escalate()'s own bounded_wait must not overwrite the setup rc (was: exit 0 after a failed setup)."""
+    s = harness(tmp_path, setup_rc=1)
+    s.write_text(s.read_text().replace("touch $T/c/acm.usb0;", ":;"))   # failsafe never reaches stock
+    r = dev.run(s, env=ENV(tmp_path, **{"MK20_SETUP_TIMEOUT": "60"}), timeout=120)
+    assert r.returncode == 1 and "fell-through" not in r.stdout
+    assert (tmp_path / "flag").exists() and (tmp_path / "reboot").exists()
+    assert (tmp_path / "status").read_text().strip() == "setup-failsafe-NOT-verified"   # written last, on success
+    assert not (tmp_path / "mk20/gadget.busy").exists() and _mutex_free(dev, tmp_path)
+
+
+def test_escalate_preserves_bw_rc_and_writes_status_last():
+    e = G[G.index("escalate() {"):]
+    e = e[:e.index("\n}\n")]
+    assert "ebrc=${BW_RC:-1}" in e and "BW_RC=$ebrc" in e
+    assert e.index('touch "$EOKF"') < e.index("sync")            # success marked before sync
+    assert e.index("rb_status") > e.index("bounded_wait")        # status only after the flags are known
