@@ -1,0 +1,942 @@
+00:02:17.340740  write  F=53  B=0x2a  0.000015  ScreenKeyMacOS.682858
+00:02:17.341413  read  F=53  B=0x26  0.000007  ScreenKeyMacOS.682858
+00:02:17.950469  write  F=53  B=0x2a  0.000013  ScreenKeyMacOS.682858
+00:02:17.951464  read  F=53  B=0x26  0.000007  ScreenKeyMacOS.682858
+00:02:18.541091  write  F=53  B=0x2a  0.000008  ScreenKeyMacOS.682858
+00:02:18.541986  read  F=53  B=0x26  0.000006  ScreenKeyMacOS.682858
+00:02:18.733625  close  F=41  0.000003  ScreenKeyMacOS.682679
+00:02:18.735194  fcntl  F=41  <SETFD>  0.000001  ScreenKeyMacOS.682679
+00:02:18.735194  fcntl  F=41  <GETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:18.735195  fcntl  F=41  <SETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:19.141136  write  F=53  B=0x2a  0.000009  ScreenKeyMacOS.682858
+00:02:19.142007  read  F=53  B=0x26  0.000005  ScreenKeyMacOS.682858
+00:02:19.730446  write  F=53  B=0x2a  0.000013  ScreenKeyMacOS.682858
+00:02:19.731110  read  F=53  B=0x26  0.000006  ScreenKeyMacOS.682858
+00:02:20.351160  write  F=53  B=0x2a  0.000013  ScreenKeyMacOS.682858
+00:02:20.351914  read  F=53  B=0x26  0.000045  ScreenKeyMacOS.682858
+00:02:20.822874  close  F=42  0.000003  ScreenKeyMacOS.682835
+00:02:20.822917  open  F=42  (R______________)  private/etc/hosts  0.000034  ScreenKeyMacOS.682835
+00:02:20.822936  fstat64  F=42  0.000002  ScreenKeyMacOS.682835
+00:02:20.822945  read  F=42  B=0xef  0.000005  ScreenKeyMacOS.682835
+00:02:20.822955  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682835
+00:02:20.822957  close  F=42  0.000001  ScreenKeyMacOS.682835
+00:02:20.822971  open  F=42  (R______________)  private/etc/hosts  0.000010  ScreenKeyMacOS.682835
+00:02:20.822973  fstat64  F=42  0.000001  ScreenKeyMacOS.682835
+00:02:20.822974  read  F=42  B=0xef  0.000001  ScreenKeyMacOS.682835
+00:02:20.822979  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682835
+00:02:20.822980  close  F=42  0.000001  ScreenKeyMacOS.682835
+00:02:20.920352  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000068  ScreenKeyMacOS.682679
+00:02:20.920355  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:20.920357  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.920359  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.920370  read  F=42  B=0x25c2  0.000007  ScreenKeyMacOS.682679
+00:02:20.920370  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:20.920375  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:20.920508  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000012  ScreenKeyMacOS.682679
+00:02:20.920509  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.920510  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.920511  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.920513  read  F=42  B=0x25c2  0.000002  ScreenKeyMacOS.682679
+00:02:20.920513  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:20.920515  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921111  write  F=53  B=0x2a  0.000011  ScreenKeyMacOS.682858
+00:02:20.921252  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000026  ScreenKeyMacOS.682679
+00:02:20.921253  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921284  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921286  read  F=42  B=0x339  0.000002  ScreenKeyMacOS.682679
+00:02:20.921287  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:20.921302  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:20.921304  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:20.921520  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921521  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921522  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921523  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921533  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:20.921581  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000013  ScreenKeyMacOS.682679
+00:02:20.921581  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921589  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921591  read  F=42  B=0x339  0.000002  ScreenKeyMacOS.682679
+00:02:20.921592  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:20.921594  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:20.921595  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:20.921771  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921771  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921772  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921773  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921784  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921839  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_3.png  0.000022  ScreenKeyMacOS.682679
+00:02:20.921840  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921847  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.921850  read  F=42  B=0x26e6  0.000003  ScreenKeyMacOS.682679
+00:02:20.921850  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:20.921852  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:20.921853  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:20.921857  read  F=53  B=0x26  0.000005  ScreenKeyMacOS.682858
+00:02:20.922193  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.922194  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.922194  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.922195  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:20.922202  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:21.027592  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_4.png  0.000056  ScreenKeyMacOS.682679
+00:02:21.027594  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:21.027621  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.027638  read  F=42  B=0x262d  0.000009  ScreenKeyMacOS.682679
+00:02:21.027638  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.027648  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:21.027652  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.028017  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.028017  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.028019  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.028019  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.028033  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:21.131772  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_2.png  0.000056  ScreenKeyMacOS.682679
+00:02:21.131775  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:21.131802  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.131818  read  F=42  B=0x30d  0.000005  ScreenKeyMacOS.682679
+00:02:21.131819  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.131830  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000004  ScreenKeyMacOS.682679
+00:02:21.131833  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.132035  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132036  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132037  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132040  fstat64  F=42  0.000004  ScreenKeyMacOS.682679
+00:02:21.132054  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:21.132112  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_2.png  0.000014  ScreenKeyMacOS.682679
+00:02:21.132113  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132120  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132124  read  F=42  B=0x30d  0.000004  ScreenKeyMacOS.682679
+00:02:21.132125  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.132126  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.132127  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.132320  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132321  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132322  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132322  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132330  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132374  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_5.png  0.000021  ScreenKeyMacOS.682679
+00:02:21.132375  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132382  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132391  read  F=42  B=0x23c4  0.000009  ScreenKeyMacOS.682679
+00:02:21.132391  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.132393  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.132394  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.132702  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132703  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132704  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132704  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.132709  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.231963  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_6.png  0.000056  ScreenKeyMacOS.682679
+00:02:21.231965  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:21.231991  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.232004  read  F=42  B=0x240c  0.000009  ScreenKeyMacOS.682679
+00:02:21.232004  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.232014  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:21.232020  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000004  ScreenKeyMacOS.682679
+00:02:21.232354  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.232355  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.232356  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.232357  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.232369  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:21.331766  fcntl  F=42  <SETFD>  0.000002  ScreenKeyMacOS.682679
+00:02:21.344106  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.530491  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000077  ScreenKeyMacOS.682679
+00:02:21.530494  fstat64  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:21.530496  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.530498  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.530513  read  F=42  B=0x25c2  0.000008  ScreenKeyMacOS.682679
+00:02:21.530513  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.530519  close  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:21.530675  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000012  ScreenKeyMacOS.682679
+00:02:21.530676  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.530676  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.530677  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.530679  read  F=42  B=0x25c2  0.000002  ScreenKeyMacOS.682679
+00:02:21.530680  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.530682  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531314  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_3.png  0.000027  ScreenKeyMacOS.682679
+00:02:21.531315  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531350  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531352  read  F=42  B=0x335  0.000002  ScreenKeyMacOS.682679
+00:02:21.531353  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.531370  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:21.531373  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.531600  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531601  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531602  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531603  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531613  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:21.531667  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_3.png  0.000013  ScreenKeyMacOS.682679
+00:02:21.531668  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531675  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531676  read  F=42  B=0x335  0.000002  ScreenKeyMacOS.682679
+00:02:21.531677  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.531679  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.531680  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.531859  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531859  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531860  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531861  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531865  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531916  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_7.png  0.000021  ScreenKeyMacOS.682679
+00:02:21.531917  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531924  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.531926  read  F=42  B=0x23ad  0.000002  ScreenKeyMacOS.682679
+00:02:21.531927  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.531928  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.531930  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.532272  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.532273  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.532274  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.532274  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.532279  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.540999  write  F=53  B=0x2a  0.000013  ScreenKeyMacOS.682858
+00:02:21.541833  read  F=53  B=0x26  0.000006  ScreenKeyMacOS.682858
+00:02:21.632913  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_8.png  0.000056  ScreenKeyMacOS.682679
+00:02:21.632915  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:21.632946  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.632965  read  F=42  B=0x2392  0.000009  ScreenKeyMacOS.682679
+00:02:21.632965  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.632975  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:21.632981  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.633365  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.633366  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.633367  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.633367  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.633383  close  F=42  0.000006  ScreenKeyMacOS.682679
+00:02:21.732442  fcntl  F=42  <SETFD>  0.000003  ScreenKeyMacOS.682679
+00:02:21.732442  fcntl  F=42  <GETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:21.732444  fcntl  F=42  <SETFL>  0.000002  ScreenKeyMacOS.682679
+00:02:21.734953  fcntl  F=41  <SETFD>  0.000001  ScreenKeyMacOS.682679
+00:02:21.734953  fcntl  F=41  <GETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:21.734954  fcntl  F=41  <SETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:21.831897  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_10.png  0.000051  ScreenKeyMacOS.682679
+00:02:21.831899  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:21.831926  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.833259  read  F=42  B=0x22eb  0.001330  ScreenKeyMacOS.682679
+00:02:21.833261  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:21.833271  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:21.833275  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:21.833604  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.833604  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.833605  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.833606  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:21.833623  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:21.933068  fcntl  F=42  <SETFD>  0.000002  ScreenKeyMacOS.682679
+00:02:21.945962  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.130420  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000073  ScreenKeyMacOS.682679
+00:02:22.130423  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.130425  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.130427  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.130446  read  F=42  B=0x25c2  0.000009  ScreenKeyMacOS.682679
+00:02:22.130446  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.130455  close  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:22.130607  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000012  ScreenKeyMacOS.682679
+00:02:22.130608  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.130609  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.130610  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.130613  read  F=42  B=0x25c2  0.000003  ScreenKeyMacOS.682679
+00:02:22.130614  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.130616  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131267  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000025  ScreenKeyMacOS.682679
+00:02:22.131268  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131300  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131303  read  F=42  B=0x339  0.000002  ScreenKeyMacOS.682679
+00:02:22.131303  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.131319  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:22.131322  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.131525  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131525  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131526  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131527  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131541  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.131590  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000013  ScreenKeyMacOS.682679
+00:02:22.131591  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131598  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131600  read  F=42  B=0x339  0.000001  ScreenKeyMacOS.682679
+00:02:22.131600  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.131602  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.131603  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.131774  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131775  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131775  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131776  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131780  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131834  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_11.png  0.000021  ScreenKeyMacOS.682679
+00:02:22.131835  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131841  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.131843  read  F=42  B=0x2383  0.000002  ScreenKeyMacOS.682679
+00:02:22.131844  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.131845  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.131847  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.132150  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.132150  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.132151  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.132152  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.132156  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.140652  write  F=53  B=0x2a  0.000013  ScreenKeyMacOS.682858
+00:02:22.141334  read  F=53  B=0x26  0.000006  ScreenKeyMacOS.682858
+00:02:22.233387  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_0.png  0.000060  ScreenKeyMacOS.682679
+00:02:22.233389  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.233412  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.233421  read  F=42  B=0x235c  0.000006  ScreenKeyMacOS.682679
+00:02:22.233422  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.233432  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.233435  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.233768  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.233768  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.233769  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.233770  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.233785  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:22.332044  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_2.png  0.000050  ScreenKeyMacOS.682679
+00:02:22.332046  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.332069  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332081  read  F=42  B=0x30d  0.000004  ScreenKeyMacOS.682679
+00:02:22.332082  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.332091  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:22.332094  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.332280  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332280  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332281  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332282  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332296  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:22.332342  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_2.png  0.000014  ScreenKeyMacOS.682679
+00:02:22.332343  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332349  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332351  read  F=42  B=0x30d  0.000002  ScreenKeyMacOS.682679
+00:02:22.332352  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.332353  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.332354  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.332530  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332531  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332531  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332532  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332536  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332580  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_1.png  0.000021  ScreenKeyMacOS.682679
+00:02:22.332581  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332588  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332594  read  F=42  B=0x231a  0.000006  ScreenKeyMacOS.682679
+00:02:22.332595  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.332596  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.332597  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.332913  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332914  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332914  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332915  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.332919  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.431900  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_2.png  0.000060  ScreenKeyMacOS.682679
+00:02:22.431903  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.431931  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.431944  read  F=42  B=0x2534  0.000007  ScreenKeyMacOS.682679
+00:02:22.431944  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.431953  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:22.431956  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.432296  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.432296  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.432297  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.432298  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.432311  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:22.532111  fcntl  F=42  <SETFD>  0.000002  ScreenKeyMacOS.682679
+00:02:22.545093  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.734386  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000068  ScreenKeyMacOS.682679
+00:02:22.734388  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.734391  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.734393  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.734429  read  F=42  B=0x25c3  0.000008  ScreenKeyMacOS.682679
+00:02:22.734430  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.734443  close  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:22.734634  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000034  ScreenKeyMacOS.682679
+00:02:22.734636  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.734638  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.734639  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.734653  read  F=42  B=0x25c3  0.000004  ScreenKeyMacOS.682679
+00:02:22.734654  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.734657  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735296  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_3.png  0.000028  ScreenKeyMacOS.682679
+00:02:22.735297  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735331  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735335  read  F=42  B=0x335  0.000002  ScreenKeyMacOS.682679
+00:02:22.735336  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.735351  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:22.735354  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.735557  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735557  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735558  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735559  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735573  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.735626  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_3.png  0.000013  ScreenKeyMacOS.682679
+00:02:22.735627  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735634  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735636  read  F=42  B=0x335  0.000001  ScreenKeyMacOS.682679
+00:02:22.735636  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.735638  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.735639  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.735815  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735816  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735817  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735817  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735822  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735875  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_3.png  0.000021  ScreenKeyMacOS.682679
+00:02:22.735877  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735883  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.735888  read  F=42  B=0x26e6  0.000004  ScreenKeyMacOS.682679
+00:02:22.735889  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.735890  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.735891  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.736221  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.736222  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.736223  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.736223  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.736227  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.740502  write  F=53  B=0x2a  0.000009  ScreenKeyMacOS.682858
+00:02:22.741208  read  F=53  B=0x26  0.000007  ScreenKeyMacOS.682858
+00:02:22.833655  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_4.png  0.000063  ScreenKeyMacOS.682679
+00:02:22.833658  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.833688  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.833717  read  F=42  B=0x262d  0.000014  ScreenKeyMacOS.682679
+00:02:22.833718  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.833728  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:22.833732  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.834130  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.834130  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.834131  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.834132  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.834147  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:22.932289  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_0.png  0.000057  ScreenKeyMacOS.682679
+00:02:22.932291  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:22.932315  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932323  read  F=42  B=0x30d  0.000005  ScreenKeyMacOS.682679
+00:02:22.932324  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.932334  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:22.932337  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.932542  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932543  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932544  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932544  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932558  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:22.932602  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_0.png  0.000013  ScreenKeyMacOS.682679
+00:02:22.932603  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932610  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932616  read  F=42  B=0x30d  0.000006  ScreenKeyMacOS.682679
+00:02:22.932616  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.932618  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.932619  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.932789  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932790  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932790  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932791  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932795  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932839  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_5.png  0.000021  ScreenKeyMacOS.682679
+00:02:22.932840  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932846  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.932849  read  F=42  B=0x23c4  0.000003  ScreenKeyMacOS.682679
+00:02:22.932850  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:22.932851  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.932852  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:22.933165  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.933166  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.933166  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.933167  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:22.933171  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.033722  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_6.png  0.000057  ScreenKeyMacOS.682679
+00:02:23.033724  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.033750  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.033770  read  F=42  B=0x240c  0.000010  ScreenKeyMacOS.682679
+00:02:23.033770  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.033784  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:23.033788  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.034134  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.034135  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.034136  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.034137  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.034151  close  F=42  0.000006  ScreenKeyMacOS.682679
+00:02:23.132319  fcntl  F=42  <SETFD>  0.000002  ScreenKeyMacOS.682679
+00:02:23.145546  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.335828  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000069  ScreenKeyMacOS.682679
+00:02:23.335831  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.335833  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.335835  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.335847  read  F=42  B=0x25c3  0.000006  ScreenKeyMacOS.682679
+00:02:23.335848  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.335855  close  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:23.336031  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000012  ScreenKeyMacOS.682679
+00:02:23.336032  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.336033  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.336034  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.336036  read  F=42  B=0x25c3  0.000002  ScreenKeyMacOS.682679
+00:02:23.336037  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.336039  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.336716  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000027  ScreenKeyMacOS.682679
+00:02:23.336718  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.336754  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.336757  read  F=42  B=0x339  0.000002  ScreenKeyMacOS.682679
+00:02:23.336758  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.336776  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:23.336779  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.337001  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337002  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337003  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337003  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337019  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.337076  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000013  ScreenKeyMacOS.682679
+00:02:23.337077  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337084  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337086  read  F=42  B=0x339  0.000002  ScreenKeyMacOS.682679
+00:02:23.337086  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.337088  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.337089  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.337266  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337267  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337268  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337268  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337279  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337334  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_7.png  0.000021  ScreenKeyMacOS.682679
+00:02:23.337335  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337342  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337345  read  F=42  B=0x23ad  0.000002  ScreenKeyMacOS.682679
+00:02:23.337345  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.337346  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.337348  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.337704  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337705  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337705  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337706  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.337718  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.341181  write  F=53  B=0x2a  0.000011  ScreenKeyMacOS.682858
+00:02:23.341937  read  F=53  B=0x26  0.000007  ScreenKeyMacOS.682858
+00:02:23.433568  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_8.png  0.000056  ScreenKeyMacOS.682679
+00:02:23.433570  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.433599  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.433609  read  F=42  B=0x2392  0.000006  ScreenKeyMacOS.682679
+00:02:23.433610  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.433622  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:23.433625  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.433977  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.433977  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.433978  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.433979  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.433996  close  F=42  0.000004  ScreenKeyMacOS.682679
+00:02:23.532471  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_2.png  0.000065  ScreenKeyMacOS.682679
+00:02:23.532473  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.532506  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.532523  read  F=42  B=0x30d  0.000009  ScreenKeyMacOS.682679
+00:02:23.532527  read  F=42  B=0x0  0.000004  ScreenKeyMacOS.682679
+00:02:23.532537  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000003  ScreenKeyMacOS.682679
+00:02:23.532541  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.532736  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.532737  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.532738  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.532738  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.532752  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:23.532799  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_2.png  0.000013  ScreenKeyMacOS.682679
+00:02:23.532800  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.532807  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.532816  read  F=42  B=0x30d  0.000002  ScreenKeyMacOS.682679
+00:02:23.532816  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.532818  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.532819  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.533003  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533003  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533004  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533005  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533009  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533054  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_9.png  0.000021  ScreenKeyMacOS.682679
+00:02:23.533055  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533061  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533068  read  F=42  B=0x23a0  0.000006  ScreenKeyMacOS.682679
+00:02:23.533068  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.533070  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.533071  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.533406  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533407  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533408  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533408  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.533413  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.632447  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_10.png  0.000051  ScreenKeyMacOS.682679
+00:02:23.632449  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.632474  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.632485  read  F=42  B=0x22eb  0.000007  ScreenKeyMacOS.682679
+00:02:23.632486  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.632495  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.632497  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.632815  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.632815  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.632816  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.632817  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.632835  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:23.732175  fcntl  F=42  <SETFD>  0.000002  ScreenKeyMacOS.682679
+00:02:23.745134  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.922746  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000065  ScreenKeyMacOS.682679
+00:02:23.922748  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.922751  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.922752  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.922769  read  F=42  B=0x25c3  0.000008  ScreenKeyMacOS.682679
+00:02:23.922769  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.922774  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.922925  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000011  ScreenKeyMacOS.682679
+00:02:23.922926  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.922927  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.922927  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.922930  read  F=42  B=0x25c3  0.000002  ScreenKeyMacOS.682679
+00:02:23.922930  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.922932  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.923664  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_3.png  0.000027  ScreenKeyMacOS.682679
+00:02:23.923665  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.923698  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.923700  read  F=42  B=0x335  0.000002  ScreenKeyMacOS.682679
+00:02:23.923701  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.923718  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:23.923722  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.923944  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.923945  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.923946  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.923946  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.923963  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.924016  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_3.png  0.000013  ScreenKeyMacOS.682679
+00:02:23.924017  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924025  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924027  read  F=42  B=0x335  0.000001  ScreenKeyMacOS.682679
+00:02:23.924027  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.924029  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.924030  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.924205  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924205  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924206  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924207  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924211  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924264  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_11.png  0.000021  ScreenKeyMacOS.682679
+00:02:23.924265  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924271  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924274  read  F=42  B=0x2383  0.000002  ScreenKeyMacOS.682679
+00:02:23.924274  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:23.924276  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.924277  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:23.924596  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924596  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924597  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924598  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:23.924604  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:23.931062  write  F=53  B=0x2a  0.000022  ScreenKeyMacOS.682858
+00:02:23.931721  read  F=53  B=0x26  0.000005  ScreenKeyMacOS.682858
+00:02:24.031417  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_0.png  0.000051  ScreenKeyMacOS.682679
+00:02:24.031419  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:24.031445  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.031460  read  F=42  B=0x235c  0.000006  ScreenKeyMacOS.682679
+00:02:24.031461  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.031471  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.031475  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.031846  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.031846  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.031847  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.031848  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.031861  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:24.132766  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_0.png  0.000052  ScreenKeyMacOS.682679
+00:02:24.132769  fstat64  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:24.132792  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.132800  read  F=42  B=0x30d  0.000006  ScreenKeyMacOS.682679
+00:02:24.132801  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.132810  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:24.132813  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.133028  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133029  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133030  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133030  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133043  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:24.133087  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_0.png  0.000013  ScreenKeyMacOS.682679
+00:02:24.133088  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133094  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133096  read  F=42  B=0x30d  0.000001  ScreenKeyMacOS.682679
+00:02:24.133097  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.133098  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.133099  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.133252  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133253  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133254  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133254  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133259  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133301  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_1.png  0.000021  ScreenKeyMacOS.682679
+00:02:24.133302  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133308  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133315  read  F=42  B=0x231a  0.000006  ScreenKeyMacOS.682679
+00:02:24.133316  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.133317  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.133318  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.133620  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133621  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133621  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133622  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.133627  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.232540  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_2.png  0.000058  ScreenKeyMacOS.682679
+00:02:24.232542  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:24.232565  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.232577  read  F=42  B=0x2534  0.000009  ScreenKeyMacOS.682679
+00:02:24.232578  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.232588  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:24.232590  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.232950  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.232951  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.232952  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.232953  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.232970  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:24.332412  fcntl  F=42  <SETFD>  0.000002  ScreenKeyMacOS.682679
+00:02:24.345449  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.529007  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000081  ScreenKeyMacOS.682679
+00:02:24.529010  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:24.529012  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.529015  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.529029  read  F=42  B=0x25c2  0.000006  ScreenKeyMacOS.682679
+00:02:24.529029  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.529036  close  F=42  0.000004  ScreenKeyMacOS.682679
+00:02:24.529295  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000037  ScreenKeyMacOS.682679
+00:02:24.529297  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:24.529299  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.529300  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.529320  read  F=42  B=0x25c2  0.000007  ScreenKeyMacOS.682679
+00:02:24.529320  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.529326  close  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:24.530039  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000032  ScreenKeyMacOS.682679
+00:02:24.530041  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530076  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530079  read  F=42  B=0x339  0.000002  ScreenKeyMacOS.682679
+00:02:24.530080  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.530096  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.530099  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.530316  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530316  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530317  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530318  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530332  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:24.530380  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000013  ScreenKeyMacOS.682679
+00:02:24.530381  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530388  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530390  read  F=42  B=0x339  0.000001  ScreenKeyMacOS.682679
+00:02:24.530390  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.530392  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.530393  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.530579  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530580  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530580  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530581  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530586  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:24.530640  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_3.png  0.000022  ScreenKeyMacOS.682679
+00:02:24.530642  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530648  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530651  read  F=42  B=0x26e6  0.000002  ScreenKeyMacOS.682679
+00:02:24.530651  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.530653  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.530654  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.530944  write  F=53  B=0x2a  0.000010  ScreenKeyMacOS.682858
+00:02:24.530983  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530983  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530984  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530985  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.530989  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.531961  read  F=53  B=0x26  0.000008  ScreenKeyMacOS.682858
+00:02:24.632199  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_4.png  0.000035  ScreenKeyMacOS.682679
+00:02:24.632201  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.632245  fstat64  F=42  0.000004  ScreenKeyMacOS.682679
+00:02:24.632261  read  F=42  B=0x262d  0.000006  ScreenKeyMacOS.682679
+00:02:24.632262  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.632272  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.632279  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.632682  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.632683  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.632684  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.632684  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.632697  close  F=42  0.000004  ScreenKeyMacOS.682679
+00:02:24.732443  fcntl  F=42  <SETFD>  0.000002  ScreenKeyMacOS.682679
+00:02:24.732443  fcntl  F=42  <GETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:24.732445  fcntl  F=42  <SETFL>  0.000002  ScreenKeyMacOS.682679
+00:02:24.735583  fcntl  F=41  <SETFD>  0.000001  ScreenKeyMacOS.682679
+00:02:24.735584  fcntl  F=41  <GETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:24.735585  fcntl  F=41  <SETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:24.832431  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_6.png  0.000054  ScreenKeyMacOS.682679
+00:02:24.832433  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:24.832464  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.832476  read  F=42  B=0x240c  0.000008  ScreenKeyMacOS.682679
+00:02:24.832476  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:24.832490  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:24.832493  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:24.832874  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.832875  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.832876  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.832877  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:24.832890  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:24.932160  fcntl  F=42  <SETFD>  0.000002  ScreenKeyMacOS.682679
+00:02:24.944922  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.132991  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000074  ScreenKeyMacOS.682679
+00:02:25.132993  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.132995  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.132997  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.133012  read  F=42  B=0x25c2  0.000008  ScreenKeyMacOS.682679
+00:02:25.133012  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.133019  close  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:25.133253  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000034  ScreenKeyMacOS.682679
+00:02:25.133255  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.133257  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.133258  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.133279  read  F=42  B=0x25c2  0.000006  ScreenKeyMacOS.682679
+00:02:25.133279  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.133286  close  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:25.134051  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_3.png  0.000033  ScreenKeyMacOS.682679
+00:02:25.134053  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.134086  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134089  read  F=42  B=0x335  0.000002  ScreenKeyMacOS.682679
+00:02:25.134089  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.134106  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:25.134109  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.134335  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134335  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134336  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134337  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134354  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.134409  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_3.png  0.000014  ScreenKeyMacOS.682679
+00:02:25.134410  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134418  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134419  read  F=42  B=0x335  0.000002  ScreenKeyMacOS.682679
+00:02:25.134420  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.134422  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.134423  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.134606  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134606  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134607  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134608  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134613  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.134670  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_7.png  0.000022  ScreenKeyMacOS.682679
+00:02:25.134672  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134678  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.134681  read  F=42  B=0x23ad  0.000003  ScreenKeyMacOS.682679
+00:02:25.134682  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.134683  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.134684  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.135026  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.135026  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.135027  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.135028  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.135032  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.140703  write  F=53  B=0x2a  0.000013  ScreenKeyMacOS.682858
+00:02:25.141385  read  F=53  B=0x26  0.000009  ScreenKeyMacOS.682858
+00:02:25.232588  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_8.png  0.000052  ScreenKeyMacOS.682679
+00:02:25.232591  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.232623  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.232642  read  F=42  B=0x2392  0.000008  ScreenKeyMacOS.682679
+00:02:25.232643  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.232652  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:25.232655  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.233037  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.233038  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.233039  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.233039  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.233052  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:25.332923  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_0.png  0.000051  ScreenKeyMacOS.682679
+00:02:25.332925  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.332948  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.332956  read  F=42  B=0x30d  0.000005  ScreenKeyMacOS.682679
+00:02:25.332957  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.332966  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:25.332968  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.333180  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333180  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333181  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333182  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333197  close  F=42  0.000005  ScreenKeyMacOS.682679
+00:02:25.333243  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_0.png  0.000014  ScreenKeyMacOS.682679
+00:02:25.333244  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333251  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333252  read  F=42  B=0x30d  0.000001  ScreenKeyMacOS.682679
+00:02:25.333253  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.333254  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.333255  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.333427  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333428  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333429  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333430  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333434  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.333478  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_9.png  0.000021  ScreenKeyMacOS.682679
+00:02:25.333479  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333485  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333489  read  F=42  B=0x23a0  0.000003  ScreenKeyMacOS.682679
+00:02:25.333489  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.333491  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.333492  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.333812  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333813  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333813  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333814  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.333819  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.432396  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_10.png  0.000053  ScreenKeyMacOS.682679
+00:02:25.432398  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.432423  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.432435  read  F=42  B=0x22eb  0.000009  ScreenKeyMacOS.682679
+00:02:25.432436  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.432445  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:25.432448  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.432804  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.432804  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.432805  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.432806  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.432824  close  F=42  0.000004  ScreenKeyMacOS.682679
+00:02:25.532076  fcntl  F=42  <SETFD>  0.000003  ScreenKeyMacOS.682679
+00:02:25.545287  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.729509  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000081  ScreenKeyMacOS.682679
+00:02:25.729511  fstat64  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.729514  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.729516  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.729532  read  F=42  B=0x25c2  0.000008  ScreenKeyMacOS.682679
+00:02:25.729533  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.729540  close  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:25.729695  open  F=42  (R__________X___)  /Users/dev/.config/btop/btop.json  0.000012  ScreenKeyMacOS.682679
+00:02:25.729696  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.729697  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.729698  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.729700  read  F=42  B=0x25c2  0.000002  ScreenKeyMacOS.682679
+00:02:25.729700  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.729702  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.730338  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000028  ScreenKeyMacOS.682679
+00:02:25.730339  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.730374  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.730377  read  F=42  B=0x339  0.000002  ScreenKeyMacOS.682679
+00:02:25.730378  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.730394  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000002  ScreenKeyMacOS.682679
+00:02:25.730397  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.730650  fstat64  F=42  0.000003  ScreenKeyMacOS.682679
+00:02:25.730651  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.730652  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.730653  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.730676  close  F=42  0.000004  ScreenKeyMacOS.682679
+00:02:25.730768  write  F=53  B=0x2a  0.000010  ScreenKeyMacOS.682858
+00:02:25.730795  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/常用网站/frame_1.png  0.000031  ScreenKeyMacOS.682679
+00:02:25.730796  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.730814  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.730822  read  F=42  B=0x339  0.000004  ScreenKeyMacOS.682679
+00:02:25.730822  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.730829  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.730833  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.731037  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731038  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731039  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731040  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731045  close  F=42  0.000002  ScreenKeyMacOS.682679
+00:02:25.731109  open  F=42  (R__________X___)  /Users/dev/Applications/ScreenKeyMacOS.app/Contents/MacOS/image/MK20-PLUS/cache/original-dd39491a7508ad469db8f4a58549577b_2/frame_11.png  0.000024  ScreenKeyMacOS.682679
+00:02:25.731110  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731116  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731122  read  F=42  B=0x2383  0.000005  ScreenKeyMacOS.682679
+00:02:25.731123  read  F=42  B=0x0  0.000001  ScreenKeyMacOS.682679
+00:02:25.731124  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.731125  lseek  F=42  O=0x00000000  <SEEK_SET>  0.000001  ScreenKeyMacOS.682679
+00:02:25.731390  read  F=53  B=0x26  0.000005  ScreenKeyMacOS.682858
+00:02:25.731437  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731437  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731438  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731439  fstat64  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:25.731443  close  F=42  0.000001  ScreenKeyMacOS.682679
+00:02:26.331245  write  F=53  B=0x2a  0.000011  ScreenKeyMacOS.682858
+00:02:26.331959  read  F=53  B=0x26  0.000006  ScreenKeyMacOS.682858
+00:02:26.940465  write  F=53  B=0x2a  0.000013  ScreenKeyMacOS.682858
+00:02:26.941254  read  F=53  B=0x26  0.000007  ScreenKeyMacOS.682858
+00:02:27.551221  write  F=53  B=0x2a  0.000014  ScreenKeyMacOS.682858
+00:02:27.552106  read  F=53  B=0x26  0.000008  ScreenKeyMacOS.682858
+00:02:27.733281  fcntl  F=41  <SETFD>  0.000001  ScreenKeyMacOS.682679
+00:02:27.733281  fcntl  F=41  <GETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:27.733282  fcntl  F=41  <SETFL>  0.000001  ScreenKeyMacOS.682679
+00:02:28.140484  write  F=53  B=0x2a  0.000013  ScreenKeyMacOS.682858
+00:02:28.141545  read  F=53  B=0x26  0.000007  ScreenKeyMacOS.682858

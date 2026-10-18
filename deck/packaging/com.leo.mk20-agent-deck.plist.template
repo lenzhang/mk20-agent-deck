@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MK20 Agent Deck LaunchAgent (template).  Generate with:
+      python -m mk20deck launchd-plist > ~/Library/LaunchAgents/com.leo.mk20-agent-deck.plist
+  Load/unload (user's choice, not done automatically):
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.leo.mk20-agent-deck.plist
+      launchctl bootout   gui/$(id -u)/com.leo.mk20-agent-deck
+  The daemon only reads ~/.codex and writes ~/.config/mk20-agent-deck/state.json.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.leo.mk20-agent-deck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PYTHON@</string>
+    <string>-m</string>
+    <string>mk20deck</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key><string>@WORKDIR@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key><string>@WORKDIR@</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>@LOGDIR@/deck.out.log</string>
+  <key>StandardErrorPath</key><string>@LOGDIR@/deck.err.log</string>
+</dict>
+</plist>
