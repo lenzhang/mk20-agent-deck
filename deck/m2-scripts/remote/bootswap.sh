@@ -40,5 +40,11 @@ dd if=$NEW of=$DEV bs=1M conv=fsync 2>&1 || { dd if=$STOCK of=$DEV bs=1M conv=fs
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null  # readback from media, not page cache
 R=$(head -c $NS $DEV | sha256sum | awk '{print $1}'); echo "readback=$R"
 if [ "$R" != "$E" ]; then [ "$(sha256sum $STOCK | awk '{print $1}')" = "$PSHA" ] || fail "readback mismatch AND stock copy bad - DO NOT REBOOT, pull TF"; dd if=$STOCK of=$DEV bs=1M conv=fsync; sync; fail "readback mismatch -> stock restored"; fi
+# stage the one-shot post-boot check for the patched kernel (auto-revert on failure / no host confirm)
+PC=/data/mk20/postswap-check.sh
+if [ -f $PC ]; then mkdir -p $S/mk20/boot-once; cp -f $PC $S/mk20/boot-once/postswap-check.sh
+  sha256sum $S/mk20/boot-once/postswap-check.sh | awk '{print $1"  postswap-check.sh"}' > $S/mk20/boot-once/postswap-check.sh.sha256
+  echo "staged postswap-check"; else echo "WARNING: no $PC (no auto-revert)"; fi
+rm -f $S/mk20-swap-ok
 echo "ok-rebooting" > $ST; sync
 echo "write verified; rebooting in 3s"; sleep 3; reboot
