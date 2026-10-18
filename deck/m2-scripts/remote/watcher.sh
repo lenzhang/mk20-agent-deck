@@ -1,5 +1,5 @@
 #!/bin/sh
-# MK20 watcher v2 — polls /mnt/SDCARD every 2s. Started by lunch stub.
+# MK20 watcher v2.1 — polls /mnt/SDCARD every 2s. Started by lunch stub.
 #   cmd-reboot                      -> sync + hardware WDT reset (hardreset.sh), reboot as fallback
 #   job.sh + job.sh.sha256          -> verify, run once (300s cap), log, emit over ttyGS0
 #   mk20/boot-once/*.sh(+.sha256)   -> run once at boot (after KD up), emit log
@@ -89,8 +89,9 @@ while :; do
     rm -f $S/cmd-reboot; log "cmd-reboot"; echo "rebooting $(cut -d' ' -f1 /proc/uptime)" > /tmp/mk20/rb
     emit /tmp/mk20/rb reboot; sync; sleep 1
     # soft reboot hangs in PSCI on this board -> hardware WDT reset (see hardreset.sh); reboot only as last resort
-    [ -f $D/hardreset.sh ] && sh $D/hardreset.sh watcher
-    reboot
+    # no `reboot` fallback: it hangs in PSCI too. hardreset v2 refuses (rc 2/3) when unsafe -> report, keep running.
+    if [ -f $D/hardreset.sh ]; then sh $D/hardreset.sh watcher; rc=$?; else rc=9; fi
+    log "hardreset returned rc=$rc (no reset happened)"; echo "reboot FAILED rc=$rc (see logs/hardreset.log); power-cycle needed" > /tmp/mk20/rb; emit /tmp/mk20/rb reboot-failed
   fi
   if [ -f $S/cmd-ping ]; then
     rm -f $S/cmd-ping

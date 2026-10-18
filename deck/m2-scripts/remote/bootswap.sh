@@ -34,6 +34,8 @@ if [ -f $S/boot-stock.img.sha256 ] && [ ! -f $S/boot-swap.rebackup ]; then
     echo "current p4 = recorded baseline $BL; stock copies kept"; SKIPBK=1
   else fail "partition sha $PSHA != recorded stock $O nor baseline; refusing (touch boot-swap.rebackup to override)"; fi
 fi
+# kernel-write lock (fd 8): hardreset.sh waits for it, so no reset can tear a p4 write. Held until exit.
+mkdir -p /tmp/mk20; exec 8>/tmp/mk20/kwrite.lock; flock -w 60 8 || fail "kernel-write lock busy"
 if [ $SKIPBK = 0 ]; then
 rm -f $STOCK
 FREE=$(( $(df -k $S | awk 'NR==2{print $4}') * 1024 )); echo "SDCARD free=$FREE need=$((PART+131072))"
@@ -60,4 +62,4 @@ if [ -f $PC ]; then mkdir -p $S/mk20/boot-once; cp -f $PC $S/mk20/boot-once/post
 rm -f $S/mk20-swap-ok
 echo "ok-rebooting" > $ST; sync
 if [ -f $S/boot-swap.noreboot ]; then rm -f $S/boot-swap.noreboot; echo "ok-power-cycle-now" > $ST; sync; echo "write verified; NO reboot (soft reboot hangs): user must power-cycle"; exit 0; fi
-echo "write verified; rebooting in 3s"; sleep 3; reboot
+echo "write verified; hard reset (WDT) in 3s"; sleep 3; exec 8>&-; sh $S/mk20/hardreset.sh bootswap; echo "hardreset rc=$? -> power-cycle needed"; echo "ok-power-cycle-now" > $ST; sync
