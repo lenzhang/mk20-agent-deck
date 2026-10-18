@@ -45,7 +45,9 @@ listening() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !o
 lock_held() { ( exec 5>"$1"; ! flock -n 5 ) 2>/dev/null; }   # a live instance holds the lock
 wdt_armed() { ${MK20_UBUS:-ubus} call system watchdog 2>/dev/null | grep -q '"running"'; }
 
-selftest() { # FAIL = host-independent breakage; composite rollback / missing rescue alias is "degraded" (WARN)
+selftest() { # FAIL = host-independent breakage. Composite rollback to stock is "degraded" (WARN): flapmon rolls back on
+  # host-side USB flaps, and stock ACM+KD(+adb) stays reachable. With the composite up, the link-local rescue listener is
+  # mandatory (1.1.0): it is the subnet-independent path, so a release that loses it must not be confirmed.
   local f n; f=0
   n=$(kd_count); [ "$n" = 1 ] && echo "PASS kd=1" || { echo "FAIL kd=$n"; f=1; }
   [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && echo "PASS udc bound" || { echo "FAIL udc unbound"; f=1; }
@@ -53,7 +55,7 @@ selftest() { # FAIL = host-independent breakage; composite rollback / missing re
   wdt_armed && echo "PASS watchdog armed" || { echo "FAIL watchdog not armed"; f=1; }
   if composite_up; then
     listening "$ECM_IP:$BRIDGE_PORT" && echo "PASS bridge $ECM_IP:$BRIDGE_PORT" || { echo "FAIL bridge not on $ECM_IP:$BRIDGE_PORT"; f=1; }
-    listening "${MK20_LL_IP:-169.254.7.2}:$BRIDGE_PORT" && echo "PASS bridge link-local" || echo "WARN bridge not on link-local"
+    listening "${MK20_LL_IP:-169.254.7.2}:$BRIDGE_PORT" && echo "PASS bridge link-local" || { echo "FAIL bridge not on link-local"; f=1; }
     listening "0.0.0.0:$BRIDGE_PORT" && { echo "FAIL bridge on 0.0.0.0"; f=1; }
     if [ -e "$C/hid.usb0" ]; then [ -e "$R/dev/hidg0" ] && echo "PASS hid" || { echo "FAIL no hidg0"; f=1; }; fi
   else echo "WARN composite down (stock ACM+KD$([ -e "$C/ffs.adb" ] && echo +adb))"
@@ -136,7 +138,8 @@ boot)
       MK20_DEV_MAC=$ECM_DEV_MAC MK20_HOST_MAC=$ECM_HOST_MAC MK20_BRIDGE_PORT=$BRIDGE_PORT \
       MK20_FLAP_DROPS=$FLAP_DROPS MK20_FLAP_WINDOW=$FLAP_WINDOW_S MK20_NOHID=$NOHID MK20_NOADB=$NOADB \
       sh "$TM/gadget-boot.sh" --boot >> "$LOGDIR/gadget.log" 2>&1
-    log INFO gadget "rc=$? status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null) nohid=$NOHID noadb=$NOADB ip=$ECM_IP"
+    grc=$?
+    log INFO gadget "rc=$grc status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null) nohid=$NOHID noadb=$NOADB ip=$ECM_IP"
   elif [ $MODE = stock ]; then
     SADB=1; [ -f "$S/mk20-no-adb" ] && SADB=0; kernel_has adb || SADB=0
     log WARN boot "composite skipped: $why -> stock ACM+KD$([ $SADB = 1 ] && echo +adb)"
@@ -147,13 +150,18 @@ boot)
   # The marker is set by flapmon BEFORE it launches a rollback and by cleanup(); a sample taken while (or just
   # before) it appears is retaken after the failsafe ends. Total wait capped (stays well under the loader deadline).
   w=0; busy_wait() { while [ -f "$TM/gadget.busy" ] && [ $w -lt "${MK20_BUSY_CAP:-150}" ]; do sleep 5; w=$((w+5)); done; }
-  busy_wait; try=0; src=1
+  busy_wait; try=0; src=1; grc=${grc:-0}
   while [ $try -lt 3 ]; do
     try=$((try+1)); r=$(selftest); src=$?
     if [ -f "$TM/gadget.busy" ] && [ $w -lt "${MK20_BUSY_CAP:-150}" ]; then busy_wait; try=$((try-1)); continue; fi
     [ $src = 0 ] && break; [ $try = 3 ] || sleep "${MK20_SELFTEST_GAP:-10}"
   done
   [ $w -gt 0 ] && log INFO selftest "waited ${w}s for gadget failsafe"
+  # On probation, a composite that failed its own setup (gadget rc!=0: ip/alias/bridge/bind -> die -> stock) is a
+  # release failure, not "degraded": roll back. Host-caused flap rollbacks happen only after rc 0 and stay WARN.
+  if [ $MODE = composite ] && [ "$grc" != 0 ] && [ "$(cat "$MK20_HOME/state/pending" 2>/dev/null)" = "$V" ]; then
+    r="$r
+FAIL composite setup rc=$grc during probation"; src=1; fi
   echo "$r" > "$TM/selftest.txt"; log INFO selftest "rc=$src try=$try mode=$MODE $(echo "$r" | tr '\n' ';')"
   # per-boot records: selftest-last.json + selftest-1..4.json (previous boots)
   ST=$MK20_HOME/state; for k in 3 2 1; do [ -f "$ST/selftest-$k.json" ] && mv -f "$ST/selftest-$k.json" "$ST/selftest-$((k+1)).json"; done

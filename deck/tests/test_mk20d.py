@@ -42,14 +42,14 @@ def cfg(dev, rel):
 
 def test_defaults_unchanged(dev, rel):
     c = cfg(dev, rel)
-    assert c["CFG_SRC"] == "defaults" and c["ECM_IP"] == "10.20.0.2" and c["ECM_HOST_IP"] == "10.20.0.1"
+    assert c["CFG_SRC"] == "defaults" and c["ECM_IP"] == "172.30.250.2" and c["ECM_HOST_IP"] == "172.30.250.1"
     assert c["BRIDGE_PORT"] == "17890" and c["FEATURE_COMPOSITE"] == "1" and "WARNINGS" not in c
 
 
 def test_valid_config(dev, rel):
-    conf(dev, "# comment\r\nECM_SUBNET=172.30.250.0/24\r\nBRIDGE_PORT = 17999  # trailing\nFEATURE_HID=0\nECM_DEV_MAC=0a:00:00:00:00:01\nLOG_KEEP=5\n")
+    conf(dev, "# comment\r\nECM_SUBNET=172.30.251.0/24\r\nBRIDGE_PORT = 17999  # trailing\nFEATURE_HID=0\nECM_DEV_MAC=0a:00:00:00:00:01\nLOG_KEEP=5\n")
     c = cfg(dev, rel)
-    assert c["ECM_IP"] == "172.30.250.2" and c["ECM_HOST_IP"] == "172.30.250.1"
+    assert c["ECM_IP"] == "172.30.251.2" and c["ECM_HOST_IP"] == "172.30.251.1"
     assert c["BRIDGE_PORT"] == "17999" and c["FEATURE_HID"] == "0" and c["ECM_DEV_MAC"] == "0a:00:00:00:00:01"
     assert c["LOG_KEEP"] == "5" and "WARNINGS" not in c
 
@@ -67,7 +67,7 @@ def test_valid_config(dev, rel):
 def test_invalid_values_keep_defaults(dev, rel, line, key):
     conf(dev, line + "\n")
     c = cfg(dev, rel)
-    assert c["ECM_IP"] == "10.20.0.2" and c["BRIDGE_PORT"] == "17890" and c["ECM_DEV_MAC"] == "02:11:22:33:44:55"
+    assert c["ECM_IP"] == "172.30.250.2" and c["BRIDGE_PORT"] == "17890" and c["ECM_DEV_MAC"] == "02:11:22:33:44:55"
     assert c["FEATURE_ADB"] == "1" and c["FLAP_DROPS"] == "5" and c["LOG_MAX_KB"] == "256"
     assert f"invalid {key}" in c["WARNINGS"]
 
@@ -81,9 +81,9 @@ def test_unknown_and_injection_keys_ignored(dev, rel):
 
 
 def test_oversize_config_ignored(dev, rel):
-    conf(dev, "ECM_SUBNET=172.30.250.0/24\n" + "#" * 5000 + "\n")
+    conf(dev, "ECM_SUBNET=172.30.9.0/24\n" + "#" * 5000 + "\n")
     c = cfg(dev, rel)
-    assert c["ECM_IP"] == "10.20.0.2" and "too large" in c["WARNINGS"]
+    assert c["ECM_IP"] == "172.30.250.2" and "too large" in c["WARNINGS"]
 
 
 def test_key_internal_whitespace_rejected(dev, rel):
@@ -103,9 +103,9 @@ def test_warnings_reset_each_load(dev, rel):
 
 def test_env_default_subnet_validated(dev, rel):
     r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "1.2.3.4;reboot"})
-    assert "ECM_IP=10.20.0.2" in r.stdout
-    r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "172.30.250.0/24"})
     assert "ECM_IP=172.30.250.2" in r.stdout
+    r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "10.20.0.0/24"})
+    assert "ECM_IP=10.20.0.2" in r.stdout
 
 
 def test_flags_override_config(dev, rel):
@@ -153,14 +153,14 @@ def g1(dev):
 
 
 def test_boot_composite_env_contract(dev, rel, g1):
-    conf(dev, "ECM_SUBNET=172.30.250.0/24\nBRIDGE_PORT=17999\nFEATURE_ADB=0\n")
+    conf(dev, "ECM_SUBNET=172.30.9.0/24\nBRIDGE_PORT=17999\nFEATURE_ADB=0\n")
     r, log = run_boot(dev, rel)
     env = dict(l.split("=", 1) for l in dev.read("tmp/mk20/gadget.env").splitlines())
     assert dev.read("tmp/mk20/gadget.args") == "--boot"
-    assert env["MK20_ECM_IP"] == "172.30.250.2" and env["MK20_BRIDGE_PORT"] == "17999"
+    assert env["MK20_ECM_IP"] == "172.30.9.2" and env["MK20_BRIDGE_PORT"] == "17999"
     assert env["MK20_NOADB"] == "1" and env["MK20_NOHID"] == "0" and env["MK20_REL"] == str(rel)
     assert env["MK20_GADGET_LOG"].endswith("data/mk20/logs/gadget.log")
-    assert "INFO mk20d boot" in log and "subnet=172.30.250.0/24" in log
+    assert "INFO mk20d boot" in log and "subnet=172.30.9.0/24" in log
     h = json.loads(dev.read("data/mk20/state/selftest-last.json"))
     assert h["version"] == "9.9.9" and h["kernel"]["name"] == "ep5out" and h["vendor"] == "ok"
 
@@ -239,14 +239,39 @@ def test_selftest_and_health_json(dev, rel, g1):
     h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
     assert h["selftest"]["pass"] is False and h["kd"] == 2 and h["watchdog"] is True
     assert h["maint"] is False   # no pid file (BusyBox 1.27 `kill -0 ""` succeeds: regression)
-    assert h["usb"]["udc"] == "musb-hdrc.1.auto" and h["net"]["subnet"] == "10.20.0.0/24"
+    assert h["usb"]["udc"] == "musb-hdrc.1.auto" and h["net"]["subnet"] == "172.30.250.0/24"
     assert json.loads(dev.read("tmp/mk20/health.json")) == h
 
 
 def test_selftest_composite_requires_bridge_and_hid(dev, rel, g1):
     (g1 / "configs/c.1/ecm.usb0").mkdir(); (g1 / "configs/c.1/hid.usb0").mkdir()
     r = dev.run(rel / "sbin/mk20d", "selftest")
-    assert r.returncode == 1 and "FAIL no hidg0" in r.stdout and "FAIL bridge not on 10.20.0.2:17890" in r.stdout
+    assert r.returncode == 1 and "FAIL no hidg0" in r.stdout and "FAIL bridge not on 172.30.250.2:17890" in r.stdout
+
+
+def test_probation_composite_setup_failure_not_confirmed(dev, rel, g1):
+    ld = dev.p("tmp/mk20/rescue-loader.sh"); ld.write_text('echo "$*" >> "$MK20_ROOT/tmp/mk20/loader.calls"\n')
+    (rel / "share/gadget.sh").write_text('exit 3\n')
+    st = dev.p("data/mk20/state"); st.mkdir(parents=True, exist_ok=True); (st / "pending").write_text("9.9.9\n")
+    r, log = run_boot(dev, rel)
+    assert not dev.p("tmp/mk20/loader.calls").exists(), log
+    assert "FAIL composite setup rc=3 during probation" in log
+    (st / "pending").unlink()            # same failure on the trusted (good) release: degraded, keep running
+    r, log = run_boot(dev, rel)
+    assert dev.read("tmp/mk20/loader.calls").strip() == "confirm 9.9.9"
+
+
+def test_selftest_link_local_listener_mandatory(dev, rel, g1):
+    """1.1.0: the subnet-independent rescue listener 169.254.7.2 must be up for a composite release to confirm."""
+    (g1 / "configs/c.1/ecm.usb0").mkdir()
+    hdr = "Proto Recv-Q Send-Q Local Address Foreign Address State\n"
+    (dev.mock / "netstat.out").write_text(hdr + "tcp 0 0 172.30.250.2:17890 0.0.0.0:* LISTEN\n")
+    r = dev.run(rel / "sbin/mk20d", "selftest")
+    assert r.returncode == 1 and "PASS bridge 172.30.250.2:17890" in r.stdout and "FAIL bridge not on link-local" in r.stdout
+    (dev.mock / "netstat.out").write_text(hdr + "tcp 0 0 172.30.250.2:17890 0.0.0.0:* LISTEN\n"
+                                          "tcp 0 0 169.254.7.2:17890 0.0.0.0:* LISTEN\n")
+    r = dev.run(rel / "sbin/mk20d", "selftest")
+    assert r.returncode == 0 and "PASS bridge link-local" in r.stdout, r.stdout
 
 
 def test_health_json_escapes_hostile_config(dev, rel, g1):
@@ -302,7 +327,7 @@ def test_gadget_env_written_only_when_gates_pass(dev, rel, g1):
     conf(dev, "BRIDGE_PORT=17999\n")
     run_boot(dev, rel)
     env = dict(l.split("=", 1) for l in dev.read("tmp/mk20/gadget.env").splitlines())
-    assert env["MK20_BRIDGE_PORT"] == "17999" and env["MK20_ECM_IP"] == "10.20.0.2"
+    assert env["MK20_BRIDGE_PORT"] == "17999" and env["MK20_ECM_IP"] == "172.30.250.2"
     dev.p("data/setusbconfig").write_text("tampered\n")
     run_boot(dev, rel)
     assert not dev.p("tmp/mk20/gadget.env").exists()
@@ -322,11 +347,11 @@ def test_shim_mounted_with_composite_down_fails(dev, rel, g1):
 
 
 def test_symlinked_config_ignored(dev, rel, tmp_path):
-    t = tmp_path / "real.conf"; t.write_text("ECM_SUBNET=172.30.250.0/24\n")
+    t = tmp_path / "real.conf"; t.write_text("ECM_SUBNET=172.30.9.0/24\n")
     c = dev.p("data/mk20/config"); c.mkdir(parents=True)
     (c / "mk20.conf").symlink_to(t)
     cf = cfg(dev, rel)
-    assert cf["ECM_IP"] == "10.20.0.2" and "not a regular file" in cf["WARNINGS"]
+    assert cf["ECM_IP"] == "172.30.250.2" and "not a regular file" in cf["WARNINGS"]
 
 
 def test_vendor_list_incomplete_fails_closed(dev, rel, g1):

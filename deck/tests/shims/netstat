@@ -1,0 +1,4 @@
+#!/bin/sh
+# mock: prints $MOCK_DIR/netstat.out if present, else the real (busybox) netstat
+[ -f "$MOCK_DIR/netstat.out" ] && { cat "$MOCK_DIR/netstat.out"; exit 0; }
+exec busybox netstat "$@"

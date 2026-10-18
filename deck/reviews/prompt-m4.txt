@@ -1,0 +1,417 @@
+You are reviewing milestone M4 of the MK20 Agent firmware (Allwinner T113, BusyBox 1.27.2 device; macOS host with mihomo TUN that excludes 10.0.0.0/8 and 172.16.0.0/12). M4 = release 1.1.0 switching the default ECM subnet from 10.20.0.0/24 to 172.30.250.0/24 (device .2, Mac .1), keeping the link-local rescue alias 169.254.7.2/16 on usb0, updating host tools, a Mac-side tool that changes ONLY the network service of the MK20 interface (matched by host MAC 02:11:22:33:44:56) with an overlap preflight and a TUN-safety check (route get must resolve to the MK20 interface, else revert). Requirements: TUN-safe, no change to any other Mac network service, a 1.1.0 failure must auto-roll back to 1.0.4 (device-side self-test is host-independent), link-local fallback must keep working during the cutover.
+Review the diff below. Report findings as BLOCKER / MAJOR / MINOR with file:line and a concrete fix. Focus on: correctness of the awk parsing of networksetup/netstat output on macOS (service names with spaces/parentheses, "(*)" disabled services, routes like "172.30.250" without prefix, link#N entries), overlap detection gaps, revert behavior, the Python link-local fallback (IP_BOUND_IF), cutover ordering hazards, and anything that could break remote reachability. Be concise.
+
+```diff
+diff --git a/deck/Makefile b/deck/Makefile
+index f2c7538..3b0e7e7 100644
+--- a/deck/Makefile
++++ b/deck/Makefile
+@@ -1,5 +1,6 @@
+ test:
+-	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh
++	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh tools/mk20-host-net.sh
++	(cd tools && uv run --with pytest python -m pytest -q test_tcp_transport.py)
+ 	MK20_TEST_BUSYBOX=$${MK20_TEST_BUSYBOX:-$$( [ -x /workspace/tools/bb127/busybox ] && echo /workspace/tools/bb127/busybox )} uv run --with pytest python -m pytest -q tests
+ 
+ release:
+diff --git a/deck/firmware/VERSION b/deck/firmware/VERSION
+index ee90284..9084fa2 100644
+--- a/deck/firmware/VERSION
++++ b/deck/firmware/VERSION
+@@ -1 +1 @@
+-1.0.4
++1.1.0
+diff --git a/deck/firmware/release/share/gadget.sh b/deck/firmware/release/share/gadget.sh
+index bd4a172..a4c70b8 100755
+--- a/deck/firmware/release/share/gadget.sh
++++ b/deck/firmware/release/share/gadget.sh
+@@ -22,7 +22,8 @@
+ #  - v3.2 boot mode (--boot, run by boot-every/composite.sh in the watcher): no host confirmation; instead a
+ #    detached flap monitor polls /sys/class/udc/<udc>/state and rolls back if the link drops >=5 times in 60 s.
+ #    Any rollback (failure, flapping, --rollback) ends in stock ACM + KD + adb (mk20-add-adb.sh).
+-#  - Addressing: usb0 10.20.0.2/24 (Mac en "Serial" manual 10.20.0.1/24) + alias 169.254.7.2/16; fixed MACs.
++#  - Addressing (1.1.0+): usb0 172.30.250.2/24 (Mac MK20 service manual 172.30.250.1/24) + alias 169.254.7.2/16;
++#    fixed MACs. mk20d passes the configured values; the defaults here only apply outside release mode.
+ #  - It must NEVER run inside an adb shell (it kills adbd; adbd kills the session group). It queues itself to the watcher.
+ set -u
+ LOG=${MK20_GADGET_LOG:-/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log}
+@@ -42,7 +43,7 @@ if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
+     esac; done < "$GENV"
+   else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) echo "release mode: no $GENV (gates not passed at boot) -> refused"; exit 1;; esac; fi
+ fi
+-ECM_IP=${MK20_ECM_IP:-10.20.0.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
++ECM_IP=${MK20_ECM_IP:-172.30.250.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
+ DEV_MAC=${MK20_DEV_MAC:-02:11:22:33:44:55}; HOST_MAC=${MK20_HOST_MAC:-02:11:22:33:44:56}
+ BRIDGE_PORT=${MK20_BRIDGE_PORT:-17890}   # v3.9: the bridge binds the usb0 addresses only (ECM IP + link-local alias, SO_BINDTODEVICE usb0)
+ FLAP_DROPS=${MK20_FLAP_DROPS:-5}; FLAP_WINDOW=${MK20_FLAP_WINDOW:-60}
+diff --git a/deck/firmware/release/share/mk20lib.sh b/deck/firmware/release/share/mk20lib.sh
+index 6eb7df7..7029322 100644
+--- a/deck/firmware/release/share/mk20lib.sh
++++ b/deck/firmware/release/share/mk20lib.sh
+@@ -64,9 +64,10 @@ cfg_set() { # $1=key $2=value: validated, then assigned explicitly (no eval)
+ }
+ cfg_load() {
+   local line k v n
+-  # release defaults (1.0.x keeps the proven 10.20.0.0/24; the M4 release switches the default)
++  # release defaults: 1.1.0 (M4) moved the ECM default from 10.20.0.0/24 to 172.30.250.0/24 (device .2, Mac .1);
++  # 172.16.0.0/12 is excluded from the Mac's mihomo TUN, and 169.254.7.2 stays as the link-local rescue alias
+   CFG_WARN=""
+-  ECM_SUBNET=10.20.0.0/24; [ -n "${MK20_DEFAULT_SUBNET:-}" ] && cfg_set ECM_SUBNET "$MK20_DEFAULT_SUBNET"
++  ECM_SUBNET=172.30.250.0/24; [ -n "${MK20_DEFAULT_SUBNET:-}" ] && cfg_set ECM_SUBNET "$MK20_DEFAULT_SUBNET"
+   ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56
+   FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
+   LOG_MAX_KB=256; LOG_KEEP=3; CFG_SRC=defaults
+diff --git a/deck/m2-scripts/gadget-ecm-hid-adb.sh b/deck/m2-scripts/gadget-ecm-hid-adb.sh
+index bd4a172..a4c70b8 100755
+--- a/deck/m2-scripts/gadget-ecm-hid-adb.sh
++++ b/deck/m2-scripts/gadget-ecm-hid-adb.sh
+@@ -22,7 +22,8 @@
+ #  - v3.2 boot mode (--boot, run by boot-every/composite.sh in the watcher): no host confirmation; instead a
+ #    detached flap monitor polls /sys/class/udc/<udc>/state and rolls back if the link drops >=5 times in 60 s.
+ #    Any rollback (failure, flapping, --rollback) ends in stock ACM + KD + adb (mk20-add-adb.sh).
+-#  - Addressing: usb0 10.20.0.2/24 (Mac en "Serial" manual 10.20.0.1/24) + alias 169.254.7.2/16; fixed MACs.
++#  - Addressing (1.1.0+): usb0 172.30.250.2/24 (Mac MK20 service manual 172.30.250.1/24) + alias 169.254.7.2/16;
++#    fixed MACs. mk20d passes the configured values; the defaults here only apply outside release mode.
+ #  - It must NEVER run inside an adb shell (it kills adbd; adbd kills the session group). It queues itself to the watcher.
+ set -u
+ LOG=${MK20_GADGET_LOG:-/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log}
+@@ -42,7 +43,7 @@ if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
+     esac; done < "$GENV"
+   else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) echo "release mode: no $GENV (gates not passed at boot) -> refused"; exit 1;; esac; fi
+ fi
+-ECM_IP=${MK20_ECM_IP:-10.20.0.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
++ECM_IP=${MK20_ECM_IP:-172.30.250.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
+ DEV_MAC=${MK20_DEV_MAC:-02:11:22:33:44:55}; HOST_MAC=${MK20_HOST_MAC:-02:11:22:33:44:56}
+ BRIDGE_PORT=${MK20_BRIDGE_PORT:-17890}   # v3.9: the bridge binds the usb0 addresses only (ECM IP + link-local alias, SO_BINDTODEVICE usb0)
+ FLAP_DROPS=${MK20_FLAP_DROPS:-5}; FLAP_WINDOW=${MK20_FLAP_WINDOW:-60}
+diff --git a/deck/tests/test_mk20d.py b/deck/tests/test_mk20d.py
+index 3f8530f..10a3111 100644
+--- a/deck/tests/test_mk20d.py
++++ b/deck/tests/test_mk20d.py
+@@ -42,14 +42,14 @@ def cfg(dev, rel):
+ 
+ def test_defaults_unchanged(dev, rel):
+     c = cfg(dev, rel)
+-    assert c["CFG_SRC"] == "defaults" and c["ECM_IP"] == "10.20.0.2" and c["ECM_HOST_IP"] == "10.20.0.1"
++    assert c["CFG_SRC"] == "defaults" and c["ECM_IP"] == "172.30.250.2" and c["ECM_HOST_IP"] == "172.30.250.1"
+     assert c["BRIDGE_PORT"] == "17890" and c["FEATURE_COMPOSITE"] == "1" and "WARNINGS" not in c
+ 
+ 
+ def test_valid_config(dev, rel):
+-    conf(dev, "# comment\r\nECM_SUBNET=172.30.250.0/24\r\nBRIDGE_PORT = 17999  # trailing\nFEATURE_HID=0\nECM_DEV_MAC=0a:00:00:00:00:01\nLOG_KEEP=5\n")
++    conf(dev, "# comment\r\nECM_SUBNET=172.30.251.0/24\r\nBRIDGE_PORT = 17999  # trailing\nFEATURE_HID=0\nECM_DEV_MAC=0a:00:00:00:00:01\nLOG_KEEP=5\n")
+     c = cfg(dev, rel)
+-    assert c["ECM_IP"] == "172.30.250.2" and c["ECM_HOST_IP"] == "172.30.250.1"
++    assert c["ECM_IP"] == "172.30.251.2" and c["ECM_HOST_IP"] == "172.30.251.1"
+     assert c["BRIDGE_PORT"] == "17999" and c["FEATURE_HID"] == "0" and c["ECM_DEV_MAC"] == "0a:00:00:00:00:01"
+     assert c["LOG_KEEP"] == "5" and "WARNINGS" not in c
+ 
+@@ -67,7 +67,7 @@ def test_valid_config(dev, rel):
+ def test_invalid_values_keep_defaults(dev, rel, line, key):
+     conf(dev, line + "\n")
+     c = cfg(dev, rel)
+-    assert c["ECM_IP"] == "10.20.0.2" and c["BRIDGE_PORT"] == "17890" and c["ECM_DEV_MAC"] == "02:11:22:33:44:55"
++    assert c["ECM_IP"] == "172.30.250.2" and c["BRIDGE_PORT"] == "17890" and c["ECM_DEV_MAC"] == "02:11:22:33:44:55"
+     assert c["FEATURE_ADB"] == "1" and c["FLAP_DROPS"] == "5" and c["LOG_MAX_KB"] == "256"
+     assert f"invalid {key}" in c["WARNINGS"]
+ 
+@@ -81,9 +81,9 @@ def test_unknown_and_injection_keys_ignored(dev, rel):
+ 
+ 
+ def test_oversize_config_ignored(dev, rel):
+-    conf(dev, "ECM_SUBNET=172.30.250.0/24\n" + "#" * 5000 + "\n")
++    conf(dev, "ECM_SUBNET=172.30.9.0/24\n" + "#" * 5000 + "\n")
+     c = cfg(dev, rel)
+-    assert c["ECM_IP"] == "10.20.0.2" and "too large" in c["WARNINGS"]
++    assert c["ECM_IP"] == "172.30.250.2" and "too large" in c["WARNINGS"]
+ 
+ 
+ def test_key_internal_whitespace_rejected(dev, rel):
+@@ -103,9 +103,9 @@ def test_warnings_reset_each_load(dev, rel):
+ 
+ def test_env_default_subnet_validated(dev, rel):
+     r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "1.2.3.4;reboot"})
+-    assert "ECM_IP=10.20.0.2" in r.stdout
+-    r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "172.30.250.0/24"})
+     assert "ECM_IP=172.30.250.2" in r.stdout
++    r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "10.20.0.0/24"})
++    assert "ECM_IP=10.20.0.2" in r.stdout
+ 
+ 
+ def test_flags_override_config(dev, rel):
+@@ -153,14 +153,14 @@ def g1(dev):
+ 
+ 
+ def test_boot_composite_env_contract(dev, rel, g1):
+-    conf(dev, "ECM_SUBNET=172.30.250.0/24\nBRIDGE_PORT=17999\nFEATURE_ADB=0\n")
++    conf(dev, "ECM_SUBNET=172.30.9.0/24\nBRIDGE_PORT=17999\nFEATURE_ADB=0\n")
+     r, log = run_boot(dev, rel)
+     env = dict(l.split("=", 1) for l in dev.read("tmp/mk20/gadget.env").splitlines())
+     assert dev.read("tmp/mk20/gadget.args") == "--boot"
+-    assert env["MK20_ECM_IP"] == "172.30.250.2" and env["MK20_BRIDGE_PORT"] == "17999"
++    assert env["MK20_ECM_IP"] == "172.30.9.2" and env["MK20_BRIDGE_PORT"] == "17999"
+     assert env["MK20_NOADB"] == "1" and env["MK20_NOHID"] == "0" and env["MK20_REL"] == str(rel)
+     assert env["MK20_GADGET_LOG"].endswith("data/mk20/logs/gadget.log")
+-    assert "INFO mk20d boot" in log and "subnet=172.30.250.0/24" in log
++    assert "INFO mk20d boot" in log and "subnet=172.30.9.0/24" in log
+     h = json.loads(dev.read("data/mk20/state/selftest-last.json"))
+     assert h["version"] == "9.9.9" and h["kernel"]["name"] == "ep5out" and h["vendor"] == "ok"
+ 
+@@ -239,14 +239,14 @@ def test_selftest_and_health_json(dev, rel, g1):
+     h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+     assert h["selftest"]["pass"] is False and h["kd"] == 2 and h["watchdog"] is True
+     assert h["maint"] is False   # no pid file (BusyBox 1.27 `kill -0 ""` succeeds: regression)
+-    assert h["usb"]["udc"] == "musb-hdrc.1.auto" and h["net"]["subnet"] == "10.20.0.0/24"
++    assert h["usb"]["udc"] == "musb-hdrc.1.auto" and h["net"]["subnet"] == "172.30.250.0/24"
+     assert json.loads(dev.read("tmp/mk20/health.json")) == h
+ 
+ 
+ def test_selftest_composite_requires_bridge_and_hid(dev, rel, g1):
+     (g1 / "configs/c.1/ecm.usb0").mkdir(); (g1 / "configs/c.1/hid.usb0").mkdir()
+     r = dev.run(rel / "sbin/mk20d", "selftest")
+-    assert r.returncode == 1 and "FAIL no hidg0" in r.stdout and "FAIL bridge not on 10.20.0.2:17890" in r.stdout
++    assert r.returncode == 1 and "FAIL no hidg0" in r.stdout and "FAIL bridge not on 172.30.250.2:17890" in r.stdout
+ 
+ 
+ def test_health_json_escapes_hostile_config(dev, rel, g1):
+@@ -302,7 +302,7 @@ def test_gadget_env_written_only_when_gates_pass(dev, rel, g1):
+     conf(dev, "BRIDGE_PORT=17999\n")
+     run_boot(dev, rel)
+     env = dict(l.split("=", 1) for l in dev.read("tmp/mk20/gadget.env").splitlines())
+-    assert env["MK20_BRIDGE_PORT"] == "17999" and env["MK20_ECM_IP"] == "10.20.0.2"
++    assert env["MK20_BRIDGE_PORT"] == "17999" and env["MK20_ECM_IP"] == "172.30.250.2"
+     dev.p("data/setusbconfig").write_text("tampered\n")
+     run_boot(dev, rel)
+     assert not dev.p("tmp/mk20/gadget.env").exists()
+@@ -322,11 +322,11 @@ def test_shim_mounted_with_composite_down_fails(dev, rel, g1):
+ 
+ 
+ def test_symlinked_config_ignored(dev, rel, tmp_path):
+-    t = tmp_path / "real.conf"; t.write_text("ECM_SUBNET=172.30.250.0/24\n")
++    t = tmp_path / "real.conf"; t.write_text("ECM_SUBNET=172.30.9.0/24\n")
+     c = dev.p("data/mk20/config"); c.mkdir(parents=True)
+     (c / "mk20.conf").symlink_to(t)
+     cf = cfg(dev, rel)
+-    assert cf["ECM_IP"] == "10.20.0.2" and "not a regular file" in cf["WARNINGS"]
++    assert cf["ECM_IP"] == "172.30.250.2" and "not a regular file" in cf["WARNINGS"]
+ 
+ 
+ def test_vendor_list_incomplete_fails_closed(dev, rel, g1):
+diff --git a/deck/tools/mk20ctl-url.py b/deck/tools/mk20ctl-url.py
+index 33c5d4e..caf790d 100644
+--- a/deck/tools/mk20ctl-url.py
++++ b/deck/tools/mk20ctl-url.py
+@@ -1,4 +1,5 @@
+-# Wrapper: lets MK20_PORT be a pyserial URL (e.g. socket://169.254.7.2:17890 via the ECM PTY bridge).
++# Wrapper: lets MK20_PORT be a pyserial URL via the ECM PTY bridge, e.g. socket://172.30.250.2:17890 (firmware
++# >= 1.1.0; 10.20.0.2 on 1.0.x). Link-local socket://169.254.7.2:17890 needs the MK20 interface (see en-relay.py).
+ import runpy, sys, serial
+ _orig = serial.Serial
+ def _url(port, *a, **k):
+diff --git a/deck/tools/tcp_transport.py b/deck/tools/tcp_transport.py
+index 2c51b4b..0e569c7 100644
+--- a/deck/tools/tcp_transport.py
++++ b/deck/tools/tcp_transport.py
+@@ -1,14 +1,19 @@
+ """TCP transport for Protocol A over ECM (or adb-forward / pty bridge).
+ 
+ Drop into mk20deck/transport.py (or import alongside SerialTransport).
+-Device side: ttygs_tcp_bridge --listen 0.0.0.0:17890 --link /dev/ttyGS0
+-Mac: TcpTransport("192.168.7.2", 17890)  # after ECM link-up
++Device side (firmware >= 1.1.0): ttygs_tcp_bridge --dev usb0 --listen 172.30.250.2:17890 --listen 169.254.7.2:17890
++Mac: connect_device() -> 172.30.250.2:17890, falling back to the link-local rescue alias 169.254.7.2 forced out the
++MK20 interface (found by its host MAC). Override with MK20_HOST=<ip> (and MK20_BRIDGE_PORT).
+ """
+ from __future__ import annotations
+ 
++import os
++import re
+ import socket
++import subprocess
++import sys
+ import time
+-from typing import Protocol
++from typing import Optional, Protocol
+ 
+ 
+ class Transport(Protocol):
+@@ -17,17 +22,52 @@ class Transport(Protocol):
+     def close(self) -> None: ...
+ 
+ 
+-DEFAULT_ECM_HOST = "192.168.7.2"
++DEFAULT_ECM_HOST = "172.30.250.2"   # firmware 1.1.0+ (was 10.20.0.2 in 1.0.x)
++LINK_LOCAL_HOST = "169.254.7.2"     # rescue/discovery alias on usb0, all releases
+ DEFAULT_PORT = 17890
++MK20_HOST_MAC = "02:11:22:33:44:56"
++IP_BOUND_IF = 25                    # macOS <netinet/in.h>
++
++
++def mk20_interface(mac: str = MK20_HOST_MAC) -> Optional[str]:
++    """Name of the host interface whose hardware address is the MK20 host MAC (macOS/Linux ifconfig)."""
++    try:
++        out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
++    except (OSError, subprocess.SubprocessError):
++        return None
++    cur = None
++    for line in out.splitlines():
++        m = re.match(r"^([A-Za-z0-9]+):", line)
++        if m:
++            cur = m.group(1)
++        elif cur and re.search(r"\b(ether|HWaddr)\s+" + re.escape(mac.lower()), line.lower()):
++            return cur
++    return None
+ 
+ 
+ class TcpTransport:
+     """Length-agnostic byte pipe over TCP (same framing as SerialTransport)."""
+ 
+-    def __init__(self, host: str = DEFAULT_ECM_HOST, port: int = DEFAULT_PORT, connect_timeout: float = 5.0) -> None:
++    def __init__(self, host: str = DEFAULT_ECM_HOST, port: int = DEFAULT_PORT, connect_timeout: float = 5.0,
++                 bound_if: Optional[str] = None) -> None:
+         self.host = host
+         self.port = port
+-        self._s = socket.create_connection((host, port), timeout=connect_timeout)
++        if bound_if:
++            # link-local: macOS routes 169.254/16 via the primary interface only, so pin the socket to the MK20 one
++            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++            if sys.platform == "darwin":
++                s.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, socket.if_nametoindex(bound_if))
++            elif hasattr(socket, "SO_BINDTODEVICE"):
++                s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, bound_if.encode())
++            s.settimeout(connect_timeout)
++            try:
++                s.connect((host, port))
++            except OSError:
++                s.close()
++                raise
++            self._s = s
++        else:
++            self._s = socket.create_connection((host, port), timeout=connect_timeout)
+         self._s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+         self._s.settimeout(0.0)  # non-blocking; read() uses select-style wait
+         self._buf = bytearray()
+@@ -74,8 +114,29 @@ class TcpTransport:
+             pass
+ 
+ 
++def connect_device(port: Optional[int] = None, hosts: Optional[list] = None, connect_timeout: float = 3.0,
++                   iface: Optional[str] = None) -> TcpTransport:
++    """Primary ECM address first, then the link-local alias pinned to the MK20 interface."""
++    port = port or int(os.environ.get("MK20_BRIDGE_PORT", DEFAULT_PORT))
++    if hosts is None:
++        env = os.environ.get("MK20_HOST")
++        hosts = [(env, None)] if env else [(DEFAULT_ECM_HOST, None), (LINK_LOCAL_HOST, iface or mk20_interface() or "")]
++    errs = []
++    for host, bif in hosts:
++        if bif == "":
++            errs.append(f"{host}: MK20 interface not found")
++            continue
++        try:
++            return TcpTransport(host, port, connect_timeout, bound_if=bif)
++        except OSError as e:
++            errs.append(f"{host}:{port}: {e}")
++    raise ConnectionError("MK20 bridge unreachable: " + "; ".join(errs))
++
++
+ def open_transport(url: str):
+-    """Factory: serial:/dev/cu.xxx | tcp:192.168.7.2:17890 | tcp://host:port"""
++    """Factory: mk20: (auto: primary, then link-local) | serial:/dev/cu.xxx | tcp:172.30.250.2:17890 | tcp://host:port"""
++    if url in ("mk20", "mk20:", "auto"):
++        return connect_device()
+     if url.startswith("tcp:"):
+         rest = url[4:].lstrip("/")
+         host, _, port_s = rest.partition(":")
+diff --git a/deck/tools/test_tcp_transport.py b/deck/tools/test_tcp_transport.py
+index 9388bc3..3ef30f8 100644
+--- a/deck/tools/test_tcp_transport.py
++++ b/deck/tools/test_tcp_transport.py
+@@ -7,7 +7,7 @@ import threading
+ import time
+ import unittest
+ 
+-from tcp_transport import TcpTransport, open_transport
++from tcp_transport import TcpTransport, open_transport, connect_device, DEFAULT_ECM_HOST, mk20_interface
+ 
+ 
+ def _echo_server(port_holder: list):
+@@ -61,5 +61,27 @@ class TestTcp(unittest.TestCase):
+         tr.close()
+ 
+ 
++
++class TestConnectDevice(unittest.TestCase):
++    def test_default_is_new_subnet(self):
++        self.assertEqual(DEFAULT_ECM_HOST, "172.30.250.2")
++
++    def test_fallback_to_second_host(self):
++        ports: list = []
++        threading.Thread(target=_echo_server, args=(ports,), daemon=True).start()
++        for _ in range(50):
++            if ports:
++                break
++            time.sleep(0.01)
++        # first candidate refuses (closed port), second answers
++        dead = socket.socket(); dead.bind(("127.0.0.1", 0)); dport = dead.getsockname()[1]; dead.close()
++        tr = connect_device(port=ports[0], hosts=[("127.0.0.2", None), ("127.0.0.1", None)], connect_timeout=1)
++        tr.write(b"hi"); self.assertEqual(tr.read(1.0), b"hi"); tr.close()
++
++    def test_missing_interface_reported(self):
++        with self.assertRaises(ConnectionError) as cm:
++            connect_device(port=1, hosts=[("169.254.7.2", "")], connect_timeout=0.2)
++        self.assertIn("MK20 interface not found", str(cm.exception))
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/deck/tools/mk20-host-net.sh b/deck/tools/mk20-host-net.sh
+new file mode 100755
+index 0000000..6ff59a1
+--- /dev/null
++++ b/deck/tools/mk20-host-net.sh
+@@ -0,0 +1,45 @@
++#!/bin/sh
++# macOS host side of the MK20 ECM link (M4). Touches ONLY the network service whose hardware address is the MK20
++# host MAC (default 02:11:22:33:44:56, set by the firmware's ECM host_addr); every other service is left alone.
++#   tools/mk20-host-net.sh status          service, address, route + TUN check, reachability (read-only)
++#   tools/mk20-host-net.sh apply           manual 172.30.250.1/24 on the MK20 service (after the preflight)
++#   tools/mk20-host-net.sh revert          back to the pre-1.1.0 address 10.20.0.1/24
++# Preflight (apply): refuses if another interface already has a route of /24 or narrower inside 172.30.250.0/24
++# (then use the link-local fallback 169.254.7.2 instead). TUN safety: after apply, `route get 172.30.250.2` must
++# resolve to the MK20 interface (mihomo excludes 172.16.0.0/12 from its TUN), else the change is reverted.
++# Env: MK20_HOST_MAC, MK20_SUBNET (a.b.c, default 172.30.250).
++set -eu
++MAC=${MK20_HOST_MAC:-02:11:22:33:44:56}
++NET=${MK20_SUBNET:-172.30.250}
++echo "$NET" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || { echo "bad MK20_SUBNET" >&2; exit 2; }
++dev=$(networksetup -listallhardwareports | awk -v m="$MAC" '/^Device:/{d=$2} /^Ethernet Address:/{ if (tolower($3)==tolower(m)) print d }' | head -n 1)
++[ -n "$dev" ] || { echo "MK20 interface (MAC $MAC) not present - is the composite up?" >&2; exit 1; }
++svc=$(networksetup -listnetworkserviceorder | awk -v d="$dev" '/^\([0-9*]+\) /{sub(/^\([0-9*]+\) /,""); s=$0} index($0, "Device: " d ")"){print s; exit}')
++[ -n "$svc" ] || { echo "no network service for $dev" >&2; exit 1; }
++route_if() { route -n get "$1" 2>/dev/null | awk '/interface:/{print $2}'; }
++overlap() { # routes /24-or-narrower inside $NET.0/24 on interfaces other than $dev
++  netstat -rn -f inet | awk -v n="$NET" -v d="$dev" '
++    { dst=$1; ifc=$4; if (ifc==d) next
++      split(dst, a, "/"); ip=a[1]; plen=(a[2]=="" ? 32 : a[2])
++      if (index(ip".", n".")==1 && plen>=24) print }'
++}
++show() {
++  echo "service='$svc' device=$dev mac=$MAC"
++  networksetup -getinfo "$svc" | grep -E '^(IP address|Subnet mask):'
++  echo "route $NET.2 -> $(route_if "$NET.2")   route 169.254.7.2 -> $(route_if 169.254.7.2)"
++  ping -c 1 -t 2 "$NET.2" >/dev/null 2>&1 && echo "ping $NET.2 ok" || echo "ping $NET.2 FAILED"
++}
++case "${1:-status}" in
++status) show;;
++apply)
++  o=$(overlap); [ -z "$o" ] || { echo "REFUSED: existing route(s) overlap $NET.0/24 on other interfaces:"; echo "$o"; echo "use link-local 169.254.7.2"; exit 3; }
++  old=$(networksetup -getinfo "$svc" | awk -F': ' '/^IP address/{print $2}')
++  networksetup -setmanual "$svc" "$NET.1" 255.255.255.0
++  i=0; while [ "$(route_if "$NET.2")" != "$dev" ] && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
++  if [ "$(route_if "$NET.2")" != "$dev" ]; then
++    echo "route to $NET.2 does not use $dev (TUN/other route?) -> reverting to ${old:-10.20.0.1}"
++    networksetup -setmanual "$svc" "${old:-10.20.0.1}" 255.255.255.0; exit 4; fi
++  show;;
++revert) networksetup -setmanual "$svc" 10.20.0.1 255.255.255.0; show;;
++*) echo "usage: $0 status|apply|revert" >&2; exit 2;;
++esac
+```

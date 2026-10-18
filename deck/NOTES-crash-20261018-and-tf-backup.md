@@ -315,3 +315,100 @@
   from GPT's review); the Claude run fell back to Opus 4.8 mid-way (safety filter). Deferred minors: tar -tv 6-column
   assumption (pinned to device BusyBox), blocking PTY write in the bridge, uninstalled-<ts> cleanup, host-tool tests;
   vendor mismatch keeps adb (deliberate: remote recoverability; GPT wanted zero USB changes).
+
+## Decision (user, 18:32 SGT): adb stays on when the vendor hashes don't match
+
+If the vendor hash gate fails (`/data/KeyboardDevice`, `appLunch.sh`, `setusbconfig` or `qt_env.sh` differ from
+`share/vendor.sha256`, e.g. after a vendor OTA), mk20d skips the composite and the KD shims, but stock fallback still
+adds adb (`stock_adb`, the same behaviour as the legacy `adb.sh`). The reason is remote reachability. adb over USB is
+the only remote channel that needs neither the composite nor our shims, and the device sits ~3 m away behind a
+watchdog-only reset path. Without adb, a vendor update would leave the device reachable only through the watcher's FAT
+queue, which also needs physical media. The risk is small. adb is the vendor's own `/bin/adbd`, only exposed over the
+USB cable, so it adds no new attack surface. It is added after KD has configured the stock gadget, with a restore to
+serial on failure and a bounded keepalive. To opt out, put the flag file `mk20-no-adb` on the FAT. A kernel without
+the `adb` feature also disables it.
+
+## M4: subnet 172.30.250.0/24 (releases 1.1.0 and 1.1.1), 18:35–19:12 SGT
+
+**Device**
+- The default `ECM_SUBNET` is now 172.30.250.0/24 (device .2, Mac .1). The link-local rescue alias 169.254.7.2/16
+  stays on `usb0`. The bridge listens on both addresses, bound to `usb0`.
+- `selftest`: with the composite up, the link-local listener is now required (it used to be a WARN). It is the
+  subnet-independent path.
+- 1.1.1 (review fix): during probation, a composite that fails its own setup (gadget `--boot` rc≠0, i.e. ip, alias,
+  bridge or bind failed, then `die`, then stock) is a FAIL. The release is not confirmed and rolls back. Host-caused
+  flap rollbacks only happen after rc 0 and stay "degraded".
+- Tests: a `netstat` shim, a test that the link-local listener is mandatory, and a test that a probation setup failure
+  is not confirmed but the same failure on a good release is.
+
+**Mac (only the MK20 interface, matched by host MAC 02:11:22:33:44:56 = en13 "Serial")**
+- New tool `tools/mk20_host_net.py`:
+  - Commands: `status`, `sync`, `apply [--force]`, `revert`, `linklocal`, `linklocal-remove`.
+  - Refusals: a disabled service, several enabled services on the port, two MK20s (duplicate MAC), and any
+    /24-or-narrower route inside the target on another interface. Unparseable netstat fails closed.
+  - `apply` also refuses unless the device is confirmed on the target subnet. It checks through adb
+    (`/tmp/mk20/gadget.env`). `MK20_ADB` must target only the MK20.
+  - After the change, `route get .2` must use the MK20 interface (TUN check) and ping must answer. Otherwise the full
+    previous IPv4 state is restored (DHCP, or manual ip/mask/router). SIGINT, SIGTERM and SIGHUP also restore it.
+- Applied at 19:01 SGT: `Serial` is set to manual 172.30.250.1/24, with no router, so the default route is untouched.
+  `route get 172.30.250.2` resolves to en13. mihomo TUN stays on (default route utun1, AI route US-Exit-Hy2);
+  its config excludes 172.16.0.0/12 and was not changed.
+- Added service "MK20 link-local": manual 169.254.7.1/16 on the same hardware port (Serial/en13), inserted at
+  position 5, right after Serial. `route get 169.254.1.1` still goes to en0, and Wi-Fi is unchanged (DHCP
+  192.168.88.4). The service order before the change is saved in `~/mk20-backup/netservices-before-m4.txt`. Undo:
+  `mk20_host_net.py linklocal-remove`, then `revert --force`.
+- Mismatch test on hardware: Mac on 10.20.0.1 with the device on 1.1.x, i.e. what a device rollback to 1.0.x looks
+  like from the other side.
+  - 172.30.250.2 was unreachable, as expected.
+  - Bound to en13, 169.254.7.2 connected (the device showed the connection ESTABLISHED from 10.20.0.1).
+  - The device has no route back to 10.20.0.1, but the bridge socket is SO_BINDTODEVICE usb0. On a bound socket
+    with no route, Linux treats the destination as on-link, so replies go out usb0.
+  - `sync` then restored 172.30.250.1.
+  - Conclusion: the link-local path (bound to the MK20 interface) works in either mismatch direction. adb over USB
+    never depends on IP.
+
+**Host tools and daemon**
+- p2 `tools/tcp_transport.py`: the default host is now 172.30.250.2. `connect_device()` tries 172.30.250.2, then
+  169.254.7.2, every candidate pinned to the MK20 interface with IP_BOUND_IF. If the interface can't be found, it
+  makes no unbound attempt. A link-local `MK20_HOST` override is always bound.
+- p0 daemon `mk20deck/transport.py` (feature/p0-mvp): candidates are tried in order, 172.30.250.2, then 10.20.0.2,
+  then 169.254.7.2, all bound to the ECM interface. The daemon therefore follows an upgrade or a firmware rollback
+  without config changes. `MK20_TCP` override and off are unchanged. README updated. Tests: 117 passed, 1 skipped.
+- `mk20ctl-url.py` docs now point at 172.30.250.2.
+
+**Hardware verification**
+- 1.1.0: installer, then watcher hardreset. Selftest passed on try 1 (bridge 172.30.250.2 and link-local, hid) and
+  the release was confirmed good. FAT RO remount was clean (`hardreset.last fat_ro=y mount_hung=n`).
+- 1.1.1: upgrade 1.1.0 to 1.1.1 through the installer, same result, FAT RO clean again.
+- Mac side: daemon `find_ports()` returns `tcp://172.30.250.2:17890`. `mk20ctl info` over socket://172.30.250.2:17890
+  returns the KD info (V2.32). VNC auth check from the T113 to 172.30.250.1:5900 passes (AUTH OK).
+- `make test`: shellcheck, 27 host tests (tcp_transport, mk20_host_net) and 223 box tests, all passing.
+
+**Reviews** (`reviews/m4-*.md`, route US-Exit-Hy2 checked first)
+- GPT-5.6-sol-xhigh, findings and how each was handled:
+  - B1, the link-local listener was only a WARN: now a FAIL.
+  - B2, the link-local mismatch path: tested on hardware, plus the link-local service and `sync`.
+  - M, overlap and netstat parsing: rewritten in Python with numeric intersection, header-located columns and
+    fail-closed handling.
+  - M, disabled services and partial restore: full snapshot restore plus signal traps.
+  - M, unbound primary connection: every candidate is now bound.
+  - M, `apply` without a device check: now refuses unless the device is confirmed on the subnet. A forced unreachable
+    result returns rc 6.
+  - m, octet validation: fixed. m, tests: added.
+- Claude Opus 5.5 max:
+  - B1, link-local can't work with a manual service: the "MK20 link-local" service was added, and the path is
+    verified in both directions.
+  - B2, nothing keeps both addresses reachable and the p0 daemon was not updated: the daemon now tries candidates in
+    order. A device-side transitional 10.20.0.2 alias was not added. The link-local path plus `sync` already cover
+    the mismatch, and 1.1.x keeps a single primary subnet as the plan intended.
+  - M1, binding: done. M2, the device check: done.
+  - M3, full restore: done.
+  - M4, probation setup failure was confirmed: fixed in 1.1.1.
+  - Minor 1 to 4, disabled or duplicate services, duplicate MAC, lo0 idempotence and fail-closed parsing, and the
+    status abort: all done.
+- Not done: the persistent state file for `revert`. `revert` targets 10.20.0.1 explicitly, and `apply` keeps its
+  snapshot in memory for the restore.
+
+**Known limitations**
+- The FAT boot partition is 8 MiB with about 1.28 MiB free. The selftest warns below 1 MiB.
+- The two MK20s share the fixed host MAC until per-unit MACs land. The host tool refuses when it sees two.

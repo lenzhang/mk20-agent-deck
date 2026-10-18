@@ -64,9 +64,10 @@ cfg_set() { # $1=key $2=value: validated, then assigned explicitly (no eval)
 }
 cfg_load() {
   local line k v n
-  # release defaults (1.0.x keeps the proven 10.20.0.0/24; the M4 release switches the default)
+  # release defaults: 1.1.0 (M4) moved the ECM default from 10.20.0.0/24 to 172.30.250.0/24 (device .2, Mac .1);
+  # 172.16.0.0/12 is excluded from the Mac's mihomo TUN, and 169.254.7.2 stays as the link-local rescue alias
   CFG_WARN=""
-  ECM_SUBNET=10.20.0.0/24; [ -n "${MK20_DEFAULT_SUBNET:-}" ] && cfg_set ECM_SUBNET "$MK20_DEFAULT_SUBNET"
+  ECM_SUBNET=172.30.250.0/24; [ -n "${MK20_DEFAULT_SUBNET:-}" ] && cfg_set ECM_SUBNET "$MK20_DEFAULT_SUBNET"
   ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56
   FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
   LOG_MAX_KB=256; LOG_KEEP=3; CFG_SRC=defaults

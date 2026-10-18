@@ -202,7 +202,7 @@ closed). MTU 478 is set before `usb0 up` and reported by health (over-MTU test).
 | M1 | Box test harness (fake sysfs/configfs, mocked busybox, fault injection) + shellcheck, THEN stub v2 + rescue tier + release layout + A/B pointers + MANIFEST + build tool |
 | M2 | mk20d entry point, health/self-test (kmsg), structured logs + rotation, whitelisted config, vendor hash gates, bridge bind usb0 |
 | M3 | Installer/updater + state machine + auto rollback, with power-cut injection |
-| M4 | Subnet switch to 172.30.250.0/24 shipped as 1.1.0 THROUGH the installer (real upgrade/rollback exercise) + Mac/daemon update |
+| M4 | Subnet switch to 172.30.250.0/24 shipped as 1.1.0 THROUGH the installer (real upgrade/rollback exercise) + Mac/daemon update | DONE 19:12 SGT: 1.1.0 + 1.1.1 good on HW, Mac en13 172.30.250.1 + MK20 link-local svc, daemon candidates (p0) |
 | M5 | Docs: RELEASE / INSTALL / RECOVERY + kernel/<sha>/RECOVERY.txt |
 | M6 | `make test` wiring everything (box) |
 | M7 | Hardware acceptance (2 runs) + host events + soak; then VNC milestone |
