@@ -1,5 +1,5 @@
 #!/bin/sh
-# v3.2 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+# v3.5 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
 # (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
 # Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
 # NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
@@ -48,8 +48,33 @@ fi
 KDSVC=/etc/init.d/qt_app2   # procd service (CMD=/data/appLunch.sh). NOT qt_app1 (plain sh, kills adbd)
 [ -x $KDSVC ] || KDSVC=""
 udc_now() { cat $G/UDC 2>/dev/null; }
-kd_start() { if [ -n "$KDSVC" ]; then $KDSVC start >>"$LOG" 2>&1; fi; sleep 3
-  pgrep -f KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 ) & }; }
+# KD start: via procd only when the service exists (a manual fallback raced procd -> TWO KD processes, 16:17).
+# KD stop: procd may respawn appLunch.sh right after `stop`; killing that sh later orphaned its fresh KD
+# (PPid 1) -> TWO KD after rollback (16:17 and 16:20). Kill appLunch.sh first, then KD, until both stay gone.
+kd_stop() {
+  [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1
+  i=0; while [ $i -lt 15 ]; do
+    for p in $(pgrep -f /data/appLunch.sh); do kill $p 2>/dev/null; done
+    killall KeyboardDevice 2>/dev/null; sleep 1
+    pgrep -f /data/KeyboardDevice >/dev/null || pgrep -f /data/appLunch.sh >/dev/null || { sleep 1; pgrep -f /data/KeyboardDevice >/dev/null || pgrep -f /data/appLunch.sh >/dev/null || return 0; }
+    i=$((i+1)); done
+  killall -9 KeyboardDevice 2>/dev/null; log "WARN kd_stop: KD/appLunch still alive after 15 s (sent KILL)"
+}
+# reap any KD whose parent is not appLunch.sh (orphan from a respawn race)
+kd_reap_orphans() {
+  for p in $(pgrep -f /data/KeyboardDevice); do pp=$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null)
+    grep -q appLunch /proc/$pp/cmdline 2>/dev/null || { kill $p 2>/dev/null; log "reaped orphan KD $p (ppid $pp)"; }; done
+}
+kd_start() {
+  if [ -n "$KDSVC" ]; then
+    $KDSVC start >>"$LOG" 2>&1; i=0
+    while ! pgrep -f /data/KeyboardDevice >/dev/null && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
+    pgrep -f /data/KeyboardDevice >/dev/null || log "WARN KD not up 20 s after procd start"
+  else
+    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 ) & }
+  fi
+  sleep 3; n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" -le 1 ] || { log "WARN $n KeyboardDevice processes"; kd_reap_orphans; }
+}
 # after a rollback: stock KD has re-run `setusbconfig serial` (ACM only) -> add adb back like boot-every/adb.sh
 readd_adb() {
   [ -f /mnt/SDCARD/mk20-no-adb ] && return
@@ -57,7 +82,9 @@ readd_adb() {
   i=0; until [ -n "$(udc_now)" ] && [ -e $C/acm.usb0 ] && [ -e /dev/ttyGS0 ] && pgrep -f KeyboardDevice >/dev/null; do
     i=$((i+1)); [ $i -gt 60 ] && { log "readd_adb: g1 not ready"; return; }; sleep 1; done
   sleep 5; cp -f $H /tmp/mk20-add-adb.sh; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 && log "adb re-added" || log "adb re-add FAILED"
-  sleep 15; [ -e $C/ffs.adb ] || { log "adb gone again (KD reset?) -> re-add once"; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1; }
+  # KD's startup re-runs `setusbconfig serial` (drops ffs.adb) once or twice: keep re-adding for ~90 s
+  n=0; while [ $n -lt 6 ]; do sleep 15; n=$((n+1)); [ -e $C/ffs.adb ] && continue
+    log "adb gone again (KD reset) -> re-add #$n"; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1; done
 }
 OK=0
 cleanup() {
@@ -68,10 +95,12 @@ cleanup() {
   echo "" > $G/UDC 2>/dev/null
   for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
   rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
-  umount /data/setusbconfig 2>/dev/null; umount /data/appLunch.sh 2>/dev/null
   touch /tmp/mk20-bridge-stop; [ -f /tmp/mk20-bridge-loop.pid ] && kill $(cat /tmp/mk20-bridge-loop.pid) 2>/dev/null; killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
   # KD may hold the dead PTY: restart it cleanly on real ttyGS0
-  [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1; killall KeyboardDevice 2>/dev/null; sleep 1
+  # unmount the shims only after KD + appLunch.sh have exited (a running sh keeps its script busy -> EBUSY)
+  kd_stop
+  for m in /data/setusbconfig /data/appLunch.sh; do i=0; while grep -q " $m " /proc/mounts && [ $i -lt 5 ]; do umount $m 2>/dev/null || sleep 1; i=$((i+1)); done
+    grep -q " $m " /proc/mounts && log "WARN still mounted: $m"; done
   /data/setusbconfig serial >>"$LOG" 2>&1
   kd_start
   readd_adb
@@ -95,8 +124,7 @@ trap '' HUP
 die() { log "FAIL $*"; exit 1; }
 
 # ---- stop KD (via procd so it is not respawned mid-change) and adbd ----
-if [ -n "$KDSVC" ]; then $KDSVC stop >>"$LOG" 2>&1; fi
-killall KeyboardDevice 2>/dev/null; killall adbd 2>/dev/null; sleep 2
+kd_stop; killall adbd 2>/dev/null; sleep 1
 pgrep -f /data/KeyboardDevice >/dev/null && die "KD still running/respawned after stop"
 # ---- unbind + clean stale links ----
 i=0; while [ -n "$(udc_now)" ] && [ $i -lt 10 ]; do echo "" > $G/UDC 2>/dev/null; sleep 0.3; i=$((i+1)); done
@@ -154,6 +182,8 @@ grep -q mk20-shim /tmp/appLunch-shim.sh || die "dmesg shim sed"
 mount --bind /tmp/appLunch-shim.sh /data/appLunch.sh || die "shadow appLunch"
 kd_start
 pgrep -f KeyboardDevice >/dev/null || die "KD not running"
+# test hook (one-shot): prove the failure rollback with everything set up (bridge, shims, KD on PTY)
+if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
 rm -f /mnt/SDCARD/mk20-composite-ok
 OK=1
 log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=10.20.0.2 kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"

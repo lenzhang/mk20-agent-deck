@@ -1,0 +1,10 @@
+You are reviewing a production plan for an "MK20 Agent enhanced firmware" (Allwinner T113, Tina Linux 5.4.61, busybox,
+128MB RAM, TF card with FAT partition /mnt/SDCARD + /data overlay, binary-patched stock kernel). READ ONLY: do not modify
+any files. Read deck/PLAN-production-firmware.md, then for context deck/NOTES-crash-20261018-and-tf-backup.md (end
+sections), deck/m2-scripts/gadget-ecm-hid-adb.sh, deck/m2-scripts/remote/{watcher.sh,lunch-stub.sh,hardreset.sh,
+boot-every/composite.sh,boot-every/adb.sh}.
+Give: (1) GO / GO-with-conditions / NO-GO for the plan; (2) blocking issues (bricking/recovery risks, FAT atomicity,
+pointer-file switch, boot-counter rollback, kernel coupling, KD vendor-behaviour shims, watchdog reset interactions);
+(3) the ECM subnet choice (172.30.250.0/24 vs 172.31.250.0/24 vs link-local-only) for collision with VPN/TUN/Docker/
+corporate networks; (4) missing acceptance criteria or tests; (5) milestone order changes. Be concrete and concise
+(max ~900 words). Output markdown.

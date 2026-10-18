@@ -1,0 +1,1 @@
+AI=US-Exit-Hy2 (confirmed 2026-10-18 16:19 SGT via local controller API, before production-plan reviews)

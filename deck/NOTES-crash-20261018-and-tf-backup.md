@@ -184,3 +184,16 @@
   provided by composite. Ping 50/50 ~1 ms, getInfo over TCP V2.32, daemon find_ports->tcp handshake 640x656
   + SHOW_JPG ACK, adb OK, HID matched by macOS (AppleUserHIDDevice), reports written OK. Stable 8+ min
   (4 host terminates total, all during boot). 15:40 keepalive (pid 2263) killed before the reboot.
+
+## 16:28 SGT: failsafes proven on hardware (gadget v3.5, sha 73b96c83)
+- Flap rollback (16:1x): 6 soft disconnect/connect cycles on the UDC -> flapmon "5 in 60s -> FLAPPING -> rollback"
+  -> FAILSAFE -> ACM+KD+adb. Found /data/appLunch.sh still bind-mounted (EBUSY) -> v3.3: umount after KD exits.
+- Forced boot failure (one-shot hook /mnt/SDCARD/mk20-composite-failtest, consumed on use):
+  - #1 (v3.3): rollback OK and no shim mounts, but TWO KeyboardDevice (manual-fallback race) -> v3.4 procd-only kd_start.
+  - #2 (v3.4): still TWO KD. Cause: procd respawns appLunch.sh right after `qt_app2 stop`; killing that sh
+    afterwards orphaned its fresh KD (PPid 1). v3.5: kd_stop() kills appLunch.sh first, then KD, and loops until
+    both stay gone (15 s cap, then KILL); kd_start reaps orphan KDs (parent not appLunch.sh).
+  - #3 (v3.5, 16:21): FAIL FAILTEST -> FAILSAFE -> adb re-added (KD dropped it once, loop re-added) -> FAILSAFE
+    done acm=y; exactly 1 KD, no shim mounts, g1 = acm.usb0 + ffs.adb, Mac /dev/cu.usbmodem1101 present.
+    Rollback takes ~2 min end to end (most of it is the readd_adb loop).
+- Restore (16:25 cmd-reboot -> WDT): composite up at 57 s uptime (ecm+hid+adb), 1 KD, en13 10.20.0.1, ping 1 ms.
