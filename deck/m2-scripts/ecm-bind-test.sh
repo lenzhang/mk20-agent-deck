@@ -39,7 +39,8 @@ sleep 2
 [ -n "$(udc)" ] || { restore "bind failed: $(dmesg | tail -5 | tr '\n' '|')"; exit 1; }
 log "bound links=$(ls $C | tr '\n' ' ') ifname=$(cat $G/functions/ecm.usb0/ifname 2>/dev/null)"
 N=$(cat $G/functions/ecm.usb0/ifname 2>/dev/null); [ -n "$N" ] || N=usb0
-ifconfig $N 169.254.7.2 netmask 255.255.0.0 up 2>>$L
+MTU=$(cat $S/mk20-ecm-mtu 2>/dev/null); MTU=${MTU:-478}   # <=512B requests -> PIO only (sunxi_udc DMA/bounce bug)
+ifconfig $N mtu $MTU 2>>$L; ifconfig $N 169.254.7.2 netmask 255.255.0.0 up 2>>$L
 log "net: $(ifconfig $N 2>&1 | head -2 | tr '\n' ' ')"
 pidof adbd >/dev/null || log "adbd gone (will be restored at rollback/keep)"
 dmesg | grep -i -E 'udc|ecm|gadget' | tail -8 >> $L

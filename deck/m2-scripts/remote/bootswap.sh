@@ -13,6 +13,7 @@ DEV=$(readlink -f /dev/by-name/boot); [ -b "$DEV" ] || fail "no /dev/by-name/boo
 SEC=$(cat /sys/class/block/${DEV##*/}/size 2>/dev/null); [ -n "$SEC" ] || fail "no sysfs size"
 PART=$((SEC*512)); echo "DEV=$DEV PART=$PART"
 [ -f $NEW ] && [ -f $NEWSHA ] || fail "missing $NEW/.sha256"
+[ -f /data/mk20/postswap-check.sh ] || fail "missing /data/mk20/postswap-check.sh (no auto-revert) - refusing"
 NS=$(wc -c < $NEW); echo "NEWSIZE=$NS"
 [ "$NS" -gt 0 ] && [ "$NS" -le "$PART" ] || fail "size gate NS=$NS PART=$PART"
 E=$(awk '{print $1}' $NEWSHA); G=$(sha256sum $NEW | awk '{print $1}')

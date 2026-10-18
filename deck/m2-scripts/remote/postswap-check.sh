@@ -9,7 +9,7 @@ PS=$(awk '{print $1}' $S/boot-stock.img.sha256 2>/dev/null)
 DEV=$(readlink -f /dev/by-name/boot)
 log() { echo "post $(cut -d' ' -f1 /proc/uptime): $*" | tee -a $L; }
 revert() {
-  log "REVERT: $*"
+  log "REVERT: $*"; rm -f $S/mk20/boot-once/postswap-check.sh*
   SRC=""; for c in $STOCK $STOCK2; do [ -f $c ] && [ "$(sha256sum $c | awk '{print $1}')" = "$PS" ] && { SRC=$c; break; }; done
   [ -n "$SRC" ] || { log "NO VALID STOCK COPY - leave as is; pull TF + tf-restore-boot.sh --slice s4"; echo "revert-failed-no-stock: $*" > $ST; sync; exit 1; }
   dd if=$SRC of=$DEV bs=1M conv=fsync 2>&1 | tail -1 >> $L; sync; echo 3 > /proc/sys/vm/drop_caches
@@ -22,8 +22,12 @@ revert() {
 log "BEGIN uname=$(uname -v)"
 [ -n "$E" ] && [ -n "$PS" ] || { log "missing sha files; skip"; exit 0; }
 NS=$(wc -c < $NEW); H=$(head -c $NS $DEV | sha256sum | awk '{print $1}')
-[ "$H" = "$E" ] || { log "p4 is not the patched image ($H); nothing to check"; exit 0; }
-echo "patched-booted-checking" > $ST; sync
+[ "$H" = "$E" ] || { log "p4 is not the patched image ($H); nothing to check"; rm -f $S/mk20/boot-once/postswap-check.sh*; exit 0; }
+[ -f $S/mk20-swap-ok ] && { log "already host-confirmed"; echo "patched-confirmed" > $ST; rm -f $S/mk20/boot-once/postswap-check.sh*; sync; exit 0; }
+echo "patched-booted-checking" > $ST
+# re-arm for the next boot until confirmed/reverted (a power cycle inside the window must not disarm us)
+BO=$S/mk20/boot-once; mkdir -p $BO; cp -f "$0" $BO/postswap-check.sh
+sha256sum $BO/postswap-check.sh | awk '{print $1"  postswap-check.sh"}' > $BO/postswap-check.sh.sha256; sync
 G=/sys/kernel/config/usb_gadget/g1; i=0
 until [ -n "$(cat $G/UDC 2>/dev/null)" ] && [ -e $G/configs/c.1/acm.usb0 ] && [ -e /dev/ttyGS0 ] && pgrep -f KeyboardDevice >/dev/null; do
   i=$((i+1)); [ $i -gt 90 ] && revert "ACM/KD not up after 90s"; sleep 1
@@ -38,7 +42,7 @@ log "local checks OK; waiting up to 600s for host confirmation ($S/mk20-swap-ok)
 echo "patched-ok-awaiting-host-confirm" > $ST; sync
 # detach the confirmation wait (watcher caps jobs at 300s)
 cat > /tmp/mk20-confirm.sh <<EOC
-i=0; while [ \$i -lt 300 ]; do [ -f $S/mk20-swap-ok ] && { echo "post confirmed by host at \$(cut -d' ' -f1 /proc/uptime)" >> $L; echo "patched-confirmed" > $ST; sync; exit 0; }; sleep 2; i=\$((i+1)); done
+i=0; while [ \$i -lt 300 ]; do [ -f $S/mk20-swap-ok ] && { echo "post confirmed by host at \$(cut -d' ' -f1 /proc/uptime)" >> $L; echo "patched-confirmed" > $ST; rm -f $S/mk20/boot-once/postswap-check.sh*; sync; exit 0; }; sleep 2; i=\$((i+1)); done
 echo "no host confirmation" >> $L
 EOC
 # NOTE: this Tina busybox has NO setsid/nohup (v1 used setsid -> detach silently never ran, 2026-10-18).

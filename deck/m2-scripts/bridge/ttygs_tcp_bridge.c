@@ -18,8 +18,12 @@
 #include <sys/socket.h>
 static const char *linkp = "/dev/ttyGS0";
 static void cleanup(int s) { (void)s; unlink(linkp); _exit(0); }
-static int wall(int fd, const char *b, ssize_t n) {
+static int wall(int fd, const char *b, ssize_t n) {  // blocking-style (to the PTY / KD)
   while (n > 0) { ssize_t w = write(fd, b, n); if (w < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(1000); continue; } return -1; } b += w; n -= w; }
+  return 0;
+}
+static int wsock(int fd, const char *b, ssize_t n) {  // non-blocking to the client: drop on EAGAIN so KD never stalls
+  while (n > 0) { ssize_t w = send(fd, b, n, MSG_DONTWAIT | MSG_NOSIGNAL); if (w < 0) { if (errno == EINTR) continue; if (errno == EAGAIN || errno == EWOULDBLOCK) return 0; return -1; } b += w; n -= w; }
   return 0;
 }
 int main(int argc, char **argv) {
@@ -52,7 +56,7 @@ int main(int argc, char **argv) {
     }
     if (p[0].revents & (POLLIN | POLLHUP)) {
       ssize_t r = read(m, buf, sizeof buf);
-      if (r > 0 && cl >= 0 && wall(cl, buf, r)) { close(cl); cl = -1; }
+      if (r > 0 && cl >= 0 && wsock(cl, buf, r)) { close(cl); cl = -1; }
       if (r <= 0) usleep(10000);
     }
     if (cl >= 0 && (p[2].revents & (POLLIN | POLLHUP | POLLERR))) {

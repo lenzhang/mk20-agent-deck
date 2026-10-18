@@ -78,3 +78,20 @@
   the host sent 114 frames and usb0 got 1 RX. So bulk OUT on **ep5out** delivered only the first transfer.
   ep1/ep2 OUT are fine (ACM, ADB). Suspect the ep5out DMA/double-FIFO RX path.
 - The rollback after the 180 s keep window worked: ACM + ADB restored, KD and adbd unchanged, getInfo OK.
+
+## 14:4x ECM at MTU 478 works (Opus DMA hypothesis confirmed)
+- Same ECM bind test (ECM data on the ep5 pair) with `ifconfig usb0 mtu 478` set before `up`: 300 pings of
+  450 B at 20 ms intervals, 0 % loss, about 1.25 ms average. With MTU 478 every OUT request is at most
+  512 B, so it uses PIO. Larger requests go through the sunxi_udc DMA/bounce path, which is broken (it
+  also risks memory corruption on every endpoint). Note: IPv6 is disabled at an MTU below 1280, so use
+  IPv4 link-local (Mac en13 169.254.x.x, device 169.254.7.2). Over-MTU frames from the host are dropped.
+  TCP is fine thanks to MSS.
+- gadget v3 fixes from the Opus composite review:
+  - KDSVC is hardcoded to qt_app2. qt_app1 is a plain sh script that kills adbd.
+  - The script checks that KD stays stopped.
+  - MTU 478 is set before `up`.
+  - `--rollback` goes through the watcher queue; the waiter uses `--rollback-now`.
+  - The bridge runs under a supervisor loop (with a stop file and a pidfile).
+  - The bridge drops data instead of blocking when the client is slow.
+- postswap re-arms itself in boot-once until the swap is confirmed or reverted (a power cycle no longer
+  disarms it). bootswap now refuses to run without postswap-check.sh.
