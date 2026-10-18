@@ -163,3 +163,24 @@
   one KD-startup reconnect at 15:55:39, then stable; ECM ping 30/30 (0.7-1.8 ms), getInfo over TCP V2.32,
   SHOW_JPG over TCP ACKed, adb OK, HID pointer moved the Mac cursor +6,+6 px exactly, shift tap OK.
   Confirmed (mk20-composite-ok) at uptime 1094.
+
+## 16:00-16:12 SGT: composite ON BY DEFAULT at boot, fixed addressing, daemon TCP-first
+- boot-every/composite.sh v1 (sha edefbf00…): waits for KD's g1 (ACM+ttyGS0+KD, <=120 s), +20 s, then
+  `gadget-ecm-hid-adb.sh --boot` (sha-checked against /data/mk20/gadget-ecm-hid-adb.sh.sha256).
+  Kill switch: /mnt/SDCARD/mk20-no-composite (then boot-every/adb.sh v2.3 gives ACM+KD+adb as before).
+  adb.sh v2.3 (sha 7f3c1493…) skips itself (and its keepalive) when the composite job is enabled+valid.
+- gadget-ecm-hid-adb.sh v3.2 (sha ab3c7e08…): --boot = no host confirm; detached flap monitor
+  (/tmp/mk20-flapmon.sh polls /sys/class/udc/<udc>/state every 0.3 s; >=5 configured->down drops in 60 s ->
+  --rollback-now). Every rollback ends with readd_adb (ACM+KD+adb). usb0 10.20.0.2/24 + usb0:1 169.254.7.2/16,
+  fixed MACs dev 02:11:22:33:44:55 / host 02:11:22:33:44:56.
+- Mac: `networksetup -setmanual Serial 10.20.0.1 255.255.255.0` (service "Serial" = en13, no router -> default
+  route untouched). mihomo (read-only check): tun.route-exclude-address has 10.0.0.0/8 and rule
+  IP-CIDR,10.0.0.0/8,DIRECT -> no proxy change; `route -n get 10.20.0.2` -> en13.
+- Deck daemon (branch feature/p0-mvp 6c3bce7): find_ports() returns tcp://10.20.0.2:17890 first when reachable,
+  then ACM; TcpTransport binds to the ECM iface (found by MAC) via IP_BOUND_IF; route self-check warns if the
+  route goes via utun* with bypass rules for mihomo/Surge/sing-box/WireGuard; never edits proxy configs.
+- E2E 16:02: `mk20ctl reboot` over TCP (watchdog hard reset) -> link down +11 s, ACM (KD stock) +47 s, composite
+  +71 s (uptime 55 OK mode=--boot; one KD-startup drop at 70 counted by flapmon), adb skipped by adb.sh and
+  provided by composite. Ping 50/50 ~1 ms, getInfo over TCP V2.32, daemon find_ports->tcp handshake 640x656
+  + SHOW_JPG ACK, adb OK, HID matched by macOS (AppleUserHIDDevice), reports written OK. Stable 8+ min
+  (4 host terminates total, all during boot). 15:40 keepalive (pid 2263) killed before the reboot.

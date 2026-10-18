@@ -1,7 +1,11 @@
 #!/bin/sh
-# v2.2 Persistent ACM+adb every boot (run by watcher after KD is up). Kill switch: /mnt/SDCARD/mk20-no-adb
+# v2.3 Persistent ACM+adb every boot (run by watcher after KD is up). Kill switch: /mnt/SDCARD/mk20-no-adb
 S=/mnt/SDCARD; H=$S/mk20/mk20-add-adb.sh; export LOG=$S/mk20/logs/adb-helper.log
 [ -f $S/mk20-no-adb ] && { echo "mk20-no-adb set; skip"; exit 0; }
+# v2.3: if the composite boot job is enabled and valid, it provides adb (and re-adds it on rollback): skip here
+CS=$S/mk20/boot-every/composite.sh
+if [ ! -f $S/mk20-no-composite ] && [ -f $CS ] && [ -f $CS.sha256 ] && [ "$(sha256sum $CS | cut -d' ' -f1)" = "$(cut -d' ' -f1 $CS.sha256)" ]; then
+  echo "composite boot enabled -> adb comes with it; skip"; exit 0; fi
 [ -f $H ] || { echo "no helper"; exit 1; }
 restore() { echo "restore serial"; killall adbd 2>/dev/null; [ -x /data/setusbconfig ] && /data/setusbconfig serial; }
 cp -f $H /tmp/mk20-add-adb.sh

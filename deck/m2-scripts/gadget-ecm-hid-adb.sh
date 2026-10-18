@@ -1,5 +1,5 @@
 #!/bin/sh
-# v3 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+# v3.2 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
 # (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
 # Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
 # NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
@@ -19,6 +19,10 @@
 #    shadowed by a tmpfs no-op bind mount (gone at reboot), so KD's restart does not wipe the composite.
 #  - KD gets a filtered `dmesg` (PATH shim via bind-mounted appLunch.sh) so its USB-reset hack does not fire on
 #    f_hid's harmless -EOPNOTSUPP for SET_IDLE/SET_REPORT (root cause of the 3 s flapping, 2026-10-18 15:53).
+#  - v3.2 boot mode (--boot, run by boot-every/composite.sh in the watcher): no host confirmation; instead a
+#    detached flap monitor polls /sys/class/udc/<udc>/state and rolls back if the link drops >=5 times in 60 s.
+#    Any rollback (failure, flapping, --rollback) ends in stock ACM + KD + adb (mk20-add-adb.sh).
+#  - Addressing: usb0 10.20.0.2/24 (Mac en "Serial" manual 10.20.0.1/24) + alias 169.254.7.2/16; fixed MACs.
 #  - It must NEVER run inside an adb shell (it kills adbd; adbd kills the session group). It queues itself to the watcher.
 set -u
 LOG=/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log
@@ -32,7 +36,8 @@ log() { echo "gadget $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
 # Launch: adbd kills the whole process group of an adb shell when it ends (trap HUP does not help) and
 # this busybox has no setsid, so we hand ourselves to the watcher job queue (runs outside adb/ACM sessions).
 if [ "${1:-}" = --rollback ]; then set -- --rollback-queued; fi   # adb-safe: rollback also goes via the watcher
-if [ "${1:-}" != --run ] && [ "${1:-}" != --rollback-now ]; then
+MODE=${1:-}
+if [ "$MODE" != --run ] && [ "$MODE" != --boot ] && [ "$MODE" != --rollback-now ]; then
   Q=/mnt/SDCARD/job.sh; [ -e $Q ] && { echo "watcher queue busy ($Q exists)"; exit 1; }
   A=--run; [ "${1:-}" = --rollback-queued ] && A=--rollback-now
   echo "sh $(readlink -f "$0") $A" > $Q.tmp
@@ -45,10 +50,20 @@ KDSVC=/etc/init.d/qt_app2   # procd service (CMD=/data/appLunch.sh). NOT qt_app1
 udc_now() { cat $G/UDC 2>/dev/null; }
 kd_start() { if [ -n "$KDSVC" ]; then $KDSVC start >>"$LOG" 2>&1; fi; sleep 3
   pgrep -f KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 ) & }; }
+# after a rollback: stock KD has re-run `setusbconfig serial` (ACM only) -> add adb back like boot-every/adb.sh
+readd_adb() {
+  [ -f /mnt/SDCARD/mk20-no-adb ] && return
+  H=/mnt/SDCARD/mk20/mk20-add-adb.sh; [ -f $H ] || return
+  i=0; until [ -n "$(udc_now)" ] && [ -e $C/acm.usb0 ] && [ -e /dev/ttyGS0 ] && pgrep -f KeyboardDevice >/dev/null; do
+    i=$((i+1)); [ $i -gt 60 ] && { log "readd_adb: g1 not ready"; return; }; sleep 1; done
+  sleep 5; cp -f $H /tmp/mk20-add-adb.sh; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 && log "adb re-added" || log "adb re-add FAILED"
+  sleep 15; [ -e $C/ffs.adb ] || { log "adb gone again (KD reset?) -> re-add once"; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1; }
+}
 OK=0
 cleanup() {
   [ "$OK" = 1 ] && return
   log "FAILSAFE: undo composite"
+  touch /tmp/mk20-flapmon-stop
   killall adbd 2>/dev/null
   echo "" > $G/UDC 2>/dev/null
   for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
@@ -59,6 +74,7 @@ cleanup() {
   [ -n "$KDSVC" ] && $KDSVC stop >>"$LOG" 2>&1; killall KeyboardDevice 2>/dev/null; sleep 1
   /data/setusbconfig serial >>"$LOG" 2>&1
   kd_start
+  readd_adb
   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
 }
 # rollback runs before any preflight so an abnormal state cannot block it
@@ -118,7 +134,7 @@ sleep 1
 [ $NOHID = 1 ] || [ -e /dev/hidg0 ] || die "no /dev/hidg0"
 [ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
 ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
-ifconfig usb0 169.254.7.2 netmask 255.255.0.0 up 2>>"$LOG"; ifconfig usb0:1 192.168.7.2 netmask 255.255.255.0 up 2>>"$LOG"
+ifconfig usb0 10.20.0.2 netmask 255.255.255.0 up 2>>"$LOG" || die "usb0 ip"; ifconfig usb0:1 169.254.7.2 netmask 255.255.0.0 up 2>>"$LOG"
 rm -f /tmp/mk20-bridge-stop
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
 [ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
@@ -140,10 +156,31 @@ kd_start
 pgrep -f KeyboardDevice >/dev/null || die "KD not running"
 rm -f /mnt/SDCARD/mk20-composite-ok
 OK=1
-log "OK UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=192.168.7.2 kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
+log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=10.20.0.2 kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
 # within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
 ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh)" ] || { OK=0; die "cannot stage rollback copy"; }
+# flap monitor (both modes): >=5 configured->not-configured drops within 60 s -> rollback to ACM+KD+adb
+rm -f /tmp/mk20-flapmon-stop
+cat > /tmp/mk20-flapmon.sh <<FM
+U=/sys/class/udc/$UDC/state; prev=\$(cat \$U 2>/dev/null); times=""
+while [ ! -f /tmp/mk20-flapmon-stop ]; do
+  s=\$(cat \$U 2>/dev/null)
+  if [ "\$prev" = configured ] && [ "\$s" != configured ]; then
+    now=\$(cut -d. -f1 /proc/uptime); nt=""; cnt=0
+    for t in \$times \$now; do [ \$((now-t)) -le 60 ] && { nt="\$nt \$t"; cnt=\$((cnt+1)); }; done; times=\$nt
+    echo "flapmon \$now: link drop (\$s), \$cnt in 60s" >> $LOG
+    if [ \$cnt -ge 5 ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
+  fi
+  prev=\$s; sleep 0.3
+done
+FM
+( trap '' HUP INT; exec sh /tmp/mk20-flapmon.sh </dev/null >/dev/null 2>&1 9>&- ) &
+FP=$!; sleep 1; kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start"; }
+log "flap monitor started (pid $FP)"
+if [ "$MODE" = --boot ]; then
+  touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
+fi
 ( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; sleep 2; i=\$((i+1)); done; sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 9>&- ) &
 WP=$!; sleep 1; kill -0 $WP 2>/dev/null || { OK=0; die "confirm waiter did not start -> rollback now"; }
 log "confirm window 180s started (pid $WP)"
