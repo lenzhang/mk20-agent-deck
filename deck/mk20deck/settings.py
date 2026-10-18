@@ -33,7 +33,7 @@ MODELS = {  # example names only — the real list comes from the provider at ru
     "gemini": ["gemini-2.5-pro", "gemini-2.5-flash"]}
 WEB_HINT = "密钥/Wi-Fi 密码不在设备上输入：请在 Mac 端或网页 http://172.30.250.1:8780 设置"
 DEFAULTS = {"profile": "mac_proxy", "proxy_port": 7890, "provider": "qwen", "model": "qwen3-max",
-            "brightness": 80, "volume": 50}
+            "brightness": 80, "volume": 50, "wifi_proxy": ""}
 DEVICE_PATH = "/data/mk20/settings.json"
 NET_KEYS = ("profile", "proxy_port")
 
@@ -67,6 +67,10 @@ class SettingsStore:
             out.update({k: d[k] for k in DEFAULTS if k in d and type(d[k]) is type(DEFAULTS[k])})
         except (OSError, ValueError):
             pass
+        if out["profile"] not in ("mac_proxy", "board_wifi"):
+            out["profile"] = DEFAULTS["profile"]
+        if out["provider"] not in MODELS:
+            out["provider"], out["model"] = DEFAULTS["provider"], DEFAULTS["model"]
         return out
 
     def save(self, cfg: dict) -> None:
@@ -125,6 +129,12 @@ class SettingsPage:
 
     def __post_init__(self) -> None:
         self.saved = self.store.load()
+        self.refresh_keys()
+
+    def refresh_keys(self) -> None:
+        hk = getattr(self.applier, "has_key", None)
+        if hk:
+            self.keys_set = {p: hk(p) for p, _n, _d in PROVIDERS}
 
     # ------------------------------------------------------------- model
     def cfg(self, k: str):
@@ -134,7 +144,7 @@ class SettingsPage:
         c = self.cfg
         if self.tab == "net":
             return [Item("profile:mac_proxy", "Mac 代理", "默认", c("profile") == "mac_proxy"),
-                    Item("profile:wifi", "板载 Wi-Fi", "需网卡", c("profile") == "wifi"),
+                    Item("profile:board_wifi", "板载 Wi-Fi", "需网卡", c("profile") == "board_wifi"),
                     Item("proxy_port", "代理端口", str(c("proxy_port")), adjustable=True),
                     Item("wifi_ssid", "Wi-Fi", "Mac/网页设置", readonly=True),
                     Item("split", "国内直连", "自动", readonly=True)]
@@ -157,6 +167,7 @@ class SettingsPage:
 
     # ------------------------------------------------------------- input (doc coords / knob actions)
     def open(self) -> None:
+        self.refresh_keys()
         self.active, self.tab, self.focus, self.exit_to, self.dirty = True, "net", 0, None, True
         self._say("进入设置")
 
@@ -264,15 +275,28 @@ class SettingsPage:
         self._say(msg)
 
     def run_test(self) -> None:
-        p = self.cfg("provider")
-        dom = next(d for i, _n, d in PROVIDERS if i == p)
+        """Tests the *applied* config (what the agent would use); pending edits must be applied first."""
+        p = self.saved["provider"]
+        if self.pending:
+            self._say("请先「应用」再测试")
+            return
         if not self.keys_set.get(p):
             self.test_result = "失败：无 Key"
-        elif not dom and self.cfg("profile") == "wifi":
-            self.test_result = "失败：需代理"
-        else:
-            self.test_result = "成功 · 模拟 " + ("180" if dom else "420") + " ms"
-        self._say(f"连接测试（模拟）：{self.test_result}")
+            self._say(f"连接测试：{self.test_result}")
+            return
+        rt = getattr(self.applier, "run_test", None)
+        if rt is None:
+            self.test_result = "未实现"
+            return
+        self.test_result = "测试中…"
+
+        def done(ok: bool, msg: str) -> None:
+            self.test_result = msg if ok or msg.startswith("失败") else f"失败：{msg}"
+            self.log.append(f"连接测试：{self.test_result}")
+            self.dirty = True
+            self.version += 1
+
+        rt(dict(self.saved), done)
 
     def summary(self) -> str:
         prof = "Mac 代理:" + str(self.cfg("proxy_port")) if self.cfg("profile") == "mac_proxy" else "板载 Wi-Fi"

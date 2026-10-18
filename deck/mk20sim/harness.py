@@ -16,6 +16,8 @@ fw→doc coordinate translation are all exercised.  Output side:
 from __future__ import annotations
 
 import io
+import os
+import tempfile
 import random
 import threading
 import time
@@ -32,6 +34,8 @@ from mk20deck.layout import DeviceLayout
 from mk20deck.model import ActionResult
 from mk20deck.protocol import KeyEvent
 from mk20deck.render.canvas import Renderer
+from mk20deck.agentcfg import AgentConfigApplier, MockTester
+from mk20deck.settings import SettingsPage, SettingsStore
 from mk20deck.sim import FakeClock, demo_adapters
 
 
@@ -117,7 +121,17 @@ class Sim:
         self.clock: Callable[[], float] = time.monotonic if self.realtime else self.fake
         self.t0 = self.clock()
         self.adapters = {m: _Recording(a, self._emit) for m, a in demo_adapters().items()}
+        self.agent_dir = tempfile.mkdtemp(prefix="mk20sim-agent-")
+        sec = os.path.join(self.agent_dir, "secrets")
+        os.makedirs(sec, mode=0o700)
+        for p in ("qwen", "openai"):  # sim: these two providers have a key on file
+            with open(os.path.join(sec, f"{p}.key"), "w") as f:
+                f.write("sim-placeholder")
+        self.tester = MockTester()
+        self.applier = AgentConfigApplier(root=os.path.join(self.agent_dir, "agent"), secrets_dir=sec,
+                                          tester=self.tester)
         self.controller = Controller(DeckConfig(), self.adapters, clock=self.clock,
+                                     settings=SettingsPage(store=SettingsStore.temp(), applier=self.applier),
                                      wall=lambda: 1792244000.0 if not self.realtime else time.time(), sim=True)
         self.controller.refresh()
         self.renderer = Renderer(self.layout, animations=self.animations)

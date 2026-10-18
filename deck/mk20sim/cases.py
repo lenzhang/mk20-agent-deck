@@ -25,6 +25,8 @@ Expectations (all keys optional, all must hold):
   key_image_size: [128,128], sub_image_size: [428,142], frames_min: n
   settings.<field>: value   – settings mock: active/tab/focus/test or a config key (profile, provider…)
   settings_toast_contains: text
+  agent_file: {"provider.json": {...}}   – subset of the agent runtime config written by 应用
+  tester_last_route: [provider, proxy_url] – last (mocked) connection test route
 Optional top-level "latency": {"input_ms", "input_jitter_ms", "router_ms", "router_jitter_ms",
   "frame_ms", "frame_jitter_ms", "seed"} injects delays for the whole case.
 """
@@ -166,6 +168,15 @@ def _check(sim: Sim, exp: dict, mark: dict, idx: int, src: dict) -> None:
             sv = sim.settings.state()
             cur = sv.get(f) if f in sv else sim.settings.cfg(f)
             need(k, v, cur)
+        elif k == "agent_file":  # {"provider.json": {"provider": "kimi"}} – subset match on written config
+            for fn, want in v.items():
+                fp = os.path.join(sim.applier.root, fn)
+                got = json.load(open(fp, encoding="utf-8")) if os.path.exists(fp) else None
+                sub = {kk: (got or {}).get(kk) for kk in want} if isinstance(want, dict) else got
+                need(f"agent_file.{fn}", want, sub)
+        elif k == "tester_last_route":
+            calls = sim.tester.calls
+            need(k, v, list(calls[-1]) if calls else None)
         elif k == "settings_toast_contains":
             t = sim.settings.toast or ""
             need(k, v, t, v in t)

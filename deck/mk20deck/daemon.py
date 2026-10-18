@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import keytrace as _keytrace
 from . import protocol as P
 from .controller import LONG_PRESS, Controller
 from .link import DeviceLink, LatencyStats
@@ -23,6 +24,7 @@ class InputEvent:
     b: int | str
     pressed: bool = False
     t: float = 0.0
+    code: str = ""  # raw code for the key trace
 
 
 class WakeReconnect(ConnectionError):
@@ -54,11 +56,16 @@ class Daemon:
     paused: bool = False  # display asleep: no frames, no heartbeat
     _next_power: float = 0.0
     power_log: list = field(default_factory=list)
+    trace: object | None = field(default_factory=lambda: _keytrace.from_env())  # MK20_KEYTRACE=1
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
         """Called from the link reader thread (firmware coordinates)."""
         now = self.clock()
+        code = ""
+        if self.trace:
+            code = f"kc:0x{ev.keycode:04x}" if (ev.col < 0 and ev.keycode is not None) else f"{ev.col},{ev.row}"
+            self.trace.ev("recv", code, ev.pressed)
         if ev.col < 0 and ev.keycode is not None:  # keycode-form event
             target = self.keycode_map.get(f"0x{ev.keycode:04x}")
             if target is None:
@@ -66,7 +73,7 @@ class Daemon:
                 return
             if ":" not in target:
                 c, r = (int(x) for x in target.split(","))
-                self.events.put(InputEvent("key", c, r, ev.pressed, t=now))
+                self.events.put(InputEvent("key", c, r, ev.pressed, t=now, code=code))
                 return
             tag = target
         else:
@@ -75,9 +82,9 @@ class Daemon:
             knob = 1 if tag.startswith("K1") else 2
             action = tag.split(":", 1)[1] if ":" in tag else "press"
             if action == "press":
-                self.events.put(InputEvent("knob", knob, "down" if ev.pressed else "up", t=now))
+                self.events.put(InputEvent("knob", knob, "down" if ev.pressed else "up", ev.pressed, t=now, code=code))
             elif ev.pressed:
-                self.events.put(InputEvent("knob", knob, action, t=now))
+                self.events.put(InputEvent("knob", knob, action, True, t=now, code=code))
             return
         lay = self.renderer.layout
         if lay.keys and not any(r.col == ev.col and r.row == ev.row for r in lay.keys):
@@ -85,7 +92,7 @@ class Daemon:
             log.info("unmapped non-key event %d,%d (add it to [knobs])", ev.col, ev.row)
             return
         col, row = lay.fw_to_doc(ev.col, ev.row)
-        self.events.put(InputEvent("key", col, row, ev.pressed, t=now))
+        self.events.put(InputEvent("key", col, row, ev.pressed, t=now, code=code))
 
     def inject_key(self, col: int, row: int, pressed: bool) -> None:
         """Document coordinates (simulator)."""
@@ -96,10 +103,19 @@ class Daemon:
 
     def _apply(self, ev: InputEvent) -> None:
         log.info("input %s %s %s%s", ev.kind, ev.a, ev.b, "" if ev.kind != "key" else (" down" if ev.pressed else " up"))
+        tr = self.trace
+        if tr:
+            c = self.controller
+            ptt0, acts0 = c.ptt_held, c.action_count
         if ev.kind == "key":
             self.controller.on_key(ev.a, int(ev.b), ev.pressed)
         else:
             self.controller.on_knob(ev.a, str(ev.b))
+        if tr:
+            code = ev.code or f"inj:{ev.a},{ev.b}"
+            tr.ev("routed", code, ev.pressed)
+            out = "hid_written" if c.ptt_held != ptt0 else "agent" if c.action_count != acts0 else "local"
+            tr.ev(out, code, ev.pressed)
         if self._pending_t is None:
             self._pending_t = ev.t
 

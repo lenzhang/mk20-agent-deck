@@ -17,8 +17,11 @@ instrumenting GD32 firmware — out of scope (we never flash GD32).
 
 ## Prerequisites
 1. Soak finished; release with the router installed (Phase 2 key routing).
-2. Router supports `MK20_KEYTRACE=1`: appends `"<CLOCK_MONOTONIC ns> rx|hid <col> <row> <0|1>"` lines to
-   `/tmp/mk20/keytrace.log` (tmpfs only). **TODO in router** — the script only reads it.
+2. Start the router with `MK20_KEYTRACE=1` (implemented: `mk20deck/keytrace.py`, hooked in `daemon.py`). It writes
+   `"<CLOCK_MONOTONIC ns> <recv|routed|hid_written|agent|local> <code> <0|1>"` to `/tmp/mk20/keytrace.log`
+   (tmpfs, rotates to `.1` at 256 KiB; `MK20_KEYTRACE_PATH` / `MK20_KEYTRACE_MAX` override). Off = no cost.
+   Note: `hid_written` is currently inferred when the PTT/HID state flips; once the T113 HID writer lands it
+   should emit the stage right after its `write()` to `/dev/hidg*`.
 3. Device reachable via `~/mk20-backup/mkadb.sh` (existing bridge/adb). Respect the adb rules: do not run
    USB-changing scripts in the foreground; this tool does not change USB state.
 4. Mac: `pip install hidapi`; know the T113 HID gadget VID/PID (`--vid/--pid`).

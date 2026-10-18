@@ -9,8 +9,9 @@ Legs (all in nanoseconds of the T113 CLOCK_MONOTONIC unless noted):
   E2E = A+B+C (or B+C when usbmon is unavailable)
 
 Inputs on the T113 (read-only for this tool):
-  * key trace written by the router when MK20_KEYTRACE=1:  "<mono_ns> rx <col> <row> <0|1>" and
-    "<mono_ns> hid <col> <row> <0|1>" lines in /tmp/mk20/keytrace.log (tmpfs; never /data).
+  * key trace written by the router (mk20deck.keytrace) when MK20_KEYTRACE=1:
+    "<mono_ns> <recv|routed|hid_written|agent|local> <code> <0|1>" lines in /tmp/mk20/keytrace.log
+    (tmpfs, bounded/rotated; never /data).
   * optional usbmon text log  /sys/kernel/debug/usb/usbmon/<bus>u  (debugfs; read only).
 Clock offset Mac↔T113: min-RTT sampling of "now at N nsecs" from /proc/timer_list over adb.
 
@@ -87,10 +88,46 @@ def capture_mac_hid(vid: int, pid: int, n: int, timeout_s: float) -> list[int]:
     return out
 
 
-def pair(trace: list[tuple[int, str, int, int, int]], mac: list[int], offset: int, usb: list[int]) -> dict:
-    rx = [t for t, k, *_ in trace if k == "rx"]
-    tx = [t for t, k, *_ in trace if k == "hid"]
+def parse_trace(text: str) -> list[tuple[int, str, str, int]]:
+    out = []
+    for line in text.splitlines():
+        p = line.split()
+        if len(p) == 4 and p[0].isdigit() and p[1] in ("recv", "routed", "hid_written", "agent", "local"):
+            out.append((int(p[0]), p[1], p[2], int(p[3])))
+    return out
+
+
+def events(trace: list[tuple[int, str, str, int]]) -> list[dict]:
+    """Group stages per event: recv → routed → outcome (FIFO per code/pressed)."""
+    open_: dict[tuple[str, int], list[dict]] = {}
+    done = []
+    for t, st, code, p in trace:
+        k = (code.removeprefix("inj:"), p)
+        if st == "recv":
+            open_.setdefault(k, []).append({"code": code, "pressed": p, "recv": t})
+        elif st == "routed":
+            q = [e for e in open_.get(k, []) if "routed" not in e]
+            if q:
+                q[0]["routed"] = t
+            else:  # injected event: no recv stage
+                open_.setdefault(k, []).append({"code": code, "pressed": p, "routed": t})
+        else:
+            q = [e for e in open_.get(k, []) if "routed" in e]
+            if q:
+                e = q[0]
+                open_[k].remove(e)
+                e["outcome"], e["out_t"] = st, t
+                done.append(e)
+    return done
+
+
+def pair(trace: list[tuple[int, str, str, int]], mac: list[int], offset: int, usb: list[int]) -> dict:
+    evs = [e for e in events(trace) if "recv" in e]
+    hid = [e for e in evs if e["outcome"] == "hid_written"]
+    rx = [e["recv"] for e in hid]
+    tx = [e["out_t"] for e in hid]
     legA, legB, legC = [], [], []
+    legR = [(e["routed"] - e["recv"]) / 1e6 for e in evs]
     for r, h in zip(rx, tx):
         legB.append((h - r) / 1e6)
         prev = [u for u in usb if u <= r]
@@ -100,7 +137,8 @@ def pair(trace: list[tuple[int, str, int, int, int]], mac: list[int], offset: in
         legC.append((m + offset - h) / 1e6)
     e2e = [b + c + (a if legA else 0) for a, b, c in zip(legA or [0] * len(legB), legB, legC)]
     return {"A_gd32_to_rx_ms": pct(legA), "B_rx_to_hid_ms": pct(legB), "C_hid_to_mac_ms": pct(legC),
-            "E2E_ms": pct(e2e)}
+            "E2E_ms": pct(e2e), "recv_to_routed_ms_all_keys": pct(legR),
+            "outcomes": {o: sum(1 for e in evs if e["outcome"] == o) for o in ("hid_written", "agent", "local")}}
 
 
 def run_phase(name: str, a, load: bool) -> dict:
@@ -119,11 +157,7 @@ def run_phase(name: str, a, load: bool) -> dict:
         if loader:
             loader.terminate()
             adb("pkill -f lat.io; rm -f /tmp/mk20/lat.io; true")
-    trace = []
-    for line in adb(f"cat {TRACE}").splitlines():
-        p = line.split()
-        if len(p) == 5 and p[1] in ("rx", "hid"):
-            trace.append((int(p[0]), p[1], int(p[2]), int(p[3]), int(p[4])))
+    trace = parse_trace(adb(f"cat {TRACE}.1 2>/dev/null; cat {TRACE}"))
     usb = []
     if a.usbmon:
         for line in adb(f"cat /tmp/mk20/usbmon.txt 2>/dev/null || true").splitlines():

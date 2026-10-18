@@ -165,6 +165,7 @@ class Controller:
         self.scroll = 0
         self.version = 0  # bumps whenever the view may have changed
         self.log: list[str] = []
+        self.action_count = 0
         self.settings = settings or SettingsPage()
 
     # ------------------------------------------------------------------ helpers
@@ -185,6 +186,7 @@ class Controller:
         self._touch()
 
     def _result(self, res: ActionResult) -> ActionResult:
+        self.action_count += 1  # adapter (agent) action attempted — key trace outcome
         self._say(res.message)
         return res
 

@@ -174,7 +174,7 @@
     "expect": {
      "settings.confirm_net": false,
      "settings.pending": {},
-     "settings.profile": "wifi"
+     "settings.profile": "board_wifi"
     }
    },
    {
@@ -228,6 +228,59 @@
      "settings.volume": 60,
      "settings.pending": {},
      "settings.confirm_net": false
+    }
+   }
+  ]
+ },
+ {
+  "name": "apply_writes_agent_config_and_tests_via_mac_proxy",
+  "group": "settings",
+  "desc": "应用写入智能体配置（net.json/provider.json，不含密钥）；连接测试经 Mac 代理（模拟，无真实请求）",
+  "steps": [
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "press": "2,1"
+   },
+   {
+    "press": "5,2"
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "expect": {
+     "agent_file": {
+      "provider.json": {
+       "provider": "openai",
+       "route": "foreign",
+       "model": "gpt-5"
+      },
+      "net.json": {
+       "profile": "mac_proxy"
+      }
+     }
+    }
+   },
+   {
+    "press": "4,1"
+   },
+   {
+    "press": "1,2"
+   },
+   {
+    "expect": {
+     "settings.test": "成功 · 模拟 420 ms",
+     "tester_last_route": [
+      "openai",
+      "http://172.30.250.1:7890"
+     ]
     }
    }
   ]

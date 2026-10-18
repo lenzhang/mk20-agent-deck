@@ -35,8 +35,8 @@ def test_network_change_needs_second_apply_and_persists(tmp_path):
     s.key(2, 4)            # 应用 #1 → confirm armed
     assert s.confirm_net and not ap.calls
     s.key(2, 4)            # 应用 #2
-    assert ap.calls == [{"profile": "wifi"}]
-    assert SettingsStore(s.store.path).load()["profile"] == "wifi"
+    assert ap.calls == [{"profile": "board_wifi"}]
+    assert SettingsStore(s.store.path).load()["profile"] == "board_wifi"
 
 
 def test_confirm_disarmed_by_other_input(tmp_path):
