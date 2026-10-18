@@ -111,3 +111,17 @@
   Stock copies kept; the baseline (ep3) is backed up at /data/mk20/boot-baseline.img + Mac + box.
 - postswap (re-arming) is staged in boot-once. mk20-no-bootevery is set for the first boot. The status
   is "ok-power-cycle-now". On failure, or with no confirmation in 600 s, it auto-reverts to **stock**.
+
+## Remote hard reset (15:3x SGT) — design, NOT yet tested on hardware
+- Soft reboot hang RCA (from kallsyms + tina54 source): `psci_sys_reset` exists, so ARM `machine_restart()` uses
+  `arm_pm_restart = psci_sys_reset` (PSCI SYSTEM_RESET to secure firmware) and never reaches `sunxi_wdt_restart`.
+  Before that the reboot notifiers stop the sunxi WDT (`watchdog_reboot_notifier`, `sunxi_wdt_shutdown`), so a hung
+  PSCI call is never rescued. Matches 13:17: no USB at all, GD32 gone (hub held/powered by T113), until power cycle.
+- sysrq: enabled (1). `b` -> emergency_restart -> same PSCI call, but skips notifiers, so the WDT procd armed stays armed.
+- devmem: CONFIG_DEVMEM not set -> no register poke.
+- procd holds /dev/watchdog (fd 3), `ubus call system watchdog` = running, timeout 16, frequency 5, magicclose false,
+  API supports `stop`. procd stop = cancel pings (+ close without 'V') -> core logs "watchdog did not stop", HW fires.
+- mmc0 3.3 V high-speed (not UHS) -> no 1.8 V warm-reset trap for the boot ROM.
+- Implementation: remote/hardreset.sh (sync; ubus watchdog stop; HW WDT reset <=16 s; fallback after 30 s sysrq s,u,b).
+  watcher.sh cmd-reboot now calls it (reboot only as last resort) => `mk20ctl reboot` uses it from the next boot
+  (running watcher is a /tmp copy). Deployed to SD: watcher fd24a6cf…, hardreset ce61e3df…; backup watcher.sh.bak-pre-hardreset.

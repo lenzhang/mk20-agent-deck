@@ -1,6 +1,6 @@
 #!/bin/sh
 # MK20 watcher v2 — polls /mnt/SDCARD every 2s. Started by lunch stub.
-#   cmd-reboot                      -> sync + reboot
+#   cmd-reboot                      -> sync + hardware WDT reset (hardreset.sh), reboot as fallback
 #   job.sh + job.sh.sha256          -> verify, run once (300s cap), log, emit over ttyGS0
 #   mk20/boot-once/*.sh(+.sha256)   -> run once at boot (after KD up), emit log
 #   mk20/boot-delayed/*.sh(+.sha256)-> run once ~120s after boot, emit log
@@ -87,7 +87,10 @@ while :; do
   [ -f $S/mk20-no-watch ] && { log "kill switch; exit"; exit 0; }
   if [ -f $S/cmd-reboot ]; then
     rm -f $S/cmd-reboot; log "cmd-reboot"; echo "rebooting $(cut -d' ' -f1 /proc/uptime)" > /tmp/mk20/rb
-    emit /tmp/mk20/rb reboot; sync; sleep 1; reboot
+    emit /tmp/mk20/rb reboot; sync; sleep 1
+    # soft reboot hangs in PSCI on this board -> hardware WDT reset (see hardreset.sh); reboot only as last resort
+    [ -f $D/hardreset.sh ] && sh $D/hardreset.sh watcher
+    reboot
   fi
   if [ -f $S/cmd-ping ]; then
     rm -f $S/cmd-ping
