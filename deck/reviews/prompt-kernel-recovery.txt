@@ -1,0 +1,12 @@
+Read-only review of deck/NOTES-kernel-patch-recovery.md (MK20 / Allwinner T113-S3).
+Do NOT edit files or run destructive commands. Mode is ask/plan only.
+
+Evaluate:
+1) Accuracy of claims vs cited evidence (TF boot, partitions, V2.32 update path, PhoenixCard, FEL/PC4, Tina ep3→int).
+2) Anti-brick adequacy: is the ranked recovery plan sufficient before any kernel write? Missing steps?
+3) Runtime module claim: is the conclusion that sunxi_usb_udc is likely built-in fair given /sys/module vs missing .ko?
+4) EP math: ACM+HID+ECM after one ISO→INT — correct?
+5) Physical user actions — clearly called out?
+6) Blockers before the user should attempt a kernel patch.
+
+Output: Blockers, Risks, What looks sound, Suggested next physical steps for the user. Be concrete. Under ~600 lines.

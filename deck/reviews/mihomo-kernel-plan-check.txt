@@ -1,0 +1,11 @@
+2026-10-18 ~10:00 SGT
+(['US-Exit-Hy2', 'AI'], 'api3.cursor.sh')
+(['US-Exit-Hy2', 'AI'], 'api2.cursor.sh')
+(['US-Exit-Hy2', 'AI'], 'status.cursor.com')
+(['US-Exit-Hy2', 'AI'], 'api2.cursor.sh')
+(['US-Exit-Hy2', 'AI'], '2658b7d3019e5f12cbb6-pod-bvzpkkg6xvck3mypdimo4piytm-1340.us9.cursorvm.com')
+(['US-Exit-Hy2', 'AI'], '2658b7d3019e5f12cbb6-pod-bvzpkkg6xvck3mypdimo4piytm-1340.us9.cursorvm.com')
+(['US-Exit-Hy2', 'AI'], '2658b7d3019e5f12cbb6-pod-bvzpkkg6xvck3mypdimo4piytm-1340.us9.cursorvm.com')
+(['US-Exit-Hy2', 'AI'], '2658b7d3019e5f12cbb6-pod-bvzpkkg6xvck3mypdimo4piytm-8790.us9.cursorvm.com')
+(['US-Exit-Hy2', 'AI'], 'api2.cursor.sh')
+(['US-Exit-Hy2', 'AI'], 'api2.cursor.sh')
