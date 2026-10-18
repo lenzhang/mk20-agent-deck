@@ -1,1 +1,2 @@
 AI=US-Exit-Hy2 (confirmed 2026-10-18 12:56 SGT before stock-patch reviews)
+AI=US-Exit-Hy2 (confirmed 2026-10-18 13:18 SGT before Opus re-run)

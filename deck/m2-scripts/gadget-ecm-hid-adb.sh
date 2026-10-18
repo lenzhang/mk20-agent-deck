@@ -1,119 +1,116 @@
 #!/bin/sh
-# Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS) if EP budget allows.
-# Requires the binary-patched STOCK kernel (ep3 ISO→INT + ep5out INT-capable, see
-# NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko (insmod'ed below; HID/FFS are built in).
-# Failsafe: on any error, restore stock serial via /data/setusbconfig serial.
+# v3 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+# (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
+# Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
+# NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
 #
-# EP budget: f_hid (5.4) ALWAYS needs INT IN + INT OUT. ECM notify INT IN + HID IN/OUT = 3 INT:
-#   ep3 (INT, patched) , ep4 (INT), ep5out (bulk+INT, patched). Bulk: ep1, ep2 pairs (ECM, ADB).
-#   Link ECM BEFORE HID (configfs binds in link order) or ECM notify finds no INT IN endpoint.
+# EP budget: f_hid (5.4) ALWAYS takes INT IN + INT OUT. ECM notify INT IN + HID IN/OUT = 3 INT:
+#   ep3 (INT, patched), ep4 (INT), ep5out (bulk+INT, patched). Bulk: ep1 pair (ECM), ep2 pair (ADB).
+#   ACM cannot also fit, so KD's ttyGS0 is replaced by a PTY<->TCP bridge (/data/ttygs_tcp_bridge).
+#   Link order matters (configfs binds in link order): ECM, then HID, then ffs.adb.
+#
+# Safety (v3, per GPT-5.6 review 2026-10-18):
+#  - adbd is started BEFORE the UDC is bound (FunctionFS needs descriptors first, else -ENODEV).
+#  - HID report_length 9 (report ID 1 keyboard = 1 ID + 8 bytes; pointer = 1 + 5).
+#  - EXIT trap: on ANY failure it unbinds, unlinks and removes our functions, restores stock serial
+#    (/data/setusbconfig serial) and restarts KeyboardDevice.
+#  - Stale links in g1/configs/c.1 are removed before reuse.
+#  - KD is stopped via its procd service (no respawn race) and restarted at the end. setusbconfig is
+#    shadowed by a tmpfs no-op bind mount (gone at reboot), so KD's restart does not wipe the composite.
+#  - It must NEVER run in the foreground of an adb shell (it kills adbd). It re-execs itself detached.
+set -u
+LOG=/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log
+G=/sys/kernel/config/usb_gadget/g1
+C=$G/configs/c.1
+BR=/data/ttygs_tcp_bridge
+ECMKO=/data/mk20/usb_f_ecm.ko
+mkdir -p /mnt/SDCARD/mk20/logs
+log() { echo "gadget $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
 
-set -eu
-LOG=/mnt/SDCARD/gadget-ecm-hid.log
+# detach (adb-session-safe): killall adbd below would otherwise kill our own controlling session
+if [ "${MK20_DETACHED:-0}" != 1 ]; then
+  MK20_DETACHED=1 setsid sh "$0" "$@" </dev/null >/dev/null 2>&1 &
+  echo "detached; see $LOG"; exit 0
+fi
+
+# ---- preflight (nothing touched yet) ----
 UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
-G=/sys/kernel/config/usb_gadget/g_mk20
-FAILSAFE() {
-  echo "FAILSAFE: $*" | tee -a "$LOG"
-  /data/setusbconfig serial 2>>"$LOG" || true
-  # also try legacy path
-  setusbconfig serial 2>>"$LOG" || true
+[ -n "$UDC" ] || { log "ABORT no udc"; exit 1; }
+[ -d $G ] && [ -d $C ] || { log "ABORT no g1 (KD has not configured USB yet)"; exit 1; }
+[ -x $BR ] || { log "ABORT $BR missing: KD would lose ttyGS0 (black screens)"; exit 1; }
+[ -x /bin/adbd ] || { log "ABORT no /bin/adbd"; exit 1; }
+grep -q '^usb_f_ecm ' /proc/modules || [ -f $ECMKO ] || { log "ABORT no $ECMKO"; exit 1; }
+KDSVC=$(grep -l -E 'KeyboardDevice|qt_app2' /etc/init.d/* 2>/dev/null | head -1)
+log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
+
+udc_now() { cat $G/UDC 2>/dev/null; }
+kd_start() { if [ -n "$KDSVC" ]; then $KDSVC start >>"$LOG" 2>&1; fi; sleep 3
+  pgrep -f KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && (setsid /data/KeyboardDevice </dev/null >/dev/null 2>&1 &); }; }
+OK=0
+cleanup() {
+  [ "$OK" = 1 ] && return
+  log "FAILSAFE: undo composite"
+  killall adbd 2>/dev/null
+  echo "" > $G/UDC 2>/dev/null
+  for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
+  rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
+  umount /data/setusbconfig 2>/dev/null
+  pkill -f ttygs_tcp_bridge 2>/dev/null; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
+  /data/setusbconfig serial >>"$LOG" 2>&1
+  kd_start
+  log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
 }
-trap 'FAILSAFE trap' INT TERM
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
+die() { log "FAIL $*"; exit 1; }
 
-mkdir -p /mnt/SDCARD
-echo "=== $(date) UDC=$UDC ===" >>"$LOG"
-[ -n "$UDC" ] || { FAILSAFE no-udc; exit 1; }
-
-# Stop stock gadget / KD that holds UDC
-killall KeyboardDevice 2>/dev/null || true
-killall qt_app2 adbd 2>/dev/null || true
-sleep 1
-# Unbind existing gadgets
-for g in /sys/kernel/config/usb_gadget/*; do
-  [ -d "$g" ] || continue
-  echo "" > "$g/UDC" 2>/dev/null || true
-done
-
-mount -t configfs none /sys/kernel/config 2>/dev/null || true
-mkdir -p "$G"
-cd "$G"
-
-echo 0x1d6b > idVendor
-echo 0x0104 > idProduct
-echo 0x0100 > bcdDevice
-echo 0x0200 > bcdUSB
-
-mkdir -p strings/0x409
-echo "mk20" > strings/0x409/serialnumber
-echo "Waveshare" > strings/0x409/manufacturer
-echo "MK20 ECM+HID+ADB" > strings/0x409/product
-
-mkdir -p configs/c.1/strings/0x409
-echo "ECM+HID+ADB" > configs/c.1/strings/0x409/configuration
-echo 250 > configs/c.1/MaxPower
-
-# --- ECM ---
-grep -q '^usb_f_ecm ' /proc/modules || insmod /data/mk20/usb_f_ecm.ko
-mkdir -p functions/ecm.usb0
-# Stable locally-administered MACs
-echo "02:11:22:33:44:55" > functions/ecm.usb0/dev_addr
-echo "02:11:22:33:44:56" > functions/ecm.usb0/host_addr
-ln -sf functions/ecm.usb0 configs/c.1/
-
-# --- combined HID: report ID 1 = keyboard, report ID 2 = absolute pointer ---
-mkdir -p functions/hid.usb0
-echo 1 > functions/hid.usb0/protocol
-echo 1 > functions/hid.usb0/subclass
-echo 8 > functions/hid.usb0/report_length
-# Minimal combined descriptor (boot keyboard 8B + abs mouse 6B with report IDs)
+# ---- stop KD (via procd so it is not respawned mid-change) and adbd ----
+if [ -n "$KDSVC" ]; then $KDSVC stop >>"$LOG" 2>&1; fi
+killall KeyboardDevice qt_app2 2>/dev/null; killall adbd 2>/dev/null; sleep 1
+# ---- unbind + clean stale links ----
+i=0; while [ -n "$(udc_now)" ] && [ $i -lt 10 ]; do echo "" > $G/UDC 2>/dev/null; sleep 0.3; i=$((i+1)); done
+[ -z "$(udc_now)" ] || die "cannot unbind"
+for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
+# ---- functions ----
+grep -q '^usb_f_ecm ' /proc/modules || insmod $ECMKO 2>>"$LOG" || die "insmod ecm"
+mkdir -p $G/functions/ecm.usb0 || die "mkdir ecm"
+echo "02:11:22:33:44:55" > $G/functions/ecm.usb0/dev_addr 2>/dev/null
+echo "02:11:22:33:44:56" > $G/functions/ecm.usb0/host_addr 2>/dev/null
+mkdir -p $G/functions/hid.usb0 || die "mkdir hid"
+echo 1 > $G/functions/hid.usb0/protocol; echo 1 > $G/functions/hid.usb0/subclass
+echo 9 > $G/functions/hid.usb0/report_length || die "report_length"
 printf '\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0\x05\x01\x09\x02\xa1\x01\x85\x02\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x03\x05\x01\x09\x30\x09\x31\x16\x00\x00\x26\xff\x7f\x75\x10\x95\x02\x81\x02\xc0\xc0' > /tmp/hid.desc
-# Use report_desc via cat binary — configfs wants binary write
-cat /tmp/hid.desc > functions/hid.usb0/report_desc
-ln -sf functions/hid.usb0 configs/c.1/
-
-# --- ADB FunctionFS (optional; skip if mkdir fails) ---
-ADB_OK=0
-if mkdir -p functions/ffs.adb 2>>"$LOG"; then
-  ln -sf functions/ffs.adb configs/c.1/ || true
-  mkdir -p /dev/usb-ffs/adb
-  mount -t functionfs adb /dev/usb-ffs/adb 2>>"$LOG" || true
-  ADB_OK=1
-fi
-
-# Bind
-echo "$UDC" > UDC 2>>"$LOG" || { FAILSAFE bind-failed; exit 1; }
-echo "bound $UDC" >>"$LOG"
-
-# Network: fixed 192.168.7.2/24 (host typically .1)
+cat /tmp/hid.desc > $G/functions/hid.usb0/report_desc || die "report_desc"
+mkdir -p $G/functions/ffs.adb || die "mkdir ffs.adb"
+# link order: ECM, HID, ADB
+ln -s $G/functions/ecm.usb0 $C/ecm.usb0 || die "link ecm"
+ln -s $G/functions/hid.usb0 $C/hid.usb0 || die "link hid"
+ln -s $G/functions/ffs.adb $C/ffs.adb || die "link adb"
+echo "ECM+HID+ADB" > $C/strings/0x409/configuration 2>/dev/null
+# ---- adbd BEFORE bind (writes FFS descriptors; stock adbd then binds g1/UDC itself) ----
+mkdir -p /dev/usb-ffs/adb
+grep -q ' /dev/usb-ffs/adb ' /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb || die "mount ffs"
+/bin/adbd </dev/null >/tmp/adbd.log 2>&1 &
+i=0; while [ ! -e /dev/usb-ffs/adb/ep1 ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
+[ -e /dev/usb-ffs/adb/ep1 ] || die "adbd did not write FFS descriptors"
+i=0; while [ -z "$(udc_now)" ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
+if [ -z "$(udc_now)" ]; then echo "$UDC" > $G/UDC 2>>"$LOG" || die "bind"; fi
+[ "$(udc_now)" = "$UDC" ] || die "UDC not bound"
 sleep 1
-if [ -d /sys/class/net/usb0 ]; then
-  ip link set usb0 up 2>>"$LOG" || ifconfig usb0 up 2>>"$LOG" || true
-  ip addr add 192.168.7.2/24 dev usb0 2>>"$LOG" || \
-    ifconfig usb0 192.168.7.2 netmask 255.255.255.0 2>>"$LOG" || true
-  echo "usb0 192.168.7.2/24" >>"$LOG"
-fi
-
-# Start adbd if FFS ready
-if [ "$ADB_OK" = 1 ]; then
-  # Give FFS ep nodes a moment
-  i=0
-  while [ $i -lt 50 ]; do
-    [ -e /dev/usb-ffs/adb/ep0 ] && break
-    i=$((i+1)); sleep 0.1
-  done
-  adbd &
-  echo "adbd started" >>"$LOG"
-fi
-
-# PTY bridge for Protocol A over TCP (KeyboardDevice still wants /dev/ttyGS0)
-if [ -x /data/ttygs_tcp_bridge ]; then
-  # Move real GS aside if present
-  if [ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ]; then
-    mv /dev/ttyGS0 /dev/ttyGS0.real 2>/dev/null || true
-  fi
-  /data/ttygs_tcp_bridge --listen 0.0.0.0:17890 --link /dev/ttyGS0 >>"$LOG" 2>&1 &
-  echo "pty bridge on :17890" >>"$LOG"
-fi
-
+[ -e /dev/hidg0 ] || die "no /dev/hidg0"
+[ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
+ip link set usb0 up 2>>"$LOG" || ifconfig usb0 up 2>>"$LOG"
+ip addr add 192.168.7.2/24 dev usb0 2>>"$LOG" || ifconfig usb0 192.168.7.2 netmask 255.255.255.0 2>>"$LOG"
+# ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
+[ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
+setsid $BR --listen 0.0.0.0:17890 --link /dev/ttyGS0 </dev/null >>"$LOG" 2>&1 &
+i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
+[ -e /dev/ttyGS0 ] || die "bridge did not create /dev/ttyGS0"
+printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n' > /tmp/setusbconfig-noop; chmod 755 /tmp/setusbconfig-noop
+mount --bind /tmp/setusbconfig-noop /data/setusbconfig || die "shadow setusbconfig"
+kd_start
+pgrep -f KeyboardDevice >/dev/null || die "KD not running"
+OK=1
+log "OK UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=192.168.7.2 kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status
 exit 0

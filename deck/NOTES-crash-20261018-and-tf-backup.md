@@ -29,3 +29,19 @@
 | p5 rootfs | 1073741824 | d1d8c96b25f995b6d5b5bd9b5adcdcf824faced1464b4bccd348e7f869b9a2e1 |
 - Not backed up: p6 UDISK (2.7 GiB, rw overlay).
 - Copies: Mac ~/mk20-backup/tf/live-221-parts/ and box /workspace/mk20-backup/tf/.
+
+## 13:17 reboot test (mk20ctl reboot, stock #221, boot partition untouched)
+- The watcher accepted cmd-reboot and the T113 dropped off USB at 13:17:09 SGT. Neither the T113
+  (ACM/adb) nor anything else from the MK20 re-enumerated within 10+ min, so the soft `reboot` did not
+  bring the unit back. A replug (power cycle) recovered it at 12:5x. The suspicion is that a soft
+  reboot hangs in shutdown or in the BROM/SPL path on this board; to be confirmed after the next
+  replug (see logs/watcher.log, every-adb.log).
+- Consequence: bootswap.sh ends with `reboot`. Any swap test must expect that a human power cycle is
+  needed after the write, so the "auto-restore on failure" path can't rely on a soft reboot.
+
+## Independent verification of boot-221-ep3int.img (verify-staged.py, separate from mkboot221.py)
+- sha 38703734a1c78407b5db77e05d3f0961a5561d4b0970ee0077d55afbc5bc1ece, 5433344 B (prefix of a 6451200 B partition)
+- Header page identical to stock (ks 5429672, page 2048, ramdisk 12 B "ramdisk.img\n" beyond the prefix, untouched).
+- zImage decompressor prefix (15884 B) and tail identical. piggy length identical (5413726).
+- Decompressed Image diffs: exactly 0xd326d8 0x32->0x38, 0xd326f5 0x01->0x03.
+- Expected full-partition sha after the write: f2a19d3cb8fddc7f177cb518bb64e69645fadd3ce1b1422c4f056db39e4ee4c0
