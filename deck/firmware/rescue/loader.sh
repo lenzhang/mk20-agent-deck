@@ -84,6 +84,7 @@ verify_dir() {
   # file lines: "<sha256> <octal mode> <relative path>" after the "--" separator
   sed -n '/^--$/,$p' "$M" | sed 1d > "$T/.mf.$$"
   if LC_ALL=C grep -q '[^ -~]' "$T/.mf.$$"; then echo "control/non-ASCII chars in manifest"; rm -f "$T/.mf.$$"; return 1; fi
+  if grep -vEq '^[0-9a-f]{64} [0-7]{3} [A-Za-z0-9._/-]{1,100}$' "$T/.mf.$$"; then echo "malformed manifest line"; rm -f "$T/.mf.$$"; return 1; fi
   [ "$(cut -d' ' -f3 "$T/.mf.$$" | sort | uniq -d | wc -l)" = 0 ] || { echo "duplicate paths"; rm -f "$T/.mf.$$"; return 1; }
   grep -q ' sbin/mk20d$' "$T/.mf.$$" || { echo "sbin/mk20d not listed"; rm -f "$T/.mf.$$"; return 1; }
   while read -r fs fm fp; do
@@ -103,12 +104,25 @@ verify_dir() {
   if [ -n "$dest" ]; then [ -f "$dest/sbin/mk20d" ] || { echo "no sbin/mk20d"; return 1; }; else [ -f "$d/sbin/mk20d" ] || { echo "no sbin/mk20d"; return 1; }; fi
   echo "ok $n files"
 }
+# one state lock (fd 7) for every pointer/state mutation: boot, confirm, switch, rollback, uninstall.
+# BusyBox 1.27 flock has no -w: poll. rc 13 when still busy after $1 s.
+lock_state() { exec 7>"$T/loader.lock"; i=0; while ! flock -n 7; do i=$((i+1)); [ $i -gt "${1:-30}" ] && return 1; sleep 1; done; }
+# do_prune (caller holds install.lock): drop releases not good/pending/in a slot/active, keep MK20_KEEP newest extra
+do_prune() {
+  keep=" $(rstate good) $(rstate pending) $(slot_read A | cut -d' ' -f2) $(slot_read B | cut -d' ' -f2) $(cat "$T/release-active" 2>/dev/null) "
+  extra=$(for d in "$REL"/*; do b=${d##*/}; is_semver "$b" || continue; case "$keep" in *" $b "*) continue;; esac; echo "$b"; done \
+    | awk -F. '{printf "%03d%03d%03d %s\n",$1,$2,$3,$0}' | sort -rn | cut -d' ' -f2 | sed -n "$(( ${MK20_KEEP:-1} + 1 )),\$p")
+  for b in $extra; do rm -rf "${REL:?}/$b" && log "prune: removed $b"; echo "removed $b"; done
+  for d in "$REL"/.incoming-*; do [ -d "$d" ] && rm -rf "$d" && log "prune: removed leftover ${d##*/}"; done
+  return 0
+}
 installed_any() { [ -f "$SL/A" ] || [ -f "$SL/B" ]; }   # a slot was ever written
 # rollback_to_good <reason> -> 0 if switched (sets CUR), 1 if impossible
 rollback_to_good() {
   g=$(rstate good); bad=$CUR
   wstate "$ST/failed-$bad" "$1"
   # flip the slot FIRST; pending is cleared only once good is committed (a crash in between re-runs this rollback)
+  lock_state 30 || { echo "busy: state lock"; exit 13; }
   if is_semver "$g" && [ "$g" != "$bad" ] && [ -f "$REL/$g/MANIFEST" ] && slot_write "$g"; then
     rm -f "$ST/pending" "$ST/attempts"; log "ROLLBACK $bad -> $g: $1"; wstate "$ST/last-rollback" "$bad->$g $1"; CUR=$g; return 0
   fi
@@ -119,7 +133,9 @@ rollback_to_good() {
 cmd=${1:-status}
 case "$cmd" in
 boot)
-  exec 7>"$T/loader.lock"; flock -n 7 || { log "boot: another loader is running"; exit 13; }
+  lock_state 10 || { log "boot: state lock busy"; exit 13; }
+  # stale partial extracts (power cut during install) are dropped when no install is running
+  ( exec 6>"$T/install.lock"; flock -n 6 && for d in "$REL"/.incoming-* "$REL"/.staging.tar; do [ -e "$d" ] && rm -rf "$d" && log "boot: removed stale ${d##*/}"; done ) 7>&-
   [ -f "$S/mk20-no-release" ] && { log "flag mk20-no-release -> legacy"; exit 12; }
   P=$(pick) || { if installed_any; then log "no valid slot -> stock+rescue"; exit 11; fi; log "no release installed -> legacy"; exit 10; }
   CUR=${P##* }; PEND=$(rstate pending)
@@ -168,6 +184,7 @@ deadline)
   exit 0;;
 confirm)
   v=${2:-}; is_semver "$v" || exit 1
+  lock_state 30 || { log "confirm $v: state lock busy"; exit 13; }
   if [ "$(rstate pending)" = "$v" ]; then
     wstate "$ST/good" "$v" && [ "$(rstate good)" = "$v" ] || { log "confirm $v: cannot write good"; exit 1; }
     rm -f "$ST/pending" "$ST/attempts"; log "confirmed $v (good)"; exit 0; fi
@@ -175,6 +192,7 @@ confirm)
   log "confirm $v refused (pending='$(rstate pending)')"; exit 1;;
 switch)
   v=${2:-}; is_semver "$v" || { echo "bad version"; exit 1; }
+  lock_state 30 || { echo "busy: state lock"; exit 13; }
   [ -n "$(rstate pending)" ] && { echo "refused: $(rstate pending) is pending"; exit 1; }
   P=$(pick); [ "${P##* }" = "$v" ] && { echo "refused: $v already current"; exit 1; }
   r=$(verify_release "$v") || { echo "refused: $r"; exit 1; }
@@ -203,17 +221,21 @@ install)
   is_hex64 "$want" || { echo "pinned sha256 required"; exit 1; }
   [ -z "$nosw" ] || [ "$nosw" = --no-switch ] || { echo "bad option $nosw"; exit 1; }
   [ -z "$(rstate pending)" ] || [ -n "$nosw" ] || { echo "refused: $(rstate pending) is pending (confirm or roll back first)"; exit 1; }
-  [ "$(sha "$tb")" = "$want" ] || { echo "tarball sha mismatch"; log "install: tarball sha mismatch"; exit 1; }
   mkdir -p "$REL" || { echo "cannot create $REL"; exit 1; }
-  sz=$(wc -c < "$tb"); free=$(df -k "$REL" 2>/dev/null | awk 'END{print $(NF-2)}'); is_num "$free" || free=0   # wrap-safe
-  [ $((sz / 1024 * 3 + 4096)) -lt "$free" ] || { echo "not enough space on /data (${free} KiB free)"; exit 1; }
+  for d in "$REL"/.incoming-* "$REL/.staging.tar"; do [ -e "$d" ] && rm -rf "$d"; done   # stale partial work (we hold the lock)
+  sz=$(wc -c < "$tb"); free=$(df -Pk "$REL" 2>/dev/null | awk 'END{print $4}'); is_num "$free" || free=0
+  [ $((sz / 1024 * 4 + 4096)) -lt "$free" ] || { echo "not enough space on /data (${free} KiB free)"; exit 1; }
+  # TOCTOU: work only on a private copy whose hash is checked after the copy (the source may change under us)
+  ST_TAR=$REL/.staging.tar; ( umask 077; cp "$tb" "$ST_TAR" ) || { rm -f "$ST_TAR"; echo "cannot stage tarball"; exit 1; }
+  [ "$(sha "$ST_TAR")" = "$want" ] || { rm -f "$ST_TAR"; echo "tarball sha mismatch"; log "install: tarball sha mismatch"; exit 1; }
+  tb=$ST_TAR
   # listing: "<mode> <owner> <size> <date> <time> <name>"; only regular files and dirs, one top-level mk20-fw-<v>/
   tar -tvf "$tb" > "$T/.tl.$$" 2>/dev/null || { rm -f "$T/.tl.$$"; echo "unreadable tarball"; exit 1; }
   if LC_ALL=C grep -q '[^ -~]' "$T/.tl.$$"; then rm -f "$T/.tl.$$"; echo "control/non-ASCII chars in tar listing"; exit 1; fi
   top=$(awk 'NR==1{print $NF}' "$T/.tl.$$"); top=${top%/}; v=${top#mk20-fw-}
   is_semver "$v" && [ "$top" = "mk20-fw-$v" ] || { rm -f "$T/.tl.$$"; echo "bad top-level dir $top"; exit 1; }
   bad=$(awk -v t="$top" '{ m=substr($1,1,1); n=$NF; sub(/\/$/,"",n)
-        if ((m!="-" && m!="d") || NF!=6 || (n!=t && index(n, t "/")!=1) || n ~ /(^|\/)\.\.(\/|$)/ || n ~ /^\//) { print; exit } }' "$T/.tl.$$")
+        if ((m!="-" && m!="d") || NF!=6 || length(n) > 100 || (n!=t && index(n, t "/")!=1) || n !~ /^[A-Za-z0-9._\/-]+$/ || n ~ /(^|\/)\.\.?(\/|$)/ || seen[n]++) { print; exit } }' "$T/.tl.$$")
   nl=$(wc -l < "$T/.tl.$$"); rm -f "$T/.tl.$$"
   [ -z "$bad" ] || { echo "unsafe tar entry: $bad"; log "install: unsafe tar entry"; exit 1; }
   [ "$nl" -le 200 ] || { echo "too many tar entries"; exit 1; }
@@ -229,33 +251,36 @@ install)
     X=$REL/.incoming-$v; rm -rf "$X"; mkdir -p "$X" || { echo "cannot create $X"; exit 1; }
     tar -xf "$tb" -C "$X" 2>/dev/null || { rm -rf "$X"; echo "extract failed"; exit 1; }
     r=$(verify_dir "$X/$top" "$v") || { rm -rf "$X"; echo "verify failed: $r"; log "install $v: verify failed: $r"; exit 1; }
-    VN=$(sed -n '/^--$/,$p' "$X/$top/MANIFEST" | sed 1d | grep -c .)   # verify_dir ran in a subshell
-    nf=$(find "$X/$top" -type f | wc -l); no=$(find "$X/$top" ! -type f ! -type d | wc -l)
-    [ "$nf" = $((VN + 1)) ] && [ "$no" = 0 ] || { rm -rf "$X"; echo "unlisted files in release"; exit 1; }
+    # exact file set: every extracted regular file is MANIFEST or listed in it; nothing else (no fifo/dev/link)
+    no=$(find "$X/$top" ! -type f ! -type d | wc -l)
+    ( cd "$X/$top" && find . -type f | sed 's#^\./##' | sort ) > "$T/.xf.$$"
+    { echo MANIFEST; sed -n '/^--$/,$p' "$X/$top/MANIFEST" | sed 1d | cut -d' ' -f3; } | sort > "$T/.mf2.$$"
+    cmp -s "$T/.xf.$$" "$T/.mf2.$$"; same=$?; rm -f "$T/.xf.$$" "$T/.mf2.$$"
+    [ "$same" = 0 ] && [ "$no" = 0 ] || { rm -rf "$X"; echo "unlisted files in release"; exit 1; }
     sed -n '/^--$/,$p' "$X/$top/MANIFEST" | sed 1d | while read -r fs fm fp; do [ -n "$fp" ] && chmod "$fm" "$X/$top/$fp"; done
     find "$X/$top" -type d -exec chmod 755 {} \; ; chmod 644 "$X/$top/MANIFEST"
+    [ "$(sha "$ST_TAR")" = "$want" ] || { rm -rf "$X"; echo "staging copy changed"; exit 1; }
     sync; mv "$X/$top" "$REL/$v" || { rm -rf "$X"; echo "rename failed"; exit 1; }; rmdir "$X" 2>/dev/null; sync
     log "install: $v extracted and verified (tar $want)"
   fi
+  rm -f "$ST_TAR"
   verify_release "$v" >/dev/null || { echo "post-install verify failed"; exit 1; }
   [ -n "$nosw" ] && { echo "ok: $v installed (not switched)"; exit 0; }
   P=$(pick 2>/dev/null)
   if [ "${P##* }" = "$v" ]; then echo "ok: $v installed (already current)"
   else out=$(sh "$0" switch "$v") || { echo "switch failed: $out"; exit 1; }; echo "ok: $v installed; $out; reboot to start probation"; fi
-  MK20_INSTALL_LOCKED=1 sh "$0" prune >/dev/null 2>&1
+  do_prune >/dev/null 2>&1
   exit 0;;
 prune)
-  if [ "${MK20_INSTALL_LOCKED:-}" != 1 ]; then exec 6>"$T/install.lock"; flock -n 6 || { echo "busy: install running"; exit 13; }; fi
-  keep=" $(rstate good) $(rstate pending) $(slot_read A | cut -d' ' -f2) $(slot_read B | cut -d' ' -f2) $(cat "$T/release-active" 2>/dev/null) "
-  extra=$(for d in "$REL"/*; do b=${d##*/}; is_semver "$b" || continue; case "$keep" in *" $b "*) continue;; esac; echo "$b"; done \
-    | awk -F. '{printf "%03d%03d%03d %s\n",$1,$2,$3,$0}' | sort -rn | cut -d' ' -f2 | sed -n "$(( ${MK20_KEEP:-1} + 1 )),\$p")
-  for b in $extra; do rm -rf "${REL:?}/$b" && log "prune: removed $b"; echo "removed $b"; done
-  for d in "$REL"/.incoming-*; do [ -d "$d" ] && rm -rf "$d" && log "prune: removed leftover ${d##*/}"; done
-  exit 0;;
+  exec 6>"$T/install.lock"; flock -n 6 || { echo "busy: install running"; exit 13; }
+  do_prune; exit 0;;
 uninstall)
-  exec 7>"$T/loader.lock"; flock -n 7 || { echo "busy"; exit 13; }
+  exec 6>"$T/install.lock"; flock -n 6 || { echo "busy: install running"; exit 13; }
+  lock_state 30 || { echo "busy: state lock"; exit 13; }
   ts=$(date +%Y%m%d%H%M%S); mkdir -p "$B/uninstalled-$ts" || exit 1
-  for f in "$SL/A" "$SL/B" "$ST/good" "$ST/pending" "$ST/attempts"; do [ -f "$f" ] && mv -f "$f" "$B/uninstalled-$ts/"; done; sync
+  for f in "$SL/A" "$SL/B" "$ST/good" "$ST/pending" "$ST/attempts"; do [ -f "$f" ] && mv -f "$f" "$B/uninstalled-$ts/"; done
+  # legacy mode must be stock: keep the old composite boot job disabled (adb.sh stays)
+  E=$S/mk20/boot-every; if [ -e "$E/composite.sh" ]; then mkdir -p "$S/mk20/boot-every.disabled" && mv -f "$E"/composite.sh* "$S/mk20/boot-every.disabled/"; fi; sync
   log "uninstall: slots/state moved to uninstalled-$ts -> legacy mode on next boot"; echo "ok: legacy mode on next boot (releases kept)"; exit 0;;
 status)
   echo "current=$(pick 2>/dev/null) good=$(rstate good) pending=$(rstate pending) attempts=$(rstate attempts) active=$(cat "$T/release-active" 2>/dev/null) last_rollback=$(rstate last-rollback)"; exit 0;;

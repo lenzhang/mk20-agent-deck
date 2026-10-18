@@ -33,7 +33,9 @@ LOG=${MK20_GADGET_LOG:-/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log}
 GENV=/tmp/mk20/gadget.env
 if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
   if [ -f "$GENV" ]; then
-    while IFS='=' read -r k v; do case "$k" in
+    while IFS='=' read -r k v; do
+      case "$v" in *[!0-9a-f.:]*|'') continue;; esac   # values are digits/dots/hex/colons only (mk20d validated them)
+      case "$k" in
       MK20_ECM_IP) MK20_ECM_IP=$v;; MK20_ECM_MASK) MK20_ECM_MASK=$v;; MK20_DEV_MAC) MK20_DEV_MAC=$v;; MK20_HOST_MAC) MK20_HOST_MAC=$v;;
       MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
       MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;;
@@ -230,7 +232,7 @@ while [ ! -f /tmp/mk20-flapmon-stop ]; do
     now=\$(cut -d. -f1 /proc/uptime); nt=""; cnt=0
     for t in \$times \$now; do [ \$((now-t)) -le $FLAP_WINDOW ] && { nt="\$nt \$t"; cnt=\$((cnt+1)); }; done; times=\$nt
     echo "flapmon \$now: link drop (\$s), \$cnt in ${FLAP_WINDOW}s" >> $LOG
-    if [ \$cnt -ge $FLAP_DROPS ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
+    if [ \$cnt -ge $FLAP_DROPS ]; then echo "flapmon \$now: FLAPPING -> rollback" >> $LOG; touch /tmp/mk20/gadget.busy; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now; exit 0; fi
   fi
   prev=\$s; sleep 0.3
 done

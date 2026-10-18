@@ -11,23 +11,26 @@ TB=${1:?usage: $0 <mk20-fw-X.Y.Z.tar> [--no-switch] [--reboot] [--wait]}; shift
 NOSW=""; RB=0; WAIT=0
 for a in "$@"; do case "$a" in --no-switch) NOSW=--no-switch;; --reboot) RB=1;; --wait) WAIT=1;; *) echo "bad option $a" >&2; exit 2;; esac; done
 [ -f "$TB" ] || { echo "no such file $TB" >&2; exit 2; }
-base=$(basename "$TB"); case "$base" in mk20-fw-[0-9]*.[0-9]*.[0-9]*.tar) ;; *) echo "unexpected name $base" >&2; exit 2;; esac
+base=$(basename "$TB")
+echo "$base" | grep -Eq '^mk20-fw-[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.tar$' || { echo "unexpected name $base" >&2; exit 2; }
 V=${base#mk20-fw-}; V=${V%.tar}
 if command -v sha256sum >/dev/null; then SHA=$(sha256sum "$TB" | cut -d' ' -f1); else SHA=$(shasum -a 256 "$TB" | cut -d' ' -f1); fi
 if [ -f "$TB.sha256" ]; then [ "$(cut -d' ' -f1 "$TB.sha256")" = "$SHA" ] || { echo "sha mismatch vs $TB.sha256" >&2; exit 1; }; fi
 echo "release $V sha256 $SHA"
 $ADB shell 'mkdir -p /data/mk20/incoming && chmod 700 /data/mk20/incoming' >/dev/null
-$ADB push "$TB" "/data/mk20/incoming/$base" >/dev/null
+REMOTE=/data/mk20/incoming/upload.tar   # fixed remote name: nothing host-controlled reaches the remote shell but the hex sha
+echo "$SHA" | grep -Eq '^[0-9a-f]{64}$' || { echo "bad sha" >&2; exit 1; }
+$ADB push "$TB" "$REMOTE" >/dev/null
 # verified loader copy (the same check the watcher does), then install; output and rc come back on one line
 out=$($ADB shell "H=/data/mk20/rescue; L=/tmp/mk20/inst-loader.sh; mkdir -p /tmp/mk20
   w=\$(cut -d' ' -f1 \$H/loader.sh.sha256 2>/dev/null); cp \$H/loader.sh \$L.new 2>/dev/null
   if [ -n \"\$w\" ] && [ \"\$(sha256sum \$L.new | cut -d' ' -f1)\" = \"\$w\" ]; then mv -f \$L.new \$L
-    sh \$L install /data/mk20/incoming/$base $SHA $NOSW; echo \"rc=\$?\"
+    sh \$L install $REMOTE $SHA $NOSW; echo \"rc=\$?\"
   else rm -f \$L.new; echo 'rescue loader failed verification'; echo rc=9; fi" | tr -d '\r')
 echo "$out"
 rc=$(echo "$out" | sed -n 's/^rc=//p' | tail -n 1)
 [ "$rc" = 0 ] || { echo "install failed (rc=$rc)" >&2; exit 1; }
-$ADB shell "rm -f /data/mk20/incoming/$base" >/dev/null
+$ADB shell "rm -f $REMOTE" >/dev/null
 [ "$RB" = 1 ] || { echo "installed; reboot (watcher cmd-reboot) to start probation"; exit 0; }
 $ADB shell 'touch /mnt/SDCARD/cmd-reboot && sync' >/dev/null
 echo "reboot requested (watcher -> hardreset, WDT reset in ~30 s)"

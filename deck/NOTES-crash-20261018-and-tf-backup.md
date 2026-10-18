@@ -294,3 +294,24 @@
   OK -> self-test PASS -> confirmed good at 89 s. No FAT files open now (the next reset should remount ro cleanly).
 - Open for M2/M3: tests still run under host busybox 1.37 + util-linux flock (1.27 pinned only via the flock shim).
   Watcher main loop, mk20d and gadget have no fake-configfs tests yet. FAT-writer lock. Structured logs.
+
+## M2 + M3 (17:40-18:35 SGT)
+- M2: mk20d v2 (whitelisted mk20.conf, never sourced; flags override; kernel ALLOWLIST + vendor hash gates: unknown
+  kernel = no USB changes, vendor mismatch/no-ecm = stock ACM+KD+adb with restore); health JSON (+status ok/degraded/fail);
+  structured logs on /data/mk20/logs with rotation; maint loop (flock single instance); bridge v2 (--dev usb0
+  SO_BINDTODEVICE, ECM IP + link-local only, no wildcard); gadget v3.9 (knobs, gadget.env fail-closed, busy marker).
+- M3: loader install/prune/uninstall (pinned sha on a private staging copy, strict tar listing, exact file set vs
+  MANIFEST, atomic rename, switch, prune; boot sweeps stale .incoming); one state lock for all mutations;
+  tools/mk20-install.sh, tools/mk20-rescue-update.sh; hardreset v2.3 writes /data/mk20/state/hardreset.last.
+- Tests: 221 (incl. 30-point power-cut matrix during install), run under a BusyBox 1.27.2 build.
+- Field bugs found on hardware: BusyBox 1.27 `kill -0 ""` succeeds (pid_alive fix); `sort -k..nr` differs (awk keys);
+  `pgrep -x KeyboardDevice` never matches -> 1.0.3 failed self-test (kd=0) -> automatic rollback to 1.0.2 with no
+  manual steps (deadline reset at 603 s, attempt 2 -> rollback, confirm) = M3 acceptance proven on a real bad release.
+  Also an inline comment in 1.0.2 gadget cleanup() disabled `killall ttygs_tcp_bridge` (fixed in 1.0.3+, static test).
+- FAT clean RO remount at reset confirmed: hardreset.last fat_ro=y mount_hung=n on 3 consecutive resets.
+- Hardware: 1.0.2 -> 1.0.3 (rolled back) -> 1.0.4 installed via the installer, confirmed good 18:31; bridge on
+  10.20.0.2/169.254.7.2:17890, health status ok, VNC AUTH OK.
+- Review notes: Claude M3 = no blocker (reviewed b4102e0; its lock/incoming/TOCTOU items were already fixed in 1.0.4
+  from GPT's review); the Claude run fell back to Opus 4.8 mid-way (safety filter). Deferred minors: tar -tv 6-column
+  assumption (pinned to device BusyBox), blocking PTY write in the bridge, uninstalled-<ts> cleanup, host-tool tests;
+  vendor mismatch keeps adb (deliberate: remote recoverability; GPT wanted zero USB changes).

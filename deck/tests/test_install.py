@@ -214,3 +214,83 @@ def test_install_fault_points_exist(dev):
     run_group(dev, ["install", str(t1), sha(t1)], {"MOCK_CRASH_AT": "999", "PATH": f"{CRASH}:{dev.env['PATH']}"})
     calls = int((dev.mock / "crash.n").read_text())
     assert 8 <= calls < 31, calls
+
+
+@pytest.mark.parametrize("mutation,msg", [
+    (lambda e: e + [e[3]], "unsafe tar entry"),                                       # duplicate member
+    (lambda e: e + [("mk20-fw-1.0.5/share/" + "a" * 120, "f", "x")], "unsafe tar entry"),  # long name
+    (lambda e: e + [("mk20-fw-1.0.5/share/.", "d", None)], "unsafe tar entry"),
+    (lambda e: e + [("mk20-fw-1.0.5/share/f;reboot", "f", "x")], "unsafe tar entry"),
+])
+def test_more_malicious_tarballs(dev, mutation, msg):
+    t = mktar(dev.tmp / "bad2.tar", mutation(good_entries(dev)))
+    r = inst(dev, t)
+    assert r.returncode == 1 and msg in r.stdout, r.stdout + r.stderr
+
+
+def test_fifo_member_rejected(dev):
+    e = good_entries(dev)
+    t = dev.tmp / "fifo.tar"
+    mktar(t, e)
+    with tarfile.open(t, "a") as tf:
+        ti = tarfile.TarInfo("mk20-fw-1.0.5/share/fifo"); ti.type = tarfile.FIFOTYPE; tf.addfile(ti)
+    r = inst(dev, t)
+    assert r.returncode == 1 and "unsafe tar entry" in r.stdout
+
+
+def test_malformed_manifest_line_rejected(dev):
+    e = good_entries(dev)
+    e = [(n, k, (d.replace(" 644 share/payload.txt", "  644 share/payload.txt") if n.endswith("/MANIFEST") else d)) for n, k, d in e]
+    t = mktar(dev.tmp / "mf.tar", e)
+    r = inst(dev, t)
+    assert r.returncode == 1 and "malformed manifest line" in r.stdout
+
+
+def test_stale_incoming_does_not_wedge_install(dev):
+    t = tarball(dev, "1.0.0")
+    big = dev.p("data/mk20/releases/.incoming-1.0.0"); big.mkdir(parents=True)
+    (big / "junk").write_text("x")
+    dev.p("data/mk20/releases/.staging.tar").write_text("old")
+    r = inst(dev, t, "--no-switch")
+    assert r.returncode == 0 and not big.exists() and not dev.p("data/mk20/releases/.staging.tar").exists()
+
+
+def test_source_changed_after_pin_uses_private_copy(dev):
+    """The staged copy is hashed after copying; a different source (as if replaced) is refused."""
+    t = tarball(dev, "1.0.0"); pin = sha(t)
+    t2 = tarball(dev, "1.0.1")
+    r = dev.run(L, "install", str(t2), pin)
+    assert r.returncode == 1 and "sha mismatch" in r.stdout
+    assert not dev.p("data/mk20/releases/.staging.tar").exists()
+
+
+def test_boot_cleans_stale_incoming(dev):
+    t = tarball(dev, "1.0.0")
+    inst(dev, t); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
+    d = dev.p("data/mk20/releases/.incoming-1.0.9"); d.mkdir()
+    dev.run(L, "boot")
+    assert not d.exists()
+
+
+def test_state_lock_serialises_mutations(dev):
+    t = tarball(dev, "1.0.0")
+    inst(dev, t, "--no-switch")
+    lk = dev.p("tmp/mk20/loader.lock"); lk.touch()
+    holder = subprocess.Popen(["flock", "-x", str(lk), "sleep", "6"])
+    try:
+        import time; time.sleep(0.3)
+        r = dev.run(L, "switch", "1.0.0", env={"MK20_LOCK_WAIT": "1"}, timeout=60)
+        # switch waits for the lock (<=30 s) and succeeds once the holder exits
+        assert r.returncode == 0 and st(dev, "pending") == "1.0.0"
+    finally:
+        holder.kill(); holder.wait()
+
+
+def test_uninstall_disables_legacy_composite(dev):
+    t = tarball(dev, "1.0.0")
+    inst(dev, t); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
+    e = dev.p("mnt/SDCARD/mk20/boot-every"); e.mkdir(parents=True)
+    (e / "composite.sh").write_text("x"); (e / "composite.sh.sha256").write_text("y"); (e / "adb.sh").write_text("z")
+    assert dev.run(L, "uninstall").returncode == 0
+    assert not (e / "composite.sh").exists() and (e / "adb.sh").exists()
+    assert dev.p("mnt/SDCARD/mk20/boot-every.disabled/composite.sh").exists()

@@ -39,7 +39,7 @@ vendor_check() { # prints "ok" or the first mismatch; all 4 vendor entries must 
   echo ok
 }
 num() { case "$1" in ''|*[!0-9]*) echo 0;; *) echo "$1";; esac; }
-kd_count() { pgrep -x KeyboardDevice | wc -l | tr -d ' '; }
+kd_count() { pgrep -f '^/data/KeyboardDevice' | wc -l | tr -d ' '; }   # not -x: BusyBox 1.27 -x never matches KD (1.0.3 field failure)
 composite_up() { [ -e "$C/ecm.usb0" ]; }
 listening() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }   # exact local address
 lock_held() { ( exec 5>"$1"; ! flock -n 5 ) 2>/dev/null; }   # a live instance holds the lock
@@ -128,8 +128,9 @@ boot)
   [ -n "$(kernel_line)" ] || { MODE=none; why="kernel $(p4sha) not in kernel/ALLOWLIST"; }
   rm -f "$TM/gadget.env"
   if [ $MODE = composite ]; then
-    printf 'MK20_ECM_IP=%s\nMK20_ECM_MASK=%s\nMK20_DEV_MAC=%s\nMK20_HOST_MAC=%s\nMK20_BRIDGE_PORT=%s\nMK20_FLAP_DROPS=%s\nMK20_FLAP_WINDOW=%s\nMK20_NOHID=%s\nMK20_NOADB=%s\n' \
-      "$ECM_IP" "$ECM_MASK" "$ECM_DEV_MAC" "$ECM_HOST_MAC" "$BRIDGE_PORT" "$FLAP_DROPS" "$FLAP_WINDOW_S" "$NOHID" "$NOADB" > "$TM/gadget.env"
+    ( umask 077; printf 'MK20_ECM_IP=%s\nMK20_ECM_MASK=%s\nMK20_DEV_MAC=%s\nMK20_HOST_MAC=%s\nMK20_BRIDGE_PORT=%s\nMK20_FLAP_DROPS=%s\nMK20_FLAP_WINDOW=%s\nMK20_NOHID=%s\nMK20_NOADB=%s\n' \
+      "$ECM_IP" "$ECM_MASK" "$ECM_DEV_MAC" "$ECM_HOST_MAC" "$BRIDGE_PORT" "$FLAP_DROPS" "$FLAP_WINDOW_S" "$NOHID" "$NOADB" > "$TM/gadget.env.tmp" ) \
+      && mv -f "$TM/gadget.env.tmp" "$TM/gadget.env"
     cp -f "$REL/share/gadget.sh" "$TM/gadget-boot.sh"
     MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log MK20_ECM_IP=$ECM_IP MK20_ECM_MASK=$ECM_MASK \
       MK20_DEV_MAC=$ECM_DEV_MAC MK20_HOST_MAC=$ECM_HOST_MAC MK20_BRIDGE_PORT=$BRIDGE_PORT \
@@ -143,9 +144,16 @@ boot)
   else log ERROR boot "$why -> no USB changes (stock ACM+KD only)"; fi
   sleep "${MK20_STABLE:-30}"
   # a gadget failsafe (flap rollback + adb re-add, up to ~2.5 min) in progress is not a failure: wait it out (cap)
-  w=0; while [ -f "$TM/gadget.busy" ] && [ $w -lt "${MK20_BUSY_CAP:-150}" ]; do sleep 5; w=$((w+5)); done
+  # The marker is set by flapmon BEFORE it launches a rollback and by cleanup(); a sample taken while (or just
+  # before) it appears is retaken after the failsafe ends. Total wait capped (stays well under the loader deadline).
+  w=0; busy_wait() { while [ -f "$TM/gadget.busy" ] && [ $w -lt "${MK20_BUSY_CAP:-150}" ]; do sleep 5; w=$((w+5)); done; }
+  busy_wait; try=0; src=1
+  while [ $try -lt 3 ]; do
+    try=$((try+1)); r=$(selftest); src=$?
+    if [ -f "$TM/gadget.busy" ] && [ $w -lt "${MK20_BUSY_CAP:-150}" ]; then busy_wait; try=$((try-1)); continue; fi
+    [ $src = 0 ] && break; [ $try = 3 ] || sleep "${MK20_SELFTEST_GAP:-10}"
+  done
   [ $w -gt 0 ] && log INFO selftest "waited ${w}s for gadget failsafe"
-  for try in 1 2 3; do r=$(selftest); src=$?; [ $src = 0 ] && break; [ $try = 3 ] || sleep "${MK20_SELFTEST_GAP:-10}"; done
   echo "$r" > "$TM/selftest.txt"; log INFO selftest "rc=$src try=$try mode=$MODE $(echo "$r" | tr '\n' ';')"
   # per-boot records: selftest-last.json + selftest-1..4.json (previous boots)
   ST=$MK20_HOME/state; for k in 3 2 1; do [ -f "$ST/selftest-$k.json" ] && mv -f "$ST/selftest-$k.json" "$ST/selftest-$((k+1)).json"; done

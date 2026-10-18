@@ -349,3 +349,12 @@ def test_health_status_field(dev, rel, g1):
     (dev.mock / "wdt").write_text("offline")
     h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
     assert h["status"] == "fail"
+
+
+def test_kd_count_pattern_matches_device_cmdline():
+    """1.0.3 field failure: `pgrep -x KeyboardDevice` never matches on BusyBox 1.27 (cmdline /data/KeyboardDevice)."""
+    import re
+    src = (REL / "sbin/mk20d").read_text()
+    line = next(l for l in src.splitlines() if l.startswith("kd_count()"))
+    assert "pgrep -f '^/data/KeyboardDevice'" in line and "pgrep -x" not in line.split("#")[0]
+    assert re.search(r"^/data/KeyboardDevice", "/data/KeyboardDevice") and not re.search(r"^/data/KeyboardDevice", "sha256sum /data/KeyboardDevice")

@@ -82,6 +82,7 @@ int main(int argc, char **argv) {
       int n = accept4(ls[i], NULL, NULL, SOCK_CLOEXEC);
       if (n >= 0) { if (cl >= 0) close(cl); cl = n; ci = -1; setsockopt(cl, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one); fprintf(stderr, "client connected via %s\n", ls_s[i]); }
     }
+    if ((p[0].revents & (POLLERR | POLLNVAL)) && !(p[0].revents & POLLIN)) usleep(10000);   // no busy spin on a bad master
     if (p[0].revents & (POLLIN | POLLHUP)) {
       ssize_t r = read(m, buf, sizeof buf);
       if (r > 0 && cl >= 0 && wsock(cl, buf, r)) { close(cl); cl = -1; }
