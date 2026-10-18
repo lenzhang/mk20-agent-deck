@@ -1,0 +1,6 @@
+# Paths NEVER copied off the device by any backup (tar --exclude-from / rsync --exclude-from).
+data/mk20/secrets
+data/mk20/secrets/*
+/data/mk20/secrets
+/data/mk20/secrets/*
+overlay/upper/data/mk20/secrets

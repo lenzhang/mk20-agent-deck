@@ -220,3 +220,17 @@
   + ALLOWLIST (sha -> features). Running p4 = ep5out.
 - Device recovery path noted for RECOVERY.md: qt_app1 copies /mnt/SDCARD/overlayDir/* onto / at every boot and then
   empties it. A Mac with a TF reader can drop files there (and a security note: same path = root on boot).
+
+## 16:58 SGT: VNC credential install + auth check
+- Password installed at /data/mk20/secrets/vnc.pass (dir 700, file 600, root:root, 6 bytes). Path: box env -> 600
+  file -> CopyFromBox into a 700 Mac dir -> adb push -> `rm -P` on the Mac + rm on the box. The box has no ssh/LAN
+  route to the Mac, so a direct stdin stream wasn't possible. No copy remains on the Mac or the box. Never printed.
+- Backups must exclude it: deck/tools/backup-exclude.txt (use with `tar -X`). The 16:33 /data backup predates the
+  secret.
+- Checker: m2-scripts/vnc/vnc_authcheck.c + des.c, static ARM, /data/mk20/vnc_authcheck. RFB 3.8 + VNC auth type 2.
+  Never prints the password. DES verified against the FIPS vector and openssl.
+- Result 16:57 from the T113 -> 10.20.0.1:5900: server offers type 2, but `SecurityResult != 0` (wrong password).
+  Mac (read-only): VNCLegacyConnectionsEnabled=1, but /Library/Preferences/com.apple.VNCSettings.txt was last
+  modified 2026-09-13 11:16. The password set "today" may not have been applied, or the env value differs.
+  -> user: re-enter the VNC password in Screen Sharing settings and press OK (or confirm the env value). Then rerun
+  `/data/mk20/vnc_authcheck 10.20.0.1 5900 /data/mk20/secrets/vnc.pass`.

@@ -1,0 +1,2 @@
+build (box): arm-linux-gnueabihf-gcc -O2 -static -o vnc_authcheck vnc_authcheck.c des.c
+usage (T113): /data/mk20/vnc_authcheck 10.20.0.1 5900 /data/mk20/secrets/vnc.pass
