@@ -197,3 +197,12 @@
     done acm=y; exactly 1 KD, no shim mounts, g1 = acm.usb0 + ffs.adb, Mac /dev/cu.usbmodem1101 present.
     Rollback takes ~2 min end to end (most of it is the readd_adb loop).
 - Restore (16:25 cmd-reboot -> WDT): composite up at 57 s uptime (ecm+hid+adb), 1 KD, en13 10.20.0.1, ping 1 ms.
+
+## 16:36 SGT: VNC milestone pre-check (read-only, nothing changed on the Mac)
+- macOS 26.6.2. Screen Sharing is ALREADY enabled (launchd com.apple.screensharing => enabled, :5900 listening).
+- From the T113 over ECM: `nc 10.20.0.1 5900` -> "RFB 003.889" (Apple's RFB variant: ARD/Apple auth with a macOS
+  account, or the legacy VNC password if "VNC viewers may control screen with password" is set). So the PRD §14
+  capture path (T113 -> Mac VNC over the USB link) is reachable today with no proxy change.
+- Still needs the user: which credential to use (a dedicated macOS account is recommended, or the VNC password).
+  It is stored 600 on the T113 and never uploaded. Also Screen Recording/control consent if macOS prompts.
+- VNC work resumes after packaging M0.5-M2 (plan v0.2).
