@@ -139,8 +139,11 @@ capture them even without the exclude.
 ## 6. Acceptance check and soak
 
 ```sh
-python3 tools/mk20_accept.py [--reboot] [--no-hid] [--json out.json]   # checks + HID probe: two all-released reports, detached, never killed; --reboot = one WDT reboot cycle first
-mkdir -p ~/mk20-backup/soak && caffeinate -i nohup python3 tools/mk20_soak.py --hours 24 --interval 300 \
+python3 tools/mk20_accept.py [--reboot] [--tcp] [--hid-write] [--no-hid] [--json out.json]
+#   default: read-only (adb, health, bound pings, bridge listeners, HID enumeration)
+#   --reboot one WDT reboot first; --tcp bound connects + getInfo (kicks another bridge client, e.g. the deck daemon:
+#   use only when nothing else is connected); --hid-write two all-released HID reports (presses nothing)
+mkdir -p ~/mk20-backup/soak && caffeinate -i nohup python3 tools/mk20_soak.py --hours 24 --interval 300 [--tcp-probe] \
   > ~/mk20-backup/soak/soak.out 2>&1 &   # unattended; caffeinate keeps a laptop from idle-sleeping
 ```
 

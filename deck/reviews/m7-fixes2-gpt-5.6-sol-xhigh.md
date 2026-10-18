@@ -1,0 +1,9 @@
+- **BLOCKER** — `deck/firmware/release/share/gadget.sh:140-146`: `rollback.once` conflates “running” and “verified.” Concurrent callers and every caller after a killed rollback return 0 without verification; a killed owner leaves a permanent wedge. Replace it with an fd-based `flock -n`, re-check `stock_ok` under the lock, poll all verification predicates, and ensure spawned daemons close the lock fd.
+
+- **BLOCKER** — `deck/tools/tf-restore-boot.sh:48-54`: exact size plus GPT magic/checksum does not validate the layout. Any same-sized GPT image passes and can replace the six-partition MK20 layout. Read-only parse and validate both GPT headers/CRCs, backup GPT location, exactly six partitions, and canonical partition boundaries/types before writing.
+
+- **MAJOR** — `deck/tools/mk20_accept.py:249-261`, `deck/tools/mk20_soak.py:77-80`: client counting followed by connecting is a TOCTOU race. A client can connect after the check and then be kicked. The soak lock does not protect other output directories or `mk20_accept`. If kicking is forbidden, skip active TCP tests by default; require explicit coordinated maintenance mode or change the bridge to reject newcomers while occupied.
+
+- **MAJOR** — `deck/tools/mk20_soak.py:70-73`: the route is merely recorded; an unbound `ping` is sent before `route_if == iface` is enforced, so traffic can traverse a TUN. Validate first and bind every ping to the MK20 interface (`-b` on supported macOS versions), otherwise skip it.
+
+- **MAJOR** — `deck/tools/mk20_accept.py:194-199`: on `HIDPENDING`, the detached writer remains blocked and leaves `hidtap.busy`; if it completes later, it leaves its tagged marker and injects reports after acceptance returned. Default to passive HID enumeration. If active testing is explicitly enabled, use a bounded, waited worker with guaranteed kill/reap and cleanup.

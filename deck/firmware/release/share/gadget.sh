@@ -134,15 +134,33 @@ cleanup() {
   rm -f /tmp/mk20/gadget.busy
 }
 # rollback runs before any preflight so an abnormal state cannot block it
-# once-guard: flapmon, the confirm waiter and mk20d can all ask; only the first undoes (cleared when a composite is up).
-# Exit 0 = stock verified (or already done), 1 = rollback ran but stock not verified (guard released for a retry).
-if [ "${1:-}" = --rollback-now ]; then mkdir -p /tmp/mk20; mkdir /tmp/mk20/rollback.once 2>/dev/null || { log "rollback already done/running"; exit 0; }
+# Rollback guard /tmp/mk20/rollback.once/{pid,done}: flapmon, the confirm waiter and mk20d can all ask. One owner
+# (mkdir is atomic) runs cleanup; others wait for it. "done" is written only after stock is VERIFIED, and every
+# caller re-verifies, so exit 0 always means stock ACM+UDC+KD is up. A dead owner (killed half-way) is taken over;
+# no fd/lock is held, so daemons spawned by cleanup can't pin the guard. Cleared when a composite comes up.
+stock_ok() { [ -e $C/acm.usb0 ] && [ -n "$(udc_now)" ] && pgrep -f KeyboardDevice >/dev/null; }
+if [ "${1:-}" = --rollback-now ]; then
+  RB=/tmp/mk20/rollback.once; mkdir -p /tmp/mk20; i=0
+  while ! mkdir $RB 2>/dev/null; do
+    if [ -f $RB/done ]; then
+      stock_ok && { log "rollback already done (stock verified)"; exit 0; }
+      log "rollback marked done but stock not verified -> redo"; rm -rf $RB; continue
+    fi
+    op=$(cat $RB/pid 2>/dev/null)
+    case "$op" in
+      ''|*[!0-9]*) [ $i -ge 8 ] && { log "rollback guard without owner -> taking over"; rm -rf $RB; continue; };;
+      *) kill -0 "$op" 2>/dev/null || { log "rollback owner $op gone -> taking over"; rm -rf $RB; continue; };;
+    esac
+    [ $i -ge 600 ] && { log "rollback owner ${op:-?} still running after 150 s"; exit 1; }
+    sleep 0.25; i=$((i+1))
+  done
+  echo $$ > $RB/pid
   log "rollback requested"; cleanup
-  # verify stock: ACM linked, UDC bound, KD running. Only a verified rollback keeps the once-guard (retry otherwise).
-  i=0; while ! pgrep -f KeyboardDevice >/dev/null && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done
-  if [ -e $C/acm.usb0 ] && [ -n "$(udc_now)" ] && pgrep -f KeyboardDevice >/dev/null; then log "rollback verified"; exit 0; fi
+  i=0; while ! stock_ok && [ $i -lt 20 ]; do sleep 0.5; i=$((i+1)); done
+  if stock_ok; then touch $RB/done; log "rollback verified"; exit 0; fi
   log "rollback NOT verified (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now)) -> guard released"
-  rmdir /tmp/mk20/rollback.once 2>/dev/null; exit 1; fi
+  rm -rf $RB; exit 1
+fi
 
 # ---- preflight (nothing touched yet) ----
 UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
@@ -228,7 +246,7 @@ pgrep -f KeyboardDevice >/dev/null || die "KD not running"
 # test hook (one-shot): prove the failure rollback with everything set up (bridge, shims, KD on PTY)
 if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
 rm -f /mnt/SDCARD/mk20-composite-ok
-rmdir /tmp/mk20/rollback.once 2>/dev/null
+rm -rf /tmp/mk20/rollback.once
 OK=1
 log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_IP bridge=[$BRIDGE_LISTEN] kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)

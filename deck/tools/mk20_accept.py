@@ -9,7 +9,8 @@ Checks (each PASS/FAIL, exit 1 if any FAIL):
   bound to the MK20 interface); Protocol A getInfo over TCP (deviceVersion); HID: Mac sees the 1d6b:0104 keyboard
   and two all-released reports written to /dev/hidg0 are consumed by the host within 5 s (detached, never killed); Mac route to the device not via a
   TUN; FAT/mem headroom. --reboot first does one watcher hardreset (WDT) and checks hardreset.last fat_ro=y.
-Read-only apart from --reboot and the HID probe (two all-released keyboard reports; presses nothing).
+Read-only by default. Opt-in: --reboot (one WDT reboot), --tcp (active bridge connects + getInfo; would kick
+another bridge client), --hid-write (two all-released HID reports; presses nothing).
 """
 from __future__ import annotations
 
@@ -178,8 +179,10 @@ def hid_enumerated() -> bool:
     return any(re.search(r"0x1d6b\s+0x104\s+\S+\s+1\s+6\s", l) for l in out.splitlines())
 
 
-def hid(run: Run) -> None:
+def hid(run: Run, write: bool = False) -> None:
     run.check("hid: Mac enumerates 1d6b:0104 keyboard", hid_enumerated())
+    if not write:
+        return
     # Two ALL-RELEASED keyboard reports (report ID 1). The first write() returns once queued; the second completes only
     # after the host read the first, so finishing proves the host polls the HID endpoint. Nothing is ever pressed, so a
     # report left queued (host not polling) can't latch a key on the Mac. The writer runs detached and is never killed.
@@ -203,7 +206,11 @@ def hid(run: Run) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reboot", action="store_true")
-    ap.add_argument("--no-hid", action="store_true")
+    ap.add_argument("--no-hid", action="store_true", help="skip the HID enumeration check")
+    ap.add_argument("--hid-write", action="store_true",
+                    help="also write two all-released reports to /dev/hidg0 (proves the host polls; off by default)")
+    ap.add_argument("--tcp", action="store_true",
+                    help="active TCP connects + getInfo (kicks any other bridge client; only when nothing else uses it)")
     ap.add_argument("--json")
     a = ap.parse_args()
     try:
@@ -239,15 +246,23 @@ def main() -> int:
     m = re.search(r"interface:\s*(\S+)", r)
     rif = m.group(1) if m else None
     run.check("mac: route to device via MK20 interface (not TUN)", bool(iface) and rif == iface, f"{DEV_IP} -> {rif}")
-    _, p, _ = run_proc(["ping", "-c", "3", "-i", "0.3", "-t", "5", DEV_IP], 15)
+    p = ""
+    if iface:   # bound to the MK20 interface: never via TUN
+        _, p, _ = run_proc(["ping", "-b", iface, "-c", "3", "-i", "0.3", "-t", "5", DEV_IP], 15)
     m = re.search(r"([\d.]+)% packet loss", p)
     loss = float(m.group(1)) if m else 100.0
     m = re.search(r"= [\d.]+/([\d.]+)/", p)
     run.check("ping device (primary)", loss == 0.0, f"loss={loss}% avg={m.group(1) if m else '?'}ms")
     lp, ll = bridge_listening()
     run.check("bridge listening on primary + link-local (device netstat)", lp and ll, f"primary={lp} ll={ll}")
-    nc = bridge_clients()
-    if nc is None:
+    if iface:
+        _, pl, _ = run_proc(["ping", "-b", iface, "-c", "2", "-i", "0.3", "-t", "5", LL_IP], 15)
+        m2 = re.search(r"([\d.]+)% packet loss", pl)
+        run.check("ping link-local 169.254.7.2 (bound)", bool(m2) and float(m2.group(1)) == 0.0, m2.group(0) if m2 else "?")
+    nc = bridge_clients() if a.tcp else None
+    if not a.tcp:
+        run.check("tcp bridge: active connects skipped (use --tcp when no other client uses the bridge)", True, "passive")
+    elif nc is None:
         run.check("tcp bridge: client count known (device netstat)", False, "netstat failed: connect tests skipped")
     elif nc:   # connecting would kick the deck daemon off the single-client bridge: an active client proves the path
         run.check("tcp bridge: client already connected (connect tests skipped, not disturbed)", True, f"{nc} client(s)")
@@ -259,7 +274,7 @@ def main() -> int:
         ok, d = get_info(iface)
         run.check("protocol A getInfo over TCP", ok, d)
     if not a.no_hid:
-        hid(run)
+        hid(run, write=a.hid_write)
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"time": t0, "pass": run.ok, "results": run.results, "health": h}, f, indent=1)

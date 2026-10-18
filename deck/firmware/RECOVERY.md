@@ -20,7 +20,7 @@ $MK20_ADB shell 'v=$(cat /data/mk20/state/good); /data/mk20/releases/$v/sbin/mk2
 $MK20_ADB shell 'tail -n 30 /data/mk20/logs/mk20d.log /mnt/SDCARD/mk20/logs/loader.log /mnt/SDCARD/mk20/logs/watcher.log'
 $MK20_ADB shell 'cat /tmp/mk20/stub.status /data/mk20/state/hardreset.last /mnt/SDCARD/gadget-ecm-hid.status'
 python3 tools/mk20_host_net.py status       # Mac side: service, routes, device subnet, ping
-python3 tools/mk20_accept.py --no-hid       # read-only check (without --no-hid it also writes two all-released HID reports)
+python3 tools/mk20_accept.py                # read-only check (writes nothing; see INSTALL.md §6 for opt-ins)
 ```
 
 Symptoms and where to go:
@@ -63,11 +63,11 @@ Commands the watcher polls for every 2 s:
 - Afterwards, align the Mac: `python3 tools/mk20_host_net.py sync`. In a mismatch, the bound link-local path to
   169.254.7.2 still works.
 
-- **Rollback once-guard (1.1.3+):** `gadget.sh --rollback-now` runs only once per composite (flapmon, the confirm
-  waiter and mk20d may all ask). It leaves `/tmp/mk20/rollback.once`; a new successful composite setup clears it.
-  From 1.1.4 it exits 0 only when stock is verified (ACM linked, UDC bound, KD running); otherwise it logs
-  "rollback NOT verified", releases the guard and exits 1, so a retry works. If a rollback process was killed
-  half-way, `rmdir /tmp/mk20/rollback.once` before re-running it by hand.
+- **Rollback guard (1.1.3+, reworked in 1.1.4):** `gadget.sh --rollback-now` may be requested by flapmon, the
+  confirm waiter and mk20d. One owner runs it (`/tmp/mk20/rollback.once/pid`); the others wait. `done` is written
+  only after stock is verified (ACM linked, UDC bound, KD running), and every caller re-verifies, so exit 0 always
+  means stock is up. A dead owner is taken over automatically; an unverified rollback releases the guard and exits 1.
+  A new successful composite setup clears the guard.
 
 ## 3. Uninstall the firmware, or remove the stub
 

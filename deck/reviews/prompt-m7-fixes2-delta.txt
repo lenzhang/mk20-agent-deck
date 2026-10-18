@@ -1,0 +1,341 @@
+Review MK20 firmware/host-tool changes (BusyBox 1.27.2 ash on device: flock only -sxun, no setsid/nohup; macOS host; MK20 TF card is GPT, 6 partitions). Goals: flapmon/gadget rollback must never wedge or double-rollback and must report success truthfully; tf-restore-boot.sh must never write anything that destroys the card layout; accept/soak must never change device state, never kick the single-client KD TCP bridge, never connect unbound (TUN). Report BLOCKER/MAJOR/MINOR with file:line and a concrete fix. Be concise. Do not run commands; review the diff only.
+Diff: fixes after your previous review of fedfc99 (fedfc99..8904b63). Your earlier findings: BLOCKER tf-restore undersized whole-image; MAJOR rollback-now exit 1, flapmon start race, fail-open client detection, unbound getInfo; MINOR hidtap marker, soak lock.
+```diff
+diff --git a/deck/firmware/RECOVERY.md b/deck/firmware/RECOVERY.md
+index 878f666..73aca48 100644
+--- a/deck/firmware/RECOVERY.md
++++ b/deck/firmware/RECOVERY.md
+@@ -65,7 +65,9 @@ Commands the watcher polls for every 2 s:
+ 
+ - **Rollback once-guard (1.1.3+):** `gadget.sh --rollback-now` runs only once per composite (flapmon, the confirm
+   waiter and mk20d may all ask). It leaves `/tmp/mk20/rollback.once`; a new successful composite setup clears it.
+-  If a rollback died half-way and you must re-run it by hand: `rmdir /tmp/mk20/rollback.once` first.
++  From 1.1.4 it exits 0 only when stock is verified (ACM linked, UDC bound, KD running); otherwise it logs
++  "rollback NOT verified", releases the guard and exits 1, so a retry works. If a rollback process was killed
++  half-way, `rmdir /tmp/mk20/rollback.once` before re-running it by hand.
+ 
+ ## 3. Uninstall the firmware, or remove the stub
+ 
+@@ -117,8 +119,10 @@ Steps:
+ 
+ Whole card (last resort; erases `/data` and everything else on the card):
+ - `--whole-image` takes only a **raw whole-card `dd` image of this card** (made as in `deck/RECOVERY.md` §3,
+-  e.g. `~/mk20-backup/mk20-tf-YYYYMMDD.img`). As of 1.1.3 no such image exists yet; make one before you need it.
+-  Rehearse with `--dry-run`. The script refuses directories and Allwinner `IMAGEWTY` files.
++  e.g. `~/mk20-backup/mk20-tf-YYYYMMDD.img`). As of 1.1.4 no such image exists yet; make one before you need it,
++  with its sidecar: `shasum -a 256 IMG > IMG.sha256`. Rehearse with `--dry-run`. The script refuses directories,
++  Allwinner `IMAGEWTY` files, any size other than exactly the card size (so `p4.img` or `disk-head.img` can never
++  land at LBA0), images without the GPT signature, and a missing or mismatching `IMG.sha256`.
+ - `~/mk20-backup/tf/live-221-parts/` is a **directory of per-partition images** (SHA256SUMS; p6 UDISK isn't in
+   it), not a whole-card image. Never pass it to `--whole-image` and never `dd` it to the whole disk. Use only
+   `p4.img` with `--image … --slice s4` as above. Restoring other partitions by hand is not documented or tested.
+diff --git a/deck/firmware/release/share/flapmon.sh b/deck/firmware/release/share/flapmon.sh
+index 3b6560e..0af7667 100644
+--- a/deck/firmware/release/share/flapmon.sh
++++ b/deck/firmware/release/share/flapmon.sh
+@@ -7,6 +7,7 @@
+ # (Mac sleep) is not a flap: suspend, resume and a resume reset / unplug after it are logged, not counted.
+ # Single instance (flock on fd 8, not inherited by the rollback). The stopfile is re-checked right before rollback.
+ # If the rollback command fails, the busy marker is cleared so mk20d does not wait on a dead failsafe.
++# Writes the ready marker (MK20_FLAP_READY, default /tmp/mk20/flapmon.ready) once the lock is held.
+ # Test env: MK20_UPTIME_CMD (seconds), MK20_FLAP_POLL (default 0.3), MK20_BUSY, MK20_FLAP_LOCK, MK20_FLAP_SUSP_S.
+ [ $# -ge 7 ] && [ "$6" = -- ] || { echo "usage: flapmon.sh state window drops log stopfile -- cmd..." >&2; exit 2; }
+ U=$1; W=$2; N=$3; LOG=$4; STOP=$5; shift 6
+@@ -15,6 +16,7 @@ BUSY=${MK20_BUSY:-/tmp/mk20/gadget.busy}; SUSP=${MK20_FLAP_SUSP_S:-5}
+ LOCK=${MK20_FLAP_LOCK:-/tmp/mk20/flapmon.lock}; mkdir -p "$(dirname "$LOCK")"
+ exec 8>"$LOCK"; i=0; while ! flock -n 8; do i=$((i+1)); [ $i -lt 10 ] && { sleep 0.5; continue; }
+   { echo "flapmon $(cut -d. -f1 /proc/uptime): another monitor holds $LOCK" >> "$LOG"; exit 3; }; done
++READY=${MK20_FLAP_READY:-/tmp/mk20/flapmon.ready}; mkdir -p "$(dirname "$READY")"; : > "$READY"   # lock held: gadget.sh waits for this
+ up() { if [ -n "${MK20_UPTIME_CMD:-}" ]; then $MK20_UPTIME_CMD; else cut -d. -f1 /proc/uptime; fi; }
+ prev=$(cat "$U" 2>/dev/null); times=""; sus=""
+ while [ ! -f "$STOP" ]; do
+diff --git a/deck/firmware/release/share/gadget.sh b/deck/firmware/release/share/gadget.sh
+index 97db6cd..7219a2b 100755
+--- a/deck/firmware/release/share/gadget.sh
++++ b/deck/firmware/release/share/gadget.sh
+@@ -134,9 +134,15 @@ cleanup() {
+   rm -f /tmp/mk20/gadget.busy
+ }
+ # rollback runs before any preflight so an abnormal state cannot block it
+-# once-guard: flapmon, the confirm waiter and mk20d can all ask; only the first undoes (cleared when a composite is up)
++# once-guard: flapmon, the confirm waiter and mk20d can all ask; only the first undoes (cleared when a composite is up).
++# Exit 0 = stock verified (or already done), 1 = rollback ran but stock not verified (guard released for a retry).
+ if [ "${1:-}" = --rollback-now ]; then mkdir -p /tmp/mk20; mkdir /tmp/mk20/rollback.once 2>/dev/null || { log "rollback already done/running"; exit 0; }
+-  log "rollback requested"; trap cleanup EXIT; exit 1; fi
++  log "rollback requested"; cleanup
++  # verify stock: ACM linked, UDC bound, KD running. Only a verified rollback keeps the once-guard (retry otherwise).
++  i=0; while ! pgrep -f KeyboardDevice >/dev/null && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done
++  if [ -e $C/acm.usb0 ] && [ -n "$(udc_now)" ] && pgrep -f KeyboardDevice >/dev/null; then log "rollback verified"; exit 0; fi
++  log "rollback NOT verified (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now)) -> guard released"
++  rmdir /tmp/mk20/rollback.once 2>/dev/null; exit 1; fi
+ 
+ # ---- preflight (nothing touched yet) ----
+ UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+@@ -230,13 +236,14 @@ log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_I
+ ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh)" ] || { OK=0; die "cannot stage rollback copy"; }
+ # flap monitor (both modes, share/flapmon.sh): >=5 configured->not-configured drops within 60 s -> rollback to
+ # ACM+KD+adb. Host USB suspend (Mac sleep) is not a flap.
+-rm -f /tmp/mk20-flapmon-stop
++rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready
+ FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
+ { [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
+ ( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG"
+   exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
+     sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 9>&- ) &
+-FP=$!; sleep 1; kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start"; }
++FP=$!; i=0; while [ ! -f /tmp/mk20/flapmon.ready ] && [ $i -lt 40 ] && kill -0 $FP 2>/dev/null; do sleep 0.25; i=$((i+1)); done
++[ -f /tmp/mk20/flapmon.ready ] && kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start (no lock/ready marker)"; }
+ log "flap monitor started (pid $FP)"
+ if [ "$MODE" = --boot ]; then
+   touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
+diff --git a/deck/tests/test_flapmon.py b/deck/tests/test_flapmon.py
+index 9f4e9c2..6212f50 100644
+--- a/deck/tests/test_flapmon.py
++++ b/deck/tests/test_flapmon.py
+@@ -18,7 +18,7 @@ def start(dev, tmp_path, window=60, drops=5, cmd=None):
+     st, log, stop, mark, clock = (tmp_path / n for n in ("state", "fm.log", "stop", "rolled", "clock"))
+     put(st, "configured\n"); put(clock, "100\n")
+     env = dict(dev.env, MK20_FLAP_POLL="0.05", MK20_BUSY=str(tmp_path / "busy"),
+-               MK20_FLAP_LOCK=str(tmp_path / "fm.lock"), MK20_UPTIME_CMD=f"cat {clock}")
++               MK20_FLAP_LOCK=str(tmp_path / "fm.lock"), MK20_FLAP_READY=str(tmp_path / "ready"), MK20_UPTIME_CMD=f"cat {clock}")
+     cmd = cmd or ["sh", "-c", f"echo 'roll back' >> '{mark}'"]
+     p = subprocess.Popen(["sh", str(FM), str(st), str(window), str(drops), str(log), str(stop), "--", *cmd], env=env)
+     time.sleep(0.4)
+@@ -91,10 +91,12 @@ def test_stopfile_ends_monitor(dev, tmp_path):
+ 
+ def test_second_instance_refused(dev, tmp_path):
+     p, st, log, stop, mark, clock = start(dev, tmp_path)
+-    env = dict(dev.env, MK20_FLAP_LOCK=str(tmp_path / "fm.lock"), MK20_FLAP_POLL="0.05")
++    env = dict(dev.env, MK20_FLAP_LOCK=str(tmp_path / "fm.lock"), MK20_FLAP_POLL="0.05",
++               MK20_FLAP_READY=str(tmp_path / "ready2"))
+     r = subprocess.run(["sh", str(FM), str(st), "60", "5", str(log), str(stop), "--", "true"], env=env, timeout=15)
+     put(stop, ""); p.wait(timeout=5)
+     assert r.returncode == 3 and "another monitor holds" in log.read_text()
++    assert (tmp_path / "ready").exists() and not (tmp_path / "ready2").exists()
+ 
+ 
+ def test_bad_args_exit_2(dev, tmp_path):
+diff --git a/deck/tools/mk20_accept.py b/deck/tools/mk20_accept.py
+index 966025c..1a0b9bb 100644
+--- a/deck/tools/mk20_accept.py
++++ b/deck/tools/mk20_accept.py
+@@ -68,10 +68,13 @@ def sh(cmd: str, timeout: float = 20) -> tuple[int, str]:
+ 
+ 
+ def bridge_clients() -> int | None:
+-    """Established TCP clients of the KD bridge (it serves ONE client and drops the old one on a new connect)."""
+-    rc, o = sh("netstat -tn 2>/dev/null | grep -c ':%d .*ESTABLISHED'" % PORT, timeout=10)
+-    o = o.strip()
+-    return int(o) if rc in (0, 1) and o.isdigit() else None
++    """Established TCP clients of the KD bridge (it serves ONE client and drops the old one on a new connect).
++    None = unknown (adb/netstat failed): callers must then NOT open a TCP connection."""
++    rc, o = sh("netstat -tn 2>/dev/null && echo NETSTAT_RC=0", timeout=10)
++    if rc != 0 or "NETSTAT_RC=0" not in o or "Proto" not in o:
++        return None
++    return sum(1 for l in o.splitlines() if l.startswith("tcp") and "ESTABLISHED" in l
++               and l.split()[3].endswith(f":{PORT}"))
+ 
+ 
+ def bridge_listening() -> tuple[bool, bool]:
+@@ -160,9 +163,11 @@ def tcp_bound(host: str, iface: str | None) -> tuple[bool, str]:
+         return False, str(e)
+ 
+ 
+-def get_info() -> tuple[bool, str]:
+-    env = dict(os.environ, MK20_PORT=f"socket://{DEV_IP}:{PORT}")
+-    rc, o, e = run_proc(["uv", "run", "-q", "--with", "pyserial", "python", os.path.join(HERE, "mk20ctl-url.py"),
++def get_info(iface: str | None) -> tuple[bool, str]:
++    if not iface:
++        return False, "no MK20 interface (refusing an unbound connect)"
++    env = dict(os.environ, MK20_PORT=f"bound:{DEV_IP}:{PORT}:{iface}")
++    rc, o, e = run_proc(["uv", "run", "-q", "--with", "pyserial", "python", os.path.join(HERE, "mk20ctl.py"),
+                          "info"], 40, env=env)
+     m = re.search(r'"deviceVersion":\s*"([^"]+)"', o)
+     return bool(m), (m.group(1) if m else (o + e)[-200:] or f"rc={rc}")
+@@ -181,15 +186,17 @@ def hid(run: Run) -> None:
+     # [ -c ]: never create a regular file /dev/hidg0 when the HID function is absent (it would mask the real node).
+     # BusyBox here has no setsid/nohup: a subshell that ignores SIGHUP, with stdio detached, outlives the adb shell.
+     z = "'\\001\\000\\000\\000\\000\\000\\000\\000\\000'"
++    tag = f"{os.getpid()}-{int(time.time())}"
+     cmd = ("[ -c /dev/hidg0 ] || { echo NOHIDG; exit 0; }; "
+            "grep -qx configured /sys/class/udc/*/state || { echo NOTCONF; exit 0; }; "
+-           "mkdir -p /tmp/mk20; rm -f /tmp/mk20/hidtap.done; "
+-           f"( trap '' HUP; printf {z} > /dev/hidg0 && printf {z} > /dev/hidg0 && touch /tmp/mk20/hidtap.done ) "
++           "mkdir -p /tmp/mk20; mkdir /tmp/mk20/hidtap.busy 2>/dev/null || { echo HIDBUSY; exit 0; }; "
++           f"D=/tmp/mk20/hidtap.{tag}; "
++           f"( trap '' HUP; printf {z} > /dev/hidg0 && printf {z} > /dev/hidg0 && touch $D; rmdir /tmp/mk20/hidtap.busy ) "
+            "</dev/null >/dev/null 2>&1 & "
+-           "i=0; while [ $i -lt 5 ] && [ ! -f /tmp/mk20/hidtap.done ]; do sleep 1; i=$((i+1)); done; "
+-           "[ -f /tmp/mk20/hidtap.done ] && echo HIDOK || echo HIDPENDING")
++           "i=0; while [ $i -lt 5 ] && [ ! -f $D ]; do sleep 1; i=$((i+1)); done; "
++           "[ -f $D ] && { rm -f $D; echo HIDOK; } || echo HIDPENDING")
+     _, o = sh(cmd, timeout=20)
+-    det = next((k for k in ("HIDOK", "NOHIDG", "NOTCONF", "HIDPENDING") if k in o), o.strip()[-80:])
++    det = next((k for k in ("HIDOK", "NOHIDG", "NOTCONF", "HIDBUSY", "HIDPENDING") if k in o), o.strip()[-80:])
+     run.check("hid: host consumes keyboard reports (all keys released)", det == "HIDOK", det)
+ 
+ 
+@@ -240,14 +247,16 @@ def main() -> int:
+     lp, ll = bridge_listening()
+     run.check("bridge listening on primary + link-local (device netstat)", lp and ll, f"primary={lp} ll={ll}")
+     nc = bridge_clients()
+-    if nc:   # connecting would kick the deck daemon off the single-client bridge: an active client proves the path
++    if nc is None:
++        run.check("tcp bridge: client count known (device netstat)", False, "netstat failed: connect tests skipped")
++    elif nc:   # connecting would kick the deck daemon off the single-client bridge: an active client proves the path
+         run.check("tcp bridge: client already connected (connect tests skipped, not disturbed)", True, f"{nc} client(s)")
+     else:
+         ok, d = tcp_bound(DEV_IP, iface)
+         run.check("tcp bridge primary (bound)", ok, d)
+         ok, d = tcp_bound(LL_IP, iface)
+         run.check("tcp bridge link-local 169.254.7.2 (bound)", ok, d)
+-        ok, d = get_info()
++        ok, d = get_info(iface)
+         run.check("protocol A getInfo over TCP", ok, d)
+     if not a.no_hid:
+         hid(run)
+diff --git a/deck/tools/mk20_soak.py b/deck/tools/mk20_soak.py
+index 422e8bf..283e8ca 100644
+--- a/deck/tools/mk20_soak.py
++++ b/deck/tools/mk20_soak.py
+@@ -17,6 +17,7 @@ Stop early: kill the process (pid in <out>/soak.pid); the summary is still writt
+ from __future__ import annotations
+ 
+ import argparse
++import fcntl
+ import json
+ import os
+ import re
+@@ -63,6 +64,9 @@ def sample(deep: bool) -> dict:
+         s["bridge_clients"] = acc.bridge_clients()
+     iface = tt.mk20_interface()
+     s["iface"] = iface
++    _, r, _ = acc.run_proc(["route", "-n", "get", acc.DEV_IP], 10)
++    m = re.search(r"interface:\s*(\S+)", r)
++    s["route_if"] = m.group(1) if m else None
+     _, p, _ = acc.run_proc(["ping", "-c", "3", "-i", "0.3", "-t", "5", acc.DEV_IP], 15)
+     s["ping_loss"] = float((re.search(r"([\d.]+)% packet loss", p) or [None, "100"])[1])
+     s["ping_avg_ms"] = (re.search(r"= [\d.]+/([\d.]+)/", p) or [None, None])[1]
+@@ -73,11 +77,11 @@ def sample(deep: bool) -> dict:
+     if deep and s.get("bridge_clients") == 0 and not STOP:
+         s["tcp_primary"] = acc.tcp_bound(acc.DEV_IP, iface)[0]
+         s["tcp_ll"] = acc.tcp_bound(acc.LL_IP, iface)[0]
+-        s["getinfo"] = acc.get_info()[0]
++        s["getinfo"] = acc.get_info(iface)[0]
+     if deep and not STOP:
+         s["hid"] = acc.hid_enumerated()
+     h = s.get("health") or {}
+-    s["ok"] = bool(s["adb"] and h.get("status") == "ok" and h.get("kd") == 1 and h.get("composite") is True
++    s["ok"] = bool(s["adb"] and iface and s["route_if"] == iface and h.get("status") == "ok" and h.get("kd") == 1 and h.get("composite") is True
+                    and s["ping_loss"] == 0 and s.get("ping_ll_loss", 100) == 0
+                    and s.get("listen_primary") and s.get("listen_ll")
+                    and s.get("tcp_primary", True) and s.get("tcp_ll", True) and s.get("getinfo", True)
+@@ -102,8 +106,13 @@ def main() -> int:
+     if not os.environ.get("MK20_ADB"):
+         sys.exit("set MK20_ADB (MK20-only adb wrapper, never the watch)")
+     os.makedirs(a.out, exist_ok=True)
+-    stamp = time.strftime("%Y%m%d-%H%M")
++    stamp = time.strftime("%Y%m%d-%H%M%S")
+     jl, sm = os.path.join(a.out, f"soak-{stamp}.jsonl"), os.path.join(a.out, f"soak-{stamp}.summary.json")
++    lockf = open(os.path.join(a.out, "soak.lock"), "w")
++    try:
++        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except OSError:
++        sys.exit(f"another soak is running in {a.out} (soak.lock held)")
+     pidf = os.path.join(a.out, "soak.pid")
+     with open(pidf, "w") as f:
+         f.write(f"{os.getpid()}\n")
+diff --git a/deck/tools/mk20ctl.py b/deck/tools/mk20ctl.py
+index 29bf780..ec59e0a 100644
+--- a/deck/tools/mk20ctl.py
++++ b/deck/tools/mk20ctl.py
+@@ -10,6 +10,7 @@
+   mk20ctl.py ping|reboot [--wait S]
+   mk20ctl.py listen [--wait S]           capture @@MK20 blocks (raw tap) to ~/mk20-backup/remote-logs
+   mk20ctl.py stage-dryrun DIR            stage dry-run + watcher (see NOTES)
++MK20_PORT: serial device (default), or bound:HOST:PORT:IFACE for the TCP bridge pinned to the MK20 interface.
+ Raw bytes on the port are teed: frames go to DeviceLink, text between @@MK20 markers is captured.
+ """
+ from __future__ import annotations
+@@ -64,8 +65,18 @@ class TeeTransport:
+     def close(self): self.inner.close(); self.rawlog.close()
+ 
+ 
++def _open_port():
++    """MK20_PORT=bound:HOST:PORT:IFACE -> TCP bridge socket pinned to IFACE (never via TUN/another route)."""
++    if PORT.startswith("bound:"):
++        _, host, port, iface = PORT.split(":", 3)
++        sys.path.insert(0, str(Path(__file__).resolve().parent))
++        from tcp_transport import TcpTransport  # noqa: E402
++        return TcpTransport(host, int(port), 5.0, bound_if=iface)
++    return SerialTransport(PORT)
++
++
+ def connect():
+-    t = TeeTransport(SerialTransport(PORT))
++    t = TeeTransport(_open_port())
+     link = DeviceLink(t, ack_timeout=10.0, preamble_flush=0)
+     link.start()
+     return t, link
+diff --git a/deck/tools/test_mk20_accept.py b/deck/tools/test_mk20_accept.py
+new file mode 100644
+index 0000000..e4a2579
+--- /dev/null
++++ b/deck/tools/test_mk20_accept.py
+@@ -0,0 +1,27 @@
++"""mk20_accept helpers: bridge client detection fails closed; getInfo refuses unbound."""
++import mk20_accept as acc
++
++NS = ("Active Internet connections (w/o servers)\nProto Recv-Q Send-Q Local Address Foreign Address State\n"
++      "tcp 0 0 172.30.250.2:17890 172.30.250.1:50000 ESTABLISHED\n"
++      "tcp 0 0 172.30.250.2:5555 172.30.250.1:50001 ESTABLISHED\nNETSTAT_RC=0\n")
++
++
++def test_clients_counted(monkeypatch):
++    monkeypatch.setattr(acc, "sh", lambda c, timeout=20: (0, NS))
++    assert acc.bridge_clients() == 1
++
++
++def test_clients_zero(monkeypatch):
++    monkeypatch.setattr(acc, "sh", lambda c, timeout=20: (0, NS.replace("17890", "17891")))
++    assert acc.bridge_clients() == 0
++
++
++def test_clients_unknown_fails_closed(monkeypatch):
++    for out in ((124, ""), (0, "netstat: not found\n"), (1, NS)):
++        monkeypatch.setattr(acc, "sh", lambda c, timeout=20, o=out: o)
++        assert acc.bridge_clients() is None
++
++
++def test_getinfo_refuses_unbound():
++    ok, d = acc.get_info(None)
++    assert not ok and "unbound" in d
+diff --git a/deck/tools/tf-restore-boot.sh b/deck/tools/tf-restore-boot.sh
+index fc9315b..b5f54fd 100755
+--- a/deck/tools/tf-restore-boot.sh
++++ b/deck/tools/tf-restore-boot.sh
+@@ -43,7 +43,14 @@ if [[ -n "$WHOLE" ]]; then
+   [[ -f "$SRC" ]] || die "missing $SRC"
+   [[ "$(head -c 8 "$SRC")" == IMAGEWTY ]] && die "$SRC is an Allwinner PhoenixCard image; flash it with PhoenixCard/OpenixCard, never dd"
+   WBYTES=$(wc -c <"$SRC" | tr -d ' ')
+-  (( WBYTES <= SIZE )) || die "image ($WBYTES B) larger than card ($SIZE B)"
++  # a whole-card dd image of THIS card is exactly the card size; anything smaller (e.g. p4.img) would land at LBA0
++  (( WBYTES == SIZE )) || die "image ($WBYTES B) != card ($SIZE B): not a whole-card dd image of this card"
++  [[ "$(dd if="$SRC" bs=1 skip=510 count=2 2>/dev/null | xxd -p)" == 55aa ]] || die "no MBR/GPT boot signature at LBA0"
++  dd if="$SRC" bs=512 skip=1 count=1 2>/dev/null | head -c 8 | grep -q '^EFI PART' || \
++    die "no GPT header at LBA1 (the MK20 card uses GPT)"
++  [[ -f "$SRC.sha256" ]] || die "missing $SRC.sha256 (write it when you make the image: shasum -a 256 IMG > IMG.sha256)"
++  WANT=$(awk '{print $1; exit}' "$SRC.sha256")
++  [[ "$WANT" =~ ^[0-9a-f]{64}$ ]] || die "bad $SRC.sha256"
+ elif [[ -n "$IMAGE" ]]; then
+   SLICE="${SLICE:-s4}"
+   [[ "$SLICE" == s4 ]] || die "MK20 boot partition is s4 (got $SLICE); refusing"
+@@ -57,6 +64,7 @@ else
+ fi
+ [[ -f "$SRC" ]] || die "missing $SRC"
+ SUM=$(shasum -a 256 "$SRC" | awk '{print $1}')
++[[ -z "${WANT:-}" || "$SUM" == "$WANT" ]] || die "sha256 $SUM != $SRC.sha256 ($WANT)"
+ BYTES=$(wc -c <"$SRC" | tr -d ' ')
+ info "source=$SRC sha256=$SUM bytes=$BYTES dest=$DEST"
+ if (( DRY )); then info "DRY-RUN: would unmount $BLK and dd -> $DEST"; exit 0; fi
+```
