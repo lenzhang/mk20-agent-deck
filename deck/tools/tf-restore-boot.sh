@@ -2,7 +2,9 @@
 # Mac: restore MK20 TF — whole card OR a named slice (boot partition).
 # Usage:
 #   tf-restore-boot.sh --disk diskN --whole-image IMG [--dry-run]
-#   tf-restore-boot.sh --disk diskN --image boot-stock.img --slice sN [--dry-run]
+#   tf-restore-boot.sh --disk diskN --image boot-stock.img [--slice s4] [--dry-run]
+#   MK20 TF layout: s1 SDCARD(FAT) s2 env s3 env-redund s4 BOOT (6451200 B) s5 rootfs s6 UDISK.
+#   The slice must be EXACTLY the image size (full 6451200-B stock p4 backup; never the prefix-only staged images).
 # Safety: refuses Internal disks; size ~3–5GB; never ESP32.
 set -euo pipefail
 DISK=""; IMAGE=""; WHOLE=""; SLICE=""; DRY=0
@@ -38,9 +40,13 @@ diskutil list "$BLK" | grep -qiE 'ESP32|ESP-' && die "looks like ESP32"
 if [[ -n "$WHOLE" ]]; then
   SRC="$WHOLE"; DEST="$RAW"
 elif [[ -n "$IMAGE" ]]; then
-  [[ -n "$SLICE" ]] || die "boot-partition restore needs --slice sN (e.g. s3). Run diskutil list $BLK first."
+  SLICE="${SLICE:-s4}"
+  [[ "$SLICE" == s4 ]] || die "MK20 boot partition is s4 (got $SLICE); refusing"
   SRC="$IMAGE"
-  DEST="/dev/r${DISK}${SLICE}"   # e.g. /dev/rdisk4s3
+  DEST="/dev/r${DISK}${SLICE}"   # /dev/rdiskNs4
+  SSIZE=$(diskutil info -plist "/dev/${DISK}${SLICE}" | awk '/<key>TotalSize<\/key>/{getline; gsub(/<[^>]+>/,""); print}' | tr -d '[:space:]')
+  [[ "$SSIZE" == 6451200 ]] || die "slice ${DISK}${SLICE} size $SSIZE != 6451200 (not the MK20 boot partition)"
+  [[ -f "$SRC" ]] && [[ "$(wc -c <"$SRC" | tr -d ' ')" == "$SSIZE" ]] || die "image size must equal slice size $SSIZE (use the full stock p4 backup)"
 else
   die "need --whole-image or --image+--slice"
 fi

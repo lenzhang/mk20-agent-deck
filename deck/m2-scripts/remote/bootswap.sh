@@ -36,8 +36,9 @@ dd if=$DEV of=$STOCK2 bs=1M conv=fsync 2>&1; echo "stock2 sha=$(sha256sum $STOCK
 sync
 if [ -f $S/boot-swap.dry ]; then echo "DRY-RUN OK (no write)"; echo "dry-ok part=$PART sha=$PSHA" > $ST; sync; exit 0; fi
 echo "WRITING new boot"
-dd if=$NEW of=$DEV bs=1M conv=fsync 2>&1; sync
+dd if=$NEW of=$DEV bs=1M conv=fsync 2>&1 || { dd if=$STOCK of=$DEV bs=1M conv=fsync; sync; fail "dd write error -> stock restored"; }; sync
+echo 3 > /proc/sys/vm/drop_caches 2>/dev/null  # readback from media, not page cache
 R=$(head -c $NS $DEV | sha256sum | awk '{print $1}'); echo "readback=$R"
-if [ "$R" != "$E" ]; then dd if=$STOCK of=$DEV bs=1M conv=fsync; sync; fail "readback mismatch -> stock restored"; fi
+if [ "$R" != "$E" ]; then [ "$(sha256sum $STOCK | awk '{print $1}')" = "$PSHA" ] || fail "readback mismatch AND stock copy bad - DO NOT REBOOT, pull TF"; dd if=$STOCK of=$DEV bs=1M conv=fsync; sync; fail "readback mismatch -> stock restored"; fi
 echo "ok-rebooting" > $ST; sync
 echo "write verified; rebooting in 3s"; sleep 3; reboot
