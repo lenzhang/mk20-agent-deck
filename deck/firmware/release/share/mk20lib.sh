@@ -43,7 +43,7 @@ v_mac() { # locally administered unicast xx:xx:xx:xx:xx:xx (lowercase)
 }
 v_bool() { [ "$1" = 0 ] || [ "$1" = 1 ]; }
 v_range() { case "$1" in ''|*[!0-9]*|0?*) return 1;; esac; [ ${#1} -le 6 ] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; }
-cfg_set() { # $1=key $2=value (validated)
+cfg_set() { # $1=key $2=value: validated, then assigned explicitly (no eval)
   case "$1" in
     ECM_SUBNET) v_subnet "$2" ;;
     ECM_DEV_MAC|ECM_HOST_MAC) v_mac "$2" ;;
@@ -55,15 +55,23 @@ cfg_set() { # $1=key $2=value (validated)
     LOG_KEEP) v_range "$2" 1 9 ;;
     *) cfg_warn "unknown key $1"; return 0 ;;
   esac || { cfg_warn "invalid $1"; return 0; }
-  eval "$1=\$2"
+  case "$1" in
+    ECM_SUBNET) ECM_SUBNET=$2;; ECM_DEV_MAC) ECM_DEV_MAC=$2;; ECM_HOST_MAC) ECM_HOST_MAC=$2;;
+    FEATURE_COMPOSITE) FEATURE_COMPOSITE=$2;; FEATURE_HID) FEATURE_HID=$2;; FEATURE_ADB) FEATURE_ADB=$2;;
+    BRIDGE_PORT) BRIDGE_PORT=$2;; FLAP_DROPS) FLAP_DROPS=$2;; FLAP_WINDOW_S) FLAP_WINDOW_S=$2;;
+    LOG_MAX_KB) LOG_MAX_KB=$2;; LOG_KEEP) LOG_KEEP=$2;;
+  esac
 }
 cfg_load() {
   local line k v n
   # release defaults (1.0.x keeps the proven 10.20.0.0/24; the M4 release switches the default)
-  ECM_SUBNET=${MK20_DEFAULT_SUBNET:-10.20.0.0/24}; ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56
+  CFG_WARN=""
+  ECM_SUBNET=10.20.0.0/24; [ -n "${MK20_DEFAULT_SUBNET:-}" ] && cfg_set ECM_SUBNET "$MK20_DEFAULT_SUBNET"
+  ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56
   FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
   LOG_MAX_KB=256; LOG_KEEP=3; CFG_SRC=defaults
-  if [ -f "$CONF" ]; then
+  if [ -L "$CONF" ] || { [ -e "$CONF" ] && [ ! -f "$CONF" ]; }; then cfg_warn "config is not a regular file, ignored"
+  elif [ -f "$CONF" ]; then
     CFG_SRC=$CONF
     if [ "$(wc -c < "$CONF")" -gt 4096 ]; then cfg_warn "config too large, ignored"
     else
@@ -72,7 +80,7 @@ cfg_load() {
         case "$line" in ''|'#'*) continue;; esac
         k=${line%%=*}; v=${line#*=}
         [ "$k" = "$line" ] && { cfg_warn "bad line"; continue; }
-        k=$(echo "$k" | tr -d ' \t'); v=$(echo "$v" | sed 's/^[ \t]*//; s/[ \t]*#.*$//; s/[ \t]*$//')
+        k=$(printf '%s' "$k" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'); v=$(printf '%s' "$v" | sed 's/^[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//')
         echo "$k" | grep -Eq '^[A-Z_]{1,32}$' || { cfg_warn "bad key"; continue; }
         cfg_set "$k" "$v"
       done < "$CONF"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# MK20 remote HARD reset v2.2 (soft `reboot` hangs on this board).
+# MK20 remote HARD reset v2.3 (v2.3: outcome persisted to /data/mk20/state/hardreset.last) (soft `reboot` hangs on this board).
 # Why reboot hangs: ARM machine_restart() uses arm_pm_restart = psci_sys_reset (PSCI SYSTEM_RESET), which never
 # returns here, and the reboot notifiers stop the sunxi WDT first. So: procd keeps the sunxi WDT armed (16 s,
 # ping 5 s); we stop procd's pings -> the hardware WDT resets the SoC. No kernel restart path, no PSCI.
@@ -40,6 +40,8 @@ rm -f "$R/tmp/mk20/hr-ro"; ( exec 8>&-; mount -o remount,ro "$S" 2>/dev/null && 
 i=0; while kill -0 $mp 2>/dev/null && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done
 MHUNG=n; kill -0 $mp 2>/dev/null && { kill -9 $mp 2>/dev/null; MHUNG=y; }
 [ -f "$R/tmp/mk20/hr-ro" ] && RO=y || RO=n
+# persistent outcome on ext4 (FAT may be ro now): read after the reset to prove a clean FAT remount
+[ -d "$R/data/mk20/state" ] && echo "uptime=$(cut -d' ' -f1 /proc/uptime) by=${1:-?} fat_ro=$RO mount_hung=$MHUNG" > "$R/data/mk20/state/hardreset.last" 2>/dev/null
 sync
 $UBUS call system watchdog '{"stop":true}' >/dev/null 2>&1
 # FAT may be ro now: log to tmpfs (and FAT if still rw)

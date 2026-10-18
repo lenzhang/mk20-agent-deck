@@ -1,6 +1,6 @@
 import os, subprocess, time, shutil, hashlib, pathlib, signal
 import pytest
-from conftest import FW, DECK, sha
+from conftest import FW, DECK, sha, BB
 
 STUB = FW / "rescue/lunch.sh"
 HR = FW / "rescue/hardreset.sh"
@@ -79,6 +79,10 @@ def test_hardreset_stops_pings_and_remounts(dev):
     calls = (dev.mock / "ubus.calls").read_text()
     assert '{"stop":true}' in calls
     assert "remount,ro" in (dev.mock / "mount.calls").read_text()
+    dev.p("data/mk20/state").mkdir(parents=True, exist_ok=True)
+    r = dev.run(HR, "test", env={"MK20_HR_NOSLEEP": "1"})
+    last = dev.read("data/mk20/state/hardreset.last")
+    assert "by=test fat_ro=y mount_hung=n" in last, last
 
 
 def test_hardreset_waits_for_kernel_write_lock(dev):
@@ -150,7 +154,7 @@ def test_build_reproducible_and_manifest(tmp_path):
         assert (outs[0] / "rescue" / f"{f}.sha256").read_text().split()[0] == sha(outs[0] / "rescue" / f)
 
 
-SH_FILES = sorted(set(list((FW).rglob("*.sh")) + [FW / "release/sbin/mk20d", DECK / "tools/mk20-release-build.sh"]))
+SH_FILES = sorted(set(list((FW).rglob("*.sh")) + [FW / "release/sbin/mk20d", DECK / "tools/mk20-release-build.sh", DECK / "tools/mk20-install.sh", DECK / "tools/mk20-rescue-update.sh"]))
 
 
 @pytest.mark.parametrize("f", SH_FILES, ids=lambda p: str(p.relative_to(DECK)))
@@ -162,7 +166,7 @@ def test_shellcheck(f):
 def test_hardreset_refuses_in_test_root_without_ubus_override(dev):
     (dev.mock / "wdt").write_text("running")
     env = dict(dev.env); env.pop("MK20_UBUS")
-    r = subprocess.run(["busybox", "sh", str(HR), "t"], env={**env, "MK20_HR_NOSLEEP": "1"}, capture_output=True, text=True)
+    r = subprocess.run([BB, "sh", str(HR), "t"], env={**env, "MK20_HR_NOSLEEP": "1"}, capture_output=True, text=True)
     assert r.returncode == 13
 
 
@@ -192,3 +196,32 @@ def test_stub_liveness_falls_back_to_fat(dev):
     put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"))
     dev.run(STUB, env={"MK20_STUB_LIVENESS": "1"})
     assert wait_text(dev.mock / "watcher.ran", t=6).startswith("fat ")
+
+
+def _code(text):
+    """shell text without comments (a '#' at line start or after whitespace, outside quotes - good enough here)"""
+    out = []
+    for line in text.splitlines():
+        q = None; buf = ""
+        for i, ch in enumerate(line):
+            if q:
+                if ch == q: q = None
+            elif ch in "'\"":
+                q = ch
+            elif ch == "#" and (i == 0 or line[i - 1] in " \t;"):
+                break
+            buf += ch
+        out.append(buf)
+    return "\n".join(out)
+
+
+def test_gadget_failsafe_commands_are_live_code():
+    """Regression (1.0.2): an inline comment swallowed `killall ttygs_tcp_bridge` + the ttyGS0 restore in cleanup()."""
+    for f in (FW / "release/share/gadget.sh", DECK / "m2-scripts/gadget-ecm-hid-adb.sh"):
+        code = _code(f.read_text())
+        body = code[code.index("cleanup() {"):code.index("# rollback runs before any preflight") if "# rollback runs" in code else None]
+        body = code[code.index("cleanup() {"):]
+        body = body[:body.index("\n}\n")]
+        for needle in ("killall ttygs_tcp_bridge", "rm -f /dev/ttyGS0", "mv /dev/ttyGS0.real /dev/ttyGS0", "umount $m",
+                       "/data/setusbconfig serial", "kd_stop", "kd_start", "readd_adb", "echo \"\" > $G/UDC"):
+            assert needle in body, f"{f.name}: '{needle}' missing from live cleanup() code"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# v3.8 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+# v3.9 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
 # (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
 # Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
 # NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
@@ -27,10 +27,22 @@
 set -u
 LOG=${MK20_GADGET_LOG:-/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log}
 # v3.8 knobs (set by mk20d from mk20.conf; defaults = the proven v3.7 behaviour)
+# Release mode: a manual/queued run (no MK20_ECM_IP in the env) takes the knobs mk20d validated at boot from
+# /tmp/mk20/gadget.env; mk20d writes that file only when the kernel/vendor/config gates allow the composite, so
+# without it only a rollback is allowed (fail closed).
+GENV=/tmp/mk20/gadget.env
+if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
+  if [ -f "$GENV" ]; then
+    while IFS='=' read -r k v; do case "$k" in
+      MK20_ECM_IP) MK20_ECM_IP=$v;; MK20_ECM_MASK) MK20_ECM_MASK=$v;; MK20_DEV_MAC) MK20_DEV_MAC=$v;; MK20_HOST_MAC) MK20_HOST_MAC=$v;;
+      MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
+      MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;;
+    esac; done < "$GENV"
+  else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) echo "release mode: no $GENV (gates not passed at boot) -> refused"; exit 1;; esac; fi
+fi
 ECM_IP=${MK20_ECM_IP:-10.20.0.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
 DEV_MAC=${MK20_DEV_MAC:-02:11:22:33:44:55}; HOST_MAC=${MK20_HOST_MAC:-02:11:22:33:44:56}
-BRIDGE_PORT=${MK20_BRIDGE_PORT:-}   # set (mk20d >= 1.0.2): bridge binds the usb0 addresses only (ECM IP + link-local alias); unset: legacy 0.0.0.0:17890
-BRIDGE_LISTEN="--listen 0.0.0.0:17890"
+BRIDGE_PORT=${MK20_BRIDGE_PORT:-17890}   # v3.9: the bridge binds the usb0 addresses only (ECM IP + link-local alias, SO_BINDTODEVICE usb0)
 FLAP_DROPS=${MK20_FLAP_DROPS:-5}; FLAP_WINDOW=${MK20_FLAP_WINDOW:-60}
 NOADB=${MK20_NOADB:-0}; [ -f /mnt/SDCARD/mk20-no-adb ] && NOADB=1
 G=/sys/kernel/config/usb_gadget/g1
@@ -97,13 +109,16 @@ readd_adb() {
 OK=0
 cleanup() {
   [ "$OK" = 1 ] && return
+  mkdir -p /tmp/mk20; touch /tmp/mk20/gadget.busy
   log "FAILSAFE: undo composite"
   touch /tmp/mk20-flapmon-stop
   killall adbd 2>/dev/null
   echo "" > $G/UDC 2>/dev/null
   for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
   rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
-  touch /tmp/mk20-bridge-stop; [ -f /tmp/mk20-bridge-loop.pid ] && kill "$(cat /tmp/mk20-bridge-loop.pid)" 2>/dev/null; killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
+  # stop the bridge loop + bridge, restore the real ttyGS0 (validated pid: BusyBox `kill ""` = own process group)
+  touch /tmp/mk20-bridge-stop; bp=$(cat /tmp/mk20-bridge-loop.pid 2>/dev/null); case "$bp" in ''|*[!0-9]*|0|1) ;; *) kill "$bp" 2>/dev/null;; esac
+  killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
   # KD may hold the dead PTY: restart it cleanly on real ttyGS0
   # unmount the shims only after KD + appLunch.sh have exited (a running sh keeps its script busy -> EBUSY)
   kd_stop
@@ -113,6 +128,7 @@ cleanup() {
   kd_start
   readd_adb
   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
+  rm -f /tmp/mk20/gadget.busy
 }
 # rollback runs before any preflight so an abnormal state cannot block it
 if [ "${1:-}" = --rollback-now ]; then log "rollback requested"; trap cleanup EXIT; exit 1; fi
@@ -173,8 +189,8 @@ sleep 1
 [ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
 ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
 ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG" || die "usb0 ip"
-if [ -n "$BRIDGE_PORT" ]; then BRIDGE_LISTEN="--listen $ECM_IP:$BRIDGE_PORT"; fi
-if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then [ -n "$BRIDGE_PORT" ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
+BRIDGE_LISTEN="--dev usb0 --listen $ECM_IP:$BRIDGE_PORT"
+if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
 else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
 rm -f /tmp/mk20-bridge-stop
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----

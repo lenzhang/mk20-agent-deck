@@ -1,0 +1,14 @@
+READ ONLY code review: do not modify files or run git/shell commands. Target: Allwinner T113, Tina Linux, BusyBox v1.27.2 ash
+(flock only -sxun; no setsid/nohup/pkill; `kill ""` signals the own process group; `local` ok), /mnt/SDCARD = 8 MiB FAT
+(nearly full), /data = ext4. Soft reboot hangs; resets only via hardreset.sh (WDT). Read deck/reviews/m3.diff (M2 review
+fixes + M3 installer), then deck/firmware/rescue/loader.sh (new: install/prune/uninstall), deck/firmware/rescue/hardreset.sh,
+deck/tools/{mk20-install.sh,mk20-rescue-update.sh}, deck/firmware/release/sbin/mk20d, deck/firmware/release/share/
+{mk20lib.sh,gadget.sh}, deck/m2-scripts/bridge/ttygs_tcp_bridge.c, deck/tests/{test_install.py,test_mk20d.py,test_bridge.py,
+conftest.py,crashshims/*}, and deck/PLAN-production-firmware.md sections 4 and 11.
+Focus: installer safety - tar listing/extract bypasses (path traversal, symlink/hardlink, device nodes, long names, GNU vs
+busybox listing format, TOCTOU between sha check/listing/extract), free-space and partial-extract handling, idempotence,
+power cut at every step (does the board always boot good or the new release on probation, never a half release?), lock
+correctness (install/prune/boot/switch races), prune deleting something still needed, uninstall semantics; the host tools
+(quoting, adb pitfalls, never resetting via `reboot`); whether M2 review findings (deck/reviews/m2-*.md) are really fixed;
+the gadget busy marker and gadget.env fail-closed path; busybox 1.27 portability; test gaps. Rank BLOCKER/MAJOR/MINOR with
+file:line and a concrete fix. Max ~700 words, markdown.

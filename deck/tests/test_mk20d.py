@@ -1,7 +1,7 @@
 """M2: mk20d config whitelist, structured log rotation, vendor/kernel gates, health JSON, boot env contract."""
 import json, shutil, pathlib, os, stat
 import pytest
-from conftest import FW, P4, sha
+from conftest import FW, P4, sha, BB
 
 REL = FW / "release"
 
@@ -25,7 +25,7 @@ def rel(dev, tmp_path):
     (dev.mock / "wdt").write_text("running")
     dev.mounts = dev.tmp / "mounts"; dev.mounts.write_text("")
     dev.env.update({"MK20_REL": str(d), "MK20_VERSION": "9.9.9", "MK20_MOUNTS": str(dev.mounts),
-                    "MK20_SETTLE": "0", "MK20_STABLE": "0", "MK20_SELFTEST_GAP": "0", "MK20_MAINT": "0"})
+                    "MK20_SETTLE": "0", "MK20_STABLE": "0", "MK20_SELFTEST_GAP": "0", "MK20_MAINT": "0", "MK20_ADB_KEEPALIVE": "0"})
     return d
 
 
@@ -84,6 +84,28 @@ def test_oversize_config_ignored(dev, rel):
     conf(dev, "ECM_SUBNET=172.30.250.0/24\n" + "#" * 5000 + "\n")
     c = cfg(dev, rel)
     assert c["ECM_IP"] == "10.20.0.2" and "too large" in c["WARNINGS"]
+
+
+def test_key_internal_whitespace_rejected(dev, rel):
+    conf(dev, "FEATURE_ ADB=0\n  FEATURE_HID = 0 \n")
+    c = cfg(dev, rel)
+    assert c["FEATURE_ADB"] == "1" and c["FEATURE_HID"] == "0" and "bad key" in c["WARNINGS"]
+
+
+def test_warnings_reset_each_load(dev, rel):
+    lib = rel / "share/mk20lib.sh"
+    conf(dev, "FOO=1\n")
+    s = dev.tmp / "twice.sh"
+    s.write_text(f". {lib}\ncfg_load; cfg_load; echo \"$CFG_WARN\"\n")
+    out = dev.run(s).stdout.strip()
+    assert out.count("unknown key FOO") == 1
+
+
+def test_env_default_subnet_validated(dev, rel):
+    r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "1.2.3.4;reboot"})
+    assert "ECM_IP=10.20.0.2" in r.stdout
+    r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "172.30.250.0/24"})
+    assert "ECM_IP=172.30.250.2" in r.stdout
 
 
 def test_flags_override_config(dev, rel):
@@ -153,15 +175,32 @@ def test_boot_vendor_mismatch_fails_closed(dev, rel, g1):
 
 def test_boot_vendor_bindmount_skipped(dev, rel, g1):
     dev.p("data/setusbconfig").write_text("our shim bind-mounted\n")
-    dev.mounts.write_text("/dev/root /data/setusbconfig ext4 rw 0 0\n")
+    dev.mounts.write_text("tmpfs /data/setusbconfig tmpfs rw 0 0\n")
     run_boot(dev, rel)
     assert dev.p("tmp/mk20/gadget.env").exists()
+
+
+@pytest.mark.parametrize("line", ["/dev/root /data/setusbconfig ext4 rw 0 0", "tmpfs /data/setusbconfig.x tmpfs rw 0 0",
+                                  "tmpfs /x/data/setusbconfig tmpfs rw 0 0"])
+def test_boot_vendor_foreign_mount_not_skipped(dev, rel, g1, line):
+    dev.p("data/setusbconfig").write_text("tampered\n")
+    dev.mounts.write_text(line + "\n")
+    r, log = run_boot(dev, rel)
+    assert not dev.p("tmp/mk20/gadget.env").exists() and "vendor mismatch" in log
 
 
 def test_boot_kernel_without_ecm_or_unknown(dev, rel, g1):
     dev.p("data/mk20/kernel/ALLOWLIST").write_text(f"{P4} stock acm,adb\n")
     r, log = run_boot(dev, rel)
     assert not dev.p("tmp/mk20/gadget.env").exists() and "lacks ecm" in log
+
+
+@pytest.mark.parametrize("allow", ["", "deadbeef stock acm,adb\n", f"{P4}\n"])
+def test_boot_unknown_kernel_no_usb_changes(dev, rel, g1, allow):
+    dev.p("data/mk20/kernel/ALLOWLIST").write_text(allow)
+    r, log = run_boot(dev, rel)
+    assert not dev.p("tmp/mk20/gadget.env").exists() and not dev.p("tmp/mk20/addadb.ran").exists()
+    assert "no USB changes" in log
 
 
 def test_boot_kernel_without_hid(dev, rel, g1):
@@ -193,12 +232,13 @@ def test_boot_confirms_on_pass_not_on_fail(dev, rel, g1):
 def test_selftest_and_health_json(dev, rel, g1):
     r = dev.run(rel / "sbin/mk20d", "selftest")
     assert r.returncode == 0, r.stdout
-    assert "PASS kd=1" in r.stdout and "INFO composite down" in r.stdout
+    assert "PASS kd=1" in r.stdout and "WARN composite down" in r.stdout
     (dev.mock / "pgrep.out").write_text("1\n2\n")
     r = dev.run(rel / "sbin/mk20d", "selftest")
     assert r.returncode == 1 and "FAIL kd=2" in r.stdout
     h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
     assert h["selftest"]["pass"] is False and h["kd"] == 2 and h["watchdog"] is True
+    assert h["maint"] is False   # no pid file (BusyBox 1.27 `kill -0 ""` succeeds: regression)
     assert h["usb"]["udc"] == "musb-hdrc.1.auto" and h["net"]["subnet"] == "10.20.0.0/24"
     assert json.loads(dev.read("tmp/mk20/health.json")) == h
 
@@ -206,11 +246,11 @@ def test_selftest_and_health_json(dev, rel, g1):
 def test_selftest_composite_requires_bridge_and_hid(dev, rel, g1):
     (g1 / "configs/c.1/ecm.usb0").mkdir(); (g1 / "configs/c.1/hid.usb0").mkdir()
     r = dev.run(rel / "sbin/mk20d", "selftest")
-    assert r.returncode == 1 and "FAIL no hidg0" in r.stdout and "FAIL bridge not listening" in r.stdout
+    assert r.returncode == 1 and "FAIL no hidg0" in r.stdout and "FAIL bridge not on 10.20.0.2:17890" in r.stdout
 
 
 def test_health_json_escapes_hostile_config(dev, rel, g1):
-    conf(dev, 'FOO"\\=1\n')
+    conf(dev, 'FOO"\\=1\nBAR\x01\x1b=2\n')
     h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
     assert "bad key" in h["config"]["warnings"]
 
@@ -222,7 +262,7 @@ def test_maint_rotates_and_trims(dev, rel, g1):
     b = dev.p("tmp/mk20/bridge.log"); b.write_text("b" * 300000)
     import subprocess, time
     e = dict(dev.env); e["MK20_MAINT_S"] = "1"
-    p = subprocess.Popen(["busybox", "sh", str(rel / "sbin/mk20d"), "maint"], env=e)
+    p = subprocess.Popen([BB, "sh", str(rel / "sbin/mk20d"), "maint"], env=e)
     try:
         for _ in range(100):
             if (logs / "gadget.log.1").exists() and dev.p("tmp/mk20/health.json").exists() and b.stat().st_size <= 65536:
@@ -233,3 +273,79 @@ def test_maint_rotates_and_trims(dev, rel, g1):
     assert (logs / "gadget.log.1").stat().st_size == 20000 and not (logs / "gadget.log").exists()
     assert b.stat().st_size == 65536
     assert json.loads(dev.read("tmp/mk20/health.json"))["maint"] is True
+
+
+def test_maint_single_instance(dev, rel, g1):
+    import subprocess, time
+    e = dict(dev.env); e["MK20_MAINT_S"] = "30"
+    p1 = subprocess.Popen([BB, "sh", str(rel / "sbin/mk20d"), "maint"], env=e)
+    try:
+        time.sleep(0.8)
+        p2 = subprocess.run([BB, "sh", str(rel / "sbin/mk20d"), "maint"], env=e, timeout=10)
+        assert p2.returncode == 0 and p1.poll() is None      # second instance exits at once
+        h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+        assert h["maint"] is True
+    finally:
+        p1.kill(); p1.wait()
+    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+    assert h["maint"] is False
+
+
+def test_stock_fallback_keeps_adb_despite_config(dev, rel, g1):
+    conf(dev, "FEATURE_ADB=0\n")
+    dev.p("mnt/SDCARD/mk20-no-composite").write_text("")
+    run_boot(dev, rel)
+    assert dev.read("tmp/mk20/addadb.ran") == "addadb"
+
+
+def test_gadget_env_written_only_when_gates_pass(dev, rel, g1):
+    conf(dev, "BRIDGE_PORT=17999\n")
+    run_boot(dev, rel)
+    env = dict(l.split("=", 1) for l in dev.read("tmp/mk20/gadget.env").splitlines())
+    assert env["MK20_BRIDGE_PORT"] == "17999" and env["MK20_ECM_IP"] == "10.20.0.2"
+    dev.p("data/setusbconfig").write_text("tampered\n")
+    run_boot(dev, rel)
+    assert not dev.p("tmp/mk20/gadget.env").exists()
+
+
+def test_selftest_waits_for_gadget_failsafe(dev, rel, g1):
+    dev.p("tmp/mk20/gadget.busy").write_text("")
+    r = dev.run(rel / "sbin/mk20d", "boot", env={"MK20_BUSY_CAP": "5"}, timeout=60)
+    log = dev.read("data/mk20/logs/mk20d.log")
+    assert "waited 5s for gadget failsafe" in log
+
+
+def test_shim_mounted_with_composite_down_fails(dev, rel, g1):
+    dev.mounts.write_text("tmpfs /data/setusbconfig tmpfs rw 0 0\n")
+    r = dev.run(rel / "sbin/mk20d", "selftest")
+    assert r.returncode == 1 and "FAIL shim still mounted on /data/setusbconfig" in r.stdout
+
+
+def test_symlinked_config_ignored(dev, rel, tmp_path):
+    t = tmp_path / "real.conf"; t.write_text("ECM_SUBNET=172.30.250.0/24\n")
+    c = dev.p("data/mk20/config"); c.mkdir(parents=True)
+    (c / "mk20.conf").symlink_to(t)
+    cf = cfg(dev, rel)
+    assert cf["ECM_IP"] == "10.20.0.2" and "not a regular file" in cf["WARNINGS"]
+
+
+def test_vendor_list_incomplete_fails_closed(dev, rel, g1):
+    lines = (rel / "share/vendor.sha256").read_text().splitlines()
+    (rel / "share/vendor.sha256").write_text(lines[0] + "\n")
+    r, log = run_boot(dev, rel)
+    assert not dev.p("tmp/mk20/gadget.env").exists() and "vendor list incomplete" in log
+
+
+def test_vendor_last_line_without_newline_checked(dev, rel, g1):
+    v = rel / "share/vendor.sha256"; v.write_text(v.read_text().rstrip("\n"))
+    dev.p("data/qt_env.sh").write_text("tampered\n")       # the last entry
+    r, log = run_boot(dev, rel)
+    assert "vendor mismatch:/data/qt_env.sh" in log
+
+
+def test_health_status_field(dev, rel, g1):
+    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+    assert h["status"] == "degraded"          # composite down = degraded
+    (dev.mock / "wdt").write_text("offline")
+    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+    assert h["status"] == "fail"

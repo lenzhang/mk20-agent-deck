@@ -1,0 +1,1352 @@
+diff --git a/deck/Makefile b/deck/Makefile
+index 6e539c3..217f36b 100644
+--- a/deck/Makefile
++++ b/deck/Makefile
+@@ -1,5 +1,5 @@
+ test:
+-	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh
++	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh
+ 	uv run --with pytest python -m pytest -q tests
+ 
+ release:
+diff --git a/deck/firmware/VERSION b/deck/firmware/VERSION
+index 6d7de6e..21e8796 100644
+--- a/deck/firmware/VERSION
++++ b/deck/firmware/VERSION
+@@ -1 +1 @@
+-1.0.2
++1.0.3
+diff --git a/deck/firmware/release/bin/ttygs_tcp_bridge b/deck/firmware/release/bin/ttygs_tcp_bridge
+index 79f2bc2..e62ee4d 100755
+Binary files a/deck/firmware/release/bin/ttygs_tcp_bridge and b/deck/firmware/release/bin/ttygs_tcp_bridge differ
+diff --git a/deck/firmware/release/sbin/mk20d b/deck/firmware/release/sbin/mk20d
+index 57b6c9a..3549a5c 100755
+--- a/deck/firmware/release/sbin/mk20d
++++ b/deck/firmware/release/sbin/mk20d
+@@ -1,14 +1,17 @@
+ #!/bin/sh
++# shellcheck disable=SC3043
+ # MK20 Agent firmware single entry point (release tier). Launched by the rescue loader with
+ #   MK20_REL (verified tmpfs copy of this release), MK20_VERSION, MK20_HOME (/data/mk20).
+ #   mk20d boot      gates (kernel features, vendor hashes, config) -> composite ECM+HID+ADB+KD-bridge or stock
+-#                   ACM+KD+adb -> self-test (3 samples) -> confirm with the loader (or restore stock on failure)
++#                   ACM+KD(+adb) -> self-test (3 samples) -> confirm with the loader (or restore stock on failure)
+ #   mk20d health    JSON health report (stdout; also written to /tmp/mk20/health.json)
+-#   mk20d selftest  host-independent checks, PASS/FAIL lines, rc 0 = pass
++#   mk20d selftest  host-independent checks, PASS/FAIL/WARN lines, rc 0 = pass
+ #   mk20d config    effective configuration (mk20.conf + flag overrides) and warnings
+-#   mk20d maint     detached housekeeping loop started by boot: log rotation (/data/mk20/logs), tmpfs bridge-log
+-#                   trim, periodic /tmp/mk20/health.json (every MK20_MAINT_S=300 s)
++#   mk20d maint     detached housekeeping loop started by boot (single instance: flock): log rotation
++#                   (/data/mk20/logs), tmpfs bridge-log trim, periodic /tmp/mk20/health.json (MK20_MAINT_S=300 s)
+ #   mk20d version
++# Gate policy: kernel not in kernel/ALLOWLIST -> NO USB changes at all (KD's stock ACM stays); kernel without ecm or
++# vendor hash mismatch or config/flag -> stock ACM+KD+adb (adb with restore-to-serial on failure, like legacy adb.sh).
+ R=${MK20_ROOT:-}
+ REL=${MK20_REL:-$(cd "$(dirname "$0")/.." && pwd)}
+ V=${MK20_VERSION:-$(sed -n 's/^version=//p' "$REL/MANIFEST" 2>/dev/null)}
+@@ -19,64 +22,95 @@ mkdir -p "$TM" "$LOGDIR" "$MK20_HOME/state" 2>/dev/null
+ log() { mk20log "$1" mk20d "$2" "v=$V" "$3"; }
+ 
+ p4sha() { [ -n "${MK20_P4_SHA:-}" ] && { echo "$MK20_P4_SHA"; return; }; [ -s "$TM/p4.sha" ] || sha256sum "$R/dev/by-name/boot" 2>/dev/null | cut -d' ' -f1 > "$TM/p4.sha"; cat "$TM/p4.sha"; }
+-kernel_line() { p=$(p4sha); grep "^$p " "$MK20_HOME/kernel/ALLOWLIST" 2>/dev/null | head -n 1; }   # "<sha> <name> <features>"
++kernel_line() { local p; p=$(p4sha); echo "$p" | grep -Eq '^[0-9a-f]{64}$' && awk -v p="$p" '$1==p && NF>=3 {print; exit}' "$MK20_HOME/kernel/ALLOWLIST" 2>/dev/null; }   # "<sha> <name> <features>"
+ kernel_has() { case ",$(kernel_line | cut -d' ' -f3)," in *",$1,"*) return 0;; esac; return 1; }
+-vendor_check() { # prints "ok" or the first mismatch; bind-mounted files (our shims) are skipped
+-  while read -r h f; do
++shim_mounted() { # $1=path: our KD shim (a tmpfs file bind-mounted exactly on a known vendor path)
++  case "$1" in /data/appLunch.sh|/data/setusbconfig) ;; *) return 1;; esac
++  awk -v f="$1" '$2==f && $3=="tmpfs" {ok=1} END{exit !ok}' "$MOUNTS" 2>/dev/null; }
++vendor_check() { # prints "ok" or the first mismatch; all 4 vendor entries must be present and checked
++  local h f n; n=0
++  while read -r h f || [ -n "$h" ]; do
+     [ -n "$h" ] || continue
+-    if grep -q " $f " "$MOUNTS" 2>/dev/null; then continue; fi
++    n=$((n+1))
++    shim_mounted "$f" && continue
+     [ "$(sha256sum "$R$f" 2>/dev/null | cut -d' ' -f1)" = "$h" ] || { echo "mismatch:$f"; return 1; }
+   done < "$REL/share/vendor.sha256"
++  [ "$n" -ge 4 ] || { echo "vendor list incomplete ($n)"; return 1; }
+   echo ok
+ }
+-kd_count() { pgrep -f /data/KeyboardDevice | wc -l | tr -d ' '; }
++num() { case "$1" in ''|*[!0-9]*) echo 0;; *) echo "$1";; esac; }
++kd_count() { pgrep -x KeyboardDevice | wc -l | tr -d ' '; }
+ composite_up() { [ -e "$C/ecm.usb0" ]; }
+-bridge_listening() { netstat -ltn 2>/dev/null | grep -q ":$BRIDGE_PORT "; }
++listening() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }   # exact local address
++lock_held() { ( exec 5>"$1"; ! flock -n 5 ) 2>/dev/null; }   # a live instance holds the lock
+ wdt_armed() { ${MK20_UBUS:-ubus} call system watchdog 2>/dev/null | grep -q '"running"'; }
+ 
+-selftest() { # FAIL = host-independent breakage; composite rollback is "degraded", not a failure
+-  f=0
++selftest() { # FAIL = host-independent breakage; composite rollback / missing rescue alias is "degraded" (WARN)
++  local f n; f=0
+   n=$(kd_count); [ "$n" = 1 ] && echo "PASS kd=1" || { echo "FAIL kd=$n"; f=1; }
+   [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && echo "PASS udc bound" || { echo "FAIL udc unbound"; f=1; }
+   [ -e "$R/dev/ttyGS0" ] && echo "PASS ttyGS0" || { echo "FAIL no ttyGS0"; f=1; }
+   wdt_armed && echo "PASS watchdog armed" || { echo "FAIL watchdog not armed"; f=1; }
+   if composite_up; then
+-    bridge_listening && echo "PASS bridge :$BRIDGE_PORT" || { echo "FAIL bridge not listening"; f=1; }
++    listening "$ECM_IP:$BRIDGE_PORT" && echo "PASS bridge $ECM_IP:$BRIDGE_PORT" || { echo "FAIL bridge not on $ECM_IP:$BRIDGE_PORT"; f=1; }
++    listening "${MK20_LL_IP:-169.254.7.2}:$BRIDGE_PORT" && echo "PASS bridge link-local" || echo "WARN bridge not on link-local"
++    listening "0.0.0.0:$BRIDGE_PORT" && { echo "FAIL bridge on 0.0.0.0"; f=1; }
+     if [ -e "$C/hid.usb0" ]; then [ -e "$R/dev/hidg0" ] && echo "PASS hid" || { echo "FAIL no hidg0"; f=1; }; fi
+-  else echo "INFO composite down (stock ACM+KD$([ -e "$C/ffs.adb" ] && echo +adb))"; fi
++  else echo "WARN composite down (stock ACM+KD$([ -e "$C/ffs.adb" ] && echo +adb))"
++    for n in /data/appLunch.sh /data/setusbconfig; do shim_mounted "$n" && { echo "FAIL shim still mounted on $n with composite down"; f=1; }; done; fi
++  n=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); case "$n" in ''|*[!0-9]*) ;; *) [ "$n" -lt 1024 ] && echo "WARN FAT free ${n} KiB";; esac
+   return $f
+ }
+ 
+-jstr() { printf '"%s"' "$(printf '%s' "$1" | tr -d '"\\' | tr '\n\t' '  ')"; }
++jstr() { # JSON string: drop control bytes, escape backslash and quote
++  printf '"%s"' "$(printf '%s' "$1" | tr '\n\t' '  ' | LC_ALL=C tr -cd ' -~' | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
++jbool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
+ health() {
++  local kl up fat dat mem links l st rc mounts
+   cfg_load
+-  kl=$(kernel_line); up=$(cut -d' ' -f1 /proc/uptime)
+-  fat=$(df -k "$S" 2>/dev/null | awk 'NR==2{print $4}'); dat=$(df -k "$MK20_HOME" 2>/dev/null | awk 'NR==2{print $4}')
++  kl=$(kernel_line); up=$(cut -d. -f1 /proc/uptime)
++  fat=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); dat=$(df -Pk "$MK20_HOME" 2>/dev/null | awk 'END{print $4}')
+   mem=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+   links=""; for l in "$C"/*usb0 "$C"/*adb; do [ -e "$l" ] && links="$links${l##*/} "; done
+   st=$(selftest 2>/dev/null); rc=$?
+-  mounts=$(grep -c -E ' /data/(appLunch.sh|setusbconfig) ' "$MOUNTS")
++  mounts=0; for l in /data/appLunch.sh /data/setusbconfig; do shim_mounted "$l" && mounts=$((mounts+1)); done
+   {
+     printf '{'
+-    printf '"version":%s,"uptime_s":%s,' "$(jstr "$V")" "${up%.*}"
++    printf '"version":%s,"uptime_s":%s,' "$(jstr "$V")" "$(num "$up")"
+     printf '"kernel":{"p4":%s,"name":%s,"features":%s},' "$(jstr "$(p4sha)")" "$(jstr "$(echo "$kl" | cut -d' ' -f2)")" "$(jstr "$(echo "$kl" | cut -d' ' -f3)")"
+     printf '"vendor":%s,' "$(jstr "$(vendor_check)")"
+     printf '"usb":{"udc":%s,"state":%s,"functions":%s,"composite":%s},' "$(jstr "$(cat "$G/UDC" 2>/dev/null)")" \
+-      "$(jstr "$(cat "$R"/sys/class/udc/*/state 2>/dev/null | head -n 1)")" "$(jstr "$links")" "$(composite_up && echo true || echo false)"
++      "$(jstr "$(cat "$R"/sys/class/udc/*/state 2>/dev/null | head -n 1)")" "$(jstr "$links")" "$(jbool composite_up)"
+     printf '"net":{"usb0":%s,"mtu":%s,"subnet":%s,"bridge":%s,"hidg0_writable":%s},' "$(jstr "$(ifconfig usb0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')")" \
+-      "$(cat "$R/sys/class/net/usb0/mtu" 2>/dev/null || echo 0)" "$(jstr "$ECM_SUBNET")" "$(bridge_listening && echo true || echo false)" "$([ -w "$R/dev/hidg0" ] && echo true || echo false)"
+-    printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,' "$(kd_count)" "$(pidof adbd >/dev/null && echo true || echo false)" \
+-      "$(pgrep -f mk20-flapmon.sh >/dev/null && echo true || echo false)" "$(kill -0 "$(cat "$TM/mk20d-maint.pid" 2>/dev/null)" 2>/dev/null && echo true || echo false)" "$mounts"
+-    printf '"watchdog":%s,"mem_avail_kb":%s,"fat_free_kb":%s,"data_free_kb":%s,' "$(wdt_armed && echo true || echo false)" "${mem:-0}" "${fat:-0}" "${dat:-0}"
+-    printf '"release":{"good":%s,"pending":%s,"last_rollback":%s},' "$(jstr "$(cat "$MK20_HOME/state/good" 2>/dev/null)")" \
+-      "$(jstr "$(cat "$MK20_HOME/state/pending" 2>/dev/null)")" "$(jstr "$(cat "$MK20_HOME/state/last-rollback" 2>/dev/null)")"
++      "$(num "$(cat "$R/sys/class/net/usb0/mtu" 2>/dev/null)")" "$(jstr "$ECM_SUBNET")" "$(jbool listening "$ECM_IP:$BRIDGE_PORT")" "$(jbool test -w "$R/dev/hidg0")"
++    printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,' "$(num "$(kd_count)")" "$(jbool pidof adbd)" \
++      "$(jbool pgrep -f mk20-flapmon.sh)" "$(jbool lock_held "$TM/mk20d-maint.lock")" "$mounts"
++    printf '"watchdog":%s,"mem_avail_kb":%s,"fat_free_kb":%s,"data_free_kb":%s,' "$(jbool wdt_armed)" "$(num "$mem")" "$(num "$fat")" "$(num "$dat")"
++    printf '"release":{"good":%s,"pending":%s,"last_rollback":%s},' "$(jstr "$(head -n 1 "$MK20_HOME/state/good" 2>/dev/null)")" \
++      "$(jstr "$(head -n 1 "$MK20_HOME/state/pending" 2>/dev/null)")" "$(jstr "$(head -n 1 "$MK20_HOME/state/last-rollback" 2>/dev/null)")"
+     printf '"config":{"src":%s,"warnings":%s},' "$(jstr "$CFG_SRC")" "$(jstr "$CFG_WARN")"
+-    printf '"selftest":{"pass":%s,"detail":%s}' "$([ $rc = 0 ] && echo true || echo false)" "$(jstr "$st")"
++    printf '"selftest":{"pass":%s,"detail":%s},' "$([ "$rc" = 0 ] && echo true || echo false)" "$(jstr "$st")"
++    printf '"status":%s' "$(jstr "$(if [ "$rc" != 0 ]; then echo fail; elif echo "$st" | grep -q '^WARN'; then echo degraded; else echo ok; fi)")"
+     printf '}\n'
+-  } > "$TM/health.json.tmp" && mv -f "$TM/health.json.tmp" "$TM/health.json"
++  } > "$TM/health.json.tmp.$$" && mv -f "$TM/health.json.tmp.$$" "$TM/health.json" || { rm -f "$TM/health.json" "$TM/health.json.tmp.$$"; return 1; }
+   cat "$TM/health.json"
+ }
+ 
++stock_adb() { # legacy adb.sh semantics: add adb beside ACM; on failure or lost ACM restore serial; bounded keepalive
++  local rc
++  sh "$REL/share/mk20-add-adb.sh" >> "$LOGDIR/gadget.log" 2>&1; rc=$?
++  [ $rc = 0 ] || log WARN adb "add-adb rc=$rc -> restore serial"
++  if [ $rc != 0 ] || [ ! -e "$R/dev/ttyGS0" ] || [ ! -e "$C/acm.usb0" ]; then
++    killall adbd 2>/dev/null; [ -x "$R/data/setusbconfig" ] && "$R/data/setusbconfig" serial >> "$LOGDIR/gadget.log" 2>&1; fi
++  [ "${MK20_ADB_KEEPALIVE:-1}" = 1 ] || return 0
++  ( trap '' HUP INT; exec 5>"$TM/adb-keepalive.lock"; flock -n 5 || exit 0; n=0
++    while [ $n -lt 5 ]; do sleep 30
++      [ -f "$S/mk20-no-adb" ] && exit 0
++      if [ ! -e "$C/ffs.adb" ] && pgrep -f KeyboardDevice >/dev/null; then sleep 10; n=$((n+1)); log INFO adb "keepalive re-add #$n"
++        sh "$REL/share/mk20-add-adb.sh" >> "$LOGDIR/gadget.log" 2>&1 || { killall adbd 2>/dev/null; [ -x "$R/data/setusbconfig" ] && "$R/data/setusbconfig" serial; }; fi
++    done ) </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- &
++}
++
+ case "${1:-}" in
+ boot)
+   cfg_load
+@@ -86,43 +120,57 @@ boot)
+     i=$((i+1)); [ $i -gt 120 ] && { log WARN boot "KD/g1 not up after 120 s"; break; }; sleep 1; done
+   sleep "${MK20_SETTLE:-20}"
+   MODE=composite; why=""
++  NOHID=0; [ "$FEATURE_HID" = 1 ] && kernel_has hid || NOHID=1
++  NOADB=0; [ "$FEATURE_ADB" = 1 ] || NOADB=1   # composite only; the stock fallback always adds adb (FAT flag aside)
+   [ "$FEATURE_COMPOSITE" = 1 ] || { MODE=stock; why="config/flag"; }
+-  kernel_has ecm || { MODE=stock; why="${why:+$why,}kernel $(kernel_line | cut -d' ' -f2) lacks ecm"; }
++  kernel_has ecm || { MODE=stock; why="${why:+$why,}kernel '$(kernel_line | cut -d' ' -f2)' lacks ecm"; }
+   vc=$(vendor_check) || { MODE=stock; why="${why:+$why,}vendor $vc"; }
+-  NOHID=0; [ "$FEATURE_HID" = 1 ] && kernel_has hid || NOHID=1
+-  NOADB=0; [ "$FEATURE_ADB" = 1 ] || NOADB=1
++  [ -n "$(kernel_line)" ] || { MODE=none; why="kernel $(p4sha) not in kernel/ALLOWLIST"; }
++  rm -f "$TM/gadget.env"
+   if [ $MODE = composite ]; then
++    printf 'MK20_ECM_IP=%s\nMK20_ECM_MASK=%s\nMK20_DEV_MAC=%s\nMK20_HOST_MAC=%s\nMK20_BRIDGE_PORT=%s\nMK20_FLAP_DROPS=%s\nMK20_FLAP_WINDOW=%s\nMK20_NOHID=%s\nMK20_NOADB=%s\n' \
++      "$ECM_IP" "$ECM_MASK" "$ECM_DEV_MAC" "$ECM_HOST_MAC" "$BRIDGE_PORT" "$FLAP_DROPS" "$FLAP_WINDOW_S" "$NOHID" "$NOADB" > "$TM/gadget.env"
+     cp -f "$REL/share/gadget.sh" "$TM/gadget-boot.sh"
+     MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log MK20_ECM_IP=$ECM_IP MK20_ECM_MASK=$ECM_MASK \
+       MK20_DEV_MAC=$ECM_DEV_MAC MK20_HOST_MAC=$ECM_HOST_MAC MK20_BRIDGE_PORT=$BRIDGE_PORT \
+       MK20_FLAP_DROPS=$FLAP_DROPS MK20_FLAP_WINDOW=$FLAP_WINDOW_S MK20_NOHID=$NOHID MK20_NOADB=$NOADB \
+       sh "$TM/gadget-boot.sh" --boot >> "$LOGDIR/gadget.log" 2>&1
+     log INFO gadget "rc=$? status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null) nohid=$NOHID noadb=$NOADB ip=$ECM_IP"
+-  else
+-    log WARN boot "composite skipped: $why -> stock ACM+KD$([ $NOADB = 0 ] && echo +adb)"
+-    [ $NOADB = 0 ] && sh "$REL/share/mk20-add-adb.sh" >> "$LOGDIR/gadget.log" 2>&1
+-  fi
++  elif [ $MODE = stock ]; then
++    SADB=1; [ -f "$S/mk20-no-adb" ] && SADB=0; kernel_has adb || SADB=0
++    log WARN boot "composite skipped: $why -> stock ACM+KD$([ $SADB = 1 ] && echo +adb)"
++    [ $SADB = 1 ] && stock_adb
++  else log ERROR boot "$why -> no USB changes (stock ACM+KD only)"; fi
+   sleep "${MK20_STABLE:-30}"
+-  for try in 1 2 3; do r=$(selftest); rc=$?; [ $rc = 0 ] && break; [ $try = 3 ] || sleep "${MK20_SELFTEST_GAP:-10}"; done
+-  echo "$r" > "$TM/selftest.txt"; log INFO selftest "rc=$rc try=$try mode=$MODE $(echo "$r" | tr '\n' ';')"
+-  health > "$MK20_HOME/state/selftest-last.json" 2>/dev/null
+-  if [ $rc = 0 ]; then
++  # a gadget failsafe (flap rollback + adb re-add, up to ~2.5 min) in progress is not a failure: wait it out (cap)
++  w=0; while [ -f "$TM/gadget.busy" ] && [ $w -lt "${MK20_BUSY_CAP:-150}" ]; do sleep 5; w=$((w+5)); done
++  [ $w -gt 0 ] && log INFO selftest "waited ${w}s for gadget failsafe"
++  for try in 1 2 3; do r=$(selftest); src=$?; [ $src = 0 ] && break; [ $try = 3 ] || sleep "${MK20_SELFTEST_GAP:-10}"; done
++  echo "$r" > "$TM/selftest.txt"; log INFO selftest "rc=$src try=$try mode=$MODE $(echo "$r" | tr '\n' ';')"
++  # per-boot records: selftest-last.json + selftest-1..4.json (previous boots)
++  ST=$MK20_HOME/state; for k in 3 2 1; do [ -f "$ST/selftest-$k.json" ] && mv -f "$ST/selftest-$k.json" "$ST/selftest-$((k+1)).json"; done
++  [ -f "$ST/selftest-last.json" ] && mv -f "$ST/selftest-last.json" "$ST/selftest-1.json"
++  # decide on the 3-sample result ($src) BEFORE the (slower) health record, which can never change it
++  if [ $src = 0 ]; then
+     if [ -f "$TM/rescue-loader.sh" ]; then sh "$TM/rescue-loader.sh" confirm "$V" && log INFO confirm "ok" || log INFO confirm "not pending/refused"; fi
+   else log ERROR selftest "FAILED: not confirming; restoring stock ACM+KD+adb now"
+     [ -f "$TM/gadget-boot.sh" ] && composite_up && MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rollback-now >> "$LOGDIR/gadget.log" 2>&1; fi
+-  if [ "${MK20_MAINT:-1}" = 1 ] && ! kill -0 "$(cat "$TM/mk20d-maint.pid" 2>/dev/null)" 2>/dev/null; then
++  ( health ) > "$ST/selftest-last.json" 2>/dev/null
++  if [ "${MK20_MAINT:-1}" = 1 ]; then
+     export MK20_REL="$REL" MK20_VERSION="$V"
+-    ( trap '' HUP INT; exec sh "$REL/sbin/mk20d" maint </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- ) &
++    ( trap '' HUP INT; exec sh "$REL/sbin/mk20d" maint </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) &
+   fi
+   ;;
+ health) health;;
+ maint)
+-  cfg_load; echo $$ > "$TM/mk20d-maint.pid"; log INFO maint "start pid=$$"
++  exec 5>"$TM/mk20d-maint.lock"; flock -n 5 || exit 0   # single instance for the lifetime of the loop
++  log INFO maint "start pid=$$"
+   while :; do
++    cfg_load
+     log_rotate "$LOGDIR/mk20d.log"; log_rotate "$LOGDIR/gadget.log"
+-    b=$TM/bridge.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
++    b=$TM/bridge.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }   # O_APPEND writers keep appending
+     health > /dev/null 2>&1
+-    sleep "${MK20_MAINT_S:-300}"
++    sleep "${MK20_MAINT_S:-300}" 5>&-   # the lock dies with this loop, not with an orphaned sleep
+   done;;
+ selftest) cfg_load; selftest; exit $?;;
+ config) cfg_load; cfg_print;;
+diff --git a/deck/firmware/release/share/gadget.sh b/deck/firmware/release/share/gadget.sh
+index 2bcf157..086f0f3 100755
+--- a/deck/firmware/release/share/gadget.sh
++++ b/deck/firmware/release/share/gadget.sh
+@@ -1,5 +1,5 @@
+ #!/bin/sh
+-# v3.8 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
++# v3.9 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+ # (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
+ # Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
+ # NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
+@@ -27,10 +27,22 @@
+ set -u
+ LOG=${MK20_GADGET_LOG:-/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log}
+ # v3.8 knobs (set by mk20d from mk20.conf; defaults = the proven v3.7 behaviour)
++# Release mode: a manual/queued run (no MK20_ECM_IP in the env) takes the knobs mk20d validated at boot from
++# /tmp/mk20/gadget.env; mk20d writes that file only when the kernel/vendor/config gates allow the composite, so
++# without it only a rollback is allowed (fail closed).
++GENV=/tmp/mk20/gadget.env
++if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
++  if [ -f "$GENV" ]; then
++    while IFS='=' read -r k v; do case "$k" in
++      MK20_ECM_IP) MK20_ECM_IP=$v;; MK20_ECM_MASK) MK20_ECM_MASK=$v;; MK20_DEV_MAC) MK20_DEV_MAC=$v;; MK20_HOST_MAC) MK20_HOST_MAC=$v;;
++      MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
++      MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;;
++    esac; done < "$GENV"
++  else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) echo "release mode: no $GENV (gates not passed at boot) -> refused"; exit 1;; esac; fi
++fi
+ ECM_IP=${MK20_ECM_IP:-10.20.0.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
+ DEV_MAC=${MK20_DEV_MAC:-02:11:22:33:44:55}; HOST_MAC=${MK20_HOST_MAC:-02:11:22:33:44:56}
+-BRIDGE_PORT=${MK20_BRIDGE_PORT:-}   # set (mk20d >= 1.0.2): bridge binds the usb0 addresses only (ECM IP + link-local alias); unset: legacy 0.0.0.0:17890
+-BRIDGE_LISTEN="--listen 0.0.0.0:17890"
++BRIDGE_PORT=${MK20_BRIDGE_PORT:-17890}   # v3.9: the bridge binds the usb0 addresses only (ECM IP + link-local alias, SO_BINDTODEVICE usb0)
+ FLAP_DROPS=${MK20_FLAP_DROPS:-5}; FLAP_WINDOW=${MK20_FLAP_WINDOW:-60}
+ NOADB=${MK20_NOADB:-0}; [ -f /mnt/SDCARD/mk20-no-adb ] && NOADB=1
+ G=/sys/kernel/config/usb_gadget/g1
+@@ -97,13 +109,16 @@ readd_adb() {
+ OK=0
+ cleanup() {
+   [ "$OK" = 1 ] && return
++  mkdir -p /tmp/mk20; touch /tmp/mk20/gadget.busy
+   log "FAILSAFE: undo composite"
+   touch /tmp/mk20-flapmon-stop
+   killall adbd 2>/dev/null
+   echo "" > $G/UDC 2>/dev/null
+   for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
+   rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
+-  touch /tmp/mk20-bridge-stop; [ -f /tmp/mk20-bridge-loop.pid ] && kill "$(cat /tmp/mk20-bridge-loop.pid)" 2>/dev/null; killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
++  # stop the bridge loop + bridge, restore the real ttyGS0 (validated pid: BusyBox `kill ""` = own process group)
++  touch /tmp/mk20-bridge-stop; bp=$(cat /tmp/mk20-bridge-loop.pid 2>/dev/null); case "$bp" in ''|*[!0-9]*|0|1) ;; *) kill "$bp" 2>/dev/null;; esac
++  killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
+   # KD may hold the dead PTY: restart it cleanly on real ttyGS0
+   # unmount the shims only after KD + appLunch.sh have exited (a running sh keeps its script busy -> EBUSY)
+   kd_stop
+@@ -113,6 +128,7 @@ cleanup() {
+   kd_start
+   readd_adb
+   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
++  rm -f /tmp/mk20/gadget.busy
+ }
+ # rollback runs before any preflight so an abnormal state cannot block it
+ if [ "${1:-}" = --rollback-now ]; then log "rollback requested"; trap cleanup EXIT; exit 1; fi
+@@ -173,8 +189,8 @@ sleep 1
+ [ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
+ ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
+ ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG" || die "usb0 ip"
+-if [ -n "$BRIDGE_PORT" ]; then BRIDGE_LISTEN="--listen $ECM_IP:$BRIDGE_PORT"; fi
+-if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then [ -n "$BRIDGE_PORT" ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
++BRIDGE_LISTEN="--dev usb0 --listen $ECM_IP:$BRIDGE_PORT"
++if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
+ else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
+ rm -f /tmp/mk20-bridge-stop
+ # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
+diff --git a/deck/firmware/release/share/mk20lib.sh b/deck/firmware/release/share/mk20lib.sh
+index c75a801..6eb7df7 100644
+--- a/deck/firmware/release/share/mk20lib.sh
++++ b/deck/firmware/release/share/mk20lib.sh
+@@ -43,7 +43,7 @@ v_mac() { # locally administered unicast xx:xx:xx:xx:xx:xx (lowercase)
+ }
+ v_bool() { [ "$1" = 0 ] || [ "$1" = 1 ]; }
+ v_range() { case "$1" in ''|*[!0-9]*|0?*) return 1;; esac; [ ${#1} -le 6 ] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; }
+-cfg_set() { # $1=key $2=value (validated)
++cfg_set() { # $1=key $2=value: validated, then assigned explicitly (no eval)
+   case "$1" in
+     ECM_SUBNET) v_subnet "$2" ;;
+     ECM_DEV_MAC|ECM_HOST_MAC) v_mac "$2" ;;
+@@ -55,15 +55,23 @@ cfg_set() { # $1=key $2=value (validated)
+     LOG_KEEP) v_range "$2" 1 9 ;;
+     *) cfg_warn "unknown key $1"; return 0 ;;
+   esac || { cfg_warn "invalid $1"; return 0; }
+-  eval "$1=\$2"
++  case "$1" in
++    ECM_SUBNET) ECM_SUBNET=$2;; ECM_DEV_MAC) ECM_DEV_MAC=$2;; ECM_HOST_MAC) ECM_HOST_MAC=$2;;
++    FEATURE_COMPOSITE) FEATURE_COMPOSITE=$2;; FEATURE_HID) FEATURE_HID=$2;; FEATURE_ADB) FEATURE_ADB=$2;;
++    BRIDGE_PORT) BRIDGE_PORT=$2;; FLAP_DROPS) FLAP_DROPS=$2;; FLAP_WINDOW_S) FLAP_WINDOW_S=$2;;
++    LOG_MAX_KB) LOG_MAX_KB=$2;; LOG_KEEP) LOG_KEEP=$2;;
++  esac
+ }
+ cfg_load() {
+   local line k v n
+   # release defaults (1.0.x keeps the proven 10.20.0.0/24; the M4 release switches the default)
+-  ECM_SUBNET=${MK20_DEFAULT_SUBNET:-10.20.0.0/24}; ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56
++  CFG_WARN=""
++  ECM_SUBNET=10.20.0.0/24; [ -n "${MK20_DEFAULT_SUBNET:-}" ] && cfg_set ECM_SUBNET "$MK20_DEFAULT_SUBNET"
++  ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56
+   FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
+   LOG_MAX_KB=256; LOG_KEEP=3; CFG_SRC=defaults
+-  if [ -f "$CONF" ]; then
++  if [ -L "$CONF" ] || { [ -e "$CONF" ] && [ ! -f "$CONF" ]; }; then cfg_warn "config is not a regular file, ignored"
++  elif [ -f "$CONF" ]; then
+     CFG_SRC=$CONF
+     if [ "$(wc -c < "$CONF")" -gt 4096 ]; then cfg_warn "config too large, ignored"
+     else
+@@ -72,7 +80,7 @@ cfg_load() {
+         case "$line" in ''|'#'*) continue;; esac
+         k=${line%%=*}; v=${line#*=}
+         [ "$k" = "$line" ] && { cfg_warn "bad line"; continue; }
+-        k=$(echo "$k" | tr -d ' \t'); v=$(echo "$v" | sed 's/^[ \t]*//; s/[ \t]*#.*$//; s/[ \t]*$//')
++        k=$(printf '%s' "$k" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'); v=$(printf '%s' "$v" | sed 's/^[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//')
+         echo "$k" | grep -Eq '^[A-Z_]{1,32}$' || { cfg_warn "bad key"; continue; }
+         cfg_set "$k" "$v"
+       done < "$CONF"
+diff --git a/deck/firmware/rescue/hardreset.sh b/deck/firmware/rescue/hardreset.sh
+index ac76b34..8ef1ba5 100644
+--- a/deck/firmware/rescue/hardreset.sh
++++ b/deck/firmware/rescue/hardreset.sh
+@@ -1,5 +1,5 @@
+ #!/bin/sh
+-# MK20 remote HARD reset v2.2 (soft `reboot` hangs on this board).
++# MK20 remote HARD reset v2.3 (v2.3: outcome persisted to /data/mk20/state/hardreset.last) (soft `reboot` hangs on this board).
+ # Why reboot hangs: ARM machine_restart() uses arm_pm_restart = psci_sys_reset (PSCI SYSTEM_RESET), which never
+ # returns here, and the reboot notifiers stop the sunxi WDT first. So: procd keeps the sunxi WDT armed (16 s,
+ # ping 5 s); we stop procd's pings -> the hardware WDT resets the SoC. No kernel restart path, no PSCI.
+@@ -40,6 +40,8 @@ rm -f "$R/tmp/mk20/hr-ro"; ( exec 8>&-; mount -o remount,ro "$S" 2>/dev/null &&
+ i=0; while kill -0 $mp 2>/dev/null && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done
+ MHUNG=n; kill -0 $mp 2>/dev/null && { kill -9 $mp 2>/dev/null; MHUNG=y; }
+ [ -f "$R/tmp/mk20/hr-ro" ] && RO=y || RO=n
++# persistent outcome on ext4 (FAT may be ro now): read after the reset to prove a clean FAT remount
++[ -d "$R/data/mk20/state" ] && echo "uptime=$(cut -d' ' -f1 /proc/uptime) by=${1:-?} fat_ro=$RO mount_hung=$MHUNG" > "$R/data/mk20/state/hardreset.last" 2>/dev/null
+ sync
+ $UBUS call system watchdog '{"stop":true}' >/dev/null 2>&1
+ # FAT may be ro now: log to tmpfs (and FAT if still rw)
+diff --git a/deck/firmware/rescue/loader.sh b/deck/firmware/rescue/loader.sh
+index 38c946a..7dac7d3 100644
+--- a/deck/firmware/rescue/loader.sh
++++ b/deck/firmware/rescue/loader.sh
+@@ -10,6 +10,13 @@
+ #   deadline <v>    (internal) one hard reset if pending <v> is not confirmed by MK20_DEADLINE s uptime
+ #   status          print state
+ #   verify <v>      verify release <v> (no copy)
++#   install <tar> <sha256> [--no-switch]
++#                   M3 installer: pinned tarball sha, free-space check, safe tar listing (one top dir mk20-fw-<v>/,
++#                   regular files/dirs only), extract to releases/.incoming-<v>, verify MANIFEST + no unlisted files,
++#                   atomic rename to releases/<v>, then `switch <v>` (pending; next boot = probation) and prune.
++#                   Idempotent: an identical installed <v> is reused. rc 0 ok, 1 refused/failed, 13 busy.
++#   prune           drop releases that are not good/pending/in a slot (keeps MK20_KEEP=1 extra newest) + leftovers
++#   uninstall       back to legacy mode (slots moved aside; next boot = stock ACM+KD+adb + rescue watcher)
+ # Layout (ext4): /data/mk20/{releases/<semver>/,slots/{A,B},state/}. Busybox 1.27 ash compatible.
+ # Test env: MK20_ROOT (path prefix), MK20_P4_SHA, MK20_UPTIME_CMD, MK20_DEADLINE, MK20_HR (hardreset cmd).
+ R=${MK20_ROOT:-}
+@@ -63,8 +70,10 @@ p4sha() {
+   cat "$T/p4.sha"
+ }
+ # verify_release <v> [dest]: every MANIFEST file (sha, safe relative path); kernel allow-list; optional verified copy
+-verify_release() {
+-  v=$1; d=$REL/$v; M=$d/MANIFEST; dest=${2:-}
++verify_release() { verify_dir "$REL/$1" "$1" "${2:-}"; }
++# verify_dir <dir> <v> [dest]
++verify_dir() {
++  d=$1; v=$2; M=$d/MANIFEST; dest=${3:-}
+   is_semver "$v" && [ -f "$M" ] || { echo "no manifest"; return 1; }
+   [ "$(kv version "$M")" = "$v" ] || { echo "manifest version mismatch"; return 1; }
+   k=$(kv kernels "$M"); p=$(p4sha)
+@@ -187,7 +196,68 @@ rollback)
+   wstate "$ST/attempts" 0; wstate "$ST/pending" "$ov"; slot_write "$ov" || { rm -f "$ST/pending" "$ST/attempts"; exit 1; }
+   wstate "$ST/last-rollback" "$cur->$ov manual (probation)"; log "manual rollback $cur -> $ov (pending)"; echo "ok: $cur -> $ov (pending)"; exit 0;;
+ verify) verify_release "${2:-}"; exit $?;;
++install)
++  tb=${2:-}; want=${3:-}; nosw=${4:-}
++  exec 6>"$T/install.lock"; flock -n 6 || { echo "busy: another install is running"; exit 13; }
++  [ -f "$tb" ] && [ ! -L "$tb" ] || { echo "no tarball $tb"; exit 1; }
++  is_hex64 "$want" || { echo "pinned sha256 required"; exit 1; }
++  [ -z "$nosw" ] || [ "$nosw" = --no-switch ] || { echo "bad option $nosw"; exit 1; }
++  [ -z "$(rstate pending)" ] || [ -n "$nosw" ] || { echo "refused: $(rstate pending) is pending (confirm or roll back first)"; exit 1; }
++  [ "$(sha "$tb")" = "$want" ] || { echo "tarball sha mismatch"; log "install: tarball sha mismatch"; exit 1; }
++  mkdir -p "$REL" || { echo "cannot create $REL"; exit 1; }
++  sz=$(wc -c < "$tb"); free=$(df -k "$REL" 2>/dev/null | awk 'END{print $(NF-2)}'); is_num "$free" || free=0   # wrap-safe
++  [ $((sz / 1024 * 3 + 4096)) -lt "$free" ] || { echo "not enough space on /data (${free} KiB free)"; exit 1; }
++  # listing: "<mode> <owner> <size> <date> <time> <name>"; only regular files and dirs, one top-level mk20-fw-<v>/
++  tar -tvf "$tb" > "$T/.tl.$$" 2>/dev/null || { rm -f "$T/.tl.$$"; echo "unreadable tarball"; exit 1; }
++  if LC_ALL=C grep -q '[^ -~]' "$T/.tl.$$"; then rm -f "$T/.tl.$$"; echo "control/non-ASCII chars in tar listing"; exit 1; fi
++  top=$(awk 'NR==1{print $NF}' "$T/.tl.$$"); top=${top%/}; v=${top#mk20-fw-}
++  is_semver "$v" && [ "$top" = "mk20-fw-$v" ] || { rm -f "$T/.tl.$$"; echo "bad top-level dir $top"; exit 1; }
++  bad=$(awk -v t="$top" '{ m=substr($1,1,1); n=$NF; sub(/\/$/,"",n)
++        if ((m!="-" && m!="d") || NF!=6 || (n!=t && index(n, t "/")!=1) || n ~ /(^|\/)\.\.(\/|$)/ || n ~ /^\//) { print; exit } }' "$T/.tl.$$")
++  nl=$(wc -l < "$T/.tl.$$"); rm -f "$T/.tl.$$"
++  [ -z "$bad" ] || { echo "unsafe tar entry: $bad"; log "install: unsafe tar entry"; exit 1; }
++  [ "$nl" -le 200 ] || { echo "too many tar entries"; exit 1; }
++  mf=$(tar -xOf "$tb" "$top/MANIFEST" 2>/dev/null | sha256sum | cut -d' ' -f1)
++  if [ -d "$REL/$v" ]; then
++    if [ "$(sha "$REL/$v/MANIFEST")" = "$mf" ] && verify_release "$v" >/dev/null; then echo "$v already installed (identical)"
++    else
++      P=$(pick 2>/dev/null); [ "$v" = "$(rstate good)" ] || [ "$v" = "${P##* }" ] && { echo "refused: different $v is good/current"; exit 1; }
++      rm -rf "${REL:?}/$v" || exit 1; log "install: replaced stale/corrupt $v"
++    fi
++  fi
++  if [ ! -d "$REL/$v" ]; then
++    X=$REL/.incoming-$v; rm -rf "$X"; mkdir -p "$X" || { echo "cannot create $X"; exit 1; }
++    tar -xf "$tb" -C "$X" 2>/dev/null || { rm -rf "$X"; echo "extract failed"; exit 1; }
++    r=$(verify_dir "$X/$top" "$v") || { rm -rf "$X"; echo "verify failed: $r"; log "install $v: verify failed: $r"; exit 1; }
++    VN=$(sed -n '/^--$/,$p' "$X/$top/MANIFEST" | sed 1d | grep -c .)   # verify_dir ran in a subshell
++    nf=$(find "$X/$top" -type f | wc -l); no=$(find "$X/$top" ! -type f ! -type d | wc -l)
++    [ "$nf" = $((VN + 1)) ] && [ "$no" = 0 ] || { rm -rf "$X"; echo "unlisted files in release"; exit 1; }
++    sed -n '/^--$/,$p' "$X/$top/MANIFEST" | sed 1d | while read -r fs fm fp; do [ -n "$fp" ] && chmod "$fm" "$X/$top/$fp"; done
++    find "$X/$top" -type d -exec chmod 755 {} \; ; chmod 644 "$X/$top/MANIFEST"
++    sync; mv "$X/$top" "$REL/$v" || { rm -rf "$X"; echo "rename failed"; exit 1; }; rmdir "$X" 2>/dev/null; sync
++    log "install: $v extracted and verified (tar $want)"
++  fi
++  verify_release "$v" >/dev/null || { echo "post-install verify failed"; exit 1; }
++  [ -n "$nosw" ] && { echo "ok: $v installed (not switched)"; exit 0; }
++  P=$(pick 2>/dev/null)
++  if [ "${P##* }" = "$v" ]; then echo "ok: $v installed (already current)"
++  else out=$(sh "$0" switch "$v") || { echo "switch failed: $out"; exit 1; }; echo "ok: $v installed; $out; reboot to start probation"; fi
++  MK20_INSTALL_LOCKED=1 sh "$0" prune >/dev/null 2>&1
++  exit 0;;
++prune)
++  if [ "${MK20_INSTALL_LOCKED:-}" != 1 ]; then exec 6>"$T/install.lock"; flock -n 6 || { echo "busy: install running"; exit 13; }; fi
++  keep=" $(rstate good) $(rstate pending) $(slot_read A | cut -d' ' -f2) $(slot_read B | cut -d' ' -f2) $(cat "$T/release-active" 2>/dev/null) "
++  extra=$(for d in "$REL"/*; do b=${d##*/}; is_semver "$b" || continue; case "$keep" in *" $b "*) continue;; esac; echo "$b"; done \
++    | awk -F. '{printf "%03d%03d%03d %s\n",$1,$2,$3,$0}' | sort -rn | cut -d' ' -f2 | sed -n "$(( ${MK20_KEEP:-1} + 1 )),\$p")
++  for b in $extra; do rm -rf "${REL:?}/$b" && log "prune: removed $b"; echo "removed $b"; done
++  for d in "$REL"/.incoming-*; do [ -d "$d" ] && rm -rf "$d" && log "prune: removed leftover ${d##*/}"; done
++  exit 0;;
++uninstall)
++  exec 7>"$T/loader.lock"; flock -n 7 || { echo "busy"; exit 13; }
++  ts=$(date +%Y%m%d%H%M%S); mkdir -p "$B/uninstalled-$ts" || exit 1
++  for f in "$SL/A" "$SL/B" "$ST/good" "$ST/pending" "$ST/attempts"; do [ -f "$f" ] && mv -f "$f" "$B/uninstalled-$ts/"; done; sync
++  log "uninstall: slots/state moved to uninstalled-$ts -> legacy mode on next boot"; echo "ok: legacy mode on next boot (releases kept)"; exit 0;;
+ status)
+   echo "current=$(pick 2>/dev/null) good=$(rstate good) pending=$(rstate pending) attempts=$(rstate attempts) active=$(cat "$T/release-active" 2>/dev/null) last_rollback=$(rstate last-rollback)"; exit 0;;
+-*) echo "usage: $0 boot|confirm <v>|switch <v>|rollback|deadline <v>|status|verify <v>"; exit 2;;
++*) echo "usage: $0 boot|confirm <v>|switch <v>|rollback|deadline <v>|status|verify <v>|install <tar> <sha> [--no-switch]|prune|uninstall"; exit 2;;
+ esac
+diff --git a/deck/m2-scripts/bridge/ttygs_tcp_bridge.c b/deck/m2-scripts/bridge/ttygs_tcp_bridge.c
+index 37e806f..fc8e190 100644
+--- a/deck/m2-scripts/bridge/ttygs_tcp_bridge.c
++++ b/deck/m2-scripts/bridge/ttygs_tcp_bridge.c
+@@ -1,7 +1,8 @@
+ // PTY <-> TCP bridge for KeyboardDevice when ACM (ttyGS0) is not in the USB composite.
+-// Usage: ttygs_tcp_bridge --listen ADDR:PORT [--listen ADDR:PORT ...] --link /dev/ttyGS0
++// Usage: ttygs_tcp_bridge [--dev IFACE] --listen ADDR:PORT [--listen ADDR:PORT ...] --link /dev/ttyGS0
+ // v2 (firmware 1.0.2): up to 4 --listen addresses (bind to the usb0 addresses only, e.g. the ECM IP and the
+-// link-local rescue alias, instead of 0.0.0.0); strict address/port parsing (exit 2 on a bad argument).
++// link-local rescue alias, never 0.0.0.0); --dev pins every listener to that interface (SO_BINDTODEVICE), so a
++// neighbour on another interface cannot reach the alias address; strict parsing (exit 2 on a bad argument).
+ // Creates a raw PTY, symlinks --link to its slave, serves one TCP client at a time (new client
+ // replaces old). With no client, output from KD is discarded so KD never blocks.
+ #define _GNU_SOURCE
+@@ -33,31 +34,39 @@ static int parse(const char *s, struct sockaddr_in *a) {
+   char host[64]; const char *c = strrchr(s, ':'); char *e;
+   if (!c || c == s || (size_t)(c - s) >= sizeof host) return -1;
+   snprintf(host, sizeof host, "%.*s", (int)(c - s), s);
++  for (const char *q = c + 1; *q; q++) if (*q < '0' || *q > '9') return -1;   // digits only (no sign/space)
++  if (!c[1] || strlen(c + 1) > 5) return -1;
+   long port = strtol(c + 1, &e, 10);
+   if (*e || port < 1 || port > 65535) return -1;
+   memset(a, 0, sizeof *a); a->sin_family = AF_INET; a->sin_port = htons((unsigned short)port);
+-  return inet_pton(AF_INET, host, &a->sin_addr) == 1 ? 0 : -1;
++  if (inet_pton(AF_INET, host, &a->sin_addr) != 1) return -1;
++  return a->sin_addr.s_addr == htonl(INADDR_ANY) ? -1 : 0;   // wildcard refused
+ }
+ int main(int argc, char **argv) {
+-  const char *ls_s[MAXL]; int nl = 0;
++  const char *ls_s[MAXL]; int nl = 0; const char *dev = NULL;
+   for (int i = 1; i < argc; i++) {
+     if (!strcmp(argv[i], "--listen") && i + 1 < argc) { if (nl == MAXL) { fprintf(stderr, "too many --listen\n"); return 2; } ls_s[nl++] = argv[++i]; }
+     else if (!strcmp(argv[i], "--link") && i + 1 < argc) linkp = argv[++i];
++    else if (!strcmp(argv[i], "--dev") && i + 1 < argc && strlen(argv[i + 1]) < 16) dev = argv[++i];
+     else { fprintf(stderr, "bad argument %s\n", argv[i]); return 2; }
+   }
+-  if (!nl) ls_s[nl++] = "0.0.0.0:17890";
++  if (!nl) { fprintf(stderr, "usage: ttygs_tcp_bridge --listen ADDR:PORT [--listen ...] --link PATH\n"); return 2; }
+   struct sockaddr_in la[MAXL];
+   for (int i = 0; i < nl; i++) if (parse(ls_s[i], &la[i])) { fprintf(stderr, "bad --listen %s\n", ls_s[i]); return 2; }
+   signal(SIGPIPE, SIG_IGN); signal(SIGTERM, cleanup); signal(SIGINT, cleanup); signal(SIGHUP, SIG_IGN);
+   int m = posix_openpt(O_RDWR | O_NOCTTY);
+   if (m < 0 || grantpt(m) || unlockpt(m)) { perror("pty"); return 1; }
+   char *sn = ptsname(m);
++  if (!sn) { perror("ptsname"); return 1; }
+   int keep = open(sn, O_RDWR | O_NOCTTY); // hold slave open: no EIO on master when KD reopens
+-  struct termios t; tcgetattr(keep, &t); cfmakeraw(&t); tcsetattr(keep, TCSANOW, &t);
++  struct termios t;
++  if (keep < 0 || tcgetattr(keep, &t)) { perror("pty slave"); return 1; }
++  cfmakeraw(&t); if (tcsetattr(keep, TCSANOW, &t)) { perror("tcsetattr"); return 1; }
+   int one = 1, ls[MAXL];
+   for (int i = 0; i < nl; i++) {  // bind every listener before touching the link, so a bad address leaves no dangling symlink
+     ls[i] = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+     setsockopt(ls[i], SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
++    if (dev && setsockopt(ls[i], SOL_SOCKET, SO_BINDTODEVICE, dev, strlen(dev) + 1)) { perror("SO_BINDTODEVICE"); return 1; }
+     if (ls[i] < 0 || bind(ls[i], (void *)&la[i], sizeof la[i]) || listen(ls[i], 2)) { perror(ls_s[i]); return 1; }
+   }
+   unlink(linkp); if (symlink(sn, linkp)) { perror("symlink"); return 1; }
+@@ -78,11 +87,12 @@ int main(int argc, char **argv) {
+       if (r > 0 && cl >= 0 && wsock(cl, buf, r)) { close(cl); cl = -1; }
+       if (r <= 0) usleep(10000);
+     }
+-    if (cl >= 0 && ci >= 0 && ci < np && (p[ci].revents & (POLLIN | POLLHUP | POLLERR))) {
+-      ssize_t r = read(cl, buf, sizeof buf);
+-      if (r <= 0) { close(cl); cl = -1; fprintf(stderr, "client gone\n"); }
+-      else wall(m, buf, r);
++    if (cl >= 0 && ci >= 0 && ci < np && (p[ci].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
++      ssize_t r = (p[ci].revents & POLLNVAL) ? -1 : read(cl, buf, sizeof buf);
++      if (r <= 0) { if (r < 0 && errno == EINTR) continue; close(cl); cl = -1; fprintf(stderr, "client gone\n"); }
++      else if (wall(m, buf, r)) { fprintf(stderr, "pty write failed: %s\n", strerror(errno)); }
+     }
++    for (int i = 0; i < nl; i++) if (p[1 + i].revents & (POLLERR | POLLNVAL)) { fprintf(stderr, "listener %s failed\n", ls_s[i]); cleanup(0); }
+   }
+   cleanup(0); return 0;
+ }
+diff --git a/deck/m2-scripts/gadget-ecm-hid-adb.sh b/deck/m2-scripts/gadget-ecm-hid-adb.sh
+index 2bcf157..086f0f3 100755
+--- a/deck/m2-scripts/gadget-ecm-hid-adb.sh
++++ b/deck/m2-scripts/gadget-ecm-hid-adb.sh
+@@ -1,5 +1,5 @@
+ #!/bin/sh
+-# v3.8 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
++# v3.9 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+ # (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
+ # Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
+ # NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
+@@ -27,10 +27,22 @@
+ set -u
+ LOG=${MK20_GADGET_LOG:-/mnt/SDCARD/mk20/logs/gadget-ecm-hid.log}
+ # v3.8 knobs (set by mk20d from mk20.conf; defaults = the proven v3.7 behaviour)
++# Release mode: a manual/queued run (no MK20_ECM_IP in the env) takes the knobs mk20d validated at boot from
++# /tmp/mk20/gadget.env; mk20d writes that file only when the kernel/vendor/config gates allow the composite, so
++# without it only a rollback is allowed (fail closed).
++GENV=/tmp/mk20/gadget.env
++if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
++  if [ -f "$GENV" ]; then
++    while IFS='=' read -r k v; do case "$k" in
++      MK20_ECM_IP) MK20_ECM_IP=$v;; MK20_ECM_MASK) MK20_ECM_MASK=$v;; MK20_DEV_MAC) MK20_DEV_MAC=$v;; MK20_HOST_MAC) MK20_HOST_MAC=$v;;
++      MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
++      MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;;
++    esac; done < "$GENV"
++  else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) echo "release mode: no $GENV (gates not passed at boot) -> refused"; exit 1;; esac; fi
++fi
+ ECM_IP=${MK20_ECM_IP:-10.20.0.2}; ECM_MASK=${MK20_ECM_MASK:-255.255.255.0}; LL_IP=${MK20_LL_IP:-169.254.7.2}
+ DEV_MAC=${MK20_DEV_MAC:-02:11:22:33:44:55}; HOST_MAC=${MK20_HOST_MAC:-02:11:22:33:44:56}
+-BRIDGE_PORT=${MK20_BRIDGE_PORT:-}   # set (mk20d >= 1.0.2): bridge binds the usb0 addresses only (ECM IP + link-local alias); unset: legacy 0.0.0.0:17890
+-BRIDGE_LISTEN="--listen 0.0.0.0:17890"
++BRIDGE_PORT=${MK20_BRIDGE_PORT:-17890}   # v3.9: the bridge binds the usb0 addresses only (ECM IP + link-local alias, SO_BINDTODEVICE usb0)
+ FLAP_DROPS=${MK20_FLAP_DROPS:-5}; FLAP_WINDOW=${MK20_FLAP_WINDOW:-60}
+ NOADB=${MK20_NOADB:-0}; [ -f /mnt/SDCARD/mk20-no-adb ] && NOADB=1
+ G=/sys/kernel/config/usb_gadget/g1
+@@ -97,13 +109,16 @@ readd_adb() {
+ OK=0
+ cleanup() {
+   [ "$OK" = 1 ] && return
++  mkdir -p /tmp/mk20; touch /tmp/mk20/gadget.busy
+   log "FAILSAFE: undo composite"
+   touch /tmp/mk20-flapmon-stop
+   killall adbd 2>/dev/null
+   echo "" > $G/UDC 2>/dev/null
+   for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
+   rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
+-  touch /tmp/mk20-bridge-stop; [ -f /tmp/mk20-bridge-loop.pid ] && kill "$(cat /tmp/mk20-bridge-loop.pid)" 2>/dev/null; killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
++  # stop the bridge loop + bridge, restore the real ttyGS0 (validated pid: BusyBox `kill ""` = own process group)
++  touch /tmp/mk20-bridge-stop; bp=$(cat /tmp/mk20-bridge-loop.pid 2>/dev/null); case "$bp" in ''|*[!0-9]*|0|1) ;; *) kill "$bp" 2>/dev/null;; esac
++  killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
+   # KD may hold the dead PTY: restart it cleanly on real ttyGS0
+   # unmount the shims only after KD + appLunch.sh have exited (a running sh keeps its script busy -> EBUSY)
+   kd_stop
+@@ -113,6 +128,7 @@ cleanup() {
+   kd_start
+   readd_adb
+   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
++  rm -f /tmp/mk20/gadget.busy
+ }
+ # rollback runs before any preflight so an abnormal state cannot block it
+ if [ "${1:-}" = --rollback-now ]; then log "rollback requested"; trap cleanup EXIT; exit 1; fi
+@@ -173,8 +189,8 @@ sleep 1
+ [ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
+ ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
+ ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG" || die "usb0 ip"
+-if [ -n "$BRIDGE_PORT" ]; then BRIDGE_LISTEN="--listen $ECM_IP:$BRIDGE_PORT"; fi
+-if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then [ -n "$BRIDGE_PORT" ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
++BRIDGE_LISTEN="--dev usb0 --listen $ECM_IP:$BRIDGE_PORT"
++if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
+ else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
+ rm -f /tmp/mk20-bridge-stop
+ # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
+diff --git a/deck/tests/conftest.py b/deck/tests/conftest.py
+index 3cb4008..a24f5db 100644
+--- a/deck/tests/conftest.py
++++ b/deck/tests/conftest.py
+@@ -6,13 +6,19 @@ SHIMS = pathlib.Path(__file__).parent / "shims"
+ P4 = "7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc"
+ 
+ 
++# Device: BusyBox v1.27.2. Set MK20_TEST_BUSYBOX to a 1.27.2 build for fidelity (the box keeps one at
++# /workspace/tools/bb127/busybox); default: the host busybox.
++BB = os.environ.get("MK20_TEST_BUSYBOX") or shutil.which("busybox")
++
++
+ def _bbdir(tmp):
+     """PATH dir of busybox applet symlinks so scripts run against busybox tools, not GNU coreutils."""
+     d = tmp / "bb"
+     d.mkdir()
+-    bb = shutil.which("busybox")
++    bb = BB
++    (d / "busybox").symlink_to(bb)
+     for a in subprocess.run([bb, "--list"], capture_output=True, text=True).stdout.split():
+-        if a in ("flock", "mount", "pgrep", "ubus"):
++        if a in ("flock", "mount", "pgrep", "ubus", "busybox"):
+             continue
+         (d / a).symlink_to(bb)
+     return d
+@@ -41,7 +47,7 @@ class Dev:
+         e = dict(self.env)
+         if env:
+             e.update(env)
+-        return subprocess.run(["busybox", "sh", str(script), *args], env=e, capture_output=True, text=True, timeout=timeout)
++        return subprocess.run([BB, "sh", str(script), *args], env=e, capture_output=True, text=True, timeout=timeout)
+ 
+     def p(self, rel):
+         return self.root / rel
+diff --git a/deck/tests/crashshims/mv b/deck/tests/crashshims/mv
+index c8ada2b..8cc7f03 100755
+--- a/deck/tests/crashshims/mv
++++ b/deck/tests/crashshims/mv
+@@ -1,7 +1,8 @@
+ #!/bin/sh
+-# fault injection: the Nth mv/sync call (counted across both) kills the calling script (simulated power cut)
++# fault injection: the Nth mv/sync call (counted across both) kills the calling script (simulated power cut);
++# MOCK_CRASH_GROUP=1 kills the whole process group (run the test in its own session) = a real power cut
+ if [ -n "${MOCK_CRASH_AT:-}" ]; then
+   n=$(( $(cat "$MOCK_DIR/crash.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$MOCK_DIR/crash.n"
+-  [ "$n" = "$MOCK_CRASH_AT" ] && { echo "$0 $*" > "$MOCK_DIR/crashed"; kill -9 $PPID; exit 137; }
++  [ "$n" = "$MOCK_CRASH_AT" ] && { echo "$0 $*" > "$MOCK_DIR/crashed"; [ "${MOCK_CRASH_GROUP:-}" = 1 ] && kill -9 0; kill -9 $PPID; exit 137; }
+ fi
+ exec busybox mv "$@"
+diff --git a/deck/tests/crashshims/sync b/deck/tests/crashshims/sync
+index b31a3b6..6371b0c 100755
+--- a/deck/tests/crashshims/sync
++++ b/deck/tests/crashshims/sync
+@@ -1,7 +1,8 @@
+ #!/bin/sh
+-# fault injection: the Nth mv/sync call (counted across both) kills the calling script (simulated power cut)
++# fault injection: the Nth mv/sync call (counted across both) kills the calling script (simulated power cut);
++# MOCK_CRASH_GROUP=1 kills the whole process group (run the test in its own session) = a real power cut
+ if [ -n "${MOCK_CRASH_AT:-}" ]; then
+   n=$(( $(cat "$MOCK_DIR/crash.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$MOCK_DIR/crash.n"
+-  [ "$n" = "$MOCK_CRASH_AT" ] && { echo "$0 $*" > "$MOCK_DIR/crashed"; kill -9 $PPID; exit 137; }
++  [ "$n" = "$MOCK_CRASH_AT" ] && { echo "$0 $*" > "$MOCK_DIR/crashed"; [ "${MOCK_CRASH_GROUP:-}" = 1 ] && kill -9 0; kill -9 $PPID; exit 137; }
+ fi
+ exec busybox sync "$@"
+diff --git a/deck/tests/test_bridge.py b/deck/tests/test_bridge.py
+new file mode 100644
+index 0000000..ed551aa
+--- /dev/null
++++ b/deck/tests/test_bridge.py
+@@ -0,0 +1,65 @@
++"""M2: ttygs_tcp_bridge v2 (host build of the same source): strict args, multi-listen, client replacement."""
++import os, shutil, socket, subprocess, time
++import pytest
++from conftest import DECK
++
++SRC = DECK / "m2-scripts/bridge/ttygs_tcp_bridge.c"
++pytestmark = pytest.mark.skipif(not shutil.which("gcc"), reason="needs gcc")
++
++
++@pytest.fixture(scope="module")
++def br(tmp_path_factory):
++    out = tmp_path_factory.mktemp("br") / "bridge"
++    subprocess.run(["gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-o", str(out), str(SRC)], check=True)
++    return out
++
++
++@pytest.mark.parametrize("args", [[], ["--listen", "127.0.0.1:0"], ["--listen", "127.0.0.1:+80"], ["--listen", "127.0.0.1: 80"],
++                                  ["--listen", "1.2.3:80"], ["--listen", "127.0.0.1:65536"], ["--listen", ":80"],
++                                  ["--listen", "127.0.0.1:80", "--bogus"], ["--listen"] * 1, ["--listen", "0.0.0.0:18020"],
++                                  ["--dev", "x" * 20, "--listen", "127.0.0.1:18021"],
++                                  sum([["--listen", f"127.0.0.1:{p}"] for p in range(18000, 18005)], [])])
++def test_bad_args(br, tmp_path, args):
++    link = tmp_path / "link"
++    r = subprocess.run([str(br), *args, "--link", str(link)], capture_output=True, text=True, timeout=5)
++    assert r.returncode == 2, r.stderr
++    assert not link.exists()
++
++
++def test_bind_failure_leaves_no_link(br, tmp_path):
++    link = tmp_path / "link"
++    r = subprocess.run([str(br), "--listen", "192.0.2.77:18010", "--link", str(link)], capture_output=True, text=True, timeout=5)
++    assert r.returncode == 1 and not link.exists()
++
++
++def test_multi_listen_and_replace(br, tmp_path):
++    link = tmp_path / "link"
++    p = subprocess.Popen([str(br), "--listen", "127.0.0.1:18011", "--listen", "127.0.0.2:18011", "--link", str(link)],
++                         stderr=subprocess.PIPE, text=True)
++    try:
++        for _ in range(50):
++            if link.exists():
++                break
++            time.sleep(0.05)
++        s1 = socket.create_connection(("127.0.0.1", 18011)); time.sleep(0.1)
++        fd = os.open(link, os.O_RDWR | os.O_NOCTTY)
++        os.write(fd, b"to-client"); time.sleep(0.1)
++        assert s1.recv(100) == b"to-client"
++        s1.sendall(b"to-kd"); time.sleep(0.1)
++        assert os.read(fd, 100) == b"to-kd"
++        s2 = socket.create_connection(("127.0.0.2", 18011)); time.sleep(0.1)
++        os.write(fd, b"second"); time.sleep(0.1)
++        assert s2.recv(100) == b"second" and s1.recv(100) == b""
++        with pytest.raises(OSError):
++            socket.create_connection(("127.0.0.3", 18011), timeout=1)
++    finally:
++        p.terminate(); p.wait(5)
++    assert not link.exists()   # SIGTERM removes the link
++
++
++def test_bind_to_device(br, tmp_path):
++    """--dev lo: reachable on lo; a non-existent device fails (rc 1) before the link is created."""
++    link = tmp_path / "link"
++    r = subprocess.run([str(br), "--dev", "nonexist0", "--listen", "127.0.0.1:18030", "--link", str(link)],
++                       capture_output=True, text=True, timeout=5)
++    assert r.returncode == 1 and not link.exists()
+diff --git a/deck/tests/test_install.py b/deck/tests/test_install.py
+new file mode 100644
+index 0000000..d845d2e
+--- /dev/null
++++ b/deck/tests/test_install.py
+@@ -0,0 +1,216 @@
++"""M3: installer (loader install/prune/uninstall): pinned sha, safe tar listing, verify, idempotence, power cuts."""
++import io, os, pathlib, subprocess, tarfile, hashlib
++import pytest
++from conftest import FW, P4, build_release, sha, BB
++
++L = FW / "rescue/loader.sh"
++CRASH = pathlib.Path(__file__).parent / "crashshims"
++
++
++def tarball(dev, v):
++    d = build_release(dev.tmp, v)
++    t = d.parent / f"mk20-fw-{v}.tar"
++    assert t.exists()
++    return t
++
++
++def inst(dev, t, *extra, env=None, pin=None):
++    return dev.run(L, "install", str(t), pin or sha(t), *extra, env=env)
++
++
++def st(dev, k):
++    return dev.read(f"data/mk20/state/{k}")
++
++
++def test_install_switches_to_pending(dev):
++    t = tarball(dev, "1.0.0")
++    r = inst(dev, t)
++    assert r.returncode == 0, r.stdout + r.stderr
++    assert "1.0.0 installed" in r.stdout and st(dev, "pending") == "1.0.0"
++    assert not list(dev.p("data/mk20/releases").glob(".incoming-*"))
++    assert oct(dev.p("data/mk20/releases/1.0.0/sbin/mk20d").stat().st_mode & 0o777) == "0o755"
++    b = dev.run(L, "boot")
++    assert b.returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0" and st(dev, "attempts") == "1"
++    assert dev.run(L, "confirm", "1.0.0").returncode == 0 and st(dev, "good") == "1.0.0"
++
++
++def test_upgrade_and_pending_refusal(dev):
++    t0, t1, t2 = tarball(dev, "1.0.0"), tarball(dev, "1.0.1"), tarball(dev, "1.0.2")
++    assert inst(dev, t0).returncode == 0
++    dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    assert inst(dev, t1).returncode == 0 and st(dev, "pending") == "1.0.1"
++    r = inst(dev, t2)
++    assert r.returncode == 1 and "pending" in r.stdout and not dev.p("data/mk20/releases/1.0.2").exists()
++    r = inst(dev, t2, "--no-switch")
++    assert r.returncode == 0 and st(dev, "pending") == "1.0.1" and dev.p("data/mk20/releases/1.0.2").exists()
++
++
++def test_wrong_sha_refused(dev):
++    t = tarball(dev, "1.0.0")
++    r = inst(dev, t, pin="0" * 64)
++    assert r.returncode == 1 and "sha mismatch" in r.stdout
++    assert not dev.p("data/mk20/releases/1.0.0").exists()
++    assert dev.run(L, "install", str(t), "nothex").returncode == 1
++
++
++def test_idempotent_and_corrupt_replaced(dev):
++    t = tarball(dev, "1.0.0")
++    assert inst(dev, t, "--no-switch").returncode == 0
++    r = inst(dev, t, "--no-switch")
++    assert r.returncode == 0 and "already installed" in r.stdout
++    f = dev.p("data/mk20/releases/1.0.0/share/payload.txt"); f.write_text("corrupt\n")
++    r = inst(dev, t, "--no-switch")
++    assert r.returncode == 0 and dev.run(L, "verify", "1.0.0").returncode == 0
++
++
++def test_corrupt_good_not_replaced(dev):
++    t = tarball(dev, "1.0.0")
++    inst(dev, t); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    other = build_release(dev.tmp / "x", "1.0.0", extra={"share/z.txt": "different\n"}) if False else None
++    m = dev.p("data/mk20/releases/1.0.0/MANIFEST"); m.write_text(m.read_text() + "\n")
++    r = inst(dev, t, "--no-switch")
++    assert r.returncode == 1 and "good/current" in r.stdout
++
++
++def mktar(path, entries):
++    """entries: list of (name, kind, data|linkname)"""
++    with tarfile.open(path, "w") as tf:
++        for name, kind, data in entries:
++            ti = tarfile.TarInfo(name)
++            if kind == "d":
++                ti.type = tarfile.DIRTYPE; ti.mode = 0o755; tf.addfile(ti)
++            elif kind == "f":
++                b = data.encode(); ti.size = len(b); ti.mode = 0o644; tf.addfile(ti, io.BytesIO(b))
++            elif kind == "l":
++                ti.type = tarfile.SYMTYPE; ti.linkname = data; tf.addfile(ti)
++            elif kind == "h":
++                ti.type = tarfile.LNKTYPE; ti.linkname = data; tf.addfile(ti)
++    return path
++
++
++def good_entries(dev, v="1.0.5"):
++    d = build_release(dev.tmp, v)
++    out = []
++    for p in sorted(d.rglob("*")):
++        rel = f"mk20-fw-{v}/" + str(p.relative_to(d))
++        out.append((rel, "d", None) if p.is_dir() else (rel, "f", p.read_text()))
++    return [(f"mk20-fw-{v}", "d", None)] + out
++
++
++@pytest.mark.parametrize("mutation,msg", [
++    (lambda e: e + [("mk20-fw-1.0.5/share/evil", "l", "/etc/passwd")], "unsafe tar entry"),
++    (lambda e: e + [("mk20-fw-1.0.5/share/hl", "h", "mk20-fw-1.0.5/MANIFEST")], "unsafe tar entry"),
++    (lambda e: e + [("mk20-fw-1.0.5/../../evil", "f", "x")], "unsafe tar entry"),
++    (lambda e: e + [("other/evil", "f", "x")], "unsafe tar entry"),
++    (lambda e: e + [("mk20-fw-1.0.5/share/x y", "f", "x")], "unsafe tar entry"),
++    (lambda e: e + [("mk20-fw-1.0.5/share/unlisted", "f", "x")], "unlisted files"),
++    (lambda e: [(n, k, ("tampered\n" if n.endswith("payload.txt") else d)) for n, k, d in e], "verify failed"),
++    (lambda e: [(n.replace("mk20-fw-1.0.5", "mk20-fw-x"), k, d) for n, k, d in e], "bad top-level"),
++])
++def test_malicious_tarballs(dev, mutation, msg):
++    t = mktar(dev.tmp / "bad.tar", mutation(good_entries(dev)))
++    r = inst(dev, t)
++    assert r.returncode == 1 and msg in r.stdout, r.stdout + r.stderr
++    rel = dev.p("data/mk20/releases")
++    assert not (rel / "1.0.5").exists() and not list(rel.glob(".incoming-*")) if rel.exists() else True
++    assert not pathlib.Path(dev.root.parent / "evil").exists() and not (dev.root / "evil").exists()
++    assert st(dev, "pending") is None
++
++
++def test_absolute_path_rejected(dev):
++    e = good_entries(dev) + [("/tmp/abs-evil", "f", "x")]
++    t = mktar(dev.tmp / "abs.tar", e)
++    r = inst(dev, t)
++    assert r.returncode == 1
++
++
++def test_no_space(dev, tmp_path):
++    sh = tmp_path / "dfshim"; sh.mkdir()
++    (sh / "df").write_text("#!/bin/sh\necho 'Filesystem 1K-blocks Used Available Use% Mounted'\necho 'x 100 90 10 90% /'\n")
++    (sh / "df").chmod(0o755)
++    t = tarball(dev, "1.0.0")
++    r = inst(dev, t, env={"PATH": f"{sh}:{dev.env['PATH']}"})
++    assert r.returncode == 1 and "not enough space" in r.stdout
++
++
++def test_busy_lock(dev):
++    t = tarball(dev, "1.0.0")
++    lk = dev.p("tmp/mk20/install.lock"); lk.touch()
++    holder = subprocess.Popen(["flock", "-x", str(lk), "sleep", "5"])
++    try:
++        import time; time.sleep(0.3)
++        assert inst(dev, t).returncode == 13
++        assert dev.run(L, "prune").returncode == 13
++    finally:
++        holder.kill(); holder.wait()
++
++
++def test_prune_keeps_referenced(dev):
++    ts = {v: tarball(dev, v) for v in ("1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4")}
++    inst(dev, ts["1.0.0"]); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    for v in ("1.0.1", "1.0.2", "1.0.3"):
++        assert inst(dev, ts[v], "--no-switch").returncode == 0
++    dev.p("data/mk20/releases/.incoming-9.9.9").mkdir()
++    assert inst(dev, ts["1.0.4"]).returncode == 0       # switch + prune
++    left = sorted(p.name for p in dev.p("data/mk20/releases").iterdir())
++    # good 1.0.0, pending/current 1.0.4, + MK20_KEEP=1 newest extra (1.0.3); 1.0.1/1.0.2 and leftovers pruned
++    assert left == ["1.0.0", "1.0.3", "1.0.4"], left
++
++
++def test_uninstall_to_legacy(dev):
++    t = tarball(dev, "1.0.0")
++    inst(dev, t); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    r = dev.run(L, "uninstall")
++    assert r.returncode == 0
++    assert dev.run(L, "boot").returncode == 10
++    assert dev.p("data/mk20/releases/1.0.0").exists()
++
++
++def run_group(dev, args, env):
++    e = dict(dev.env); e.update(env)
++    return subprocess.run([BB, "sh", str(L), *args], env=e, capture_output=True, text=True, timeout=60,
++                          start_new_session=True)
++
++
++def invariant(dev):
++    r = dev.run(L, "boot")
++    if r.returncode == 11:
++        return "stock"
++    assert r.returncode == 0, r.stdout + r.stderr
++    active = dev.read("tmp/mk20/release-active")
++    good, pend, att = st(dev, "good"), st(dev, "pending"), st(dev, "attempts")
++    assert active == good or (active == pend and att and int(att) >= 1), (active, good, pend, att)
++    assert dev.run(L, "verify", active).returncode == 0
++    return active
++
++
++@pytest.mark.parametrize("n", range(1, 31))
++def test_power_cut_during_install(dev, n):
++    t0, t1 = tarball(dev, "1.0.0"), tarball(dev, "1.0.1")
++    assert inst(dev, t0).returncode == 0
++    dev.run(L, "boot"); assert dev.run(L, "confirm", "1.0.0").returncode == 0
++    (dev.mock / "crash.n").unlink(missing_ok=True)
++    run_group(dev, ["install", str(t1), sha(t1)],
++              {"MOCK_CRASH_AT": str(n), "MOCK_CRASH_GROUP": "1", "PATH": f"{CRASH}:{dev.env['PATH']}"})
++    crashed = (dev.mock / "crashed").exists()
++    calls = int((dev.mock / "crash.n").read_text()) if (dev.mock / "crash.n").exists() else 0
++    assert crashed or calls < n
++    # after the cut the board boots good or 1.0.1 on probation, never a half-installed release
++    a = invariant(dev)
++    assert a in ("1.0.0", "1.0.1")
++    if a == "1.0.0" and st(dev, "pending") is None:
++        # re-running the installer completes the job
++        r = inst(dev, t1)
++        assert r.returncode == 0, r.stdout + r.stderr
++        assert st(dev, "pending") == "1.0.1"
++    assert not list(dev.p("data/mk20/releases").glob(".incoming-*")) or a == "1.0.0"
++
++
++def test_install_fault_points_exist(dev):
++    """The install path has enough mv/sync points that the power-cut matrix above really cuts mid-install."""
++    t0, t1 = tarball(dev, "1.0.0"), tarball(dev, "1.0.1")
++    inst(dev, t0); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
++    (dev.mock / "crash.n").unlink(missing_ok=True)
++    run_group(dev, ["install", str(t1), sha(t1)], {"MOCK_CRASH_AT": "999", "PATH": f"{CRASH}:{dev.env['PATH']}"})
++    calls = int((dev.mock / "crash.n").read_text())
++    assert 8 <= calls < 31, calls
+diff --git a/deck/tests/test_mk20d.py b/deck/tests/test_mk20d.py
+index 42660fc..287d9fa 100644
+--- a/deck/tests/test_mk20d.py
++++ b/deck/tests/test_mk20d.py
+@@ -1,7 +1,7 @@
+ """M2: mk20d config whitelist, structured log rotation, vendor/kernel gates, health JSON, boot env contract."""
+ import json, shutil, pathlib, os, stat
+ import pytest
+-from conftest import FW, P4, sha
++from conftest import FW, P4, sha, BB
+ 
+ REL = FW / "release"
+ 
+@@ -25,7 +25,7 @@ def rel(dev, tmp_path):
+     (dev.mock / "wdt").write_text("running")
+     dev.mounts = dev.tmp / "mounts"; dev.mounts.write_text("")
+     dev.env.update({"MK20_REL": str(d), "MK20_VERSION": "9.9.9", "MK20_MOUNTS": str(dev.mounts),
+-                    "MK20_SETTLE": "0", "MK20_STABLE": "0", "MK20_SELFTEST_GAP": "0", "MK20_MAINT": "0"})
++                    "MK20_SETTLE": "0", "MK20_STABLE": "0", "MK20_SELFTEST_GAP": "0", "MK20_MAINT": "0", "MK20_ADB_KEEPALIVE": "0"})
+     return d
+ 
+ 
+@@ -86,6 +86,28 @@ def test_oversize_config_ignored(dev, rel):
+     assert c["ECM_IP"] == "10.20.0.2" and "too large" in c["WARNINGS"]
+ 
+ 
++def test_key_internal_whitespace_rejected(dev, rel):
++    conf(dev, "FEATURE_ ADB=0\n  FEATURE_HID = 0 \n")
++    c = cfg(dev, rel)
++    assert c["FEATURE_ADB"] == "1" and c["FEATURE_HID"] == "0" and "bad key" in c["WARNINGS"]
++
++
++def test_warnings_reset_each_load(dev, rel):
++    lib = rel / "share/mk20lib.sh"
++    conf(dev, "FOO=1\n")
++    s = dev.tmp / "twice.sh"
++    s.write_text(f". {lib}\ncfg_load; cfg_load; echo \"$CFG_WARN\"\n")
++    out = dev.run(s).stdout.strip()
++    assert out.count("unknown key FOO") == 1
++
++
++def test_env_default_subnet_validated(dev, rel):
++    r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "1.2.3.4;reboot"})
++    assert "ECM_IP=10.20.0.2" in r.stdout
++    r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_DEFAULT_SUBNET": "172.30.250.0/24"})
++    assert "ECM_IP=172.30.250.2" in r.stdout
++
++
+ def test_flags_override_config(dev, rel):
+     conf(dev, "FEATURE_COMPOSITE=1\nFEATURE_ADB=1\nFEATURE_HID=1\n")
+     for f in ("mk20-no-composite", "mk20-no-adb", "mk20-gadget-nohid"):
+@@ -153,17 +175,34 @@ def test_boot_vendor_mismatch_fails_closed(dev, rel, g1):
+ 
+ def test_boot_vendor_bindmount_skipped(dev, rel, g1):
+     dev.p("data/setusbconfig").write_text("our shim bind-mounted\n")
+-    dev.mounts.write_text("/dev/root /data/setusbconfig ext4 rw 0 0\n")
++    dev.mounts.write_text("tmpfs /data/setusbconfig tmpfs rw 0 0\n")
+     run_boot(dev, rel)
+     assert dev.p("tmp/mk20/gadget.env").exists()
+ 
+ 
++@pytest.mark.parametrize("line", ["/dev/root /data/setusbconfig ext4 rw 0 0", "tmpfs /data/setusbconfig.x tmpfs rw 0 0",
++                                  "tmpfs /x/data/setusbconfig tmpfs rw 0 0"])
++def test_boot_vendor_foreign_mount_not_skipped(dev, rel, g1, line):
++    dev.p("data/setusbconfig").write_text("tampered\n")
++    dev.mounts.write_text(line + "\n")
++    r, log = run_boot(dev, rel)
++    assert not dev.p("tmp/mk20/gadget.env").exists() and "vendor mismatch" in log
++
++
+ def test_boot_kernel_without_ecm_or_unknown(dev, rel, g1):
+     dev.p("data/mk20/kernel/ALLOWLIST").write_text(f"{P4} stock acm,adb\n")
+     r, log = run_boot(dev, rel)
+     assert not dev.p("tmp/mk20/gadget.env").exists() and "lacks ecm" in log
+ 
+ 
++@pytest.mark.parametrize("allow", ["", "deadbeef stock acm,adb\n", f"{P4}\n"])
++def test_boot_unknown_kernel_no_usb_changes(dev, rel, g1, allow):
++    dev.p("data/mk20/kernel/ALLOWLIST").write_text(allow)
++    r, log = run_boot(dev, rel)
++    assert not dev.p("tmp/mk20/gadget.env").exists() and not dev.p("tmp/mk20/addadb.ran").exists()
++    assert "no USB changes" in log
++
++
+ def test_boot_kernel_without_hid(dev, rel, g1):
+     dev.p("data/mk20/kernel/ALLOWLIST").write_text(f"{P4} ep3 acm,adb,ecm\n")
+     run_boot(dev, rel)
+@@ -193,12 +232,13 @@ def test_boot_confirms_on_pass_not_on_fail(dev, rel, g1):
+ def test_selftest_and_health_json(dev, rel, g1):
+     r = dev.run(rel / "sbin/mk20d", "selftest")
+     assert r.returncode == 0, r.stdout
+-    assert "PASS kd=1" in r.stdout and "INFO composite down" in r.stdout
++    assert "PASS kd=1" in r.stdout and "WARN composite down" in r.stdout
+     (dev.mock / "pgrep.out").write_text("1\n2\n")
+     r = dev.run(rel / "sbin/mk20d", "selftest")
+     assert r.returncode == 1 and "FAIL kd=2" in r.stdout
+     h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+     assert h["selftest"]["pass"] is False and h["kd"] == 2 and h["watchdog"] is True
++    assert h["maint"] is False   # no pid file (BusyBox 1.27 `kill -0 ""` succeeds: regression)
+     assert h["usb"]["udc"] == "musb-hdrc.1.auto" and h["net"]["subnet"] == "10.20.0.0/24"
+     assert json.loads(dev.read("tmp/mk20/health.json")) == h
+ 
+@@ -206,11 +246,11 @@ def test_selftest_and_health_json(dev, rel, g1):
+ def test_selftest_composite_requires_bridge_and_hid(dev, rel, g1):
+     (g1 / "configs/c.1/ecm.usb0").mkdir(); (g1 / "configs/c.1/hid.usb0").mkdir()
+     r = dev.run(rel / "sbin/mk20d", "selftest")
+-    assert r.returncode == 1 and "FAIL no hidg0" in r.stdout and "FAIL bridge not listening" in r.stdout
++    assert r.returncode == 1 and "FAIL no hidg0" in r.stdout and "FAIL bridge not on 10.20.0.2:17890" in r.stdout
+ 
+ 
+ def test_health_json_escapes_hostile_config(dev, rel, g1):
+-    conf(dev, 'FOO"\\=1\n')
++    conf(dev, 'FOO"\\=1\nBAR\x01\x1b=2\n')
+     h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+     assert "bad key" in h["config"]["warnings"]
+ 
+@@ -222,7 +262,7 @@ def test_maint_rotates_and_trims(dev, rel, g1):
+     b = dev.p("tmp/mk20/bridge.log"); b.write_text("b" * 300000)
+     import subprocess, time
+     e = dict(dev.env); e["MK20_MAINT_S"] = "1"
+-    p = subprocess.Popen(["busybox", "sh", str(rel / "sbin/mk20d"), "maint"], env=e)
++    p = subprocess.Popen([BB, "sh", str(rel / "sbin/mk20d"), "maint"], env=e)
+     try:
+         for _ in range(100):
+             if (logs / "gadget.log.1").exists() and dev.p("tmp/mk20/health.json").exists() and b.stat().st_size <= 65536:
+@@ -233,3 +273,79 @@ def test_maint_rotates_and_trims(dev, rel, g1):
+     assert (logs / "gadget.log.1").stat().st_size == 20000 and not (logs / "gadget.log").exists()
+     assert b.stat().st_size == 65536
+     assert json.loads(dev.read("tmp/mk20/health.json"))["maint"] is True
++
++
++def test_maint_single_instance(dev, rel, g1):
++    import subprocess, time
++    e = dict(dev.env); e["MK20_MAINT_S"] = "30"
++    p1 = subprocess.Popen([BB, "sh", str(rel / "sbin/mk20d"), "maint"], env=e)
++    try:
++        time.sleep(0.8)
++        p2 = subprocess.run([BB, "sh", str(rel / "sbin/mk20d"), "maint"], env=e, timeout=10)
++        assert p2.returncode == 0 and p1.poll() is None      # second instance exits at once
++        h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
++        assert h["maint"] is True
++    finally:
++        p1.kill(); p1.wait()
++    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
++    assert h["maint"] is False
++
++
++def test_stock_fallback_keeps_adb_despite_config(dev, rel, g1):
++    conf(dev, "FEATURE_ADB=0\n")
++    dev.p("mnt/SDCARD/mk20-no-composite").write_text("")
++    run_boot(dev, rel)
++    assert dev.read("tmp/mk20/addadb.ran") == "addadb"
++
++
++def test_gadget_env_written_only_when_gates_pass(dev, rel, g1):
++    conf(dev, "BRIDGE_PORT=17999\n")
++    run_boot(dev, rel)
++    env = dict(l.split("=", 1) for l in dev.read("tmp/mk20/gadget.env").splitlines())
++    assert env["MK20_BRIDGE_PORT"] == "17999" and env["MK20_ECM_IP"] == "10.20.0.2"
++    dev.p("data/setusbconfig").write_text("tampered\n")
++    run_boot(dev, rel)
++    assert not dev.p("tmp/mk20/gadget.env").exists()
++
++
++def test_selftest_waits_for_gadget_failsafe(dev, rel, g1):
++    dev.p("tmp/mk20/gadget.busy").write_text("")
++    r = dev.run(rel / "sbin/mk20d", "boot", env={"MK20_BUSY_CAP": "5"}, timeout=60)
++    log = dev.read("data/mk20/logs/mk20d.log")
++    assert "waited 5s for gadget failsafe" in log
++
++
++def test_shim_mounted_with_composite_down_fails(dev, rel, g1):
++    dev.mounts.write_text("tmpfs /data/setusbconfig tmpfs rw 0 0\n")
++    r = dev.run(rel / "sbin/mk20d", "selftest")
++    assert r.returncode == 1 and "FAIL shim still mounted on /data/setusbconfig" in r.stdout
++
++
++def test_symlinked_config_ignored(dev, rel, tmp_path):
++    t = tmp_path / "real.conf"; t.write_text("ECM_SUBNET=172.30.250.0/24\n")
++    c = dev.p("data/mk20/config"); c.mkdir(parents=True)
++    (c / "mk20.conf").symlink_to(t)
++    cf = cfg(dev, rel)
++    assert cf["ECM_IP"] == "10.20.0.2" and "not a regular file" in cf["WARNINGS"]
++
++
++def test_vendor_list_incomplete_fails_closed(dev, rel, g1):
++    lines = (rel / "share/vendor.sha256").read_text().splitlines()
++    (rel / "share/vendor.sha256").write_text(lines[0] + "\n")
++    r, log = run_boot(dev, rel)
++    assert not dev.p("tmp/mk20/gadget.env").exists() and "vendor list incomplete" in log
++
++
++def test_vendor_last_line_without_newline_checked(dev, rel, g1):
++    v = rel / "share/vendor.sha256"; v.write_text(v.read_text().rstrip("\n"))
++    dev.p("data/qt_env.sh").write_text("tampered\n")       # the last entry
++    r, log = run_boot(dev, rel)
++    assert "vendor mismatch:/data/qt_env.sh" in log
++
++
++def test_health_status_field(dev, rel, g1):
++    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
++    assert h["status"] == "degraded"          # composite down = degraded
++    (dev.mock / "wdt").write_text("offline")
++    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
++    assert h["status"] == "fail"
+diff --git a/deck/tests/test_rescue.py b/deck/tests/test_rescue.py
+index 85a00f1..a891519 100644
+--- a/deck/tests/test_rescue.py
++++ b/deck/tests/test_rescue.py
+@@ -1,6 +1,6 @@
+ import os, subprocess, time, shutil, hashlib, pathlib, signal
+ import pytest
+-from conftest import FW, DECK, sha
++from conftest import FW, DECK, sha, BB
+ 
+ STUB = FW / "rescue/lunch.sh"
+ HR = FW / "rescue/hardreset.sh"
+@@ -79,6 +79,10 @@ def test_hardreset_stops_pings_and_remounts(dev):
+     calls = (dev.mock / "ubus.calls").read_text()
+     assert '{"stop":true}' in calls
+     assert "remount,ro" in (dev.mock / "mount.calls").read_text()
++    dev.p("data/mk20/state").mkdir(parents=True, exist_ok=True)
++    r = dev.run(HR, "test", env={"MK20_HR_NOSLEEP": "1"})
++    last = dev.read("data/mk20/state/hardreset.last")
++    assert "by=test fat_ro=y mount_hung=n" in last, last
+ 
+ 
+ def test_hardreset_waits_for_kernel_write_lock(dev):
+@@ -150,7 +154,7 @@ def test_build_reproducible_and_manifest(tmp_path):
+         assert (outs[0] / "rescue" / f"{f}.sha256").read_text().split()[0] == sha(outs[0] / "rescue" / f)
+ 
+ 
+-SH_FILES = sorted(set(list((FW).rglob("*.sh")) + [FW / "release/sbin/mk20d", DECK / "tools/mk20-release-build.sh"]))
++SH_FILES = sorted(set(list((FW).rglob("*.sh")) + [FW / "release/sbin/mk20d", DECK / "tools/mk20-release-build.sh", DECK / "tools/mk20-install.sh", DECK / "tools/mk20-rescue-update.sh"]))
+ 
+ 
+ @pytest.mark.parametrize("f", SH_FILES, ids=lambda p: str(p.relative_to(DECK)))
+@@ -162,7 +166,7 @@ def test_shellcheck(f):
+ def test_hardreset_refuses_in_test_root_without_ubus_override(dev):
+     (dev.mock / "wdt").write_text("running")
+     env = dict(dev.env); env.pop("MK20_UBUS")
+-    r = subprocess.run(["busybox", "sh", str(HR), "t"], env={**env, "MK20_HR_NOSLEEP": "1"}, capture_output=True, text=True)
++    r = subprocess.run([BB, "sh", str(HR), "t"], env={**env, "MK20_HR_NOSLEEP": "1"}, capture_output=True, text=True)
+     assert r.returncode == 13
+ 
+ 
+@@ -192,3 +196,32 @@ def test_stub_liveness_falls_back_to_fat(dev):
+     put_rescue(dev, "mnt/SDCARD/mk20", marker_body(dev, "fat"))
+     dev.run(STUB, env={"MK20_STUB_LIVENESS": "1"})
+     assert wait_text(dev.mock / "watcher.ran", t=6).startswith("fat ")
++
++
++def _code(text):
++    """shell text without comments (a '#' at line start or after whitespace, outside quotes - good enough here)"""
++    out = []
++    for line in text.splitlines():
++        q = None; buf = ""
++        for i, ch in enumerate(line):
++            if q:
++                if ch == q: q = None
++            elif ch in "'\"":
++                q = ch
++            elif ch == "#" and (i == 0 or line[i - 1] in " \t;"):
++                break
++            buf += ch
++        out.append(buf)
++    return "\n".join(out)
++
++
++def test_gadget_failsafe_commands_are_live_code():
++    """Regression (1.0.2): an inline comment swallowed `killall ttygs_tcp_bridge` + the ttyGS0 restore in cleanup()."""
++    for f in (FW / "release/share/gadget.sh", DECK / "m2-scripts/gadget-ecm-hid-adb.sh"):
++        code = _code(f.read_text())
++        body = code[code.index("cleanup() {"):code.index("# rollback runs before any preflight") if "# rollback runs" in code else None]
++        body = code[code.index("cleanup() {"):]
++        body = body[:body.index("\n}\n")]
++        for needle in ("killall ttygs_tcp_bridge", "rm -f /dev/ttyGS0", "mv /dev/ttyGS0.real /dev/ttyGS0", "umount $m",
++                       "/data/setusbconfig serial", "kd_stop", "kd_start", "readd_adb", "echo \"\" > $G/UDC"):
++            assert needle in body, f"{f.name}: '{needle}' missing from live cleanup() code"
+diff --git a/deck/tools/mk20-install.sh b/deck/tools/mk20-install.sh
+new file mode 100755
+index 0000000..40e20f0
+--- /dev/null
++++ b/deck/tools/mk20-install.sh
+@@ -0,0 +1,44 @@
++#!/bin/sh
++# Host-side installer for MK20 Agent firmware releases (macOS or Linux host, over adb).
++#   tools/mk20-install.sh <mk20-fw-X.Y.Z.tar> [--no-switch] [--reboot] [--wait]
++#   MK20_ADB  adb command that targets the MK20 only (default: adb; e.g. ~/mk20-backup/mkadb.sh, never the watch)
++# Steps: pin the tarball sha (checked against <tar>.sha256 when present) -> push to /data/mk20/incoming/ ->
++# run the VERIFIED rescue loader (`loader install <tar> <sha>`, crash-safe, idempotent) -> optional reboot via the
++# watcher (cmd-reboot -> hardreset; never `reboot`) -> optional wait for the probation outcome (good or rolled back).
++set -eu
++ADB=${MK20_ADB:-adb}
++TB=${1:?usage: $0 <mk20-fw-X.Y.Z.tar> [--no-switch] [--reboot] [--wait]}; shift
++NOSW=""; RB=0; WAIT=0
++for a in "$@"; do case "$a" in --no-switch) NOSW=--no-switch;; --reboot) RB=1;; --wait) WAIT=1;; *) echo "bad option $a" >&2; exit 2;; esac; done
++[ -f "$TB" ] || { echo "no such file $TB" >&2; exit 2; }
++base=$(basename "$TB"); case "$base" in mk20-fw-[0-9]*.[0-9]*.[0-9]*.tar) ;; *) echo "unexpected name $base" >&2; exit 2;; esac
++V=${base#mk20-fw-}; V=${V%.tar}
++if command -v sha256sum >/dev/null; then SHA=$(sha256sum "$TB" | cut -d' ' -f1); else SHA=$(shasum -a 256 "$TB" | cut -d' ' -f1); fi
++if [ -f "$TB.sha256" ]; then [ "$(cut -d' ' -f1 "$TB.sha256")" = "$SHA" ] || { echo "sha mismatch vs $TB.sha256" >&2; exit 1; }; fi
++echo "release $V sha256 $SHA"
++$ADB shell 'mkdir -p /data/mk20/incoming && chmod 700 /data/mk20/incoming' >/dev/null
++$ADB push "$TB" "/data/mk20/incoming/$base" >/dev/null
++# verified loader copy (the same check the watcher does), then install; output and rc come back on one line
++out=$($ADB shell "H=/data/mk20/rescue; L=/tmp/mk20/inst-loader.sh; mkdir -p /tmp/mk20
++  w=\$(cut -d' ' -f1 \$H/loader.sh.sha256 2>/dev/null); cp \$H/loader.sh \$L.new 2>/dev/null
++  if [ -n \"\$w\" ] && [ \"\$(sha256sum \$L.new | cut -d' ' -f1)\" = \"\$w\" ]; then mv -f \$L.new \$L
++    sh \$L install /data/mk20/incoming/$base $SHA $NOSW; echo \"rc=\$?\"
++  else rm -f \$L.new; echo 'rescue loader failed verification'; echo rc=9; fi" | tr -d '\r')
++echo "$out"
++rc=$(echo "$out" | sed -n 's/^rc=//p' | tail -n 1)
++[ "$rc" = 0 ] || { echo "install failed (rc=$rc)" >&2; exit 1; }
++$ADB shell "rm -f /data/mk20/incoming/$base" >/dev/null
++[ "$RB" = 1 ] || { echo "installed; reboot (watcher cmd-reboot) to start probation"; exit 0; }
++$ADB shell 'touch /mnt/SDCARD/cmd-reboot && sync' >/dev/null
++echo "reboot requested (watcher -> hardreset, WDT reset in ~30 s)"
++[ "$WAIT" = 1 ] || exit 0
++sleep 45; i=0
++while [ $i -lt 120 ]; do
++  s=$($ADB shell 'sh /data/mk20/rescue/loader.sh status 2>/dev/null' 2>/dev/null | tr -d '\r') || s=""
++  case "$s" in
++    *"good=$V pending= "*) echo "$s"; echo "OK: $V confirmed good"; exit 0;;
++    *"last_rollback="*"$V->"*) case "$s" in *"pending=$V"*) ;; *) echo "$s"; echo "ROLLED BACK from $V" >&2; exit 3;; esac;;
++  esac
++  sleep 10; i=$((i+1))
++done
++echo "timeout waiting for the probation outcome" >&2; exit 4
+diff --git a/deck/tools/mk20-rescue-update.sh b/deck/tools/mk20-rescue-update.sh
+new file mode 100755
+index 0000000..d1cf116
+--- /dev/null
++++ b/deck/tools/mk20-rescue-update.sh
+@@ -0,0 +1,26 @@
++#!/bin/sh
++# Update rescue-tier files on the MK20 over adb (host side). Usage: tools/mk20-rescue-update.sh <rescue-dir> <file>...
++#   MK20_ADB  adb command targeting the MK20 only (e.g. ~/mk20-backup/mkadb.sh)
++# For each home (/data/mk20/rescue first, then /mnt/SDCARD/mk20 - one home stays valid at every instant):
++# push to <home>/<f>.new, verify against the build's .sha256, then rename .sha256 and file into place; reads back.
++# Only plain file copies: no USB change, safe in an adb shell. The running watcher picks the new copy up on its next
++# verified rescue_copy (no restart needed). Never use for watcher.sh while a job is running.
++set -eu
++ADB=${MK20_ADB:-adb}
++D=${1:?usage: $0 <rescue-dir> <file>...}; shift
++[ $# -gt 0 ] || { echo "no files" >&2; exit 2; }
++for f in "$@"; do
++  case "$f" in loader.sh|hardreset.sh|watcher.sh|lunch.sh) ;; *) echo "not a rescue file: $f" >&2; exit 2;; esac
++  [ -f "$D/$f" ] && [ -f "$D/$f.sha256" ] || { echo "missing $D/$f(.sha256)" >&2; exit 2; }
++  want=$(cut -d' ' -f1 "$D/$f.sha256")
++  if command -v sha256sum >/dev/null; then got=$(sha256sum "$D/$f" | cut -d' ' -f1); else got=$(shasum -a 256 "$D/$f" | cut -d' ' -f1); fi
++  [ "$want" = "$got" ] || { echo "$f does not match its .sha256" >&2; exit 1; }
++  for H in /data/mk20/rescue /mnt/SDCARD/mk20; do
++    [ "$f" = lunch.sh ] && [ "$H" = /data/mk20/rescue ] && continue   # the stub lives on FAT only (qt_app1 copies it)
++    $ADB push "$D/$f" "$H/$f.new" >/dev/null
++    $ADB push "$D/$f.sha256" "$H/$f.sha256.new" >/dev/null
++    r=$($ADB shell "cd $H && [ \"\$(sha256sum $f.new | cut -d' ' -f1)\" = $want ] && [ \"\$(cut -d' ' -f1 $f.sha256.new)\" = $want ] && sync \
++      && mv -f $f.sha256.new $f.sha256 && mv -f $f.new $f && sync && [ \"\$(sha256sum $f | cut -d' ' -f1)\" = $want ] && echo OK || { rm -f $f.new $f.sha256.new; echo FAIL; }" | tr -d '\r')
++    echo "$H/$f: $r"; [ "$r" = OK ] || exit 1
++  done
++done

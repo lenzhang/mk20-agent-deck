@@ -6,13 +6,19 @@ SHIMS = pathlib.Path(__file__).parent / "shims"
 P4 = "7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc"
 
 
+# Device: BusyBox v1.27.2. Set MK20_TEST_BUSYBOX to a 1.27.2 build for fidelity (the box keeps one at
+# /workspace/tools/bb127/busybox); default: the host busybox.
+BB = os.environ.get("MK20_TEST_BUSYBOX") or shutil.which("busybox")
+
+
 def _bbdir(tmp):
     """PATH dir of busybox applet symlinks so scripts run against busybox tools, not GNU coreutils."""
     d = tmp / "bb"
     d.mkdir()
-    bb = shutil.which("busybox")
+    bb = BB
+    (d / "busybox").symlink_to(bb)
     for a in subprocess.run([bb, "--list"], capture_output=True, text=True).stdout.split():
-        if a in ("flock", "mount", "pgrep", "ubus"):
+        if a in ("flock", "mount", "pgrep", "ubus", "busybox"):
             continue
         (d / a).symlink_to(bb)
     return d
@@ -41,7 +47,7 @@ class Dev:
         e = dict(self.env)
         if env:
             e.update(env)
-        return subprocess.run(["busybox", "sh", str(script), *args], env=e, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run([BB, "sh", str(script), *args], env=e, capture_output=True, text=True, timeout=timeout)
 
     def p(self, rel):
         return self.root / rel

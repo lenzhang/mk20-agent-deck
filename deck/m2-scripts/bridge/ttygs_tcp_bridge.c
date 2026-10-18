@@ -1,7 +1,8 @@
 // PTY <-> TCP bridge for KeyboardDevice when ACM (ttyGS0) is not in the USB composite.
-// Usage: ttygs_tcp_bridge --listen ADDR:PORT [--listen ADDR:PORT ...] --link /dev/ttyGS0
+// Usage: ttygs_tcp_bridge [--dev IFACE] --listen ADDR:PORT [--listen ADDR:PORT ...] --link /dev/ttyGS0
 // v2 (firmware 1.0.2): up to 4 --listen addresses (bind to the usb0 addresses only, e.g. the ECM IP and the
-// link-local rescue alias, instead of 0.0.0.0); strict address/port parsing (exit 2 on a bad argument).
+// link-local rescue alias, never 0.0.0.0); --dev pins every listener to that interface (SO_BINDTODEVICE), so a
+// neighbour on another interface cannot reach the alias address; strict parsing (exit 2 on a bad argument).
 // Creates a raw PTY, symlinks --link to its slave, serves one TCP client at a time (new client
 // replaces old). With no client, output from KD is discarded so KD never blocks.
 #define _GNU_SOURCE
@@ -33,31 +34,39 @@ static int parse(const char *s, struct sockaddr_in *a) {
   char host[64]; const char *c = strrchr(s, ':'); char *e;
   if (!c || c == s || (size_t)(c - s) >= sizeof host) return -1;
   snprintf(host, sizeof host, "%.*s", (int)(c - s), s);
+  for (const char *q = c + 1; *q; q++) if (*q < '0' || *q > '9') return -1;   // digits only (no sign/space)
+  if (!c[1] || strlen(c + 1) > 5) return -1;
   long port = strtol(c + 1, &e, 10);
   if (*e || port < 1 || port > 65535) return -1;
   memset(a, 0, sizeof *a); a->sin_family = AF_INET; a->sin_port = htons((unsigned short)port);
-  return inet_pton(AF_INET, host, &a->sin_addr) == 1 ? 0 : -1;
+  if (inet_pton(AF_INET, host, &a->sin_addr) != 1) return -1;
+  return a->sin_addr.s_addr == htonl(INADDR_ANY) ? -1 : 0;   // wildcard refused
 }
 int main(int argc, char **argv) {
-  const char *ls_s[MAXL]; int nl = 0;
+  const char *ls_s[MAXL]; int nl = 0; const char *dev = NULL;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--listen") && i + 1 < argc) { if (nl == MAXL) { fprintf(stderr, "too many --listen\n"); return 2; } ls_s[nl++] = argv[++i]; }
     else if (!strcmp(argv[i], "--link") && i + 1 < argc) linkp = argv[++i];
+    else if (!strcmp(argv[i], "--dev") && i + 1 < argc && strlen(argv[i + 1]) < 16) dev = argv[++i];
     else { fprintf(stderr, "bad argument %s\n", argv[i]); return 2; }
   }
-  if (!nl) ls_s[nl++] = "0.0.0.0:17890";
+  if (!nl) { fprintf(stderr, "usage: ttygs_tcp_bridge --listen ADDR:PORT [--listen ...] --link PATH\n"); return 2; }
   struct sockaddr_in la[MAXL];
   for (int i = 0; i < nl; i++) if (parse(ls_s[i], &la[i])) { fprintf(stderr, "bad --listen %s\n", ls_s[i]); return 2; }
   signal(SIGPIPE, SIG_IGN); signal(SIGTERM, cleanup); signal(SIGINT, cleanup); signal(SIGHUP, SIG_IGN);
   int m = posix_openpt(O_RDWR | O_NOCTTY);
   if (m < 0 || grantpt(m) || unlockpt(m)) { perror("pty"); return 1; }
   char *sn = ptsname(m);
+  if (!sn) { perror("ptsname"); return 1; }
   int keep = open(sn, O_RDWR | O_NOCTTY); // hold slave open: no EIO on master when KD reopens
-  struct termios t; tcgetattr(keep, &t); cfmakeraw(&t); tcsetattr(keep, TCSANOW, &t);
+  struct termios t;
+  if (keep < 0 || tcgetattr(keep, &t)) { perror("pty slave"); return 1; }
+  cfmakeraw(&t); if (tcsetattr(keep, TCSANOW, &t)) { perror("tcsetattr"); return 1; }
   int one = 1, ls[MAXL];
   for (int i = 0; i < nl; i++) {  // bind every listener before touching the link, so a bad address leaves no dangling symlink
     ls[i] = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     setsockopt(ls[i], SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (dev && setsockopt(ls[i], SOL_SOCKET, SO_BINDTODEVICE, dev, strlen(dev) + 1)) { perror("SO_BINDTODEVICE"); return 1; }
     if (ls[i] < 0 || bind(ls[i], (void *)&la[i], sizeof la[i]) || listen(ls[i], 2)) { perror(ls_s[i]); return 1; }
   }
   unlink(linkp); if (symlink(sn, linkp)) { perror("symlink"); return 1; }
@@ -78,11 +87,12 @@ int main(int argc, char **argv) {
       if (r > 0 && cl >= 0 && wsock(cl, buf, r)) { close(cl); cl = -1; }
       if (r <= 0) usleep(10000);
     }
-    if (cl >= 0 && ci >= 0 && ci < np && (p[ci].revents & (POLLIN | POLLHUP | POLLERR))) {
-      ssize_t r = read(cl, buf, sizeof buf);
-      if (r <= 0) { close(cl); cl = -1; fprintf(stderr, "client gone\n"); }
-      else wall(m, buf, r);
+    if (cl >= 0 && ci >= 0 && ci < np && (p[ci].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
+      ssize_t r = (p[ci].revents & POLLNVAL) ? -1 : read(cl, buf, sizeof buf);
+      if (r <= 0) { if (r < 0 && errno == EINTR) continue; close(cl); cl = -1; fprintf(stderr, "client gone\n"); }
+      else if (wall(m, buf, r)) { fprintf(stderr, "pty write failed: %s\n", strerror(errno)); }
     }
+    for (int i = 0; i < nl; i++) if (p[1 + i].revents & (POLLERR | POLLNVAL)) { fprintf(stderr, "listener %s failed\n", ls_s[i]); cleanup(0); }
   }
   cleanup(0); return 0;
 }
