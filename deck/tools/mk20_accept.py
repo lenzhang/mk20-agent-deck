@@ -68,10 +68,13 @@ def sh(cmd: str, timeout: float = 20) -> tuple[int, str]:
 
 
 def bridge_clients() -> int | None:
-    """Established TCP clients of the KD bridge (it serves ONE client and drops the old one on a new connect)."""
-    rc, o = sh("netstat -tn 2>/dev/null | grep -c ':%d .*ESTABLISHED'" % PORT, timeout=10)
-    o = o.strip()
-    return int(o) if rc in (0, 1) and o.isdigit() else None
+    """Established TCP clients of the KD bridge (it serves ONE client and drops the old one on a new connect).
+    None = unknown (adb/netstat failed): callers must then NOT open a TCP connection."""
+    rc, o = sh("netstat -tn 2>/dev/null && echo NETSTAT_RC=0", timeout=10)
+    if rc != 0 or "NETSTAT_RC=0" not in o or "Proto" not in o:
+        return None
+    return sum(1 for l in o.splitlines() if l.startswith("tcp") and "ESTABLISHED" in l
+               and l.split()[3].endswith(f":{PORT}"))
 
 
 def bridge_listening() -> tuple[bool, bool]:
@@ -160,9 +163,11 @@ def tcp_bound(host: str, iface: str | None) -> tuple[bool, str]:
         return False, str(e)
 
 
-def get_info() -> tuple[bool, str]:
-    env = dict(os.environ, MK20_PORT=f"socket://{DEV_IP}:{PORT}")
-    rc, o, e = run_proc(["uv", "run", "-q", "--with", "pyserial", "python", os.path.join(HERE, "mk20ctl-url.py"),
+def get_info(iface: str | None) -> tuple[bool, str]:
+    if not iface:
+        return False, "no MK20 interface (refusing an unbound connect)"
+    env = dict(os.environ, MK20_PORT=f"bound:{DEV_IP}:{PORT}:{iface}")
+    rc, o, e = run_proc(["uv", "run", "-q", "--with", "pyserial", "python", os.path.join(HERE, "mk20ctl.py"),
                          "info"], 40, env=env)
     m = re.search(r'"deviceVersion":\s*"([^"]+)"', o)
     return bool(m), (m.group(1) if m else (o + e)[-200:] or f"rc={rc}")
@@ -181,15 +186,17 @@ def hid(run: Run) -> None:
     # [ -c ]: never create a regular file /dev/hidg0 when the HID function is absent (it would mask the real node).
     # BusyBox here has no setsid/nohup: a subshell that ignores SIGHUP, with stdio detached, outlives the adb shell.
     z = "'\\001\\000\\000\\000\\000\\000\\000\\000\\000'"
+    tag = f"{os.getpid()}-{int(time.time())}"
     cmd = ("[ -c /dev/hidg0 ] || { echo NOHIDG; exit 0; }; "
            "grep -qx configured /sys/class/udc/*/state || { echo NOTCONF; exit 0; }; "
-           "mkdir -p /tmp/mk20; rm -f /tmp/mk20/hidtap.done; "
-           f"( trap '' HUP; printf {z} > /dev/hidg0 && printf {z} > /dev/hidg0 && touch /tmp/mk20/hidtap.done ) "
+           "mkdir -p /tmp/mk20; mkdir /tmp/mk20/hidtap.busy 2>/dev/null || { echo HIDBUSY; exit 0; }; "
+           f"D=/tmp/mk20/hidtap.{tag}; "
+           f"( trap '' HUP; printf {z} > /dev/hidg0 && printf {z} > /dev/hidg0 && touch $D; rmdir /tmp/mk20/hidtap.busy ) "
            "</dev/null >/dev/null 2>&1 & "
-           "i=0; while [ $i -lt 5 ] && [ ! -f /tmp/mk20/hidtap.done ]; do sleep 1; i=$((i+1)); done; "
-           "[ -f /tmp/mk20/hidtap.done ] && echo HIDOK || echo HIDPENDING")
+           "i=0; while [ $i -lt 5 ] && [ ! -f $D ]; do sleep 1; i=$((i+1)); done; "
+           "[ -f $D ] && { rm -f $D; echo HIDOK; } || echo HIDPENDING")
     _, o = sh(cmd, timeout=20)
-    det = next((k for k in ("HIDOK", "NOHIDG", "NOTCONF", "HIDPENDING") if k in o), o.strip()[-80:])
+    det = next((k for k in ("HIDOK", "NOHIDG", "NOTCONF", "HIDBUSY", "HIDPENDING") if k in o), o.strip()[-80:])
     run.check("hid: host consumes keyboard reports (all keys released)", det == "HIDOK", det)
 
 
@@ -240,14 +247,16 @@ def main() -> int:
     lp, ll = bridge_listening()
     run.check("bridge listening on primary + link-local (device netstat)", lp and ll, f"primary={lp} ll={ll}")
     nc = bridge_clients()
-    if nc:   # connecting would kick the deck daemon off the single-client bridge: an active client proves the path
+    if nc is None:
+        run.check("tcp bridge: client count known (device netstat)", False, "netstat failed: connect tests skipped")
+    elif nc:   # connecting would kick the deck daemon off the single-client bridge: an active client proves the path
         run.check("tcp bridge: client already connected (connect tests skipped, not disturbed)", True, f"{nc} client(s)")
     else:
         ok, d = tcp_bound(DEV_IP, iface)
         run.check("tcp bridge primary (bound)", ok, d)
         ok, d = tcp_bound(LL_IP, iface)
         run.check("tcp bridge link-local 169.254.7.2 (bound)", ok, d)
-        ok, d = get_info()
+        ok, d = get_info(iface)
         run.check("protocol A getInfo over TCP", ok, d)
     if not a.no_hid:
         hid(run)

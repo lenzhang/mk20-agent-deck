@@ -7,6 +7,7 @@
 # (Mac sleep) is not a flap: suspend, resume and a resume reset / unplug after it are logged, not counted.
 # Single instance (flock on fd 8, not inherited by the rollback). The stopfile is re-checked right before rollback.
 # If the rollback command fails, the busy marker is cleared so mk20d does not wait on a dead failsafe.
+# Writes the ready marker (MK20_FLAP_READY, default /tmp/mk20/flapmon.ready) once the lock is held.
 # Test env: MK20_UPTIME_CMD (seconds), MK20_FLAP_POLL (default 0.3), MK20_BUSY, MK20_FLAP_LOCK, MK20_FLAP_SUSP_S.
 [ $# -ge 7 ] && [ "$6" = -- ] || { echo "usage: flapmon.sh state window drops log stopfile -- cmd..." >&2; exit 2; }
 U=$1; W=$2; N=$3; LOG=$4; STOP=$5; shift 6
@@ -15,6 +16,7 @@ BUSY=${MK20_BUSY:-/tmp/mk20/gadget.busy}; SUSP=${MK20_FLAP_SUSP_S:-5}
 LOCK=${MK20_FLAP_LOCK:-/tmp/mk20/flapmon.lock}; mkdir -p "$(dirname "$LOCK")"
 exec 8>"$LOCK"; i=0; while ! flock -n 8; do i=$((i+1)); [ $i -lt 10 ] && { sleep 0.5; continue; }
   { echo "flapmon $(cut -d. -f1 /proc/uptime): another monitor holds $LOCK" >> "$LOG"; exit 3; }; done
+READY=${MK20_FLAP_READY:-/tmp/mk20/flapmon.ready}; mkdir -p "$(dirname "$READY")"; : > "$READY"   # lock held: gadget.sh waits for this
 up() { if [ -n "${MK20_UPTIME_CMD:-}" ]; then $MK20_UPTIME_CMD; else cut -d. -f1 /proc/uptime; fi; }
 prev=$(cat "$U" 2>/dev/null); times=""; sus=""
 while [ ! -f "$STOP" ]; do

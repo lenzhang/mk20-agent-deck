@@ -43,7 +43,14 @@ if [[ -n "$WHOLE" ]]; then
   [[ -f "$SRC" ]] || die "missing $SRC"
   [[ "$(head -c 8 "$SRC")" == IMAGEWTY ]] && die "$SRC is an Allwinner PhoenixCard image; flash it with PhoenixCard/OpenixCard, never dd"
   WBYTES=$(wc -c <"$SRC" | tr -d ' ')
-  (( WBYTES <= SIZE )) || die "image ($WBYTES B) larger than card ($SIZE B)"
+  # a whole-card dd image of THIS card is exactly the card size; anything smaller (e.g. p4.img) would land at LBA0
+  (( WBYTES == SIZE )) || die "image ($WBYTES B) != card ($SIZE B): not a whole-card dd image of this card"
+  [[ "$(dd if="$SRC" bs=1 skip=510 count=2 2>/dev/null | xxd -p)" == 55aa ]] || die "no MBR/GPT boot signature at LBA0"
+  dd if="$SRC" bs=512 skip=1 count=1 2>/dev/null | head -c 8 | grep -q '^EFI PART' || \
+    die "no GPT header at LBA1 (the MK20 card uses GPT)"
+  [[ -f "$SRC.sha256" ]] || die "missing $SRC.sha256 (write it when you make the image: shasum -a 256 IMG > IMG.sha256)"
+  WANT=$(awk '{print $1; exit}' "$SRC.sha256")
+  [[ "$WANT" =~ ^[0-9a-f]{64}$ ]] || die "bad $SRC.sha256"
 elif [[ -n "$IMAGE" ]]; then
   SLICE="${SLICE:-s4}"
   [[ "$SLICE" == s4 ]] || die "MK20 boot partition is s4 (got $SLICE); refusing"
@@ -57,6 +64,7 @@ else
 fi
 [[ -f "$SRC" ]] || die "missing $SRC"
 SUM=$(shasum -a 256 "$SRC" | awk '{print $1}')
+[[ -z "${WANT:-}" || "$SUM" == "$WANT" ]] || die "sha256 $SUM != $SRC.sha256 ($WANT)"
 BYTES=$(wc -c <"$SRC" | tr -d ' ')
 info "source=$SRC sha256=$SUM bytes=$BYTES dest=$DEST"
 if (( DRY )); then info "DRY-RUN: would unmount $BLK and dd -> $DEST"; exit 0; fi

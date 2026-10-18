@@ -65,7 +65,9 @@ Commands the watcher polls for every 2 s:
 
 - **Rollback once-guard (1.1.3+):** `gadget.sh --rollback-now` runs only once per composite (flapmon, the confirm
   waiter and mk20d may all ask). It leaves `/tmp/mk20/rollback.once`; a new successful composite setup clears it.
-  If a rollback died half-way and you must re-run it by hand: `rmdir /tmp/mk20/rollback.once` first.
+  From 1.1.4 it exits 0 only when stock is verified (ACM linked, UDC bound, KD running); otherwise it logs
+  "rollback NOT verified", releases the guard and exits 1, so a retry works. If a rollback process was killed
+  half-way, `rmdir /tmp/mk20/rollback.once` before re-running it by hand.
 
 ## 3. Uninstall the firmware, or remove the stub
 
@@ -117,8 +119,10 @@ Steps:
 
 Whole card (last resort; erases `/data` and everything else on the card):
 - `--whole-image` takes only a **raw whole-card `dd` image of this card** (made as in `deck/RECOVERY.md` §3,
-  e.g. `~/mk20-backup/mk20-tf-YYYYMMDD.img`). As of 1.1.3 no such image exists yet; make one before you need it.
-  Rehearse with `--dry-run`. The script refuses directories and Allwinner `IMAGEWTY` files.
+  e.g. `~/mk20-backup/mk20-tf-YYYYMMDD.img`). As of 1.1.4 no such image exists yet; make one before you need it,
+  with its sidecar: `shasum -a 256 IMG > IMG.sha256`. Rehearse with `--dry-run`. The script refuses directories,
+  Allwinner `IMAGEWTY` files, any size other than exactly the card size (so `p4.img` or `disk-head.img` can never
+  land at LBA0), images without the GPT signature, and a missing or mismatching `IMG.sha256`.
 - `~/mk20-backup/tf/live-221-parts/` is a **directory of per-partition images** (SHA256SUMS; p6 UDISK isn't in
   it), not a whole-card image. Never pass it to `--whole-image` and never `dd` it to the whole disk. Use only
   `p4.img` with `--image … --slice s4` as above. Restoring other partitions by hand is not documented or tested.

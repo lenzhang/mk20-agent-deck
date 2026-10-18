@@ -70,6 +70,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 | 1.0.4 | 2026-10-18 | KD count via `pgrep -f '^/data/KeyboardDevice'`, cleanup fix, installer/prune/uninstall |
 | 1.1.0 | 2026-10-18 | M4: default subnet 172.30.250.0/24 (device .2, Mac .1); link-local listener 169.254.7.2 required by self-test |
 | 1.1.1 | 2026-10-18 | During probation, a composite setup failure (gadget rc≠0) is a self-test FAIL, so the release rolls back |
+| 1.1.4 | 2026-10-18 | M7-fixes review: `gadget.sh --rollback-now` exits 0 only on verified stock (ACM+UDC+KD), else releases the once-guard and exits 1; gadget.sh waits for flapmon's lock-held ready marker instead of a 1-s liveness check. Host tools (not in the tarball): tf-restore-boot.sh whole-image needs exact card size + GPT + `.sha256`; accept/soak getInfo over a socket bound to the MK20 interface, bridge-client check fails closed, soak route check + single-instance lock |
 | 1.1.3 | 2026-10-18 | M5–M7 review fixes: flapmon counts a short suspend that ends in a reset/detach (a long suspend = Mac sleep is not counted), single instance (flock), re-checks the stopfile before rolling back, validates its arguments; `gadget.sh --rollback-now` once-guard (`/tmp/mk20/rollback.once`), confirm waiter honours the flapmon stopfile, a re-run stops the old monitor; rollback env via `export` |
 | 1.1.2 | 2026-10-18 | M7: flap monitor moved to `share/flapmon.sh` (unit-tested); a host USB suspend/resume (Mac sleep) is logged, not counted as a flap |
 

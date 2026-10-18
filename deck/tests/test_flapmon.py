@@ -18,7 +18,7 @@ def start(dev, tmp_path, window=60, drops=5, cmd=None):
     st, log, stop, mark, clock = (tmp_path / n for n in ("state", "fm.log", "stop", "rolled", "clock"))
     put(st, "configured\n"); put(clock, "100\n")
     env = dict(dev.env, MK20_FLAP_POLL="0.05", MK20_BUSY=str(tmp_path / "busy"),
-               MK20_FLAP_LOCK=str(tmp_path / "fm.lock"), MK20_UPTIME_CMD=f"cat {clock}")
+               MK20_FLAP_LOCK=str(tmp_path / "fm.lock"), MK20_FLAP_READY=str(tmp_path / "ready"), MK20_UPTIME_CMD=f"cat {clock}")
     cmd = cmd or ["sh", "-c", f"echo 'roll back' >> '{mark}'"]
     p = subprocess.Popen(["sh", str(FM), str(st), str(window), str(drops), str(log), str(stop), "--", *cmd], env=env)
     time.sleep(0.4)
@@ -91,10 +91,12 @@ def test_stopfile_ends_monitor(dev, tmp_path):
 
 def test_second_instance_refused(dev, tmp_path):
     p, st, log, stop, mark, clock = start(dev, tmp_path)
-    env = dict(dev.env, MK20_FLAP_LOCK=str(tmp_path / "fm.lock"), MK20_FLAP_POLL="0.05")
+    env = dict(dev.env, MK20_FLAP_LOCK=str(tmp_path / "fm.lock"), MK20_FLAP_POLL="0.05",
+               MK20_FLAP_READY=str(tmp_path / "ready2"))
     r = subprocess.run(["sh", str(FM), str(st), "60", "5", str(log), str(stop), "--", "true"], env=env, timeout=15)
     put(stop, ""); p.wait(timeout=5)
     assert r.returncode == 3 and "another monitor holds" in log.read_text()
+    assert (tmp_path / "ready").exists() and not (tmp_path / "ready2").exists()
 
 
 def test_bad_args_exit_2(dev, tmp_path):

@@ -134,9 +134,15 @@ cleanup() {
   rm -f /tmp/mk20/gadget.busy
 }
 # rollback runs before any preflight so an abnormal state cannot block it
-# once-guard: flapmon, the confirm waiter and mk20d can all ask; only the first undoes (cleared when a composite is up)
+# once-guard: flapmon, the confirm waiter and mk20d can all ask; only the first undoes (cleared when a composite is up).
+# Exit 0 = stock verified (or already done), 1 = rollback ran but stock not verified (guard released for a retry).
 if [ "${1:-}" = --rollback-now ]; then mkdir -p /tmp/mk20; mkdir /tmp/mk20/rollback.once 2>/dev/null || { log "rollback already done/running"; exit 0; }
-  log "rollback requested"; trap cleanup EXIT; exit 1; fi
+  log "rollback requested"; cleanup
+  # verify stock: ACM linked, UDC bound, KD running. Only a verified rollback keeps the once-guard (retry otherwise).
+  i=0; while ! pgrep -f KeyboardDevice >/dev/null && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done
+  if [ -e $C/acm.usb0 ] && [ -n "$(udc_now)" ] && pgrep -f KeyboardDevice >/dev/null; then log "rollback verified"; exit 0; fi
+  log "rollback NOT verified (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now)) -> guard released"
+  rmdir /tmp/mk20/rollback.once 2>/dev/null; exit 1; fi
 
 # ---- preflight (nothing touched yet) ----
 UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
@@ -230,13 +236,14 @@ log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_I
 ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh)" ] || { OK=0; die "cannot stage rollback copy"; }
 # flap monitor (both modes, share/flapmon.sh): >=5 configured->not-configured drops within 60 s -> rollback to
 # ACM+KD+adb. Host USB suspend (Mac sleep) is not a flap.
-rm -f /tmp/mk20-flapmon-stop
+rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready
 FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
 { [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
 ( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG"
   exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
     sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 9>&- ) &
-FP=$!; sleep 1; kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start"; }
+FP=$!; i=0; while [ ! -f /tmp/mk20/flapmon.ready ] && [ $i -lt 40 ] && kill -0 $FP 2>/dev/null; do sleep 0.25; i=$((i+1)); done
+[ -f /tmp/mk20/flapmon.ready ] && kill -0 $FP 2>/dev/null || { OK=0; die "flap monitor did not start (no lock/ready marker)"; }
 log "flap monitor started (pid $FP)"
 if [ "$MODE" = --boot ]; then
   touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0

@@ -434,3 +434,13 @@ the `adb` feature also disables it.
 - tools/en-relay.py marked obsolete; its process stopped (no current tool uses it).
 - FAT free 1277 KiB of 8 MiB (headroom check >= 1024 KiB).
 - Soak: ~/mk20-backup/soak/soak-20261018-2011.{jsonl,summary.json}, 300 s interval, 24 h.
+
+### Soak annotations: planned host events (user), 20:23 and 20:27 SGT
+- ~20:23 replug; ~20:27 port change and behind a hub. All passed: each boot did self-test + confirm at about 90 s
+  uptime, 1.1.3 stayed good, no rollback. Soak sample 20:26:56 failed during the replug (expected); the soak counted
+  1 reboot (uptime drop) but there were 2 (the 20:23 boot fell between samples). Sidecar:
+  ~/mk20-backup/soak/soak-20261018-2011.events.json.
+- Flapmon "link drop (not attached)" investigated (read-only, gadget.log 65 lines = 13 boots): exactly ONE per boot,
+  always at 72-74 s uptime, ~14 s after gadget OK (58-60 s): the host re-enumerating the new composite. Never in
+  steady state: current boot (since ~20:27) has 0 drops after 73 s through 988 s uptime; earlier 1.1.3 boot 0 drops
+  through 765 s. No "rebinding" outside boots: every BEGIN line is a new boot (uptime ~49 s). Not a stability bug.

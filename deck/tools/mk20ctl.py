@@ -10,6 +10,7 @@
   mk20ctl.py ping|reboot [--wait S]
   mk20ctl.py listen [--wait S]           capture @@MK20 blocks (raw tap) to ~/mk20-backup/remote-logs
   mk20ctl.py stage-dryrun DIR            stage dry-run + watcher (see NOTES)
+MK20_PORT: serial device (default), or bound:HOST:PORT:IFACE for the TCP bridge pinned to the MK20 interface.
 Raw bytes on the port are teed: frames go to DeviceLink, text between @@MK20 markers is captured.
 """
 from __future__ import annotations
@@ -64,8 +65,18 @@ class TeeTransport:
     def close(self): self.inner.close(); self.rawlog.close()
 
 
+def _open_port():
+    """MK20_PORT=bound:HOST:PORT:IFACE -> TCP bridge socket pinned to IFACE (never via TUN/another route)."""
+    if PORT.startswith("bound:"):
+        _, host, port, iface = PORT.split(":", 3)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from tcp_transport import TcpTransport  # noqa: E402
+        return TcpTransport(host, int(port), 5.0, bound_if=iface)
+    return SerialTransport(PORT)
+
+
 def connect():
-    t = TeeTransport(SerialTransport(PORT))
+    t = TeeTransport(_open_port())
     link = DeviceLink(t, ack_timeout=10.0, preamble_flush=0)
     link.start()
     return t, link

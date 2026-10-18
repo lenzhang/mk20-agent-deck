@@ -17,6 +17,7 @@ Stop early: kill the process (pid in <out>/soak.pid); the summary is still writt
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -63,6 +64,9 @@ def sample(deep: bool) -> dict:
         s["bridge_clients"] = acc.bridge_clients()
     iface = tt.mk20_interface()
     s["iface"] = iface
+    _, r, _ = acc.run_proc(["route", "-n", "get", acc.DEV_IP], 10)
+    m = re.search(r"interface:\s*(\S+)", r)
+    s["route_if"] = m.group(1) if m else None
     _, p, _ = acc.run_proc(["ping", "-c", "3", "-i", "0.3", "-t", "5", acc.DEV_IP], 15)
     s["ping_loss"] = float((re.search(r"([\d.]+)% packet loss", p) or [None, "100"])[1])
     s["ping_avg_ms"] = (re.search(r"= [\d.]+/([\d.]+)/", p) or [None, None])[1]
@@ -73,11 +77,11 @@ def sample(deep: bool) -> dict:
     if deep and s.get("bridge_clients") == 0 and not STOP:
         s["tcp_primary"] = acc.tcp_bound(acc.DEV_IP, iface)[0]
         s["tcp_ll"] = acc.tcp_bound(acc.LL_IP, iface)[0]
-        s["getinfo"] = acc.get_info()[0]
+        s["getinfo"] = acc.get_info(iface)[0]
     if deep and not STOP:
         s["hid"] = acc.hid_enumerated()
     h = s.get("health") or {}
-    s["ok"] = bool(s["adb"] and h.get("status") == "ok" and h.get("kd") == 1 and h.get("composite") is True
+    s["ok"] = bool(s["adb"] and iface and s["route_if"] == iface and h.get("status") == "ok" and h.get("kd") == 1 and h.get("composite") is True
                    and s["ping_loss"] == 0 and s.get("ping_ll_loss", 100) == 0
                    and s.get("listen_primary") and s.get("listen_ll")
                    and s.get("tcp_primary", True) and s.get("tcp_ll", True) and s.get("getinfo", True)
@@ -102,8 +106,13 @@ def main() -> int:
     if not os.environ.get("MK20_ADB"):
         sys.exit("set MK20_ADB (MK20-only adb wrapper, never the watch)")
     os.makedirs(a.out, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
     jl, sm = os.path.join(a.out, f"soak-{stamp}.jsonl"), os.path.join(a.out, f"soak-{stamp}.summary.json")
+    lockf = open(os.path.join(a.out, "soak.lock"), "w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit(f"another soak is running in {a.out} (soak.lock held)")
     pidf = os.path.join(a.out, "soak.pid")
     with open(pidf, "w") as f:
         f.write(f"{os.getpid()}\n")
