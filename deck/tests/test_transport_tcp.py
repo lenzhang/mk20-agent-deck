@@ -43,3 +43,29 @@ def test_tcp_transport_roundtrip_and_close(monkeypatch):
     except OSError:
         pass
     tr.close()
+
+
+def test_default_candidates_new_subnet_first(monkeypatch):
+    monkeypatch.delenv("MK20_TCP", raising=False)
+    assert T.tcp_targets() == ["172.30.250.2:17890", "10.20.0.2:17890", "169.254.7.2:17890"]
+    assert T.tcp_target() == "172.30.250.2:17890"
+
+
+def test_find_ports_falls_through_candidates(monkeypatch):
+    monkeypatch.delenv("MK20_TCP", raising=False)
+    tried = []
+    monkeypatch.setattr(T, "ecm_interface", lambda: "en13")
+    monkeypatch.setattr(T, "tcp_reachable", lambda t, timeout=0.5: tried.append(t) or t.startswith("10.20."))
+    ports = T.find_ports()
+    assert tried == ["172.30.250.2:17890", "10.20.0.2:17890"]
+    assert ports[0] == "tcp://10.20.0.2:17890"
+
+
+def test_link_local_skipped_without_interface(monkeypatch):
+    monkeypatch.delenv("MK20_TCP", raising=False)
+    tried = []
+    monkeypatch.setattr(T.sys, "platform", "darwin")
+    monkeypatch.setattr(T, "ecm_interface", lambda: None)
+    monkeypatch.setattr(T, "tcp_reachable", lambda t, timeout=0.5: tried.append(t) and False)
+    T.find_ports()
+    assert "169.254.7.2:17890" not in tried

@@ -26,8 +26,11 @@ class Transport(Protocol):
 
 
 # ECM+HID+ADB composite: KD is reachable through the on-device PTY<->TCP bridge (no ACM port then).
-# MK20_TCP=host:port overrides, MK20_TCP=off disables. Device 10.20.0.2 / Mac 10.20.0.1 on the ECM link.
-DEFAULT_TCP = "10.20.0.2:17890"
+# MK20_TCP=host:port overrides, MK20_TCP=off disables. Firmware >= 1.1.0: device 172.30.250.2 / Mac 172.30.250.1;
+# 1.0.x used 10.20.0.2 / 10.20.0.1; every release also answers on the link-local alias 169.254.7.2. Candidates are
+# probed in order (all bound to the ECM interface), so the daemon follows an upgrade or a firmware rollback.
+DEFAULT_TCP_CANDIDATES = ("172.30.250.2:17890", "10.20.0.2:17890", "169.254.7.2:17890")
+DEFAULT_TCP = DEFAULT_TCP_CANDIDATES[0]
 # Fixed host-side MAC of the device's ECM function (gadget host_addr) -> finds the ECM interface by MAC.
 ECM_HOST_MAC = "02:11:22:33:44:56"
 IP_BOUND_IF = 25  # macOS <netinet/in.h>; scoped routing: packets leave via this interface even if a TUN owns the route
@@ -99,9 +102,19 @@ def _bound_socket(host: str, port: int, timeout: float) -> socket.socket:
     return s
 
 
+def tcp_targets() -> list[str]:
+    """MK20_TCP=host:port -> [that]; MK20_TCP=off -> []; default -> DEFAULT_TCP_CANDIDATES."""
+    v = os.environ.get("MK20_TCP")
+    if v is None:
+        return list(DEFAULT_TCP_CANDIDATES)
+    v = v.strip()
+    return [] if v.lower() in ("", "off", "0", "no") else [v]
+
+
 def tcp_target() -> str | None:
-    v = os.environ.get("MK20_TCP", DEFAULT_TCP).strip()
-    return None if v.lower() in ("", "off", "0", "no") else v
+    """First configured candidate (compat); find_ports() probes all of them."""
+    t = tcp_targets()
+    return t[0] if t else None
 
 
 def tcp_reachable(target: str, timeout: float = 0.5) -> bool:
@@ -117,9 +130,14 @@ def tcp_reachable(target: str, timeout: float = 0.5) -> bool:
 def find_ports() -> list[str]:
     """Return candidate ports: ``tcp://`` bridge first when the ECM link answers, then CDC-ACM by VID/PID."""
     out: list[str] = []
-    t = tcp_target()
-    if t and tcp_reachable(t):
-        out.append(f"tcp://{t}")
+    iface_known = sys.platform != "darwin" or ecm_interface() is not None
+    for t in tcp_targets():
+        host = t.rpartition(":")[0]
+        if not iface_known and host.startswith("169.254."):
+            continue  # link-local is only meaningful bound to the ECM interface
+        if tcp_reachable(t):
+            out.append(f"tcp://{t}")
+            break
     try:
         from serial.tools import list_ports
     except ImportError:  # pragma: no cover
