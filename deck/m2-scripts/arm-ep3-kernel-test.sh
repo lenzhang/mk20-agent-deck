@@ -15,5 +15,5 @@ adb -t $T shell "set -e; S=/mnt/SDCARD; M=/data/mk20
   [ \"\$(sha256sum \$M/boot-new.img | cut -d' ' -f1)\" = $E ]
   touch \$S/mk20-no-adb \$S/mk20-no-bootevery; rm -f \$S/mk20/boot-delayed/*.sh \$S/boot-swap.rebackup \$S/mk20-no-bootswap
   mkdir -p \$S/mk20/boot-once; mv -f \$S/mk20/bootswap.sh.stage \$S/mk20/boot-once/bootswap.sh; mv -f \$S/mk20/bootswap.sh.sha256.stage \$S/mk20/boot-once/bootswap.sh.sha256
-  rm -f \$S/boot-swap.dry \$S/mk20-swap-ok \$S/mk20/boot-once/postswap-check.sh*; echo armed-ep3 > \$S/boot-swap-status.txt; sync; sh -n \$M/postswap-check.sh; ls \$S | grep -E "mk20-|boot-swap"; ls \$S/mk20/boot-delayed 2>/dev/null; ls -la \$S/mk20/boot-once \$M/boot-new.img*; cat \$M/boot-new.img.sha256"
+  rm -f \$S/boot-swap.dry \$S/mk20-swap-ok \$S/mk20/boot-once/postswap-check.sh*; echo armed-ep3 > \$S/boot-swap-status.txt; sync; sh -n \$M/postswap-check.sh; ls \$S | grep -E mk20-.boot-swap; ls \$S/mk20/boot-delayed 2>/dev/null; ls -la \$S/mk20/boot-once \$M/boot-new.img*; cat \$M/boot-new.img.sha256"
 echo "ARMED. Next: reboot (soft reboot may hang -> user power-cycles). bootswap runs at boot, writes, verifies, reboots."
