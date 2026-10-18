@@ -8,8 +8,7 @@ Every --interval s it appends one JSON line to <out>/soak-<start>.jsonl:
   loader state, KD pid (restart detection), log sizes, bridge listeners + established clients (device netstat),
   ping loss/rtt on 172.30.250.2 and ping on 169.254.7.2 bound to the MK20 interface.
 Every --deep-every samples (0 = never) also: a read-only HID check (Mac still enumerates the 1d6b:0104 keyboard).
-With --tcp-probe (off by default: check-then-connect is racy) deep samples also do bound TCP connects + getInfo
-when the single-client KD bridge has no client.
+No TCP connects to the single-client KD bridge (they would evict the deck daemon).
 Never changes device state: no reboots, no USB changes, no HID writes, never kicks a connected bridge client.
 On exit (incl. SIGTERM) writes <out>/soak-<start>.summary.json: pass/fail counts, reboots (uptime drops), KD
 restarts, rollbacks newer than the one present at start, composite losses, min memory, min FAT free.
@@ -33,7 +32,6 @@ import mk20_accept as acc  # noqa: E402
 import tcp_transport as tt  # noqa: E402
 
 STOP = False
-TCP_PROBE = False
 
 
 def _stop(*_a):
@@ -77,18 +75,13 @@ def sample(deep: bool) -> dict:
     if iface:   # link-local path without touching the bridge (macOS ping -b = bind to interface)
         _, p, _ = acc.run_proc(["ping", "-b", iface, "-c", "2", "-i", "0.3", "-t", "5", acc.LL_IP], 15)
         s["ping_ll_loss"] = float((re.search(r"([\d.]+)% packet loss", p) or [None, "100"])[1])
-    # The bridge serves ONE client and drops the old one on a new connect: only open TCP when nobody is connected.
-    if TCP_PROBE and deep and s.get("bridge_clients") == 0 and not STOP:
-        s["tcp_primary"] = acc.tcp_bound(acc.DEV_IP, iface)[0]
-        s["tcp_ll"] = acc.tcp_bound(acc.LL_IP, iface)[0]
-        s["getinfo"] = acc.get_info(iface)[0]
+    # No TCP connects at all: the KD bridge serves ONE client and evicts the old one on a new connect.
     if deep and not STOP:
         s["hid"] = acc.hid_enumerated()
     h = s.get("health") or {}
     s["ok"] = bool(s["adb"] and iface and s["route_if"] == iface and h.get("status") == "ok" and h.get("kd") == 1 and h.get("composite") is True
                    and s["ping_loss"] == 0 and s.get("ping_ll_loss", 100) == 0
                    and s.get("listen_primary") and s.get("listen_ll")
-                   and s.get("tcp_primary", True) and s.get("tcp_ll", True) and s.get("getinfo", True)
                    and s.get("hid", True))
     return s
 
@@ -105,12 +98,8 @@ def main() -> int:
     ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--interval", type=int, default=300)
     ap.add_argument("--deep-every", type=int, default=12)
-    ap.add_argument("--tcp-probe", action="store_true",
-                    help="deep samples also connect to the bridge + getInfo when it has no client (racy: off by default)")
     ap.add_argument("--out", default=os.path.expanduser("~/mk20-backup/soak"))
     a = ap.parse_args()
-    global TCP_PROBE
-    TCP_PROBE = a.tcp_probe
     if not os.environ.get("MK20_ADB"):
         sys.exit("set MK20_ADB (MK20-only adb wrapper, never the watch)")
     os.makedirs(a.out, exist_ok=True)

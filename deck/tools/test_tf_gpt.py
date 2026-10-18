@@ -13,26 +13,33 @@ MK20 = [(41464, 65536), (107000, 504), (107504, 504), (108008, 12600), (120608, 
 NLBA = 2217760 + 5644512 + 34
 
 
-def make(path, parts, nlba=NLBA, corrupt_backup=False):
+def make(path, parts, nlba=NLBA, corrupt_backup=False, slot0=0, backup_parts=None, backup_guid=None):
     es, n = 128, 128
-    ents = bytearray(es * n)
-    for i, (s, c) in enumerate(parts):
-        struct.pack_into("<16s16sQQ", ents, i * es, uuid.uuid4().bytes, uuid.uuid4().bytes, s, s + c - 1)
-    ecrc = zlib.crc32(bytes(ents)) & 0xFFFFFFFF
+    disk = uuid.uuid4().bytes
 
-    def hdr(cur, alt, ent):
+    def table(ps):
+        t = bytearray(es * n)
+        for i, (s, c) in enumerate(ps):
+            struct.pack_into("<16s16sQQ", t, (slot0 + i) * es, b"T" * 16, bytes([i + 1]) * 16, s, s + c - 1)
+        return t
+    ents = table(parts)
+    bents = table(backup_parts) if backup_parts else ents
+    ecrc = zlib.crc32(bytes(ents)) & 0xFFFFFFFF
+    becrc = zlib.crc32(bytes(bents)) & 0xFFFFFFFF
+
+    def hdr(cur, alt, ent, crc, guid):
         h = bytearray(92)
         struct.pack_into("<8sIII", h, 0, b"EFI PART", 0x10000, 92, 0)
-        struct.pack_into("<QQQQ16sQIII", h, 24, cur, alt, 34, nlba - 34, uuid.uuid4().bytes, ent, n, es, ecrc)
+        struct.pack_into("<QQQQ16sQIII", h, 24, cur, alt, 34, nlba - 34, guid, ent, n, es, crc)
         struct.pack_into("<I", h, 16, zlib.crc32(bytes(h)) & 0xFFFFFFFF)
         return bytes(h)
     with open(path, "wb") as f:
         f.truncate(nlba * 512)
         f.seek(510); f.write(b"\x55\xaa")
-        f.seek(512); f.write(hdr(1, nlba - 1, 2))
+        f.seek(512); f.write(hdr(1, nlba - 1, 2, ecrc, disk))
         f.seek(1024); f.write(ents)
-        f.seek((nlba - 33) * 512); f.write(ents if not corrupt_backup else b"x" + bytes(ents[1:]))
-        f.seek((nlba - 1) * 512); f.write(hdr(nlba - 1, 1, nlba - 33))
+        f.seek((nlba - 33) * 512); f.write(bents if not corrupt_backup else b"x" + bytes(bents[1:]))
+        f.seek((nlba - 1) * 512); f.write(hdr(nlba - 1, 1, nlba - 33, becrc, backup_guid or disk))
 
 
 def check(p):
@@ -71,3 +78,37 @@ def test_header_crc_refused(tmp_path):
 def test_partition_image_refused(tmp_path):
     (tmp_path / "p4.img").write_bytes(b"\0" * 6451200)
     assert check(tmp_path / "p4.img").returncode != 0
+
+
+def test_reordered_slots_refused(tmp_path):
+    make(tmp_path / "a.img", [MK20[1], MK20[0]] + MK20[2:])
+    assert check(tmp_path / "a.img").returncode != 0
+
+
+def test_p6_wrong_size_refused(tmp_path):
+    bad = list(MK20); bad[5] = (2217760, 1000)
+    make(tmp_path / "a.img", bad)
+    assert "p6" in check(tmp_path / "a.img").stderr
+
+
+def test_slots_shifted_refused(tmp_path):
+    make(tmp_path / "a.img", MK20, slot0=1)
+    assert "slots" in check(tmp_path / "a.img").stderr
+
+
+def test_backup_table_differs_refused(tmp_path):
+    bad = list(MK20); bad[5] = (2217760, 5644000)
+    make(tmp_path / "a.img", MK20, backup_parts=bad)
+    assert "differ" in check(tmp_path / "a.img").stderr
+
+
+def test_backup_guid_differs_refused(tmp_path):
+    make(tmp_path / "a.img", MK20, backup_guid=b"G" * 16)
+    assert "guid" in check(tmp_path / "a.img").stderr
+
+
+def test_image_with_trailing_space_backup_misplaced_refused(tmp_path):
+    make(tmp_path / "a.img", MK20)
+    with open(tmp_path / "a.img", "r+b") as f:
+        f.truncate((NLBA + 100) * 512)   # backup GPT no longer at the last LBA
+    assert check(tmp_path / "a.img").returncode != 0

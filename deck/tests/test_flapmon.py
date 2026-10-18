@@ -40,8 +40,10 @@ def test_five_drops_in_window_roll_back_once(dev, tmp_path):
     seq = []
     for i in range(7):
         seq += [("default", 101 + i), ("configured", 101 + i)]
-    n, log, busy = run_fm(dev, tmp_path, seq)
-    assert n == 1 and busy and log.count("FLAPPING -> rollback") == 1 and "5 in 60s" in log
+    n, log, busy = run_fm(dev, tmp_path, seq, cmd=["sh", "-c",
+                          f"[ -f {tmp_path}/busy ] && echo busy-during > {tmp_path}/bd; echo 'roll back' >> '{tmp_path}/rolled'"])
+    assert n == 1 and not busy and log.count("FLAPPING -> rollback") == 1 and "5 in 60s" in log
+    assert (tmp_path / "bd").exists()   # gadget.busy held while the rollback ran, cleared after
 
 
 def test_drops_outside_window_do_not_roll_back(dev, tmp_path):
@@ -78,10 +80,14 @@ def test_unplug_after_long_suspend_not_counted(dev, tmp_path):
     assert n == 0 and "'not attached' after 60s suspend" in log
 
 
-def test_failed_rollback_clears_busy(dev, tmp_path):
+def test_failed_rollback_retries_then_flags_stock_and_reboots(dev, tmp_path, monkeypatch):
+    monkeypatch.setattr(dev, "env", dict(dev.env, MK20_FLAP_TRIES="2", MK20_FLAP_RETRY_S="0",
+                                         MK20_FLAP_FLAG=str(tmp_path / "nocomp"), MK20_FLAP_REBOOT=str(tmp_path / "reboot")))
     n, log, busy = run_fm(dev, tmp_path, [("default", 101), ("configured", 101), ("default", 102)],
-                          drops=2, cmd=["sh", "-c", "exit 7"])
-    assert "rollback command failed rc=7" in log and not busy
+                          drops=2, cmd=["sh", "-c", f"echo x >> {tmp_path}/tries; exit 7"])
+    assert "rollback attempt 1 failed rc=7" in log and "rollback attempt 2 failed rc=7" in log and not busy
+    assert len((tmp_path / "tries").read_text().split()) == 2
+    assert (tmp_path / "nocomp").exists() and (tmp_path / "reboot").exists()
 
 
 def test_stopfile_ends_monitor(dev, tmp_path):

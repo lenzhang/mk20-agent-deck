@@ -37,14 +37,15 @@ Symptoms and where to go:
 
 | flag | effect |
 |---|---|
-| `mk20-no-composite` | release runs in stock mode: ACM + KD (+adb), no ECM/HID/bridge |
+| `mk20-no-composite` | release runs in stock mode: ACM + KD (+adb), no ECM/HID/bridge. **Set automatically** (1.1.4+) when flapmon's rollback fails 3 times; flapmon then hard-resets. Delete it once the cause is fixed |
 | `mk20-gadget-nohid` | composite without HID (ECM + ADB + bridge). Not a fix for the ep3 kernel: 1.1.x releases don't run on it at all (see level 5) |
 | `mk20-no-adb` | no adb in any mode |
 | `mk20-no-release` | loader skips releases: legacy `boot-every/` jobs only (stock + adb keeper) |
 | `mk20-no-watch` | boot stub does nothing at all: pure vendor behaviour, no rescue watcher, no adb |
 
 Over adb: `$MK20_ADB shell 'touch /mnt/SDCARD/mk20-no-composite && sync'`, then reboot. Without adb, **unplug the
-MK20 first** (rootfs and overlay live on the card), then put the TF card in the Mac (the FAT volume mounts in Finder), create the empty file, eject cleanly, and put the card back.
+MK20 first** (rootfs and overlay live on the card), then put the TF card in the Mac (if macOS offers to
+"Initialize" the card, click **Ignore**; never Initialize or Erase) (the FAT volume mounts in Finder), create the empty file, eject cleanly, and put the card back.
 Delete the flag to undo.
 
 Commands the watcher polls for every 2 s:
@@ -105,7 +106,7 @@ Kernel images. All are 6451200 B and all report `uname` #221, so identify them *
 | ep5out (running) | `7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc` | acm,adb,ecm,hid | `~/mk20-backup/tf/patched-ep5out/p4-patched-ep3int-ep5out.img` | `/data/mk20/kernel/7326d9e5ab9f/boot.img` |
 
 Steps:
-1. Power off and take the TF card out. Put it in the Mac's reader.
+1. Power off and take the TF card out. Put it in the Mac's reader. If macOS offers "Initialize…", click **Ignore**.
 2. Run `bash tools/tf-identify.sh` and note `diskN`. `tf-restore-boot.sh` refuses internal disks, anything not
    3–5 GB, and an s4 that isn't exactly 6451200 B.
 3. Rehearse first: `bash tools/tf-restore-boot.sh --disk diskN --image ~/mk20-backup/tf/live-221-parts/p4.img

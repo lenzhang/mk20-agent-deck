@@ -9,8 +9,8 @@ Checks (each PASS/FAIL, exit 1 if any FAIL):
   bound to the MK20 interface); Protocol A getInfo over TCP (deviceVersion); HID: Mac sees the 1d6b:0104 keyboard
   and two all-released reports written to /dev/hidg0 are consumed by the host within 5 s (detached, never killed); Mac route to the device not via a
   TUN; FAT/mem headroom. --reboot first does one watcher hardreset (WDT) and checks hardreset.last fat_ro=y.
-Read-only by default. Opt-in: --reboot (one WDT reboot), --tcp (active bridge connects + getInfo; would kick
-another bridge client), --hid-write (two all-released HID reports; presses nothing).
+Read-only by default (writes nothing to the device). Opt-in: --reboot (one WDT reboot); --tcp (maintenance only:
+active bridge connects + getInfo, evicts a client that attaches during the probe).
 """
 from __future__ import annotations
 
@@ -78,6 +78,12 @@ def bridge_clients() -> int | None:
                and l.split()[3].endswith(f":{PORT}"))
 
 
+def mac_bridge_sockets() -> bool:
+    """Any socket on this Mac to the bridge (established or connecting)? Unknown -> True (fail closed)."""
+    rc, o, _ = run_proc(["lsof", "-nP", f"-iTCP@{DEV_IP}:{PORT}", f"-iTCP@{LL_IP}:{PORT}"], 10)
+    return rc not in (0, 1) or bool(o.strip())
+
+
 def bridge_listening() -> tuple[bool, bool]:
     _, o = sh("netstat -ltn 2>/dev/null | grep ':%d '" % PORT, timeout=10)
     return f"{DEV_IP}:{PORT}" in o, f"{LL_IP}:{PORT}" in o
@@ -128,6 +134,7 @@ def wait_adb(present: bool, limit: float) -> bool:
 
 def do_reboot(run: Run) -> None:
     _, up0 = sh("cut -d. -f1 /proc/uptime")
+    _, bid0 = sh("cat /proc/sys/kernel/random/boot_id")
     sh("touch /mnt/SDCARD/cmd-reboot && sync")
     t0 = time.time()
     run.check("reboot: device left USB", wait_adb(False, 120), f"{time.time() - t0:.0f}s")
@@ -146,7 +153,8 @@ def do_reboot(run: Run) -> None:
         time.sleep(5)
     run.check("reboot: mk20d confirmed this boot", done)
     _, up1 = sh("cut -d. -f1 /proc/uptime")
-    run.check("reboot: fresh boot", up1.strip().isdigit() and up0.strip().isdigit() and int(up1) < int(up0),
+    _, bid1 = sh("cat /proc/sys/kernel/random/boot_id")
+    run.check("reboot: fresh boot (boot_id changed)", bool(bid0.strip()) and bool(bid1.strip()) and bid0.strip() != bid1.strip(),
               f"uptime {up0.strip()} -> {up1.strip()}")
     _, hr = sh("cat /data/mk20/state/hardreset.last")
     run.check("reboot: clean FAT ro remount", "fat_ro=y" in hr and "mount_hung=n" in hr, hr.strip())
@@ -179,38 +187,20 @@ def hid_enumerated() -> bool:
     return any(re.search(r"0x1d6b\s+0x104\s+\S+\s+1\s+6\s", l) for l in out.splitlines())
 
 
-def hid(run: Run, write: bool = False) -> None:
+def hid(run: Run) -> None:
+    # Passive only: no writes to /dev/hidg0 (a blocked writer could linger if the host stops polling). The device side
+    # is covered by mk20d's self-test ("PASS hid") in the health check.
     run.check("hid: Mac enumerates 1d6b:0104 keyboard", hid_enumerated())
-    if not write:
-        return
-    # Two ALL-RELEASED keyboard reports (report ID 1). The first write() returns once queued; the second completes only
-    # after the host read the first, so finishing proves the host polls the HID endpoint. Nothing is ever pressed, so a
-    # report left queued (host not polling) can't latch a key on the Mac. The writer runs detached and is never killed.
-    # [ -c ]: never create a regular file /dev/hidg0 when the HID function is absent (it would mask the real node).
-    # BusyBox here has no setsid/nohup: a subshell that ignores SIGHUP, with stdio detached, outlives the adb shell.
-    z = "'\\001\\000\\000\\000\\000\\000\\000\\000\\000'"
-    tag = f"{os.getpid()}-{int(time.time())}"
-    cmd = ("[ -c /dev/hidg0 ] || { echo NOHIDG; exit 0; }; "
-           "grep -qx configured /sys/class/udc/*/state || { echo NOTCONF; exit 0; }; "
-           "mkdir -p /tmp/mk20; mkdir /tmp/mk20/hidtap.busy 2>/dev/null || { echo HIDBUSY; exit 0; }; "
-           f"D=/tmp/mk20/hidtap.{tag}; "
-           f"( trap '' HUP; printf {z} > /dev/hidg0 && printf {z} > /dev/hidg0 && touch $D; rmdir /tmp/mk20/hidtap.busy ) "
-           "</dev/null >/dev/null 2>&1 & "
-           "i=0; while [ $i -lt 5 ] && [ ! -f $D ]; do sleep 1; i=$((i+1)); done; "
-           "[ -f $D ] && { rm -f $D; echo HIDOK; } || echo HIDPENDING")
-    _, o = sh(cmd, timeout=20)
-    det = next((k for k in ("HIDOK", "NOHIDG", "NOTCONF", "HIDBUSY", "HIDPENDING") if k in o), o.strip()[-80:])
-    run.check("hid: host consumes keyboard reports (all keys released)", det == "HIDOK", det)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reboot", action="store_true")
     ap.add_argument("--no-hid", action="store_true", help="skip the HID enumeration check")
-    ap.add_argument("--hid-write", action="store_true",
-                    help="also write two all-released reports to /dev/hidg0 (proves the host polls; off by default)")
     ap.add_argument("--tcp", action="store_true",
-                    help="active TCP connects + getInfo (kicks any other bridge client; only when nothing else uses it)")
+                    help="MAINTENANCE ONLY: bound TCP connects + getInfo. The bridge is single-client, so this evicts any"
+                         " connected client (e.g. the deck daemon); refused if one is connected, but a client attaching"
+                         " during the probe is still evicted (accepted risk, operator's explicit choice)")
     ap.add_argument("--json")
     a = ap.parse_args()
     try:
@@ -267,14 +257,16 @@ def main() -> int:
     elif nc:   # connecting would kick the deck daemon off the single-client bridge: an active client proves the path
         run.check("tcp bridge: client already connected (connect tests skipped, not disturbed)", True, f"{nc} client(s)")
     else:
-        ok, d = tcp_bound(DEV_IP, iface)
-        run.check("tcp bridge primary (bound)", ok, d)
-        ok, d = tcp_bound(LL_IP, iface)
-        run.check("tcp bridge link-local 169.254.7.2 (bound)", ok, d)
-        ok, d = get_info(iface)
-        run.check("protocol A getInfo over TCP", ok, d)
+        # re-check right before each connect (device netstat + no local socket to the bridge); narrows, not closes, the race
+        for name, fn in (("tcp bridge link-local 169.254.7.2 (bound)", lambda: tcp_bound(LL_IP, iface)),
+                         ("protocol A getInfo over TCP (bound, primary)", lambda: get_info(iface))):
+            if bridge_clients() != 0 or mac_bridge_sockets():
+                run.check(name, False, "a client appeared: skipped (not evicted)")
+                break
+            ok, d = fn()
+            run.check(name, ok, d)
     if not a.no_hid:
-        hid(run, write=a.hid_write)
+        hid(run)
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"time": t0, "pass": run.ok, "results": run.results, "health": h}, f, indent=1)

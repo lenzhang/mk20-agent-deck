@@ -6,7 +6,9 @@
 # default 5 s) that ends in anything but configured (a bus reset/glitch the poll caught as idle). A long suspend
 # (Mac sleep) is not a flap: suspend, resume and a resume reset / unplug after it are logged, not counted.
 # Single instance (flock on fd 8, not inherited by the rollback). The stopfile is re-checked right before rollback.
-# If the rollback command fails, the busy marker is cleared so mk20d does not wait on a dead failsafe.
+# The busy marker is cleared after every rollback attempt. A failed rollback is retried (MK20_FLAP_TRIES, default 3,
+# MK20_FLAP_RETRY_S apart); if all fail, the persistent mk20-no-composite flag is set and the watcher hard-resets
+# (cmd-reboot), so the next boot runs stock until the flag is deleted.
 # Writes the ready marker (MK20_FLAP_READY, default /tmp/mk20/flapmon.ready) once the lock is held.
 # Test env: MK20_UPTIME_CMD (seconds), MK20_FLAP_POLL (default 0.3), MK20_BUSY, MK20_FLAP_LOCK, MK20_FLAP_SUSP_S.
 [ $# -ge 7 ] && [ "$6" = -- ] || { echo "usage: flapmon.sh state window drops log stopfile -- cmd..." >&2; exit 2; }
@@ -40,10 +42,19 @@ while [ ! -f "$STOP" ]; do
     echo "flapmon $now: link drop ($s), $cnt in ${W}s" >> "$LOG"
     if [ "$cnt" -ge "$N" ]; then
       [ -f "$STOP" ] && exit 0
-      echo "flapmon $now: FLAPPING -> rollback" >> "$LOG"; touch "$BUSY"
-      "$@" 8>&-; rc=$?
-      [ "$rc" = 0 ] || { echo "flapmon $now: rollback command failed rc=$rc" >> "$LOG"; rm -f "$BUSY"; }
-      exit 0
+      echo "flapmon $now: FLAPPING -> rollback" >> "$LOG"
+      try=1
+      while :; do
+        touch "$BUSY"; "$@" 8>&-; rc=$?; rm -f "$BUSY"
+        [ "$rc" = 0 ] && exit 0
+        echo "flapmon $(up): rollback attempt $try failed rc=$rc" >> "$LOG"
+        [ "$try" -ge "${MK20_FLAP_TRIES:-3}" ] && break
+        try=$((try+1)); sleep "${MK20_FLAP_RETRY_S:-20}"
+      done
+      # still not stock: persist stock mode (flag file, read at boot) and hard-reset via the rescue watcher
+      echo "flapmon $(up): rollback failed $try times -> ${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite} + reboot" >> "$LOG"
+      touch "${MK20_FLAP_FLAG:-/mnt/SDCARD/mk20-no-composite}" && touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}"; sync
+      exit 1
     fi
   fi
   prev=$s; sleep "${MK20_FLAP_POLL:-0.3}"

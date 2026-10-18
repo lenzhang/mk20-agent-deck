@@ -134,32 +134,48 @@ cleanup() {
   rm -f /tmp/mk20/gadget.busy
 }
 # rollback runs before any preflight so an abnormal state cannot block it
-# Rollback guard /tmp/mk20/rollback.once/{pid,done}: flapmon, the confirm waiter and mk20d can all ask. One owner
-# (mkdir is atomic) runs cleanup; others wait for it. "done" is written only after stock is VERIFIED, and every
-# caller re-verifies, so exit 0 always means stock ACM+UDC+KD is up. A dead owner (killed half-way) is taken over;
-# no fd/lock is held, so daemons spawned by cleanup can't pin the guard. Cleared when a composite comes up.
-stock_ok() { [ -e $C/acm.usb0 ] && [ -n "$(udc_now)" ] && pgrep -f KeyboardDevice >/dev/null; }
+# Rollback guard: flapmon, the confirm waiter and mk20d can all ask for --rollback-now. State in /tmp/mk20/rollback.once
+# (owner "pid starttime deadline", and "done"); every claim/reclaim/clear happens under flock on rollback.lock (fd 7),
+# which is closed again BEFORE cleanup runs, so daemons spawned by cleanup never inherit it. "done" is written only after
+# stock is verified (ACM linked, UDC bound, KD running) and every caller re-verifies: exit 0 always means stock is up.
+# A dead owner (pid gone or pid reused: start time differs) is reclaimed; a live owner past its 150-s deadline is
+# killed (that exact process) and then reclaimed. The composite path clears the guard only when no live owner exists.
+RB=/tmp/mk20/rollback.once; RBL=/tmp/mk20/rollback.lock
+stock_ok() { [ -e $C/acm.usb0 ] && [ ! -e $C/ecm.usb0 ] && [ ! -e $C/hid.usb0 ] && [ -n "$(udc_now)" ] &&
+  [ -c /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && ! grep -qE ' /data/(setusbconfig|appLunch\.sh) ' /proc/mounts &&
+  pgrep -f '^/data/KeyboardDevice' >/dev/null; }
+rb_status() { echo "$1" > /mnt/SDCARD/gadget-ecm-hid.status 2>/dev/null; }
+pstart() { awk '$3 != "Z" {print $22}' "/proc/$1/stat" 2>/dev/null; }   # empty if gone or a zombie
+now_s() { cut -d. -f1 /proc/uptime; }
+rb_lock() { mkdir -p /tmp/mk20; exec 7>"$RBL"; flock -x 7; }
+rb_unlock() { flock -u 7; exec 7>&-; }
+# owner_live: 0 = a live owner within its deadline holds the guard; 1 = no (live) owner
+owner_live() {
+  read -r op ost odl < "$RB/owner" 2>/dev/null || return 1
+  case "$op$ost$odl" in ''|*[!0-9]*) return 1;; esac
+  [ "$(pstart "$op")" = "$ost" ] || return 1
+  [ "$(now_s)" -lt "$odl" ] && return 0
+  log "rollback owner $op past its deadline -> killing it"; kill -9 "$op" 2>/dev/null
+  i=0; while [ "$(pstart "$op")" = "$ost" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done
+  [ "$(pstart "$op")" = "$ost" ] && return 0; return 1
+}
 if [ "${1:-}" = --rollback-now ]; then
-  RB=/tmp/mk20/rollback.once; mkdir -p /tmp/mk20; i=0
-  while ! mkdir $RB 2>/dev/null; do
-    if [ -f $RB/done ]; then
-      stock_ok && { log "rollback already done (stock verified)"; exit 0; }
-      log "rollback marked done but stock not verified -> redo"; rm -rf $RB; continue
+  i=0
+  while :; do
+    rb_lock
+    if [ -f $RB/done ] && stock_ok; then rb_unlock; log "rollback already done (stock verified)"; exit 0; fi
+    if [ -d $RB ] && owner_live; then
+      rb_unlock; [ $i -ge 700 ] && { log "rollback owner still running after 175 s"; exit 1; }; sleep 0.25; i=$((i+1)); continue
     fi
-    op=$(cat $RB/pid 2>/dev/null)
-    case "$op" in
-      ''|*[!0-9]*) [ $i -ge 8 ] && { log "rollback guard without owner -> taking over"; rm -rf $RB; continue; };;
-      *) kill -0 "$op" 2>/dev/null || { log "rollback owner $op gone -> taking over"; rm -rf $RB; continue; };;
-    esac
-    [ $i -ge 600 ] && { log "rollback owner ${op:-?} still running after 150 s"; exit 1; }
-    sleep 0.25; i=$((i+1))
+    if stock_ok; then rm -rf $RB; rb_unlock; log "rollback requested but stock already verified"; exit 0; fi
+    rm -rf $RB; mkdir $RB && echo "$$ $(pstart $$) $(( $(now_s) + 150 ))" > $RB/owner; rb_unlock; break
   done
-  echo $$ > $RB/pid
   log "rollback requested"; cleanup
-  i=0; while ! stock_ok && [ $i -lt 20 ]; do sleep 0.5; i=$((i+1)); done
-  if stock_ok; then touch $RB/done; log "rollback verified"; exit 0; fi
-  log "rollback NOT verified (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now)) -> guard released"
-  rm -rf $RB; exit 1
+  i=0; while ! stock_ok && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done   # KD's own setusbconfig reset can lag
+  rb_lock
+  if stock_ok; then touch $RB/done; rb_unlock; log "rollback verified"; rb_status rollback-verified; exit 0; fi
+  rm -rf $RB; rb_unlock; rb_status rollback-NOT-verified
+  log "rollback NOT verified (acm=$([ -e $C/acm.usb0 ] && echo y || echo n) udc=$(udc_now) ttyGS0=$([ -L /dev/ttyGS0 ] && echo link || echo dev)) -> guard released"; exit 1
 fi
 
 # ---- preflight (nothing touched yet) ----
@@ -170,6 +186,7 @@ UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
 [ -x /bin/adbd ] || { log "ABORT no /bin/adbd"; exit 1; }
 grep -q '^usb_f_ecm ' /proc/modules || [ -f $ECMKO ] || { log "ABORT no $ECMKO"; exit 1; }
 [ -n "${MK20_REL:-}" ] && [ -f "$MK20_REL/share/flapmon.sh" ] || { log "ABORT no flapmon.sh (MK20_REL unset?)"; exit 1; }
+rb_lock; if [ -d $RB ] && [ ! -f $RB/done ] && owner_live; then rb_unlock; log "ABORT rollback in progress"; exit 1; fi; rb_unlock
 touch /tmp/mk20-flapmon-stop   # a re-run: any old flap monitor / confirm waiter exits (new ones start below)
 log "BEGIN udc=$UDC kdsvc=${KDSVC:-none}"
 
@@ -246,17 +263,18 @@ pgrep -f KeyboardDevice >/dev/null || die "KD not running"
 # test hook (one-shot): prove the failure rollback with everything set up (bridge, shims, KD on PTY)
 if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
 rm -f /mnt/SDCARD/mk20-composite-ok
-rm -rf /tmp/mk20/rollback.once
+rb_lock; owner_live || rm -rf $RB; rb_unlock   # never clear a live rollback owner
 OK=1
 log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_IP bridge=[$BRIDGE_LISTEN] kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
 # within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
-ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh)" ] || { OK=0; die "cannot stage rollback copy"; }
+ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh.new && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh.new)" ] &&
+  mv -f /tmp/mk20-gadget.sh.new /tmp/mk20-gadget.sh || { OK=0; die "cannot stage rollback copy"; }   # atomic: a running rollback keeps its file
 # flap monitor (both modes, share/flapmon.sh): >=5 configured->not-configured drops within 60 s -> rollback to
 # ACM+KD+adb. Host USB suspend (Mac sleep) is not a flap.
 rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready
 FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
-{ [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
+{ [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh.new && mv -f /tmp/mk20-flapmon.sh.new /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
 ( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG"
   exec sh /tmp/mk20-flapmon.sh "/sys/class/udc/$UDC/state" "$FLAP_WINDOW" "$FLAP_DROPS" "$LOG" /tmp/mk20-flapmon-stop -- \
     sh /tmp/mk20-gadget.sh --rollback-now </dev/null >/dev/null 2>&1 9>&- ) &
@@ -267,7 +285,7 @@ if [ "$MODE" = --boot ]; then
   touch /mnt/SDCARD/mk20-composite-ok; echo "gadget-ok-boot" > /mnt/SDCARD/gadget-ecm-hid.status; exit 0
 fi
 ( trap '' HUP INT; exec sh -c "i=0; while [ \$i -lt 90 ]; do [ -f /mnt/SDCARD/mk20-composite-ok ] && exit 0; [ -f /tmp/mk20-flapmon-stop ] && exit 0; sleep 2; i=\$((i+1)); done; MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh /tmp/mk20-gadget.sh --rollback-now" </dev/null >/dev/null 2>&1 9>&- ) &
-WP=$!; sleep 1; kill -0 $WP 2>/dev/null || { OK=0; die "confirm waiter did not start -> rollback now"; }
+WP=$!; sleep 1; kill -0 $WP 2>/dev/null || [ -f /mnt/SDCARD/mk20-composite-ok ] || { OK=0; die "confirm waiter did not start -> rollback now"; }
 log "confirm window 180s started (pid $WP)"
 echo "gadget-ok" > /mnt/SDCARD/gadget-ecm-hid.status
 exit 0
