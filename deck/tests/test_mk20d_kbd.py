@@ -498,3 +498,26 @@ def test_kbd_stop_kills_validated_supervisor_and_kbd(gh):
         run("kbd_stop"); assert other.poll() is None                  # stale pid file -> foreign pid untouched
     finally:
         other.kill(); other.wait()
+
+
+def test_selftest_warns_hid_lost_after_restart(kmode, rel):
+    """A restart after the USB re-bind closes the parked hidg0 fd (f_hid cdev quirk): WARN only, reboot clears it."""
+    dev = kmode
+    status(dev, hid_open=0)
+    _, ls = st(dev, rel)
+    assert not [l for l in ls if "hidg0" in l]                              # no restart yet: in-process recovery
+    dev.p("tmp/mk20/kbd.crashes").write_text("total=1 last_rc=139 last_up=1\n")
+    dev.p("data/mk20/state/pending").write_text("9.9.9\n")
+    r, ls = st(dev, rel)
+    assert "WARN hidg0 not open after mk20-kbd restart (f_hid re-bind quirk: reboot clears it)" in ls and r.returncode == 0
+    status(dev, hid_open=1)
+    _, ls = st(dev, rel)
+    assert not [l for l in ls if "hidg0" in l]
+
+
+def test_mk20_kbd_has_no_hid_exit_path():
+    """HID recovery is in-process: the run loop leaves only on a signal, poll() or GD32 read failure."""
+    src = (DECK / "kbd/mk20_kbd.c").read_text()
+    loop = src[src.index("while (!g_stop)"):src.index("if (k.hid) { hid_release_all")]
+    assert loop.count("break;") == 2 and "perror(\"poll\")" in loop and "perror(\"gd32 read\")" in loop
+    assert "exit(" not in loop and "return" not in loop.replace("return;", "")

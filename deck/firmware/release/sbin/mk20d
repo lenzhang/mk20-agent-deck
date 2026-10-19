@@ -22,6 +22,10 @@
 #                   rollback; after confirm -> WARN + health flags, restarts continue. Ends on /tmp/mk20-kbd-stop
 #                   (gadget.sh) or composite down. Status /run/mk20/kbd.status, log /tmp/mk20/kbd.log.
 #                   Debug/rescue-only manual overrides: /data/mk20/use-kd or FAT mk20-use-kd -> stock KD.
+#                   HID: mk20-kbd recovers hidg0 IN-PROCESS (stale node parked, never closed; reopen with back-off)
+#                   and never exits for HID reasons. A RESTART after the ~74 s USB re-bind closes the parked fd and
+#                   (Tina f_hid cdev_init quirk) leaves /dev/hidg0 ENXIO until reboot: panels/keys/host still work,
+#                   selftest WARNs "hidg0 not open after restart" (reboot clears it). Never restart it for HID.
 #   mk20d version
 # Gate policy: kernel not in kernel/ALLOWLIST -> NO USB changes at all (KD's stock ACM stays); kernel without ecm or
 # vendor hash mismatch or config/flag -> stock ACM+KD+adb (adb with restore-to-serial on failure, like legacy adb.sh).
@@ -93,7 +97,8 @@ selftest() { # FAIL = host-independent breakage. Composite rollback to stock is 
     kl=$( { kbd_running && echo "PASS mk20-kbd running" || kbd_bad "mk20-kbd not running"; kbd_status_check
       kr=$(kbd_recent); kt=$(kbd_total)
       if [ "$kr" -ge "${MK20_KBD_CRASHES:-3}" ]; then kbd_bad "mk20-kbd crash loop: $kr exits in ${MK20_KBD_CRASH_WINDOW:-300}s ($kt total)"
-      elif [ "$kt" -gt 0 ]; then echo "INFO mk20-kbd restarted $kt times"; fi; } )
+      elif [ "$kt" -gt 0 ]; then echo "INFO mk20-kbd restarted $kt times"; fi
+      [ "$kt" -gt 0 ] && grep -q '"hid_open": *0[,}]' "$KST" 2>/dev/null && echo "WARN hidg0 not open after mk20-kbd restart (f_hid re-bind quirk: reboot clears it)"; } )
     echo "$kl"; echo "$kl" | grep -q '^FAIL' && f=1
   else
     [ -f "$TM/kbd-degraded" ] && echo "WARN mk20-kbd not active: $(head -n 1 "$TM/kbd-degraded")"

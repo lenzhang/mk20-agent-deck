@@ -191,6 +191,7 @@
   - A fatal error on a node that is not stale closes and reopens nothing; retries stay on the 100 ms hard-error tick (no open/ESHUTDOWN spin, r121 #2).
   - Teardown (stop file / SIGUSR1) closes the current and all parked fds. gadget.sh's holder check also matches `/dev/hidg0 (deleted)`.
   - **Limitation:** if mk20-kbd dies while the gadget stays up with a parked fd, hidg0 stays unopenable until the next re-bind or reboot. mk20-kbd keeps retrying the open (≤1 s), and keys/panels keep working without HID.
+  - **Consequence for supervision:** a process that has been through a re-bind cannot be restarted without losing HID until reboot. So all HID recovery is in-process: mk20-kbd never exits for HID reasons (no exit path on hidg0 errors; SIGUSR1/stop-file teardown closes and later reopens inside the same process). The supervisor's restarts exist only for real crashes. After such a restart, selftest WARNs (never FAILs) "hidg0 not open after mk20-kbd restart"; a reboot clears it. Documented in RECOVERY.md.
   - Status file: `hid_open`, `hid_reopens`, `hid_replaced`. Covered by unit tests and e2e.
 - **Release binary:** `tools/mk20-build-bins.sh` builds `bin/mk20-kbd` (static armhf, stripped, 529,696 B) next to the bridge and router. `test_release_binaries_match_source` covers it. FEATURE_KBD stays off by default.
 
