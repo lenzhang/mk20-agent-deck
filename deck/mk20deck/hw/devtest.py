@@ -300,9 +300,13 @@ class DevTest:
         self.step_no += 1
         self.step_log.append({"t": round(self.clock(), 3), "step": name})
         self._show(text, highlight)
+        # t0 BEFORE the prompt: a scripted (or very fast) press can arrive while _progress() is
+        # still writing its file; taking t0 afterwards dropped that press from the step window
+        # (flaky test_headless_devtest_*: key "2,1" missing when the progress write took >50 ms).
+        t0 = self.clock()
         self.prompter.instruct(name, text)
         self._progress(name, text)
-        return self.clock()
+        return t0
 
     def _progress(self, name: str, text: str, state: str = "waiting") -> None:
         if not self.progress_path:

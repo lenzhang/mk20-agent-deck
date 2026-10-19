@@ -492,3 +492,23 @@ def test_step_plan_key_subset():
     p = step_plan(DevTestOptions(headless=True, only=("keys", "knobs", "ptt", "hid_leak", "reconnect"),
                                  key_subset=("1,1", "2,1", "3,1")))
     assert len(p) == 1 + 3 + 6 + 1 + 1 and "第1行 第3列" in p[3]
+
+
+def test_step_t0_taken_before_prompt_even_if_progress_is_slow(tmp_path, monkeypatch):
+    """Regression: t0 used to be taken after _progress(); a slow progress write let the scripted
+    press land before t0, so the step only saw the release and timed out."""
+    from mk20deck.hw import devtest as D
+    fired = []
+
+    class P(D.ScriptedPrompter):
+        def instruct(self, step, text):
+            fired.append(time.monotonic())
+
+    state = {"dev": MockDevice(), "present": True}
+    dt = _headless(tmp_path, state, {}, FakeHid())
+    dt.prompter = P()
+    dt.clock = time.monotonic
+    monkeypatch.setattr(dt, "_show", lambda *a, **k: None)
+    monkeypatch.setattr(dt, "_progress", lambda *a, **k: time.sleep(0.15))
+    t0 = dt._step("key:2,1", "x")
+    assert fired and t0 <= fired[0]
