@@ -42,10 +42,11 @@ void screen_discard(screen_t *s)
 {
     lock_all(s);
     for (int i = 0; i < PANEL_COUNT; i++) {
-        memset(s->pending[i], 0, px_count(i) * 2);
-        s->dirty[i] = 1;
+        if (i==19) continue; /* e-stop stays queued exactly as rendered */
+        /* Keep pixels (especially fb21's footer) until a replacement is ready.
+         * Invalidate even identical replacements after an old in-flight write. */
+        s->epoch[i]++; s->invalid[i]=1; s->dirty[i]=0;
     }
-    pthread_cond_signal(&s->cv[0]); pthread_cond_signal(&s->cv[1]);
     unlock_all(s);
 }
 
@@ -69,7 +70,7 @@ int screen_set_canvas565(screen_t *s, const uint16_t *cv)
             uint16_t *dst = s->pending[i] + (size_t)y * p->w;
             if (memcmp(dst, src, (size_t)p->w * 2)) { memcpy(dst, src, (size_t)p->w * 2); changed = 1; }
         }
-        if (changed) { s->dirty[i] = 1; sig[p->bus] = 1; }
+        if (changed || s->invalid[i]) { s->invalid[i]=0; s->dirty[i] = 1; sig[p->bus] = 1; }
         n += s->dirty[i];
     }
     for (int b = 0; b < 2; b++) if (sig[b]) pthread_cond_signal(&s->cv[b]);
@@ -88,7 +89,8 @@ int screen_set_tile565(screen_t *s, int fb, int x, int y, int w, int h, const ui
         uint16_t *dst = s->pending[i] + (size_t)(y + r) * p->w + x;
         if (memcmp(dst, px + (size_t)r * w, (size_t)w * 2)) { memcpy(dst, px + (size_t)r * w, (size_t)w * 2); changed = 1; }
     }
-    if (changed) {
+    if (changed || s->invalid[i]) {
+        s->invalid[i]=0;
         s->dirty[i] = 1; ret = 1; pthread_cond_signal(&s->cv[p->bus]);
     }
     pthread_mutex_unlock(&s->mu[p->bus]);
@@ -149,6 +151,7 @@ static void *writer(void *arg)
         }
         if (s->stop[bus] == 2 || (s->stop[bus] && i < 0)) break;   /* 2 = stop now, 1 = drain */
         memcpy(s->wbuf[bus], s->pending[i], px_count(i) * 2);     /* snapshot: latest content wins */
+        uint64_t epoch=s->epoch[i];
         s->dirty[i] = 0; s->busy[bus] = 1;
         pthread_mutex_unlock(&s->mu[bus]);
         int rc = write_buf(s, i, s->wbuf[bus]);
@@ -158,10 +161,10 @@ static void *writer(void *arg)
             memcpy(s->shadow[i], s->wbuf[bus], px_count(i) * 2);
             s->writes[i]++;
             /* re-dirtied meanwhile but back to what we just wrote? then it is clean */
-            if (s->dirty[i] && !memcmp(s->pending[i], s->shadow[i], px_count(i) * 2)) s->dirty[i] = 0;
+            if (epoch==s->epoch[i] && s->dirty[i] && !memcmp(s->pending[i], s->shadow[i], px_count(i) * 2)) s->dirty[i] = 0;
         } else {
             __atomic_fetch_add(&s->write_errors, 1, __ATOMIC_RELAXED);
-            s->dirty[i] = 1;   /* retry later, with back-off so a missing fb cannot spin */
+            if (epoch==s->epoch[i]) s->dirty[i] = 1; /* cancelled old snapshots must not retry */
             if (s->stop[bus]) break;
             struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += (long)(s->retry_ms % 1000) * 1000000L; ts.tv_sec += s->retry_ms / 1000 + ts.tv_nsec / 1000000000L;

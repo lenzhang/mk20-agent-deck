@@ -411,6 +411,7 @@ void ctl_client_gone(ctl_t *c, int ci, int64_t now_ms)
 {
     (void)now_ms;
     if (ci < 0 || ci >= CTL_MAX_CLIENTS) return;
+    c->client_generation[ci]++;
     if (c->cfd[ci] >= 0) close(c->cfd[ci]);
     c->cfd[ci] = -1; c->inlen[ci] = 0;
     ctl_screen_gone(c, ci);

@@ -27,13 +27,19 @@ intersecting the footer are reserved. fb21 `screen.text` implicitly addresses on
 permitted text still returns `rendered:false`, with no pixel mutation. No new
 agent pixel transport is invented. Builtin show/delete restrictions are retained.
 
-At a route switch, pending display content is replaced and prior receive bytes are
+At a route switch, pending ordinary display work is cancelled without queuing black
+frames; fb20 and the existing footer pixels remain intact until replacement renders.
+Cancelled in-flight writer snapshots cannot requeue a stale retry. Prior receive bytes are
 marked stale, including partial frames and a snapshot of unread fd bytes. Their eventual cmd100 ack retains its id;
 cmd200 returns `E`. A decoder result carries its original epoch and cannot publish
 on a later route. A fresh full JPEG is required after every host-route switch/loss;
 tiles cannot initialize a page. One in-flight writer may finish, then its replacement
 follows. Host handshakes/loss never blank or navigate local pages or discard drafts.
 Press-time routing consumes local releases; leaving Mac PTT sends modifier-up.
+Every outstanding host press receives an up before navigation taps. Agent page-id
+changes are boundaries even within the AGENT route; releases go to the original
+page/connection, with disconnect generations preventing client-slot reuse leaks.
+HOME/LS pressed keys retain their labels and show a white top edge until release.
 Mac PTT edges are not also forwarded as host key events. Host K1 effort and short
 K2 toggle are forwarded as complete short taps only after the release decision.
 Physical host-page navigation synchronizes the known host mode with a K2 tap; L4
@@ -63,18 +69,30 @@ methods: valid decoded full frames in an explicitly entered host route establish
 liveness (three samples over >=2 s); valid permitted tiles maintain it after the first
 full frame. After loss, `getInfo` serves as the legacy fresh handshake. No cached
 pre-switch frame is reused, and host recovery never enables/resumes an agent.
+Hello/heartbeat requests already queued at physical route entry remain valid: they
+carry no page content. Only stale ui.page requests are rejected by the JSON epoch
+gate. This avoids swallowing the handshake when HOME-to-L1 entry races ui.hello.
 
 JPEG decoding runs in one worker, reusing the existing host canvas. There is one
 compressed job <=1 MiB plus at most one <=1 MiB fresh replacement while an older
 epoch is still decoding (no unbounded frame queue), a 1 MiB operational parser payload cap, and
 one 121,552-byte local panel scratch. Decode/full-page production are capped at4 Hz;
-local redraws coalesce and run one panel per poll boundary. Safety/ctl deadlines run
+local redraws coalesce and run one panel per poll boundary. Cmd200 stages into one
+121,552-byte slot; same-rectangle updates coalesce, other rectangles return the
+existing `E` payload while occupied. Enqueue never wakes a writer. JPEG, tiles and
+ordinary local panels share a 250 ms per-panel cooldown and bus byte allowances
+(416,464 / 360,448 bytes per 250 ms), charging whole-panel writer cost even for a
+small tile. Safety faces/live-host footer updates preempt ordinary production.
+A newer accepted full frame or route boundary cancels an unproduced tile.
+Budget waits sleep instead of spinning. Safety/ctl deadlines run
 before HID/host work and after each render slice. Echo waits during the unchanged
 allow-listed knob initialization service the safety/UI loop every <=10 ms; GD32
 encode/tx gates and outbound bytes are unchanged. Writers stay asynchronous with
 200 ms retry backoff; failure to start them exits instead of blocking on SPI in the
 safety loop. A successful confirmation presentation is acknowledged only when all
 required pending panels are successfully written and both writers are idle.
+Every boundary resets confirmation `shown` and its timestamp. Returning to L5
+requires a new completed presentation and a new 300 ms guard.
 
 Host output has a bounded 16 KiB nonblocking buffer; partial writes are retained.
 Space for 64 empty cmd100 acks is reserved against JSON reply floods. This preserves
@@ -120,6 +138,18 @@ U2 validation (2026-10-19, macOS arm64/clang; offline cached Python dependencies
   test passed on isolated retry (2 passed / 85 deselected). No agent source changed.
 - No static armhf toolchain is installed. Release compiler source lists include U2;
   no binary was installed or released. No physical timing/resource acceptance claimed.
+
+Round 1 fixes (macOS, offline): `tests/onboard_test` and
+`tests/onboard_test_tsan` pass 2,736 checks, including unread-hello startup, HID
+stop/reopen/replacement/backpressure/shutdown, local feedback, press ownership,
+confirmation re-entry, intermediate reserved queues and actual cmd200 flood/acks.
+The fake-clock page-settling helper advances the new shared 250 ms budget; the
+rate tests explicitly hold time fixed and check 249/250 ms boundaries.
+`make -C deck onboard-ui-test` passes using `UV_CACHE_DIR=/tmp/mk20-a2-uv-cache`
+with the target's UV_OFFLINE=1 (11 sim tests, unchanged U1 conformance/goldens).
+`make -C deck/kbd test` stops at 3,999 core checks / 14 environmental failures;
+the same 14 assertions were reproduced from base 25b07e1. Linux e2e requires
+`/proc`; it was not run on macOS and `tests/e2e_run.py` is unchanged in this round.
 
 The following U1 notes are retained as historical foundation documentation and counts.
 

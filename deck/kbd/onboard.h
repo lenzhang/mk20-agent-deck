@@ -17,6 +17,7 @@ void onboard_loss(struct kbd_s *k);
 int onboard_json(struct kbd_s *k, const char *method, const char *s, size_t n, char *result, size_t cap);
 void onboard_jpeg(struct kbd_s *k, const uint8_t *data, size_t n);
 int onboard_tile_allowed(struct kbd_s *k, int fb, int y, int h);
+int onboard_tile(struct kbd_s *k, int fb, int x, int y, int w, int h, const uint16_t *px);
 void onboard_valid_frame(struct kbd_s *k, int64_t now);
 const ui_t *onboard_ui(const struct kbd_s *k);
 enum onboard_route onboard_current(const struct kbd_s *k);

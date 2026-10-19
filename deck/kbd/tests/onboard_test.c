@@ -12,7 +12,8 @@
 static int checks, fails; static int64_t now;
 #define CHECK(x) do { checks++; if (!(x)) { fails++; fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x); } } while (0)
 static int64_t clock_ms(void *ctx) { (void)ctx; return now; }
-static void pump(kbd_t *k) { for (int i=0;i<32;i++) kbd_service(k,now); }
+/* Let the common 4 Hz producer budget advance before settling a whole page. */
+static void pump(kbd_t *k) { now+=250; for (int i=0;i<64;i++) kbd_service(k,now); }
 static void key(kbd_t *k,int fb,int down) { uint8_t ev[]={0x16,(uint8_t)down,(uint8_t)((fb-1)/5),(uint8_t)((fb-1)%5),0,0}; kbd_on_gd32(k,ev,6); }
 static void knob(kbd_t *k,int slot,int down) { uint8_t ev[]={0x16,(uint8_t)down,(uint8_t)slot,(uint8_t)slot,0,0}; kbd_on_gd32(k,ev,6); }
 static void json(kbd_t *k,const char *s) { host_frame f={42,101,(uint32_t)strlen(s),(const uint8_t *)s}; kbd_on_host_frame(k,&f); }
@@ -76,7 +77,7 @@ static void health_and_stale(void) {
     pump(&k); CHECK(hash(&k,1)==host_face);
     uint64_t e=hash(&k,20), strip=0; for(int i=112*428;i<142*428;i++) strip+=k.scr.pending[20][i];
     CHECK(!onboard_tile_allowed(&k,20,0,1)); CHECK(!onboard_tile_allowed(&k,21,111,2));
-    tile(&k,1,0,1); CHECK(k.scr.pending[0][0]==0xffff);
+    tile(&k,1,0,1); pump(&k); CHECK(k.scr.pending[0][0]==0xffff);
     CHECK(hash(&k,20)==e); uint64_t after=0; for(int i=112*428;i<142*428;i++) after+=k.scr.pending[20][i]; CHECK(strip==after);
     json(&k,"{\"method\":\"ui.page\",\"page\":\"L4\",\"generation\":5}"); CHECK(onboard_current(&k)==ONBOARD_L4);
     CHECK(!onboard_tile_allowed(&k,1,0,1));
@@ -204,7 +205,7 @@ static void unread_receive_work(void) {
     jpeg(&k); finish_decode(&k); CHECK(k.st.jpg_ok==1 && onboard_tile_allowed(&k,1,0,1));
     /* One fresh post-switch frame must survive an older decode still in flight. */
     now+=300; jpeg(&k); onboard_route(&k,ONBOARD_L4); jpeg(&k);
-    for(int i=0;i<1000 && !onboard_tile_allowed(&k,1,0,1);i++) { kbd_service(&k,now); usleep(1000); }
+    for(int i=0;i<1000 && !onboard_tile_allowed(&k,1,0,1);i++) { now++; kbd_service(&k,now); usleep(1000); }
     CHECK(onboard_tile_allowed(&k,1,0,1)); CHECK(onboard_current(&k)==ONBOARD_L4);
     key(&k,14,1); CHECK(onboard_current(&k)==ONBOARD_L4);
     key(&k,14,0); CHECK(onboard_current(&k)==ONBOARD_L1 && !onboard_tile_allowed(&k,1,0,1));
@@ -235,9 +236,10 @@ static void in_flight_replacement(void) {
     for(int fb=1;fb<=21;fb++) { snprintf(path,sizeof path,"%s/fb%d",root,fb); unlink(path); }
     CHECK(!rmdir(root));
 }
+#include "tests_onboard_r1.inc"
 int main(void) {
     FILE *f=fopen("tests/data/canvas.jpg","rb"); if(!f) return 2;
     fseek(f,0,SEEK_END); jpg_size=(size_t)ftell(f); rewind(f); jpg=malloc(jpg_size); CHECK(fread(jpg,1,jpg_size,f)==jpg_size); fclose(f);
-    offline_and_ownership(); health_and_stale(); safety(); acknowledgements(); reservations(); legacy_and_ptt(); initialization_deadline(); pixels_and_regions(); unread_receive_work(); in_flight_replacement(); free(jpg);
+    offline_and_ownership(); health_and_stale(); safety(); acknowledgements(); reservations(); legacy_and_ptt(); initialization_deadline(); pixels_and_regions(); unread_receive_work(); in_flight_replacement(); round1_regressions(); free(jpg);
     printf("U2 onboard: %d checks, %d failures\n",checks,fails); return !!fails;
 }

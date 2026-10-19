@@ -54,7 +54,7 @@ ui-test: tests/ui_load
 # U2 uses the real compositor with fake clock/fds and buffers only.
 tests/onboard_headless: tests/onboard_headless.c $(SRC) *.h
 	$(CC) $(CFLAGS) $(UI_SAN) -g -I. -o $@ tests/onboard_headless.c $(SRC) -pthread
-tests/onboard_test: tests/onboard_test.c $(SRC) *.h
+tests/onboard_test: tests/onboard_test.c tests/tests_onboard_r1.inc $(SRC) *.h
 	$(CC) $(CFLAGS) $(UI_SAN) -g -I. -o $@ tests/onboard_test.c $(SRC) -pthread
 onboard-test: tests/onboard_test tests/onboard_headless
 	./tests/onboard_test
@@ -62,5 +62,5 @@ ui-test: onboard-test
 test: onboard-test
 .PHONY: onboard-test
 
-tests/onboard_test_tsan: tests/onboard_test.c $(SRC) *.h
+tests/onboard_test_tsan: tests/onboard_test.c tests/tests_onboard_r1.inc $(SRC) *.h
 	$(CC) $(CFLAGS) -fsanitize=thread -g -I. -o $@ tests/onboard_test.c $(SRC) -pthread

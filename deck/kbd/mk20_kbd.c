@@ -130,6 +130,7 @@ static int run(const struct run_opts *o)
         else { k.ctl = &ctl; if (o->ctl_allow) ctl_set_allowed(&ctl, 1); fprintf(stderr, "mk20-kbd: control socket %s%s\n", o->ctl, o->ctl_allow ? " (dev: allowed at start)" : ""); }
     }
     kbd_service(&k,mono_ms());
+    kbd_service(&k,mono_ms()); /* queue both e-stop and footer before waking writers, also with --no-hid */
     if (screen_start_writers(&k.scr)) {
         fprintf(stderr, "mk20-kbd: writer threads failed; refusing blocking UI fallback\n");
         kbd_free(&k); return 1;

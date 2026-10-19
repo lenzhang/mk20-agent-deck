@@ -22,6 +22,10 @@ struct onboard_s {
     uint32_t render;
     uint16_t *scratch;
     int key_owner[20], knob_down[2], knob_long[2];
+    struct { int page, client; uint64_t generation; } agent_owner[20];
+    uint32_t pressed;
+    uint16_t *tile_px; int tile_fb, tile_x, tile_y, tile_w, tile_h;
+    int64_t budget_at, panel_at[PANEL_COUNT]; size_t bus_left[2];
     int64_t knob_at[2];
     int last_page, last_stop, confirm_pending, incompatible; long confirm_id;
     pthread_t decoder;
@@ -31,6 +35,7 @@ struct onboard_s {
 };
 static void host_tap(kbd_t *k, int slot);
 static int host_route(const onboard_t *o) { return o->route == ONBOARD_L1 || o->route == ONBOARD_L4; }
+static int safety_footer(const onboard_t *o) { return host_route(o) && (o->fresh || o->health==HOST_SUSPECT); }
 static int page_id(enum onboard_route r) { return r == ONBOARD_L5 ? 1 : r == ONBOARD_L1 || r == ONBOARD_L4 ? 2 : 0; }
 static void release_mac(kbd_t *k)
 {
@@ -40,11 +45,30 @@ static void release_mac(kbd_t *k)
         o->key_owner[i] = 0;
     }
 }
+static void release_key(kbd_t *k, int i)
+{
+    onboard_t *o = k->onboard; int owner = o->key_owner[i];
+    o->key_owner[i] = 0; /* notify may disconnect a client */
+    if (owner == 1) {
+        char j[160]; int n=host_json_key_state(j,sizeof j,i%5,i/5,0);
+        if (n>0) kbd_host_send(k,KBD_EVENT_ID,HOST_CMD_JSON,j,(size_t)n);
+    } else if (owner == 2 && k->hid) hid_set_mod(k->hid,HID_MOD_RALT,0);
+    else if (owner == 3 && k->ctl) {
+        int ci=o->agent_owner[i].client;
+        if (ci >= 0 && ci < CTL_MAX_CLIENTS &&
+            k->ctl->client_generation[ci] == o->agent_owner[i].generation) {
+            char ev[160];
+            snprintf(ev,sizeof ev,"{\"ev\":\"key\",\"page\":%d,\"row\":%d,\"col\":%d,\"down\":false}",o->agent_owner[i].page,i/5,i%5);
+            ctl_notify(k->ctl,ci,ev);
+        }
+    }
+}
 static void boundary(kbd_t *k, int redraw)
 {
     onboard_t *o = k->onboard;
-    release_mac(k);
-    if (redraw || host_route(o)) memset(o->key_owner,0,sizeof o->key_owner);
+    for (int i=0;i<20;i++) release_key(k,i);
+    if (k->ctl) { k->ctl->confirm.shown=0; k->ctl->confirm.shown_ms=0; }
+    o->tile_fb=0;
     free(o->next_jpg); o->next_jpg=NULL;
     o->epoch++; o->fresh = o->publishing = 0;
     /* Preserve framing and acknowledgements for even a partial old frame; poison its origin. */
@@ -93,11 +117,13 @@ int onboard_enable(kbd_t *k)
     if (!o) return -1;
     o->scratch = malloc(428 * 142 * 2);
     if (!o->scratch) { free(o); return -1; }
+    o->tile_px = malloc(428 * 142 * 2);
+    if (!o->tile_px) { free(o->scratch); free(o); return -1; }
     ui_init(&o->ui, NULL, unavailable_apply, NULL);
     o->kbd = k; o->host_page=ONBOARD_L1; o->render = ALL_PANELS; o->epoch = 1;
     pthread_mutex_init(&o->mu, NULL); pthread_cond_init(&o->cv, NULL);
     if (pthread_create(&o->decoder, NULL, decode, o)) {
-        pthread_mutex_destroy(&o->mu); pthread_cond_destroy(&o->cv); free(o->scratch); free(o); return -1;
+        pthread_mutex_destroy(&o->mu); pthread_cond_destroy(&o->cv); free(o->tile_px); free(o->scratch); free(o); return -1;
     }
     k->onboard = o; k->local_ui = 0;
     return 0;
@@ -109,7 +135,7 @@ void onboard_free(kbd_t *k)
     pthread_mutex_lock(&o->mu); o->stop = 1; pthread_cond_signal(&o->cv); pthread_mutex_unlock(&o->mu);
     pthread_join(o->decoder, NULL); free(o->jpg); free(o->next_jpg);
     pthread_mutex_destroy(&o->mu); pthread_cond_destroy(&o->cv);
-    free(o->scratch); free(o); k->onboard = NULL;
+    free(o->tile_px); free(o->scratch); free(o); k->onboard = NULL;
 }
 void onboard_loss(kbd_t *k)
 {
@@ -187,6 +213,7 @@ void onboard_jpeg(kbd_t *k, const uint8_t *data, size_t n)
         o->jpg = malloc(n);
         if (o->jpg) {
             memcpy(o->jpg,data,n); o->jpg_size = n; o->decode_epoch = o->epoch;
+            o->tile_fb=0; /* a newer complete frame supersedes an unproduced tile */
             o->next_decode=kbd_now(k)+250; o->job = 1; pthread_cond_signal(&o->cv);
         }
     }
@@ -197,6 +224,29 @@ int onboard_tile_allowed(kbd_t *k, int fb, int y, int h)
     onboard_t *o = k->onboard;
     return host_route(o) && o->health == HOST_ONLINE && o->fresh && !o->publishing &&
         fb >= 1 && fb <= 21 && fb != 20 && (fb != 21 || (y >= 0 && h > 0 && y <= 112-h));
+}
+int onboard_tile(kbd_t *k, int fb, int x, int y, int w, int h, const uint16_t *px)
+{
+    onboard_t *o=k->onboard;
+    if (!onboard_tile_allowed(k,fb,y,h) || x<0 || y<0 || w<=0 || h<=0 ||
+        x>PANELS[fb-1].w-w || y>PANELS[fb-1].h-h) return -1;
+    /* One bounded slot. Same-rectangle updates coalesce; other work gets the
+     * existing E response until this slot is published. Acks still mean handled. */
+    if (o->tile_fb && (o->tile_fb!=fb || o->tile_x!=x || o->tile_y!=y || o->tile_w!=w || o->tile_h!=h)) return -1;
+    memcpy(o->tile_px,px,(size_t)w*h*2);
+    o->tile_fb=fb; o->tile_x=x; o->tile_y=y; o->tile_w=w; o->tile_h=h;
+    return 0;
+}
+static int budget(onboard_t *o, int fb, int64_t now)
+{
+    const panel_t *p=&PANELS[fb-1]; size_t bytes=(size_t)p->w*p->h*2;
+    if (fb==20) return 1; /* safety preempts ordinary production */
+    if (now>=o->budget_at) {
+        o->bus_left[0]=416464; o->bus_left[1]=360448; o->budget_at=now+250;
+    }
+    if (now<o->panel_at[fb-1] || bytes>o->bus_left[p->bus]) return 0;
+    o->bus_left[p->bus]-=bytes; o->panel_at[fb-1]=now+250;
+    return 1;
 }
 static void stop(kbd_t *k, const char *reason, int64_t now)
 {
@@ -221,7 +271,8 @@ void onboard_tick(kbd_t *k, int64_t now)
         if (k->ctl->estopped && !o->last_stop) { o->last_stop = 1; stop(k,"socket",now); }
         o->last_stop = k->ctl->estopped; o->ui.stopped = k->ctl->estopped;
         if (pid != o->last_page) {
-            onboard_route(k,pid == 1 ? ONBOARD_L5 : pid >= 3 ? ONBOARD_AGENT : pid == 2 ? ONBOARD_L1 : ONBOARD_HOME);
+            enum onboard_route r=pid == 1 ? ONBOARD_L5 : pid >= 3 ? ONBOARD_AGENT : pid == 2 ? ONBOARD_L1 : ONBOARD_HOME;
+            if (r==o->route) boundary(k,1); else onboard_route(k,r);
             o->last_page = pid;
         }
         if (k->ctl->confirm.pending && (!o->confirm_pending || o->confirm_id != k->ctl->confirm.cid)) {
@@ -285,12 +336,13 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
     }
     int fb = row*5+col+1;
     if (fb < 1 || fb > 20) return 1;
+    if (down) o->pressed |= 1u << (fb-1); else o->pressed &= ~(1u << (fb-1));
     if (!down) {
-        int owner = o->key_owner[fb-1]; o->key_owner[fb-1] = 0;
-        if (owner == 2 && k->hid) hid_set_mod(k->hid,HID_MOD_RALT,0);
+        int owner = o->key_owner[fb-1];
+        release_key(k,fb-1);
         if (owner == 4 && o->route == ONBOARD_L4) onboard_route(k,ONBOARD_L1);
-        if (owner == 3 && k->ctl && o->route == ONBOARD_AGENT) ctl_key_event(k->ctl,row,col,0,now);
-        return owner != 1; /* never reinterpret an up on a new route */
+        if (!host_route(o)) o->render |= 1u << (fb-1);
+        return 1; /* release_key delivers to the press-time owner */
     }
     if (fb == 20) { stop(k,"page_key",now); return 1; }
     if (keycode) return 1; /* incompatible GD32 mapping: never synthesize a second action */
@@ -319,7 +371,17 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
         else if (fb == 13) onboard_route(k,ONBOARD_HOME);
         else if (fb == 14) onboard_route(k,ONBOARD_LS);
     } else if (o->route == ONBOARD_AGENT) {
-        if (fb != 16 && k->ctl) { o->key_owner[fb-1] = 3; ctl_key_event(k->ctl,row,col,1,now); }
+        if (fb != 16 && k->ctl) {
+            for (int i=3;i<CTL_SCREEN_PAGES;i++) {
+                ctl_page_t *p=&k->ctl->screen.page[i]; int ci=p->client;
+                if (p->used && p->id==k->ctl->screen.current && ci>=0 && ci<CTL_MAX_CLIENTS &&
+                    k->ctl->allowed && !k->ctl->estopped && (p->bound & (1u << (fb-1)))) {
+                    o->key_owner[fb-1]=3; o->agent_owner[fb-1].page=p->id;
+                    o->agent_owner[fb-1].client=ci; o->agent_owner[fb-1].generation=k->ctl->client_generation[ci];
+                    ctl_key_event(k->ctl,row,col,1,now); break;
+                }
+            }
+        }
     } else {
         if (fb == 5) onboard_route(k,ONBOARD_LS);
         else if (fb == 6 || fb == 18) onboard_route(k,ONBOARD_HOME);
@@ -370,6 +432,9 @@ static void render(kbd_t *k, int fb)
         label(px,w,h,112,host_route(o) ? "Voice: Mac / Right Option" : "Voice: keyboard agent (L5)",0xef7d);
         label(px,w,h,126,o->incompatible ? (o->ui.stopped ? "STOPPED / GD32 mapping incompatible" : "GD32 mapping incompatible") : o->ui.stopped ? "STOPPED / K1 hold: Home" : o->health == HOST_SUSPECT && host_route(o) ? "Mac stale / actions frozen" : host_route(o) ? "K1: settings (L4) / K2: L1-L4" : "K1 hold: Home / K2 hold: E-STOP",0xef7d);
     }
+    /* Local pressed feedback keeps labels and the reserved safety faces intact. */
+    if (fb<20 && !host_route(o) && (o->pressed & (1u << (fb-1))))
+        for (int x=0;x<w;x++) px[x]=0xffff;
     /* On live host pages only reserved pixels may be refreshed by local status. */
     if (fb == 21 && host_route(o) && (o->fresh || o->health == HOST_SUSPECT)) screen_set_tile565(&k->scr,fb,0,112,w,30,px+112*w);
     else screen_set_tile565(&k->scr,fb,0,0,w,h,px);
@@ -391,20 +456,33 @@ void onboard_service(kbd_t *k, int64_t now)
         o->next_jpg=NULL; o->job=1; pthread_cond_signal(&o->cv);
     }
     pthread_mutex_unlock(&o->mu);
+    /* Reserved overlays win even when a stream of ready tiles keeps arriving. */
+    if (o->render & (1u<<19)) {
+        render(k,20); o->render &= ~(1u<<19); return;
+    }
+    if ((o->render & (1u<<20)) && safety_footer(o)) {
+        render(k,21); o->render &= ~(1u<<20); return;
+    }
     if (o->publishing) {
-        int fb = o->panel++; const panel_t *p = &PANELS[fb-1];
+        int fb = o->panel; const panel_t *p = &PANELS[fb-1];
+        if (!budget(o,fb,now)) return;
+        o->panel++;
         int h = fb == 21 ? 112 : p->h;
         if (fb != 20) {
             for (int y = 0; y < h; y++) memcpy(o->scratch+y*p->w,k->canvas+(p->y+y)*CANVAS_W+p->x,(size_t)p->w*2);
             screen_set_tile565(&k->scr,fb,0,0,p->w,h,o->scratch);
         }
         if (o->panel > 21) { o->publishing = 0; o->fresh = 1; o->render |= RESERVED; }
+    } else if (o->tile_fb && budget(o,o->tile_fb,now)) {
+        screen_set_tile565(&k->scr,o->tile_fb,o->tile_x,o->tile_y,o->tile_w,o->tile_h,o->tile_px);
+        o->tile_fb=0;
     } else {
         if (host_route(o) && (o->fresh || o->health == HOST_SUSPECT)) o->render &= RESERVED;
         if (o->render && now >= o->next_render) {
         /* One panel per poll boundary; no full-canvas local allocation. Safety faces first. */
         int i = o->render & (1u << 19) ? 19 : o->render & (1u << 20) ? 20 : 0;
         while (!(o->render & (1u << i))) i++;
+        if (!(i==20 && safety_footer(o)) && !budget(o,i+1,now)) return;
         render(k,i+1); o->render &= ~(1u << i);
         if (!o->render) o->next_render = now + 250;
         }
@@ -420,9 +498,20 @@ int onboard_timeout(kbd_t *k, int64_t now, int dflt)
     onboard_t *o = k->onboard; if (!o) return dflt;
     pthread_mutex_lock(&o->mu); int active = o->job || o->ready; pthread_mutex_unlock(&o->mu);
     if (active && dflt > 10) dflt = 10;
-    if (o->publishing || (o->render && now >= o->next_render)) return 0;
+    if ((o->render & (1u<<19)) || ((o->render & (1u<<20)) && safety_footer(o))) return 0;
+    int producing=o->publishing || o->tile_fb || (o->render && now >= o->next_render);
+    if (producing) {
+        /* Budget exhaustion must sleep, not spin while waiting for fake/real time. */
+        int fb=o->publishing ? o->panel : o->tile_fb;
+        if (!fb) { int i=o->render & (1u<<19) ? 19 : o->render & (1u<<20) ? 20 : 0; while (!(o->render & (1u<<i))) i++; fb=i+1; }
+        int64_t at=o->panel_at[fb-1];
+        if (fb==20 || (!o->publishing && !o->tile_fb && fb==21 && safety_footer(o))) return 0;
+        if (at<=now && o->bus_left[PANELS[fb-1].bus] >= (size_t)PANELS[fb-1].w*PANELS[fb-1].h*2) return 0;
+        if (o->bus_left[PANELS[fb-1].bus] < (size_t)PANELS[fb-1].w*PANELS[fb-1].h*2 && at<o->budget_at) at=o->budget_at;
+        if (at-now<dflt) dflt=(int)(at-now);
+    }
     int64_t left = dflt;
-    if (o->render && o->next_render-now < left) left = o->next_render-now;
+    if (!producing && o->render && o->next_render-now < left) left = o->next_render-now;
     for (int i=0;i<2;i++) if (o->knob_down[i] && !o->knob_long[i] && o->knob_at[i]+1000-now < left) left=o->knob_at[i]+1000-now;
     return left < 0 ? 0 : (int)left;
 }

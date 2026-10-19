@@ -159,8 +159,13 @@ do not consume quota. Excess: `rate_limited`, no queue.
 
 Keyboard-only `ctl_key_event(c,row,col,pressed,now)` emits
 `{"ev":"key","page":3,"row":0,"col":0,"down":true}` only to the owner of the
-currently shown agent page and only for bound keys. Both down and up are forwarded;
-system/user/control pages and inactive-page bindings emit no key events.
+currently shown agent page and only for bound keys. U2 records the down's page and
+connection generation. Leaving that page (including agent page 3 -> 4) completes
+outstanding presses with up events to their original owner; the later physical up
+is consumed. A disconnected/replaced connection never inherits an old release.
+System/user/control pages and inactive-page bindings emit no new downs.
+Leaving/re-entering L5 also resets confirmation presentation eligibility and its
+300 ms guard; the new presentation must finish successfully before Confirm works.
 
 ## Flags, release switches, and keyboard-only work
 

@@ -73,6 +73,11 @@ request. New hosts echo the accepted generation in new widget metadata; legacy
 cmd100/200 have no generation, so accept them only in an explicitly entered current
 host route, and require a fresh full frame after a switch. Flush the receive/decoder
 work for the prior route at switches; never display a cached pre-switch frame.
+Handshake/heartbeat JSON has no page content and survives a route-entry receive
+barrier; stale ui.page requests and image/tile work remain gated. Complete presses
+to their original host/page/connection at every boundary, including agent page-id
+changes, and reset confirmation presentation/guard eligibility on each boundary.
+Cancelling pending display work must not queue black e-stop/footer frames.
 
 For cmd100 retain the empty ack with the same frame id even if hidden/discarded,
 so stop-and-wait never stalls; ack means handled, not physically displayed. Decode
@@ -493,6 +498,14 @@ key->HID latency. Metrics: render CPU, dirty/written panels, bus busy time, RSS/
 input P95, stop latency; target kbd idle <2% of one core and interactive average <10%.
 These are acceptance budgets, not measured claims. Miss -> reduce redraw/host
 resolution/work, never postpone safety or allocate a full Retina frame.
+
+U2 round 1: cmd200 uses one bounded 121,552-byte staging slot (accounted in queues),
+coalesces the same rectangle and returns the existing E error while another rectangle
+occupies it. JPEG, tiles and ordinary on-board panels share per-panel 250 ms cooldowns
+and the bus byte allowances above; partial tiles are charged a complete panel write.
+Safety updates preempt ordinary work. Fake-fd/fake-clock C regressions cover the
+startup/HID path, guard re-entry, original press owners, intermediate reserved
+queues and cmd200 flood/ack/budget boundaries; see kbd/UI.md for host validation.
 
 ## 8. Host tests and milestones
 

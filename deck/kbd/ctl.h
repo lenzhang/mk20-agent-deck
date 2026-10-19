@@ -31,6 +31,7 @@
 typedef struct ctl_s {
     int lfd; char path[108];
     int cfd[CTL_MAX_CLIENTS]; char in[CTL_MAX_CLIENTS][CTL_LINE_MAX]; size_t inlen[CTL_MAX_CLIENTS];
+    uint64_t client_generation[CTL_MAX_CLIENTS]; /* changes on disconnect, even if an fd is reused */
     ctl_screen_t screen;
     hid_t *hid;              /* NULL = no HID (acts fail "no_hid") */
     int64_t (*clock_ms)(void *ctx); void *clock_ctx; /* injectable; defaults to CLOCK_MONOTONIC */

@@ -16,6 +16,8 @@ typedef struct {
     uint16_t *shadow[PANEL_COUNT];   /* last content written */
     uint16_t *pending[PANEL_COUNT];  /* desired content */
     int dirty[PANEL_COUNT];
+    int invalid[PANEL_COUNT];
+    uint64_t epoch[PANEL_COUNT];
     unsigned writes[PANEL_COUNT], write_errors;
     /* threading */
     int threaded, stop[2], busy[2];
@@ -37,7 +39,7 @@ int screen_set_tile565(screen_t *s, int fb, int x, int y, int w, int h, const ui
 int screen_flush_bus(screen_t *s, int bus);
 /* Force every panel dirty (e.g. after start). */
 void screen_invalidate(screen_t *s);
-void screen_discard(screen_t *s); /* replace prior-route pending content, including in-flight retry */
+void screen_discard(screen_t *s); /* cancel old work without queuing black; preserve safety pixels */
 int screen_start_writers(screen_t *s);
 /* drain=1: write everything still dirty first (bounded by the caller's patience: gives up after timeout_ms). */
 void screen_stop_writers(screen_t *s, int drain, int timeout_ms);

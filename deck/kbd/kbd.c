@@ -313,7 +313,9 @@ static void on_json(kbd_t *k, const host_frame *f)
     k->st.json_in++;
     if (kbd_json_str(s, n, "method", m, sizeof m) < 0) { k->st.json_bad++; return; }
     if (k->onboard) {
-        if (f->data == k->hp.buf + HOST_HDR && k->hp.frame_stale && !strncmp(m,"ui.",3)) {
+        /* Handshake/liveness carry no page content. A physical route entry may
+         * race a hello already queued in the tty; only page requests are stale. */
+        if (f->data == k->hp.buf + HOST_HDR && k->hp.frame_stale && !strcmp(m,"ui.page")) {
             ack_json(k,f->id,m,0,"stale UI request"); return;
         }
         char result[256]; int handled = onboard_json(k,m,s,n,result,sizeof result);
@@ -356,7 +358,8 @@ static void on_tile(kbd_t *k, const host_frame *f)
             uint16_t *px = malloc((size_t)w * h * 2);
             if (px) {
                 memcpy(px, f->data + 9, (size_t)w * h * 2);   /* alignment */
-                ok = screen_set_tile565(&k->scr, fb, x, y, w, h, px) >= 0;
+                ok = (k->onboard ? onboard_tile(k,fb,x,y,w,h,px) :
+                      screen_set_tile565(&k->scr, fb, x, y, w, h, px)) >= 0;
                 free(px);
             }
         }
