@@ -19,6 +19,8 @@ const rfb_info_t *rfb_info(const rfb_t *c);
 mem_t *rfb_memory(rfb_t *c);
 /* Wire request supports either mode; snapshot always requests full data. */
 int rfb_request(rfb_t *c, int incremental);
+/* Check the active request's monotonic deadline, including CPU-only work. */
+int rfb_check_deadline(rfb_t *c);
 int rfb_snapshot(rfb_t *c, unsigned max_w, unsigned max_h);
 const scale_t *rfb_frame(const rfb_t *c);
 /* UTF-8 input, converted only if every code point is Latin-1. Otherwise "unsupported".

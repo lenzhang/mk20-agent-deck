@@ -34,6 +34,15 @@ static int password(const char *path, unsigned char pw[8], size_t *n)
 }
 static long rss_kb(void)
 {
+#ifdef __linux__
+    /* Unlike ru_maxrss, this per-mm high-water mark resets across exec. */
+    FILE *f = fopen("/proc/self/status", "r");
+    if (f) {
+        char line[256]; long peak = 0;
+        while (fgets(line, sizeof line, f)) if (sscanf(line, "VmHWM: %ld kB", &peak) == 1) break;
+        fclose(f); return peak;
+    }
+#endif
     struct rusage r; if (getrusage(RUSAGE_SELF, &r)) return 0;
 #ifdef __APPLE__
     return r.ru_maxrss / 1024;
@@ -74,7 +83,9 @@ int main(int argc, char **argv)
     mem_wipe(pw, sizeof pw); if (rc) goto bad;
     if (rfb_snapshot(c, mw, mh)) { error = rfb_error(c); goto bad; }
     const scale_t *s = rfb_frame(c); int64_t enc = rfb_now_ms();
+    if (rfb_check_deadline(c)) { error = rfb_error(c); goto bad; }
     rc = img_jpeg(rfb_memory(c), s->data, s->w, s->h, (int)quality, &jpeg, &bytes);
+    if (rfb_check_deadline(c)) { error = rfb_error(c); goto bad; }
     if (rc) { error = rc == -2 ? "image_limit" : "jpeg"; goto bad; }
     double enc_ms = (double)(rfb_now_ms() - enc) + rfb_info(c)->finish_ms;
     FILE *f = fopen(out, "wb"); if (!f) { error = "output_file"; goto bad; }

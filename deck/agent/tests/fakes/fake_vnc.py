@@ -16,10 +16,11 @@ class FakeVNC:
                  encoding=None, version=8, resize=None, copyrect=False, cursor=False, extended=False,
                  cut_length=0, cut_wire_length=None, delay=0, truncate=False, malformed=None,
                  zrle_mode=0, hextile_mode="raw", split=False, name_length=None, security_reason=None,
-                 socketpair=False, messages=False, resize_at=0):
+                 socketpair=False, messages=False, resize_at=0, solid=None):
         self.w, self.h, self.password, self.sec_type = width, height, password, sec_type
-        self.rgb = image if image is not None else gradient(width, height)
-        assert len(self.rgb) == width * height * 3
+        self.solid = solid
+        self.rgb = None if solid is not None else image if image is not None else gradient(width, height)
+        assert len(solid) == 3 if solid is not None else len(self.rgb) == width * height * 3
         self.encoding, self.version, self.resize = encoding, version, resize
         self.copyrect, self.cursor, self.extended = copyrect, cursor, extended
         self.cut_length, self.cut_wire_length, self.delay = cut_length, cut_wire_length, delay
@@ -182,7 +183,7 @@ class FakeVNC:
                 self.errors.append(f"unknown msg {t}"); return
 
     def _px(self, fmt, i):
-        rr, gg, bb = self.rgb[i], self.rgb[i + 1], self.rgb[i + 2]
+        rr, gg, bb = self.solid if self.solid is not None else (self.rgb[i], self.rgb[i + 1], self.rgb[i + 2])
         v = (rr << fmt["rs"]) | (gg << fmt["gs"]) | (bb << fmt["bs"])
         return v
 

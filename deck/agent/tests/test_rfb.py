@@ -3,8 +3,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import time
+import zlib
 
 import pytest
 
@@ -29,21 +31,29 @@ def binaries(tmp_path_factory):
     return build
 
 
-def invoke(binary, *args, ok=True, password="secret12", server=None):
+def invoke(binary, *args, ok=True, password="secret12", server=None, high_rss_parent=False):
     env = dict(os.environ, MK20_VNC_PASSWORD=password)
     fds = ()
     if server and server.client:
         fds = (server.client.fileno(),); env["MK20_RFB_TEST_FD"] = str(fds[0])
-    p = subprocess.run([str(binary), *map(str, args)], capture_output=True, text=True, env=env, pass_fds=fds, timeout=30)
+    command = [str(binary), *map(str, args)]
+    if high_rss_parent:
+        # Reproduce Linux's inherited ru_maxrss even when pytest itself is small.
+        command = [sys.executable, "-c", "import os, resource, sys; ballast = bytearray(64 * 1024 * 1024); "
+                   "ballast[::4096] = b'x' * (len(ballast) // 4096); "
+                   "assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss >= 64 * 1024; "
+                   "os.execv(sys.argv[1], sys.argv[1:])", *command]
+    p = subprocess.run(command, capture_output=True, text=True, env=env, pass_fds=fds, timeout=30)
     assert p.stderr == "", p.stderr
     assert (p.returncode == 0) == ok, p.stdout
     assert len(p.stdout.splitlines()) == 1
     return json.loads(p.stdout)
 
 
-def snap(binaries, tmp_path, v, *args, ok=True, nosan=False, password="secret12"):
+def snap(binaries, tmp_path, v, *args, ok=True, nosan=False, password="secret12", high_rss_parent=False):
     return invoke(binaries / ("mk20-agent-nosan" if nosan else "mk20-agent"), "--snap", tmp_path / "snap.jpg",
-                  "--host", "127.0.0.1", "--port", v.port, *args, ok=ok, password=password, server=v)
+                  "--host", "127.0.0.1", "--port", v.port, *args, ok=ok, password=password, server=v,
+                  high_rss_parent=high_rss_parent)
 
 
 def probe(binaries, tmp_path, v, mw=1280, mh=800, frames=1, text=None):
@@ -195,6 +205,29 @@ def test_framebuffer_limit_and_timeout(binaries, tmp_path):
         assert snap(binaries, tmp_path, v, ok=False)["error"] == "framebuffer_size"
 
 
+@pytest.mark.parametrize("nosan", [False, True])
+def test_compressed_frame_decode_timeout(binaries, tmp_path, nosan):
+    # Prepare the entire frame before launch: no delivery delay or source-sized allocation.
+    zs = zlib.compressobj()
+    tiles = b"\x01\xe9\x5b\x11" * (128 * 128)  # 8192x8192, solid 64x64 tiles.
+    compressed = zs.compress(tiles) + zs.flush(zlib.Z_SYNC_FLUSH)
+    assert len(compressed) < 128  # Fits in one decoder input buffer for all 67M pixels.
+    body = struct.pack(">I", len(compressed)) + compressed
+
+    class SolidFrame(Server):
+        def _zrle(self, zs, fmt, x, y, w, h):
+            assert (x, y, w, h) == (0, 0, 8192, 8192)
+            return body
+
+    with SolidFrame(8192, 8192, solid=(17, 91, 233), encoding=16, sec_type=1, socketpair=SOCKETPAIR) as v:
+        start = time.monotonic()
+        assert snap(binaries, tmp_path, v, "--timeout-ms", 100, nosan=nosan, ok=False) == {
+            "ok": False, "error": "timeout"}
+        assert time.monotonic() - start < 1
+        assert v.updates == 1 and v.requests == [(0, 0, 0, 8192, 8192)]
+    assert not (tmp_path / "snap.jpg").exists()
+
+
 def test_reason_length_limit(binaries, tmp_path):
     with FakeVNC(9, 7, sec_type=0, security_reason=b"x" * (1024 * 1024 + 1)) as v:
         assert snap(binaries, tmp_path, v, ok=False)["error"] == "length_limit"
@@ -216,8 +249,9 @@ def test_jpeg_hard_cap(binaries, tmp_path):
 @pytest.mark.parametrize("size", [(1280, 800), (2880, 1800)])
 def test_nosan_peak_rss(binaries, tmp_path, size):
     with FakeVNC(*size, encoding=16) as v:
-        info = snap(binaries, tmp_path, v, "--timeout-ms", 15000, nosan=True)
-        assert info["peak_rss_kb"] <= 16 * 1024, info
+        info = snap(binaries, tmp_path, v, "--timeout-ms", 15000, nosan=True,
+                    high_rss_parent=sys.platform.startswith("linux"))
+        assert 0 < info["peak_rss_kb"] <= 16 * 1024, info
         assert info["heap_hw_bytes"] <= 14 * 1024 * 1024, info
         assert (info["w"], info["h"]) == (1280, 800)
         print(json.dumps({"source": size, **info}))

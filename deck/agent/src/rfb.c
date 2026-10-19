@@ -27,6 +27,7 @@ int64_t rfb_now_ms(void)
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 static int fail(rfb_t *c, const char *s) { c->error = s; return -1; }
+int rfb_check_deadline(rfb_t *c) { return rfb_now_ms() >= c->deadline ? fail(c, "timeout") : 0; }
 static unsigned u16(const unsigned char *p) { return (unsigned)p[0] * 256 + p[1]; }
 static uint32_t u32(const unsigned char *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static void p16(unsigned char *p, unsigned n) { p[0] = (unsigned char)(n >> 8); p[1] = (unsigned char)n; }
@@ -210,6 +211,7 @@ static int inside(rfb_t *c, unsigned x, unsigned y, unsigned w, unsigned h)
 }
 static int tile(rfb_t *c, unsigned x, unsigned y, unsigned w, unsigned h)
 {
+    if (rfb_check_deadline(c)) return -1;
     return scale_tile(&c->scale, x, y, w, h, c->tile, (size_t)w * 3) ? fail(c, "invalid_frame") : 0;
 }
 static void rgb(unsigned char *out, const unsigned char *b) { out[0] = b[2]; out[1] = b[1]; out[2] = b[0]; }
@@ -219,6 +221,7 @@ static int raw(rfb_t *c, unsigned x, unsigned y, unsigned w, unsigned h)
         if (rd(c, c->row, (size_t)w * 4)) return -1;
         /* In-place row conversion is safe (destination advances more slowly). */
         for (unsigned xx = 0; xx < w; xx++) { unsigned char p[3]; rgb(p, c->row + xx * 4); memcpy(c->row + xx * 3, p, 3); }
+        if (rfb_check_deadline(c)) return -1;
         if (scale_tile(&c->scale, x, y + yy, w, 1, c->row, (size_t)w * 3)) return fail(c, "invalid_frame");
     }
     return 0;
@@ -408,8 +411,10 @@ refresh:
         }
         if (again) { if (++refreshes > 3) return fail(c, "refresh_limit"); goto refresh; }
         if (!c->scale.pixels) continue; /* capability-only or empty update */
+        if (rfb_check_deadline(c)) return -1;
         int64_t done = rfb_now_ms();
         if (scale_finish(&c->scale)) return fail(c, "incomplete_frame");
+        if (rfb_check_deadline(c)) return -1;
         c->info.finish_ms = (double)(rfb_now_ms() - done); c->info.fb_ms = (double)(done - start); return 0;
     }
     return fail(c, "message_limit");

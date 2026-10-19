@@ -1,0 +1,9 @@
+# Fix r1 for MK20 agent A2 (deck/agent/). Same HARD RULES as deck/reviews/prompt-agent-a2.txt (no git commit, host-only, C11 -Werror, no kbd/firmware changes).
+1. [codex-accept-r1 MAJOR] deck/reviews/agent-a2-codex-accept-r1.md: snapshot deadline is only checked in socket I/O; a tiny highly-compressed
+   8192x8192 ZRLE frame decodes/scales 67M pixels past the deadline. Check the monotonic deadline between tiles/rows (cheaply, e.g. every tile
+   or every N rows) and before finalize/encode; return "timeout". Add a regression with a highly compressed large solid frame and a short timeout.
+2. [Linux full suite FAIL] agent/tests/test_rfb.py::test_nosan_peak_rss fails on Linux: peak_rss_kb 73688 (1280x800) and 90792 (2880x1800).
+   Cause: on Linux ru_maxrss(RUSAGE_SELF) carries the pre-exec high-water mark of the forking parent (pytest), so it measures Python, not
+   mk20-agent. Fix: on Linux report VmHWM from /proc/self/status (per-mm, reset on exec), falling back to ru_maxrss only where /proc is absent;
+   keep macOS bytes→KiB normalisation. Ensure the test checks the agent's own peak. Note in NOTES-agent-a2.md.
+Run `make -C deck/agent test` and the agent pytest suite (TCP tests may be sandbox-blocked; say which ran). Summarise changes.

@@ -1,0 +1,4 @@
+# Read-only acceptance review: MK20 agent A2 VNC capture (last commit in this worktree, deck/agent/; diff HEAD~1..HEAD)
+Spec: deck/reviews/prompt-agent-a2.txt and deck/AGENT-BUILD-PLAN.md §A2/§14.5. Do not modify files. Building/running into /tmp is fine; no network beyond 127.0.0.1, no devices. Note: pytest TCP tests may hit sandbox bind EPERM; they pass outside the sandbox (130 passed).
+Check: spec coverage per item; RFB parser memory safety on hostile servers (lengths, rect bounds, 32-bit armhf int overflow, zlib handling, timeouts, partial reads); DES/VNC auth correctness; streaming downscale truly bounded (no full-res buffer at 2880x1800) and accurate; JPEG cap/fallback; password never in argv/stdout/logs; clipboard Latin-1 refusal and no user-clipboard retention; test quality.
+Output: verdict PASS/FAIL, then findings tagged BLOCKER/MAJOR/MINOR with file:line and concrete fix. Concise.
