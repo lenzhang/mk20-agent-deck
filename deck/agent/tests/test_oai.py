@@ -112,6 +112,35 @@ def test_response_bounds(cli, tmp_path):
     assert run(cli, "parse", 200, path, ok=False)["error"] == "bad_args"
 
 
+@pytest.mark.parametrize("raw,ok", [(b"sk-secret", True), (b"sk-secret\n", True), (b"sk-secret\n\n", False),
+                                     (b"sk-secret\r\n", False), (b"sk-\nsecret", False), (b"\n", False),
+                                     (b"x" * 512 + b"\n", True), (b"x" * 513 + b"\n", False)])
+def test_header_key_file_one_lf(cli, tmp_path, raw, ok):
+    key = tmp_path / "key"; key.write_bytes(raw)
+    result = run(cli, "header", key, ok=ok)
+    if ok:
+        assert result == {"authorization": "Authorization: Bearer " + raw.removesuffix(b"\n").decode()}
+    else:
+        assert result == {"error": "bad_args"}
+
+
+@pytest.mark.parametrize("args", ['{"x":01}', '{"x":1.}', '{"x":.5}', '{"x":+1}', '{"x":"raw\x01control"}', '{} trailing'])
+def test_strict_response_and_tool_arguments(cli, tmp_path, args):
+    valid = '{"choices":[{"finish_reason":"stop","message":{"content":"ok"}}],"extra":' + args + '}'
+    assert parse(cli, tmp_path, valid)["error"]["kind"] == "bad_response"
+    calls = [{"id": "1", "type": "function", "function": {"name": "click", "arguments": args}},
+             {"id": "2", "type": "function", "function": {"name": "click", "arguments": '{"x":0.5}'}}]
+    result = parse(cli, tmp_path, json.dumps({"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": calls}}]}))
+    assert result["ok"] and result["tool_calls"][0]["error"] == "invalid_arguments"
+    assert result["tool_calls"][1]["arguments"] == {"x": 0.5}
+
+
+@pytest.mark.parametrize("message", [{"content": None}, {"content": None, "tool_calls": []}])
+def test_missing_tool_calls(cli, tmp_path, message):
+    result = parse(cli, tmp_path, json.dumps({"choices": [{"finish_reason": "tool_calls", "message": message}]}))
+    assert not result["ok"] and result["error"]["kind"] == "bad_response"
+
+
 @pytest.mark.skipif(os.environ.get("MK20_TEST_NO_NETWORK") == "1", reason="network disabled by task; loopback HTTP test not run")
 def test_fake_model_http(cli, tmp_path):
     script = [{"tool_calls": [{"name": "click", "arguments": {"x": 12}}]}, {"content": "done"},

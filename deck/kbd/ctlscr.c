@@ -15,12 +15,11 @@ void ctl_screen_reset(ctl_t *c)
 void ctl_screen_gone(ctl_t *c, int ci)
 {
     for (int i = 3; i < CTL_SCREEN_PAGES; i++) if (c->screen.page[i].used && c->screen.page[i].client == ci) {
-        c->screen.page[i].client = -1; c->screen.page[i].bound = 0;
-        memset(c->screen.page[i].action, 0, sizeof c->screen.page[i].action);
         if (c->screen.current == c->screen.page[i].id) c->screen.current = CTL_SCREEN_SYSTEM;
+        memset(&c->screen.page[i], 0, sizeof c->screen.page[i]);
     }
 }
-void ctl_screen_grant(ctl_t *c, long ttl, long now)
+void ctl_screen_grant(ctl_t *c, long ttl, int64_t now)
 {
     c->screen.grant_until = c->allowed && !c->estopped && ttl > 0 && ttl <= CTL_SCREEN_GRANT_MAX ? now + ttl : 0;
 }
@@ -29,7 +28,7 @@ static ctl_page_t *page(ctl_t *c, long id)
     for (int i = 0; i < CTL_SCREEN_PAGES; i++) if (c->screen.page[i].used && c->screen.page[i].id == id) return &c->screen.page[i];
     return NULL;
 }
-void ctl_key_event(ctl_t *c, int row, int col, int pressed, long now)
+void ctl_key_event(ctl_t *c, int row, int col, int pressed, int64_t now)
 {
     if (row < 0 || row >= 4 || col < 0 || col >= 5) return;
     ctl_page_t *p = page(c, c->screen.current);
@@ -39,7 +38,7 @@ void ctl_key_event(ctl_t *c, int row, int col, int pressed, long now)
     char ev[128]; snprintf(ev, sizeof ev, "{\"ev\":\"key\",\"page\":%d,\"row\":%d,\"col\":%d,\"down\":%s}", p->id, row, col, pressed ? "true" : "false");
     ctl_notify(c, p->client, ev);
 }
-static int rate(ctl_t *c, int fb, long now)
+static int rate(ctl_t *c, int fb, int64_t now)
 {
     int n = 0, per = 0;
     for (int i = 0; i < c->screen.nwrites; i++) if (now - c->screen.writes[i].at < 1000) {
@@ -71,7 +70,7 @@ static int layout(ctl_t *c, long id, char *r, size_t cap)
     return (int)at;
 }
 int ctl_screen_handle(ctl_t *c, int ci, const char *op, const char *s, size_t n,
-                      long now, long id, char *r, size_t cap, const char **e)
+                      int64_t now, long id, char *r, size_t cap, const char **e)
 {
     int len; long pid;
 #define FAIL(reason) do { *e = reason; return 0; } while (0)

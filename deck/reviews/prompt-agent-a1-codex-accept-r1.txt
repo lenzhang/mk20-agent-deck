@@ -1,0 +1,12 @@
+You are doing a first ACCEPTANCE pass in a READ-ONLY sandbox. Do not edit files (you cannot). Do not access devices, serial, adb or network.
+
+Repo: this worktree. The uncommitted changes implement the spec in ../mk20-a1-task.md (A1 remainder + OpenAI-compatible adapter skeleton) against deck/AGENT-BUILD-PLAN.md (§3.4, §3.4b, §3.5, A1 acceptance, A4 adapter notes). One extra fix was applied after implementation: deck/tests/test_mk20d_router.py:145 now lists ctlscr.c and k2estop.c.
+
+Tests: the authoritative full run is on Linux, log at ../mk20-a1-boxtest.log (kbd ASan/UBSan+TSan unit tests, e2e of the real binary, agent tests, tools tests, 541 pytest). macOS cannot run the Linux-only kbd tests. You may try to run what works read-only here (e.g. `make -C deck/agent test` or pytest with -p no:cacheprovider) but writes may be blocked; if so, rely on the log and say so.
+
+Do:
+1. For each spec item 1-8 and each acceptance criterion in the plan for A1 (and the adapter part of A4 that applies to a skeleton), state PASS / PARTIAL / FAIL with evidence (file:line, test name, log line).
+2. Check that defaults are unchanged (no flags -> identical mk20-kbd behaviour, descriptor, mk20d launch line), that the e-stop cannot be bypassed or cleared from the socket, that confirm honours >=300 ms, that the API key never enters a request body, and that no GD32 write beyond the allow-listed knob payload was added.
+3. List concrete defects or test gaps, each with severity (blocker/major/minor) and a precise fix.
+4. End with "ACCEPTANCE: PASS" or "ACCEPTANCE: FAIL".
+Output the report as Markdown (it is saved to deck/reviews/agent-a1-codex-accept-r1.md).

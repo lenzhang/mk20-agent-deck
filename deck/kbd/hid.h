@@ -39,20 +39,21 @@ typedef struct {
     uint8_t sent[HID_KBD_LEN];    /* last report the gadget accepted */
     int dirty, hard_fail;
     uint8_t ptrq[16][HID_PTR_LEN_SCROLL]; int ptr_head, ptr_n, ptr_len;   /* ptr_len: 6 or 8 (descriptor variant) */
+    uint8_t ptr_sent[HID_PTR_LEN_SCROLL]; /* last fully delivered pointer report */
     uint8_t ptr_btn; uint16_t ptr_x, ptr_y;   /* last queued pointer state (for release) */   /* pointer reports, FIFO (button edges never dropped) */
     volatile int close_req;
-    long next_open_ms, last_hard_ms;
+    int64_t next_open_ms, last_hard_ms;
     int parked[HID_MAX_PARKED]; unsigned nparked;   /* stale fds kept open (never closed while the gadget lives) */
     int watch, reopen_req, keep;         /* keep: reopen after replacement keeps held state; watch: fd came from open(path) -> identity is checked */
     unsigned long long dev, ino, rdev;   /* identity of the open node */
-    long next_check_ms, backoff_ms;
+    int64_t next_check_ms, backoff_ms;
     unsigned opens, closes, writes, eagain, errors, ptr_dropped, replaced, reopens;
 } hid_t;
 
 void hid_init(hid_t *h, const char *path, const char *stop_file);
 /* Housekeeping: honours stop file / close request, (re)opens when allowed, re-sends dirty state.
  * Call on every loop tick and when the fd polls writable. */
-void hid_service(hid_t *h, long now_ms);
+void hid_service(hid_t *h, int64_t now_ms);
 int hid_attach_fd(hid_t *h, int fd);   /* tests: use an existing non-blocking fd (sends all-up) */
 void hid_set_mod(hid_t *h, uint8_t mod, int on);
 int hid_key(hid_t *h, uint8_t usage, int down);         /* -1 if 6 keys already down */
@@ -60,8 +61,9 @@ int hid_pointer_abs(hid_t *h, uint8_t buttons, uint16_t x, uint16_t y);
 /* Descriptor variant: MUST match gadget.sh (MK20_HID_SCROLL=1 <-> --hid-scroll). Call right after hid_init. */
 void hid_set_scroll(hid_t *h, int on);
 int hid_scroll(hid_t *h, int wheel, int pan);   /* -1 without the scroll descriptor; values clamped to -127..127 */
-int hid_pointer_release(hid_t *h);              /* 1 if a buttons-up report was queued (some button was down) */
-/* Bounded all-keys-up (default ~1.5 s, under gadget.sh's SIGTERM->SIGKILL window). 0 = delivered. */
+int hid_pointer_release(hid_t *h);              /* purge pending pointer/scroll; queue buttons-up if queued or desired/sent buttons down */
+/* Purge pending pointer/scroll, queue buttons-up and bounded all-keys-up (default ~1.5 s, under
+ * gadget.sh's SIGTERM->SIGKILL window). 0 = keyboard delivered; pointer release stays queued on backpressure. */
 int hid_release_all(hid_t *h, int timeout_ms);
 void hid_close(hid_t *h, int release);   /* closes the current fd only */
 void hid_close_parked(hid_t *h);          /* teardown only: close every parked fd */

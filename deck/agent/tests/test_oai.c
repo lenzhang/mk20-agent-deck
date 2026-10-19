@@ -53,6 +53,31 @@ static void response_test(void)
     CHECK(oai_parse_response(deep, 80, 200, &r)); oai_response_free(&r);
     CHECK(oai_parse_response("x", OAI_BODY_MAX + 1, 200, &r)); oai_response_free(&r);
 }
+static void strict_json_test(void)
+{
+    const char *bad[] = {
+        "{\"x\":01}", "{\"x\":1.}", "{\"x\":.5}", "{\"x\":+1}", "{\"x\":-01}",
+        "{\"x\":1e}", "{\"x\":1e+}", "{\"x\":\"raw\001control\"}", "{\"x\":\"raw\ncontrol\"}",
+        "{} trailing", "{\"x\":true,}", "{\"x\":[1,]}", "{\"x\":\"\\q\"}", "{\"x\":\"\\u00xz\"}"
+    };
+    char body[2048]; oai_response_t r;
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
+        snprintf(body, sizeof body, "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}],\"extra\":%s}", bad[i]);
+        CHECK(oai_parse_response(body, strlen(body), 200, &r) && r.error.kind == OAI_BAD_RESPONSE); oai_response_free(&r);
+        cJSON *str = cJSON_CreateString(bad[i]); char *quoted = cJSON_PrintUnformatted(str); cJSON_Delete(str);
+        snprintf(body, sizeof body, "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"tool_calls\":[{\"id\":\"1\",\"type\":\"function\",\"function\":{\"name\":\"click\",\"arguments\":%s}}]}}]}", quoted);
+        cJSON_free(quoted);
+        CHECK(!oai_parse_response(body, strlen(body), 200, &r) && r.ncalls == 1 && !r.calls[0].arguments && !strcmp(r.calls[0].error, "invalid_arguments"));
+        oai_response_free(&r);
+    }
+    const char *missing[] = {"", ",\"tool_calls\":[]", ",\"tool_calls\":null"};
+    for (size_t i = 0; i < sizeof missing / sizeof *missing; i++) {
+        snprintf(body, sizeof body, "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":\"text\"%s}}]}", missing[i]);
+        CHECK(oai_parse_response(body, strlen(body), 200, &r) && r.error.kind == OAI_BAD_RESPONSE); oai_response_free(&r);
+    }
+    const char *valid = " {\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}],\"extra\":[0,-0,0.5,-1.2E+3,1e-2,true,false,null,\"\\u0061\\t\\\\u0000\"]} \n";
+    CHECK(!oai_parse_response(valid, strlen(valid), 200, &r)); oai_response_free(&r);
+}
 static void coordinate_test(void)
 {
     CHECK(oai_norm_to_pixel(0, 1920) == 0 && oai_norm_to_pixel(1000, 1920) == 1919);
@@ -63,4 +88,4 @@ static void coordinate_test(void)
     CHECK(oai_pixel_to_norm(10, 10) == -1 && oai_pixel_to_norm(-1, 10) == -1 && oai_pixel_to_norm(0, 0) == -1);
     for (int n = 0; n <= 1000; n++) CHECK(oai_pixel_to_norm(oai_norm_to_pixel(n, 1920), 1920) == n);
 }
-int main(void) { request_test(); response_test(); coordinate_test(); printf("%d checks, %d failures\n", checks, fails); return fails ? 1 : 0; }
+int main(void) { request_test(); response_test(); strict_json_test(); coordinate_test(); printf("%d checks, %d failures\n", checks, fails); return fails ? 1 : 0; }

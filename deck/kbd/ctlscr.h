@@ -16,20 +16,20 @@
 #define CTL_SCREEN_BYTES_MAX 65536
 
 typedef struct {
-    int used, id, client; /* builtin ids 0..2; client -1 after disconnect, never inherited by a new connection */
+    int used, id, client; /* builtin ids 0..2; client -1 for builtins; agent pages freed on disconnect */
     char name[129]; uint32_t bound; char action[20][481];
 } ctl_page_t;
 typedef struct {
     ctl_page_t page[CTL_SCREEN_PAGES]; int current, next_id;
-    long grant_until;
-    struct { long at; int fb; } writes[CTL_SCREEN_RATE]; int nwrites;
+    int64_t grant_until;
+    struct { int64_t at; int fb; } writes[CTL_SCREEN_RATE]; int nwrites;
 } ctl_screen_t;
 struct ctl_s;
 void ctl_screen_init(struct ctl_s *c);
 void ctl_screen_reset(struct ctl_s *c); /* disallow/estop: keep pages, drop binds/grant, system page */
 void ctl_screen_gone(struct ctl_s *c, int ci);
-void ctl_screen_grant(struct ctl_s *c, long ttl_ms, long now_ms); /* keyboard only */
-void ctl_key_event(struct ctl_s *c, int row, int col, int pressed, long now_ms);
+void ctl_screen_grant(struct ctl_s *c, long ttl_ms, int64_t now_ms); /* keyboard only */
+void ctl_key_event(struct ctl_s *c, int row, int col, int pressed, int64_t now_ms);
 int ctl_screen_handle(struct ctl_s *c, int ci, const char *op, const char *s, size_t n,
-                      long now, long id, char *r, size_t cap, const char **error);
+                      int64_t now, long id, char *r, size_t cap, const char **error);
 #endif

@@ -69,8 +69,9 @@ int main(int argc, char **argv)
     if (argc == 3 && !strcmp(argv[1], "request")) return request(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "parse")) return response(argv[2], argv[3]);
     if (argc == 3 && !strcmp(argv[1], "header")) {
-        size_t n; char *key = read_file(argv[2], OAI_KEY_MAX, &n); char header[OAI_KEY_MAX + 32];
+        size_t n; char *key = read_file(argv[2], OAI_KEY_MAX + 1, &n); char header[OAI_KEY_MAX + 32];
         if (!key) return fail();
+        if (n && key[n - 1] == '\n') key[--n] = 0;
         int rc = memchr(key, 0, n) ? -1 : oai_auth_header(key, header, sizeof header);
         memset(key, 0, n); free(key); if (rc) return fail();
         cJSON *out = cJSON_CreateObject(); cJSON_AddStringToObject(out, "authorization", header); memset(header, 0, sizeof header); return print(out);

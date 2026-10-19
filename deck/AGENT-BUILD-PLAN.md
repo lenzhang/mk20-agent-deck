@@ -165,7 +165,7 @@
 
 ### 3.4 mk20-kbd 控制口 `/run/mk20/kbd.sock`（A1）
 
-- unix stream，0600，同 uid / root 校验。当前协议为每行一个 JSON（含换行 ≤1024 B；像素二进制 framing 留给 A7）。同时最多 2 个客户端：agent，和一个只读的 status 客户端。
+- unix stream，0600，同 uid / root 校验。当前协议为每行一个 JSON（含换行 ≤1024 B；像素二进制 framing 留给 A7）。同时最多 2 个客户端；通过同 uid / root 校验后权限相同，租约和 agent 页分别绑定连接（当前没有只读第二客户端角色）。
 - 请求：`lease.acquire{owner,ttl_ms}` → token；`lease.renew`；`lease.release`；`act{token,seq,op,...}`；
   `ui.agent{state,input,summary,progress}`；`confirm.request{id,cid,summary,risk,timeout_ms}` → 异步返回 `confirm.result{cid,ok,reason}`。
 - 事件推送：`estop`、`confirm.result`、`hid.health`、`key{...}`（只在 agent 页激活时推送）。
@@ -320,8 +320,9 @@
 - 验收：box 测试全过；真机能滚动；kbd 原有验收不退化。
 
 - **A1 状态（2026-10-19，本 worktree）**：租约/act/急停/人手抢占已实现；补齐 confirm（shown 后 ≥300 ms、超时/断连/禁用取消）、ui.agent 缓存/dirty、D8 screen 权限/保留键/滑动限速/页属主事件。
-  发布开关 FEATURE_AGENT_CTL / FEATURE_HID_SCROLL / FEATURE_K2_ESTOP（均默认 0）已接入，release 不传 --ctl-allow；scroll 描述符与 kbd 取同一解析值。
-  K2 纯状态机先用 1500 ms 内三击，观察到 release 后启用 1 s hold（poll 定时触发）；真机 press/release 尚待测。
+  发布开关 FEATURE_AGENT_CTL / FEATURE_HID_SCROLL / FEATURE_K2_ESTOP / FEATURE_K2_RELEASE（均默认 0）已接入，release 不传 --ctl-allow；boot 把解析值通过 MK20_* 传入新 supervisor shell，与 gadget.env / scroll 描述符一致，启动后改配置不影响重启参数。
+  K2 默认先用 1500 ms 内三击，观察到 release 后启用 1 s hold；已测出 release 能力的固件可设 FEATURE_K2_RELEASE=1 / --k2-release，使冷启动首次 hold 就能由 poll 定时触发；真机 press/release 尚待测。
+  撤销租约/急停先丢弃未发送的 pointer/scroll，再发 neutral；断连释放连接的 agent 页（禁用/急停保留页）；单调毫秒时基和期限统一为 64 位，覆盖 armhf 长 uptime。
   macOS 可运行 ASan/UBSan 控制规则单测和 host 编译；完整 Linux kbd suite / 静态 armhf / 真机验收仍待 Linux 和设备。详见 kbd/CTL-PROTOCOL.md。
 - **A1b 屏幕 API（D8）**：协议/规则引擎已实现，draw/text 返回 rendered:false；A7 实现字体/像素 binary framing 和渲染、固定急停键视觉、物理允许/确认 UI。
 
@@ -375,6 +376,7 @@
 - mk20deck：设置页的应用改成推送到设备；连接测试改由设备侧执行；增加“智能体”状态镜像。
 - 配置网页新增：网络出口 profile（D1′）、ASR 模型配置（D5′b）。
 - mk20-kbd：`screen.*` 渲染与 agent 自有页（D8），保留页与授权确认。
+- A7 follow-up（kimi r1 #8 / #12）：清理或说明仅供观察的 `/tmp/mk20-hid-scroll` marker；真实渲染落地时为 screen.page.show / layout / page.create 评估限速（当前只有 draw/text 消耗额度）。
 - mk20-agent `--web`：配对码、写入式密钥页、`PUT /config`、`POST /test`，以及 **D5 任务 API + `/chat` 极简网页**（提交/进度/截图/暂停/停止）。
 - 测试：sim cases、web 表单安全测试（无读出接口、配对码过期、CSRF、权限 0600、原子性），secrets 不进 backup（已排除，加测试固化）。
 - **[D]**：真机看页面效果，用户回家后核对一次。

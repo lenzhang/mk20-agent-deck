@@ -1,0 +1,45 @@
+# Task: fix review findings on MK20 agent A1 (worktree = this repo; work under deck/)
+
+The uncommitted state of this worktree is the A1 implementation (spec ../mk20-a1-task.md). Two reviews flagged defects:
+deck/reviews/agent-a1-codex-accept-r1.md (F1..F7) and deck/reviews/agent-a1-kimi-r1.md (findings 1..13). Read both.
+Same HARD RULES as ../mk20-a1-task.md: no device/serial/adb/network access, no git commit/push, do not touch
+deck/firmware/release/bin/*, no new GD32 writes, defaults stay OFF and byte-identical, C11 -Wall -Wextra -Werror on Linux
+(glibc + static armhf, where long is 32-bit), every gadget-helper test via conftest.scope_gadget_fn, no unscoped /tmp.
+Do not edit the two review files. Linux-only kbd tests may not run on macOS; still make them correct.
+
+FIX (each with a regression test):
+1. [F1 / kimi 1+2, BLOCKER] Release flags lost at the `mk20d kbd` process boundary. Make the supervisor use the SAME
+   values boot resolved (boot is what wrote gadget.env / chose the descriptor): pass FEATURE_AGENT_CTL, FEATURE_HID_SCROLL,
+   FEATURE_K2_ESTOP from boot into the `sh "$REL/sbin/mk20d" kbd` exec via env (MK20_* names, the way MK20_NOHID is passed)
+   and/or have the kbd branch read the scroll value back from the gadget.env boot wrote, so descriptor and --hid-scroll
+   cannot diverge even if mk20.conf changes after boot. Replace/extend tests/test_agent_release.py with a test that drives
+   the real boot -> kbd supervisor path (existing test_mk20d_kbd.py harness, fake mk20-kbd that records its argv) and asserts
+   the recorded argv for defaults (unchanged) and each flag enabled, plus scroll descriptor <-> --hid-scroll agreement.
+2. [F2, BLOCKER] E-stop / lease revoke / disable / client gone / human preempt must purge queued pointer (and scroll)
+   reports in hid.c before the neutral reports, and hid_pointer_release must still emit a buttons-0 report when anything
+   was queued or the last SENT state had buttons down (not only the desired state). Nonblocking-pipe regression: fill the
+   pipe, queue click+scroll, e-stop, drain, assert only neutral/release reports follow.
+3. [F3 / kimi 3] Agent pages owned by a disconnected client must be freed on client disconnect (e-stop/disallow still keep
+   them, per plan). Test: 8 creates -> disconnect -> reconnect -> create succeeds. Update CTL-PROTOCOL.md.
+4. [F4] K2: add `--k2-release` (and release switch FEATURE_K2_RELEASE default 0, wired like item 1 above) meaning the
+   firmware is known to report K2 releases -> init reports_release=1 so the FIRST 1 s hold fires; without it keep press-only
+   triple mode plus learn-on-first-release. Test cold-start hold with the flag.
+5. [F5] oai.c: strict JSON grammar check (within existing bounds) before cJSON parsing for response bodies and tool-call
+   arguments: reject leading zeros (01), "1.", ".5", "+1", bare control chars in strings, trailing garbage. Tool-call args
+   failing -> per-call invalid_arguments. Tests.
+6. [F6] finish_reason "tool_calls" with absent or empty tool_calls -> bad_response. Tests.
+7. [F7] CTL-PROTOCOL.md: `mk20-kbd --run --ctl /run/mk20/kbd.sock`.
+8. [kimi 4] ctl.c hex4: accept only real [0-9a-fA-F] bytes. Test with raw control bytes after \u.
+9. [kimi 5] 32-bit long ms clock: make mono_ms and every deadline/compare in ctl.c, ctlscr.c, k2estop.c, mk20_kbd.c
+   overflow-safe on 32-bit long (use int64_t / long long for ms time base throughout, keep printf formats correct). Test a
+   time base near 2^31 ms for lease expiry, confirm timeout, rate window, grant, K2 hold.
+10. [kimi 6] Plan §3.4: correct the "read-only status client" text to match code (both clients equal; uid check) — or note
+    read-only second client as A5 follow-up. Doc only.
+11. [kimi 7] tests_ctl.inc H() reply cap = CTL_LINE_MAX (match production); add surrogate-pair and 9/10-digit int boundary tests.
+12. [kimi 10] reject negative "id" as bad_request (and document). [kimi 9] document the 24 top-level key cap.
+13. [kimi 11] oai_cli header: strip ONE trailing LF from the key file before validation. Test.
+14. [kimi 13] if the --ctl socket directory is missing, mk20-kbd logs clearly (already) — also add a one-line note in
+    CTL-PROTOCOL.md that mk20d creates /run/mk20. No code change needed beyond that.
+Skip kimi 8 and 12 (note them as A7 follow-ups in the plan).
+
+FINISH with a summary: per fix the files changed and test added, what you ran and results, what could not run on macOS.

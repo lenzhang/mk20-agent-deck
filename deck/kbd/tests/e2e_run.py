@@ -252,6 +252,28 @@ def main():
         check(drain() == b"\x01" + bytes(8), "human key press preempts agent")
         check(rq({"op": "act", "token": tok, "seq": 2, "kind": "key", "usage": 6, "down": 1}).get("err") == "no_lease", "lease gone after preempt")
         cs.close(); p.send_signal(signal.SIGTERM); p.wait(3)
+        # Known release-capable firmware: FIRST held press must fire from the real poll timer.
+        p, gm, hm, fb, st, keep = start(tmp, ["--no-gd32-write", "--no-host", "--ctl", sockp, "--ctl-allow",
+                                            "--k2-estop", "--k2-release"], hid=hidc)
+        t0 = time.monotonic()
+        while not os.path.exists(sockp) and time.monotonic() - t0 < 3: time.sleep(0.05)
+        cs = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM); cs.settimeout(2); cs.connect(sockp); cf = cs.makefile("rwb", buffering=0)
+        drain()
+        tok = rq({"op": "lease.acquire", "ttl_ms": 3000})["token"]
+        rq({"op": "act", "token": tok, "seq": 1, "kind": "key", "usage": 7, "down": 1}); drain()
+        os.write(gm, gd32_frame([0x16, 1, 104, 104, 0, 0]) + gd32_frame([0x16, 1, 105, 105, 0, 0]))
+        check(not rq({"op": "status"})["estopped"], "K2 rotation does not stop")
+        t0 = time.monotonic(); os.write(gm, gd32_frame([0x16, 1, 103, 103, 0, 0]))
+        time.sleep(0.65); check(not rq({"op": "status"})["estopped"], "cold K2 hold guard")
+        stopped = False
+        while time.monotonic() - t0 < 1.6:
+            stopped = rq({"op": "status"})["estopped"]
+            if stopped: break
+            time.sleep(0.01)
+        check(stopped and time.monotonic() - t0 >= 0.95, "cold K2 hold fires while still down with --k2-release")
+        check(drain() == b"\x01" + bytes(8), "cold K2 hold -> all-up")
+        check(rq({"op": "lease.acquire"}).get("err") == "stopped", "cold K2 hold latches stop")
+        cf.close(); cs.close(); p.send_signal(signal.SIGTERM); p.wait(3)
         os.close(hrc)
 
         # read-only modes: flag and kill file

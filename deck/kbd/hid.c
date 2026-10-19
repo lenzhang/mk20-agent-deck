@@ -8,7 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static long mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
+static int64_t mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 
 void hid_init(hid_t *h, const char *path, const char *stop_file)
 {
@@ -18,7 +18,7 @@ void hid_init(hid_t *h, const char *path, const char *stop_file)
     snprintf(h->stop_file, sizeof h->stop_file, "%s", stop_file ? stop_file : "");
     h->dirty = 1;
     h->backoff_ms = 100;
-    h->ptr_len = HID_PTR_LEN;
+    h->ptr_len = HID_PTR_LEN; h->ptr_sent[0] = 2;
 }
 
 void hid_set_scroll(hid_t *h, int on) { h->ptr_len = on ? HID_PTR_LEN_SCROLL : HID_PTR_LEN; }
@@ -52,6 +52,7 @@ static void flush(hid_t *h)
     }
     while (h->ptr_n) {
         if (wr(h, h->ptrq[h->ptr_head], (size_t)h->ptr_len)) return;
+        memcpy(h->ptr_sent, h->ptrq[h->ptr_head], HID_PTR_LEN_SCROLL);
         h->ptr_head = (h->ptr_head + 1) % 16; h->ptr_n--;
     }
 }
@@ -101,7 +102,7 @@ static void reattach_keep(hid_t *h, int fd)
 
 void hid_request_close(hid_t *h) { h->close_req = 1; }
 
-void hid_service(hid_t *h, long now)
+void hid_service(hid_t *h, int64_t now)
 {
     if ((h->fd >= 0 || h->nparked) && (h->close_req || stop_present(h))) {   /* teardown: no hidg0 fd at all */
         hid_close(h, 1);
@@ -194,24 +195,38 @@ int hid_scroll(hid_t *h, int wheel, int pan)
     return 0;
 }
 
+/* Cancel before any neutral write. Retain only the last delivered position, never a queued move. */
+static int pointer_cancel(hid_t *h)
+{
+    int need = h->ptr_n || h->ptr_btn || h->ptr_sent[1];
+    h->ptr_head = 0; h->ptr_n = 0; h->ptr_btn = 0;
+    h->ptr_x = (uint16_t)(h->ptr_sent[2] | (h->ptr_sent[3] << 8));
+    h->ptr_y = (uint16_t)(h->ptr_sent[4] | (h->ptr_sent[5] << 8));
+    if (need) {
+        memcpy(h->ptrq[0], h->ptr_sent, HID_PTR_LEN_SCROLL);
+        h->ptrq[0][1] = h->ptrq[0][6] = h->ptrq[0][7] = 0; h->ptr_n = 1;
+    }
+    return need != 0;
+}
 int hid_pointer_release(hid_t *h)
 {
-    if (!h->ptr_btn) return 0;
-    hid_pointer_abs(h, 0, h->ptr_x, h->ptr_y);
-    return 1;
+    int need = pointer_cancel(h);
+    if (h->fd >= 0 && !h->hard_fail) flush(h);
+    return need;
 }
 
 int hid_release_all(hid_t *h, int timeout_ms)
 {
+    pointer_cancel(h);
     h->mods = 0; memset(h->keys, 0, sizeof h->keys);
     uint8_t up[HID_KBD_LEN] = {1, 0, 0, 0, 0, 0, 0, 0, 0};
     if (h->fd < 0) return -1;
-    if (!h->dirty && !memcmp(h->sent, up, sizeof up)) return 0;
+    if (!h->dirty && !memcmp(h->sent, up, sizeof up)) { flush(h); return 0; }
     h->dirty = 1;
-    long end = mono_ms() + timeout_ms;
+    int64_t end = mono_ms() + timeout_ms;
     for (;;) {
-        if (wr(h, up, sizeof up) == 0) { memcpy(h->sent, up, sizeof up); h->dirty = 0; return 0; }
-        long left = end - mono_ms();
+        if (wr(h, up, sizeof up) == 0) { memcpy(h->sent, up, sizeof up); h->dirty = 0; flush(h); return 0; }
+        int64_t left = end - mono_ms();
         if (left <= 0) break;
         struct pollfd pf = {h->fd, POLLOUT, 0};
         poll(&pf, 1, left < 50 ? (int)left : 50);

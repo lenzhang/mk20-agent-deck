@@ -3,6 +3,7 @@
 #include "kbd.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -16,7 +17,14 @@ static const char *ws(const char *p, const char *end) { while (p < end && strchr
 static int hex4(const char *p, unsigned *v)
 {
     *v = 0;
-    for (int i = 0; i < 4; i++) { const char *h = strchr("0123456789abcdef", p[i] | 32); if (!p[i] || !h) return -1; *v = *v * 16 + (unsigned)(h - "0123456789abcdef"); }
+    for (int i = 0; i < 4; i++) {
+        unsigned b = (unsigned char)p[i], d;
+        if (b >= '0' && b <= '9') d = b - '0';
+        else if (b >= 'a' && b <= 'f') d = b - 'a' + 10;
+        else if (b >= 'A' && b <= 'F') d = b - 'A' + 10;
+        else return -1;
+        *v = *v * 16 + d;
+    }
     return 0;
 }
 static const char *jstr(const char *p, const char *end, char *out, size_t cap)
@@ -149,7 +157,7 @@ static void lease_revoke(ctl_t *c, const char *reason, int always_allup)
 {
     int had = c->token != 0, holder = c->holder;
     c->token = 0; c->holder = -1; c->expiry_ms = 0; c->owner[0] = 0;
-    if ((had || always_allup) && c->hid) { hid_release_all(c->hid, CTL_ESTOP_WRITE_MS); hid_pointer_release(c->hid); }
+    if ((had || always_allup) && c->hid) { hid_release_all(c->hid, CTL_ESTOP_WRITE_MS); }
     if (had && holder >= 0) {
         char ev[96]; snprintf(ev, sizeof ev, "{\"ev\":\"lease_revoked\",\"reason\":\"%s\"}", reason);
         ctl_notify(c, holder, ev);
@@ -165,11 +173,11 @@ static void confirm_result(ctl_t *c, int ok, const char *reason)
     ctl_notify(c, ci, ev);
 }
 int ctl_ui_dirty(ctl_t *c) { int dirty = c->ui.dirty; c->ui.dirty = 0; return dirty; }
-void ctl_confirm_shown(ctl_t *c, long now)
+void ctl_confirm_shown(ctl_t *c, int64_t now)
 {
     if (c->confirm.pending && !c->confirm.shown) { c->confirm.shown = 1; c->confirm.shown_ms = now; }
 }
-void ctl_confirm_key(ctl_t *c, int ok, long now)
+void ctl_confirm_key(ctl_t *c, int ok, int64_t now)
 {
     if (!c->confirm.pending) return;
     if (now >= c->confirm.deadline_ms) { confirm_result(c, 0, "timeout"); return; }
@@ -178,7 +186,7 @@ void ctl_confirm_key(ctl_t *c, int ok, long now)
     confirm_result(c, 1, "confirmed");
 }
 
-void ctl_estop(ctl_t *c, const char *reason, long now_ms)
+void ctl_estop(ctl_t *c, const char *reason, int64_t now_ms)
 {
     (void)now_ms;
     ctl_screen_reset(c);
@@ -190,7 +198,7 @@ void ctl_estop(ctl_t *c, const char *reason, long now_ms)
     for (int i = 0; i < CTL_MAX_CLIENTS; i++) ctl_notify(c, i, ev);
 }
 
-void ctl_human_input(ctl_t *c, long now_ms)
+void ctl_human_input(ctl_t *c, int64_t now_ms)
 {
     (void)now_ms;
     if (!c->token) return;
@@ -205,19 +213,19 @@ void ctl_set_allowed(ctl_t *c, int on)
     else { ctl_screen_reset(c); confirm_result(c, 0, "disabled"); lease_revoke(c, "disabled", 0); }
 }
 
-void ctl_tick(ctl_t *c, long now_ms)
+void ctl_tick(ctl_t *c, int64_t now_ms)
 {
     if (c->screen.grant_until && now_ms >= c->screen.grant_until) c->screen.grant_until = 0;
     if (c->confirm.pending && now_ms >= c->confirm.deadline_ms) confirm_result(c, 0, "timeout");
     if (c->token && now_ms >= c->expiry_ms) { c->st.expiries++; lease_revoke(c, "expired", 0); }
 }
 
-int ctl_timeout_ms(const ctl_t *c, long now_ms, int dflt)
+int ctl_timeout_ms(const ctl_t *c, int64_t now_ms, int dflt)
 {
-    long deadline = c->token ? c->expiry_ms : 0;
+    int64_t deadline = c->token ? c->expiry_ms : 0;
     if (c->confirm.pending && (!deadline || c->confirm.deadline_ms < deadline)) deadline = c->confirm.deadline_ms;
     if (!deadline) return dflt;
-    long left = deadline > now_ms ? deadline - now_ms : 0;
+    int64_t left = deadline > now_ms ? deadline - now_ms : 0;
     return dflt < 0 || left < dflt ? (int)left : dflt;
 }
 
@@ -229,7 +237,7 @@ static int err(char *r, size_t cap, long id, const char *e)
 
 static const char *state(const ctl_t *c) { return c->estopped ? "stopped" : !c->allowed ? "disabled" : c->token ? "leased" : "idle"; }
 
-static int lease_ok(ctl_t *c, int ci, const char *s, size_t n, long now, const char **e)
+static int lease_ok(ctl_t *c, int ci, const char *s, size_t n, int64_t now, const char **e)
 {
     long tok;
     if (ctl_json_int(s, n, "token", &tok) || tok <= 0) { *e = "bad_token"; return 0; }
@@ -266,22 +274,22 @@ static int act(ctl_t *c, const char *s, size_t n, const char **e)
         if (hid_scroll(c->hid, (int)w, (int)p)) { *e = "unsupported"; return -1; }
         return 0;
     }
-    if (!strcmp(kind, "allup")) { hid_release_all(c->hid, CTL_ESTOP_WRITE_MS); hid_pointer_release(c->hid); return 0; }
+    if (!strcmp(kind, "allup")) { hid_release_all(c->hid, CTL_ESTOP_WRITE_MS); return 0; }
     *e = "bad_kind"; return -1;
 }
 
-int ctl_handle_line(ctl_t *c, int ci, const char *s, size_t n, long now, char *r, size_t cap)
+int ctl_handle_line(ctl_t *c, int ci, const char *s, size_t n, int64_t now, char *r, size_t cap)
 {
     char op[24]; long id = -1; const char *e = NULL; int len;
     if (ci < 0 || ci >= CTL_MAX_CLIENTS || n >= CTL_LINE_MAX || memchr(s, 0, n) || !field(s, n, NULL)) return err(r, cap, -1, "bad_request");
     ctl_tick(c, now);
-    ctl_json_int(s, n, "id", &id);
+    if (ctl_json_has(s, n, "id") && (ctl_json_int(s, n, "id", &id) || id < 0)) { c->st.bad++; return err(r, cap, -1, "bad_request"); }
     if (ctl_json_str(s, n, "op", op, sizeof op) < 0) { c->st.bad++; return err(r, cap, id, "bad_request"); }
     if (!strcmp(op, "hello") || !strcmp(op, "status")) {
         char ui_summary[CTL_SUMMARY_CAP * 2 + 3]; ctl_json_quote(ui_summary, sizeof ui_summary, c->ui.summary);
         len = snprintf(r, cap, "{\"ok\":true,\"id\":%ld,\"v\":1,\"state\":\"%s\",\"allowed\":%d,\"estopped\":%d,\"leased\":%d,"
-                       "\"scroll\":%d,\"hid_open\":%d,\"ttl_left_ms\":%ld,\"confirm\":{\"pending\":%s,\"cid\":%ld,\"shown\":%s,\"deadline_ms\":%ld,\"ignored\":%u,\"risk\":\"%s\"},\"ui\":{\"state\":\"%s\",\"input\":\"%s\",\"summary\":%s,\"progress\":%d}}", id, state(c), c->allowed, c->estopped, c->token != 0,
-                       c->hid && c->hid->ptr_len == HID_PTR_LEN_SCROLL, c->hid && c->hid->fd >= 0, c->token ? c->expiry_ms - now : 0L, c->confirm.pending ? "true" : "false", c->confirm.cid,
+                       "\"scroll\":%d,\"hid_open\":%d,\"ttl_left_ms\":%" PRId64 ",\"confirm\":{\"pending\":%s,\"cid\":%ld,\"shown\":%s,\"deadline_ms\":%" PRId64 ",\"ignored\":%u,\"risk\":\"%s\"},\"ui\":{\"state\":\"%s\",\"input\":\"%s\",\"summary\":%s,\"progress\":%d}}", id, state(c), c->allowed, c->estopped, c->token != 0,
+                       c->hid && c->hid->ptr_len == HID_PTR_LEN_SCROLL, c->hid && c->hid->fd >= 0, c->token ? c->expiry_ms - now : INT64_C(0), c->confirm.pending ? "true" : "false", c->confirm.cid,
                        c->confirm.shown ? "true" : "false", c->confirm.deadline_ms, c->st.confirm_ignored, c->confirm.risk, c->ui.state, c->ui.input, ui_summary, c->ui.progress);
         return len > 0 && (size_t)len < cap ? len : 0;
     }
@@ -392,7 +400,7 @@ int ctl_listen(ctl_t *c, const char *path)
     return 0;
 }
 
-void ctl_client_gone(ctl_t *c, int ci, long now_ms)
+void ctl_client_gone(ctl_t *c, int ci, int64_t now_ms)
 {
     (void)now_ms;
     if (ci < 0 || ci >= CTL_MAX_CLIENTS) return;
@@ -438,7 +446,7 @@ static void accept_one(ctl_t *c)
     close(fd); c->st.rejects++;
 }
 
-static void read_client(ctl_t *c, int ci, long now)
+static void read_client(ctl_t *c, int ci, int64_t now)
 {
     char b[512];
     ssize_t r = recv(c->cfd[ci], b, sizeof b, MSG_DONTWAIT);
@@ -455,7 +463,7 @@ static void read_client(ctl_t *c, int ci, long now)
     }
 }
 
-void ctl_on_poll(ctl_t *c, const struct pollfd *pf, int n, long now)
+void ctl_on_poll(ctl_t *c, const struct pollfd *pf, int n, int64_t now)
 {
     for (int k = 0; k < n; k++) {
         if (!(pf[k].revents & (POLLIN | POLLERR | POLLHUP))) continue;

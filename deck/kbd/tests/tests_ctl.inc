@@ -46,12 +46,17 @@ static void test_hid_scroll(void)
     CHECK(n == 3 && rep[0][6] == 0 && rep[0][7] == 0);
     CHECK(rep[1][0] == 2 && rep[1][2] == (1000 & 0xFF) && rep[1][3] == (1000 >> 8) && (int8_t)rep[1][6] == -3 && (int8_t)rep[1][7] == 5);
     CHECK((int8_t)rep[2][6] == 127 && (int8_t)rep[2][7] == -127);
+    /* Desired buttons are already zero but queued moves/scroll still require one neutral report. */
+    h.fd = -1; hid_pointer_abs(&h, 0, 123, 456); hid_scroll(&h, 1, 2);
+    CHECK(h.ptr_n == 2 && hid_pointer_release(&h) == 1 && h.ptr_n == 1);
+    h.fd = p[1]; hid_service(&h, 0);
+    CHECK(rd_reports_n(p[0], rep, 64, 8) == 1 && !rep[0][1] && !rep[0][6] && !rep[0][7]);
     close(p[0]); close(p[1]);
 }
 
-static int H(ctl_t *c, int ci, long now, const char *line, char *rep)
+static int H(ctl_t *c, int ci, int64_t now, const char *line, char *rep)
 {
-    int n = ctl_handle_line(c, ci, line, strlen(line), now, rep, 4096);
+    int n = ctl_handle_line(c, ci, line, strlen(line), now, rep, CTL_LINE_MAX);
     if (n >= 0) rep[n] = 0;
     return n;
 }
@@ -271,13 +276,13 @@ static void test_ctl_ui(void)
     ctl_estop(&c, "test", 0); CHECK(H(&c, 0, 0, good, r) > 0 && has(r, "stopped"));
 }
 
-static void screen_req(ctl_t *c, int ci, long now, const char *q, const char *part)
+static void screen_req(ctl_t *c, int ci, int64_t now, const char *q, const char *part)
 {
     char r[4096]; int n = H(c, ci, now, q, r);
     if (n <= 0 || !has(r, part)) fprintf(stderr, "request %s -> %s (want %s)\n", q, r, part);
     CHECK(n > 0 && has(r, part));
 }
-static void screen_text(ctl_t *c, long now, int fb, const char *part)
+static void screen_text(ctl_t *c, int64_t now, int fb, const char *part)
 {
     char q[256]; snprintf(q, sizeof q, "{\"op\":\"screen.text\",\"page_id\":3,\"fb\":%d,\"text\":\"x\",\"size\":16,\"fg\":65535,\"bg\":0}", fb);
     screen_req(c, 0, now, q, part);
@@ -351,7 +356,7 @@ static void test_ctl_screen(void)
     screen_req(&c, 0, 7000, "{\"op\":\"screen.page.delete\",\"page_id\":3}", "\"ok\":true");
     screen_req(&c, 0, 7000, "{\"op\":\"screen.page.show\",\"page_id\":3}", "not_found");
     ctl_client_gone(&c, 0, 7001); ctl_client_gone(&c, 1, 7001); close(a[1]); close(b[1]);
-    CHECK(c.screen.page[4].client == -1);
+    CHECK(!c.screen.page[4].used);
     ctl_init(&c, NULL); CHECK(c.screen.grant_until == 0 && !c.screen.page[3].used);
 }
 
@@ -422,4 +427,132 @@ static void test_ctl_edges(void)
     CHECK(!c.estopped && !k.k2.npress);
     for (int i = 0; i < 3; i++) kbd_on_gd32(&k, press, sizeof press);
     CHECK(c.estopped && !strcmp(c.stop_reason, "k2_triple"));
+}
+
+/* Revocation must cancel actions that the gadget has not yet accepted. */
+static void test_ctl_backpressure(void)
+{
+    for (int mode = 0; mode < 7; mode++) for (int sent_down = 0; sent_down < 2; sent_down++) {
+        int p[2]; CHECK(nb_pipe(p) == 0);
+        hid_t h; hid_init(&h, "/nonexistent", NULL); hid_set_scroll(&h, 1); hid_attach_fd(&h, p[1]);
+        uint8_t rep[64][9]; rd_reports_n(p[0], rep, 64, 8);
+        ctl_t c; ctl_init(&c, &h); ctl_set_allowed(&c, 1); char r[4096], q[256];
+        CHECK(H(&c, 0, 0, "{\"op\":\"lease.acquire\",\"ttl_ms\":1000}", r) > 0); long t = tok_of(r);
+        hid_key(&h, 4, 1); hid_pointer_abs(&h, (uint8_t)sent_down, 30, 40); rd_reports_n(p[0], rep, 64, 8);
+        char filler[256]; memset(filler, 0x7f, sizeof filler);
+        while (write(p[1], filler, sizeof filler) > 0) {}
+        while (write(p[1], filler, 1) > 0) {}
+        CHECK(errno == EAGAIN);
+        hid_pointer_abs(&h, 1, 1000, 2000); hid_pointer_abs(&h, 0, 1000, 2000); hid_scroll(&h, 3, -2);
+        CHECK(h.ptr_n == 3 && h.ptr_btn == 0 && h.ptr_sent[1] == sent_down);
+        if (mode == 0) ctl_estop(&c, "test", 1);
+        else if (mode == 1) ctl_tick(&c, 1000);
+        else if (mode == 2) ctl_set_allowed(&c, 0);
+        else if (mode == 3) ctl_client_gone(&c, 0, 1);
+        else if (mode == 4) ctl_human_input(&c, 1);
+        else {
+            snprintf(q, sizeof q, "{\"op\":\"%s\",\"token\":%ld,\"seq\":1,\"kind\":\"allup\"}", mode == 5 ? "lease.release" : "act", t);
+            CHECK(H(&c, 0, 1, q, r) > 0 && has(r, "\"ok\":true"));
+        }
+        CHECK(h.ptr_n == 1 && !h.ptr_btn);
+        while (read(p[0], filler, sizeof filler) > 0) {} /* discard only pre-stop pipe contents */
+        hid_service(&h, 1001);
+        int n = rd_reports_n(p[0], rep, 64, 8);
+        CHECK(n == 2 && rep[0][0] == 1 && !rep[0][1] && !rep[0][3]);
+        CHECK(rep[1][0] == 2 && !rep[1][1] && rep[1][2] == 30 && rep[1][4] == 40 && !rep[1][6] && !rep[1][7]);
+        CHECK(!h.ptr_n && !h.ptr_sent[1]);
+        close(p[0]); close(p[1]);
+    }
+    /* Even if a rebind lost the queued up, last SENT buttons still require release. */
+    int p[2]; CHECK(nb_pipe(p) == 0);
+    hid_t h; hid_init(&h, "/nonexistent", NULL); hid_attach_fd(&h, p[1]);
+    uint8_t rep[64][9]; rd_reports_n(p[0], rep, 64, 6);
+    hid_pointer_abs(&h, 1, 30, 40); rd_reports_n(p[0], rep, 64, 6);
+    h.ptr_btn = 0; h.ptr_n = 0;
+    CHECK(hid_pointer_release(&h) == 1);
+    CHECK(rd_reports_n(p[0], rep, 64, 6) == 1 && rep[0][0] == 2 && !rep[0][1]);
+    CHECK(hid_pointer_release(&h) == 0);
+    close(p[0]); close(p[1]);
+}
+
+static void test_ctl_screen_disconnect(void)
+{
+    ctl_t c; ctl_init(&c, NULL); ctl_set_allowed(&c, 1); int p[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, p) == 0); c.cfd[0] = p[0];
+    for (int i = 0; i < 8; i++) screen_req(&c, 0, 0, "{\"op\":\"screen.page.create\",\"name\":\"work\"}", "page_id");
+    screen_req(&c, 0, 0, "{\"op\":\"screen.page.show\",\"page_id\":3}", "\"ok\":true");
+    screen_req(&c, 0, 0, "{\"op\":\"screen.page.create\",\"name\":\"full\"}", "busy");
+    ctl_client_gone(&c, 0, 1); close(p[1]); CHECK(c.screen.current == CTL_SCREEN_SYSTEM);
+    for (int i = 3; i < CTL_SCREEN_PAGES; i++) CHECK(!c.screen.page[i].used);
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, p) == 0); c.cfd[0] = p[0]; /* reused connection slot */
+    screen_req(&c, 0, 2, "{\"op\":\"screen.page.create\",\"name\":\"again\"}", "\"page_id\":11");
+    screen_req(&c, 0, 2, "{\"op\":\"screen.page.show\",\"page_id\":3}", "not_found");
+    ctl_client_gone(&c, 0, 3); close(p[1]);
+}
+
+static void test_ctl_json_edges(void)
+{
+    ctl_t c; ctl_init(&c, NULL); char r[4096], q[1024], text[16];
+    const char *pair = "{\"s\":\"\\uD83D\\uDE00\"}";
+    CHECK(ctl_json_str(pair, strlen(pair), "s", text, sizeof text) == 4 && !strcmp(text, "\xf0\x9f\x98\x80"));
+    const char *cases[] = {"{\"s\":\"\\uD83D\"}", "{\"s\":\"\\uDE00\"}", "{\"s\":\"\\uD83D\\u1234\"}"};
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) CHECK(ctl_json_str(cases[i], strlen(cases[i]), "s", text, sizeof text) < 0);
+    const char *hex = "{\"s\":\"\\u00aF\"}";
+    CHECK(ctl_json_str(hex, strlen(hex), "s", text, sizeof text) == 2 && !strcmp(text, "\xc2\xaf"));
+    for (int pos = 0; pos < 4; pos++) for (int b = 0x10; b <= 0x19; b++) {
+        strcpy(q, "{\"op\":\"status\",\"s\":\"\\u0061\"}"); strstr(q, "0061")[pos] = (char)b;
+        CHECK(H(&c, 0, 0, q, r) > 0 && has(r, "bad_request"));
+    }
+    const char *ints[] = {"999999999", "-999999999", "1000000000", "-1000000000", "1.0", "1e2"};
+    for (int i = 0; i < 6; i++) {
+        snprintf(q, sizeof q, "{\"n\":%s}", ints[i]); long v = 0;
+        int rc = ctl_json_int(q, strlen(q), "n", &v);
+        CHECK(i < 2 ? rc == 0 && v == (i ? -999999999L : 999999999L) : rc < 0);
+    }
+    const char *bad_ids[] = {"-1", "-999999999", "1000000000", "-1000000000", "1.0", "1e2", "\"1\"", "null"};
+    for (size_t i = 0; i < sizeof bad_ids / sizeof *bad_ids; i++) {
+        snprintf(q, sizeof q, "{\"op\":\"status\",\"id\":%s}", bad_ids[i]);
+        CHECK(H(&c, 0, 0, q, r) > 0 && has(r, "bad_request") && !has(r, "\"id\""));
+    }
+    CHECK(H(&c, 0, 0, "{\"op\":\"status\",\"id\":0}", r) > 0 && has(r, "\"id\":0"));
+    strcpy(q, "{\"op\":\"status\"");
+    for (int i = 0; i < 24; i++) {
+        size_t at = strlen(q); snprintf(q + at, sizeof q - at, ",\"k%d\":0", i);
+        if (i < 22) continue;
+        strcat(q, "}");
+        CHECK(H(&c, 0, 0, q, r) > 0 && has(r, i == 22 ? "\"ok\":true" : "bad_request"));
+        q[strlen(q) - 1] = 0;
+    }
+}
+
+static void test_ctl_long_uptime(void)
+{
+    const int64_t base = INT64_C(2147483647) - 100;
+    ctl_t c; ctl_init(&c, NULL); ctl_set_allowed(&c, 1); char r[4096]; int p[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, p) == 0); c.cfd[0] = p[0];
+    CHECK(H(&c, 0, base, "{\"op\":\"lease.acquire\",\"ttl_ms\":1000}", r) > 0 && c.expiry_ms == base + 1000);
+    CHECK(ctl_timeout_ms(&c, base + 999, 250) == 1);
+    CHECK(H(&c, 0, base + 999, "{\"op\":\"status\"}", r) > 0 && has(r, "\"ttl_left_ms\":1"));
+    ctl_tick(&c, base + 1000); CHECK(!c.token); event_has(p[1], "expired");
+    CHECK(H(&c, 0, base, confirm_req, r) > 0 && c.confirm.deadline_ms == base + 30000);
+    CHECK(H(&c, 0, base, "{\"op\":\"status\"}", r) > 0 && has(r, "\"deadline_ms\":2147513547"));
+    ctl_confirm_shown(&c, base); ctl_confirm_key(&c, 1, base + 299); CHECK(c.confirm.pending);
+    ctl_tick(&c, base + 29999); CHECK(c.confirm.pending && ctl_timeout_ms(&c, base + 29999, 250) == 1);
+    ctl_tick(&c, base + 30000); CHECK(!c.confirm.pending); event_has(p[1], "timeout");
+    screen_req(&c, 0, base, "{\"op\":\"screen.page.create\",\"name\":\"x\"}", "page_id");
+    for (int i = 0; i < 10; i++) screen_text(&c, base, 1, "rendered\":false");
+    screen_text(&c, base + 999, 1, "rate_limited"); screen_text(&c, base + 1000, 1, "rendered\":false");
+    ctl_screen_grant(&c, 1000, base); CHECK(c.screen.grant_until == base + 1000);
+    screen_req(&c, 0, base + 999, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":2,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "rendered\":false");
+    screen_req(&c, 0, base + 1000, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":2,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "forbidden");
+    CHECK(!c.screen.grant_until);
+    for (int fb = 1; fb <= 3; fb++) for (int i = 0; i < 10; i++) screen_text(&c, base + 5000, fb, "rendered\":false");
+    screen_text(&c, base + 5999, 4, "rate_limited"); screen_text(&c, base + 6000, 4, "rendered\":false");
+    k2_estop_t k; k2_estop_init(&k, 1); CHECK(!k2_estop_event(&k, 103, 1, base));
+    CHECK(!k2_estop_tick(&k, base + 999) && k2_estop_timeout(&k, base + 999, 250) == 1);
+    CHECK(!strcmp(k2_estop_tick(&k, base + 1000), "k2_hold"));
+    k2_estop_init(&k, 0); CHECK(!k2_estop_event(&k, 103, 1, base));
+    CHECK(!k2_estop_event(&k, 103, 1, base + 1000));
+    CHECK(!strcmp(k2_estop_event(&k, 103, 1, base + 1500), "k2_triple"));
+    ctl_client_gone(&c, 0, base + 40000); close(p[1]);
 }

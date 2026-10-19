@@ -217,7 +217,10 @@ boot)
     # clears them, so a late supervisor cannot undo a later teardown
     if ( exec 7>"$TM/transition.lock" && flock -n 7 || exit 1; [ ! -f "$TM/gadget.busy" ] && composite_up || exit 1
          rm -f "$R/tmp/mk20-kbd-stop" "$R/tmp/mk20-router-stop"; touch "$TM/kbd.mode"
-         ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V MK20_NOHID=$NOHID exec sh "$REL/sbin/mk20d" kbd </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) & ); then
+         ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V MK20_NOHID=$NOHID \
+             MK20_AGENT_CTL=$FEATURE_AGENT_CTL MK20_HID_SCROLL=$FEATURE_HID_SCROLL \
+             MK20_K2_ESTOP=$FEATURE_K2_ESTOP MK20_K2_RELEASE=$FEATURE_K2_RELEASE \
+             exec sh "$REL/sbin/mk20d" kbd </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) & ); then
       log INFO kbd "supervisor launched (nohid=$NOHID); router off"
     else log WARN kbd "transition busy or composite gone -> mk20-kbd not started, stock KD stays"; fi
   elif [ $KBDM = 1 ]; then log WARN kbd "composite rc=${grc:-} -> stock KD stays"; fi
@@ -329,11 +332,12 @@ kbd)
       composite_up || { why="composite down"; break; }   # gadget.sh cleanup owns KD on that path
       [ "$(kd_count)" != 0 ] && { kd_svc stop; sleep 1 5>&-; [ "$(kd_count)" != 0 ] && { why="kd came back"; echo "stock KD came back" > "$TM/kbd-degraded"; rm -f "$TM/kbd.mode"; break; }; }
       HA="--hid $HID --hid-stop-file $HSTOP"; [ "${MK20_NOHID:-0}" = 1 ] && HA="--no-hid"
-      # Agent release flags: all default off; --ctl-allow is intentionally never passed.
+      # Boot-resolved flags, frozen with gadget.env; never reload mk20.conf here. All default off.
       set --
-      [ "$FEATURE_AGENT_CTL" = 1 ] && set -- "$@" --ctl "$R/run/mk20/kbd.sock"
-      [ "$FEATURE_HID_SCROLL" = 1 ] && set -- "$@" --hid-scroll
-      [ "$FEATURE_K2_ESTOP" = 1 ] && set -- "$@" --k2-estop
+      [ "${MK20_AGENT_CTL:-0}" = 1 ] && set -- "$@" --ctl "$R/run/mk20/kbd.sock"
+      [ "${MK20_HID_SCROLL:-0}" = 1 ] && set -- "$@" --hid-scroll
+      [ "${MK20_K2_ESTOP:-0}" = 1 ] && set -- "$@" --k2-estop
+      [ "${MK20_K2_RELEASE:-0}" = 1 ] && set -- "$@" --k2-release
       t0=$(cut -d. -f1 /proc/uptime)
       # --exit-file: the daemon itself refuses to start / exits when teardown's marker appears (closes the window
       # between this check and the exec); --lock: daemon-lifetime single-writer lock, the SAME path as the binary's

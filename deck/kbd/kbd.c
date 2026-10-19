@@ -37,14 +37,14 @@ int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
     /* non-blocking fd, bounded wait (KBD_HOST_TX_MS): a host/bridge that stops reading must never stall the GD32 /
      * HID / teardown loop (the bridge may itself be blocked writing requests to us). A frame cut short is counted
      * as an error; the host parser resyncs on the next A1A55A5E magic. */
-    long deadline = 0;
+    int64_t deadline = 0;
     for (int off = 0; rc == 0 && off < len;) {
         ssize_t w = write(k->host_fd, out + off, (size_t)(len - off));
         if (w > 0) { off += (int)w; continue; }
         if (w < 0 && errno == EINTR) continue;
         if (w < 0 && errno == EAGAIN) {
             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-            long now = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+            int64_t now = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
             if (!deadline) deadline = now + (k->host_tx_stuck ? 0 : KBD_HOST_TX_MS);   /* stuck: fail fast */
             if (now >= deadline) { rc = -1; k->st.host_tx_timeouts++; k->host_tx_stuck = 1; break; }
             struct pollfd pf = {k->host_fd, POLLOUT, 0};
@@ -110,12 +110,12 @@ void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len)
     if (n > 0 && k->host_fd >= 0) kbd_host_send(k, KBD_EVENT_ID, HOST_CMD_JSON, j, (size_t)n);
     /* agent A1: a physical key press takes input back from the agent (lease revoked + all-up) BEFORE the PTT edge */
     if (k->ctl && ev.knob == 2 && k->k2_estop) {
-        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); long now = t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); int64_t now = (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
         const char *reason = k2_estop_event(&k->k2, ev.row, ev.pressed, now);
         if (reason) ctl_estop(k->ctl, reason, now);
     }
     if (k->ctl && !ev.knob) {
-        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); long now = t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); int64_t now = (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
         if (ev.pressed) ctl_human_input(k->ctl, now);
         ctl_key_event(k->ctl, ev.row, ev.col, ev.pressed, now);
     }

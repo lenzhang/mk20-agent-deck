@@ -80,7 +80,7 @@ static hid_t g_hid;
 static void on_sig(int s) { (void)s; g_stop = 1; }
 static void on_usr1(int s) { (void)s; hid_request_close(&g_hid); }   /* gadget teardown: drop /dev/hidg0 now */
 
-static long mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
+static int64_t mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 
 static int open_host(const char *path)
 {
@@ -91,7 +91,7 @@ static int open_host(const char *path)
     return fd;   /* stays O_NONBLOCK: replies are written with a bounded wait (kbd_host_send), never block the loop */
 }
 
-struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop, *lock, *exit_file, *ctl; int ctl_allow, hid_scroll, k2_estop, no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
+struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop, *lock, *exit_file, *ctl; int ctl_allow, hid_scroll, k2_estop, k2_release, no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
 
 static int run(const struct run_opts *o)
 {
@@ -111,7 +111,7 @@ static int run(const struct run_opts *o)
     sa.sa_handler = on_usr1; sigaction(SIGUSR1, &sa, NULL);
     kbd_t k;
     if (kbd_init(&k, o->fb, o->bl, KBD_VERSION)) { fprintf(stderr, "mk20-kbd: init failed\n"); return 1; }
-    k.k2_estop = o->k2_estop; k2_estop_init(&k.k2, 0);
+    k.k2_estop = o->k2_estop; k2_estop_init(&k.k2, o->k2_release);
     k.ptt_col = o->ptt_col; k.ptt_row = o->ptt_row;
     hid_init(&g_hid, o->hid, o->hid_stop);
     hid_set_scroll(&g_hid, o->hid_scroll);   /* MUST match gadget.sh MK20_HID_SCROLL */
@@ -134,7 +134,7 @@ static int run(const struct run_opts *o)
     /* host link first, so key events arriving during knob init (<= 18 s worst case if the
      * GD32 never echoes) are still forwarded */
     if (!o->no_host && (k.host_fd = open_host(o->host)) >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
-    long next_host_try = mono_ms() + 1000;
+    int64_t next_host_try = mono_ms() + 1000;
     if (no_write) {
         k.knob.state = 4;
         fprintf(stderr, "mk20-kbd: GD32 write disabled (%s); knob K2 stays as configured in the GD32\n",
@@ -146,7 +146,7 @@ static int run(const struct run_opts *o)
                 gd32_knob_state_name(k.knob.state), k.knob.ok_count, k.knob.timeouts, k.knob.tx_errors);
     }
     static ctl_t ctl;
-    if (o->k2_estop || (o->ctl && o->ctl[0])) {   /* agent A1, opt-in: without --ctl nothing below runs */
+    if (o->k2_estop || (o->ctl && o->ctl[0])) {   /* agent A1, opt-in: control socket or K2 safety */
         ctl_init(&ctl, k.hid);
         if (o->k2_estop) k.ctl = &ctl;
         if (!o->ctl || !o->ctl[0]) { /* K2 safety only, no listening socket */ }
@@ -155,10 +155,10 @@ static int run(const struct run_opts *o)
     }
     if (o->status) kbd_write_status(&k, o->status);
 
-    long next_status = mono_ms() + 1000;
+    int64_t next_status = mono_ms() + 1000;
     uint8_t buf[16384];
     while (!g_stop) {
-        long now = mono_ms();
+        int64_t now = mono_ms();
         if (!o->no_host && k.host_fd < 0 && now >= next_host_try) {
             k.host_fd = open_host(o->host);
             next_host_try = now + 1000;
@@ -214,7 +214,7 @@ static void usage(void)
                     "                      [--bl DIR|''] [--status FILE] [--knob-timeout-ms N]\n"
                     "                      [--no-hid | --hid PATH] [--hid-stop-file PATH] [--ptt COL,ROW (1-based)]\n"
                     "                      [--lock FILE (default /tmp/mk20-kbd.lock; '' = none)] [--exit-file FILE]\n"
-                    "                      [--ctl SOCK (agent control, e.g. /run/mk20/kbd.sock)] [--ctl-allow (dev)] [--hid-scroll] [--k2-estop]\n"
+                    "                      [--ctl SOCK (agent control, e.g. /run/mk20/kbd.sock)] [--ctl-allow (dev)] [--hid-scroll] [--k2-estop] [--k2-release]\n"
                     "       mk20-kbd --monitor [tty] | --pattern [fbdir] | --getinfo\n"
                     "  kill file " GD32_NO_WRITE_FILE " = same as --no-gd32-write\n");
 }
@@ -228,7 +228,7 @@ int main(int argc, char **argv)
     }
     if (argc >= 2 && !strcmp(argv[1], "--run")) {
         struct run_opts o = {"/dev/ttyS1", "/dev/ttyGS0", "/dev", "/sys/kernel/debug/dispdbg", "/run/mk20/kbd.status",
-                             HID_DEFAULT_PATH, HID_DEFAULT_STOP_FILE, "/tmp/mk20-kbd.lock", NULL, NULL, 0, 0, 0, 0, 0, 1000, 0, 0, 3};
+                             HID_DEFAULT_PATH, HID_DEFAULT_STOP_FILE, "/tmp/mk20-kbd.lock", NULL, NULL, 0, 0, 0, 0, 0, 0, 1000, 0, 0, 3};
         for (int i = 2; i < argc; i++) {
             const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
             if (!strcmp(a, "--no-host")) o.no_host = 1;
@@ -247,6 +247,7 @@ int main(int argc, char **argv)
             else if (v && !strcmp(a, "--ctl")) { o.ctl = v; i++; }
             else if (!strcmp(a, "--ctl-allow")) o.ctl_allow = 1;   /* dev/test only: release allows from the keyboard */
             else if (!strcmp(a, "--k2-estop")) o.k2_estop = 1;
+            else if (!strcmp(a, "--k2-release")) o.k2_release = 1;
             else if (!strcmp(a, "--hid-scroll")) o.hid_scroll = 1;
             else if (v && !strcmp(a, "--ptt")) {
                 int c, r;

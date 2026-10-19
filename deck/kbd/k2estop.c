@@ -1,12 +1,12 @@
 #include "k2estop.h"
 #include <string.h>
 void k2_estop_init(k2_estop_t *k, int reports_release) { memset(k, 0, sizeof *k); k->reports_release = reports_release != 0; }
-const char *k2_estop_tick(k2_estop_t *k, long now)
+const char *k2_estop_tick(k2_estop_t *k, int64_t now)
 {
     if (k->reports_release && k->held && !k->fired && now - k->down_ms >= K2_HOLD_MS) { k->fired = 1; return "k2_hold"; }
     return NULL;
 }
-const char *k2_estop_event(k2_estop_t *k, int slot, int pressed, long now)
+const char *k2_estop_event(k2_estop_t *k, int slot, int pressed, int64_t now)
 {
     if (slot != K2_PRESS_SLOT) return NULL;
     if (!pressed) {
@@ -23,9 +23,9 @@ const char *k2_estop_event(k2_estop_t *k, int slot, int pressed, long now)
     if (k->npress == 3 && now - k->presses[0] <= K2_TRIPLE_MS) { k->npress = 0; return "k2_triple"; }
     return NULL;
 }
-int k2_estop_timeout(const k2_estop_t *k, long now, int dflt)
+int k2_estop_timeout(const k2_estop_t *k, int64_t now, int dflt)
 {
     if (!k->reports_release || !k->held || k->fired) return dflt;
-    long left = k->down_ms + K2_HOLD_MS - now; if (left < 0) left = 0;
+    int64_t left = k->down_ms + K2_HOLD_MS - now; if (left < 0) left = 0;
     return dflt < 0 || left < dflt ? (int)left : dflt;
 }

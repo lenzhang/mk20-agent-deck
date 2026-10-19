@@ -1,23 +1,25 @@
 # mk20-kbd local control protocol (v1)
 
-Opt in with `mk20-kbd --ctl /run/mk20/kbd.sock`. No socket, new HID report format,
+Opt in with `mk20-kbd --run --ctl /run/mk20/kbd.sock`. No socket, new HID report format,
 or K2 safety behavior is enabled by default. mk20-kbd remains the sole HID writer.
+mk20d creates `/run/mk20`; for manual runs, create the socket directory first.
 
 ## Transport
 
 AF_UNIX stream, mode 0600. Linux authenticates peers using SO_PEERCRED: same effective
 uid as mk20-kbd or uid 0; macOS host builds use getpeereid with the same rule.
 At most two clients; there is no socket operation to enable agent access. Both clients
-may query; leases and agent pages remain tied to the requesting connection.
+have equal permissions after the uid check; leases and agent pages remain tied to the requesting connection.
 
 One JSON object per line, including LF at most 1024 bytes (1023 bytes of JSON).
-Objects have unique top-level keys and primitive values; no nested request objects.
+Objects have at most 24 unique top-level keys and primitive values; no nested request objects.
 Strings support JSON escapes and UTF-8; text fields reject control characters and
 invalid UTF-8. Integer fields accept at most nine digits, without fractions or exponents.
 Malformed/duplicate-key JSON returns `bad_request`; an overlong incoming line drops
 the client. Split writes and multiple lines per write work. Requests need `op`;
 `id` is an optional nonnegative integer echoed in replies (omitted id appears as -1 in
-successful replies and is absent from errors). Notifications and replies can interleave.
+successful replies and is absent from errors). A supplied negative or invalid `id`
+returns `bad_request` without an id. Notifications and replies can interleave.
 A non-reading client is dropped on any incomplete nonblocking send; no output queue.
 
 Success: `{"ok":true,"id":7,...}`. Error: `{"ok":false,"id":7,"err":"bad_args"}`.
@@ -52,7 +54,9 @@ Missing/unknown kind: `bad_kind`; actions without a HID instance: `no_hid`.
 HID transport is bounded/best effort; accepted input does not promise host application delivery.
 
 Expiry, client loss, release, human physical key press, disable, and e-stop revoke the
-lease and release keys/pointer buttons. E-stop performs synchronous all-up with a
+lease, purge queued pointer/scroll actions, and release keys/pointer buttons at the
+last delivered pointer position. A release is retained even if desired buttons were
+already zero but reports were queued or last delivered buttons were down. E-stop performs synchronous all-up with a
 50 ms write budget, latches stopped, and sets allowed=0. It cancels confirmation,
 clears the screen grant/binds, and returns to the system page. Only a keyboard-side
 explicit allow clears the latch; reconnecting or acquiring cannot clear it.
@@ -72,7 +76,8 @@ The renderer calls `ctl_confirm_shown(c, now)` when actually drawn; redraws do n
 the guard. Keyboard-only `ctl_confirm_key(c, ok, now)` ignores/counts OK before display
 or less than 300 ms after display; exactly 300 ms is accepted. Cancel rejects immediately.
 At the deadline timeout wins. `ctl_tick` expires requests, and `ctl_timeout_ms` bounds
-poll by both lease and confirmation deadlines.
+poll by both lease and confirmation deadlines. All monotonic millisecond timestamps
+and deadlines use signed 64-bit storage, including on 32-bit armhf.
 
 Requester-only event: `{"ev":"confirm.result","cid":42,"ok":false,"reason":"timeout"}`.
 Reasons: `confirmed` (ok=true), `cancel`, `timeout`, `estop`, `disabled`, `client_gone`.
@@ -91,8 +96,9 @@ set a dirty bit consumed/cleared by keyboard-only `ctl_ui_dirty(c)`. No renderin
 All `screen.*` require allowed and no e-stop, no input lease. Errors `disabled`, `stopped`.
 Page ids: 0 system, 1 reserved agent control (system owner), 2 user; created pages have
 monotonically increasing ids starting at 3, owner agent and a specific client connection.
-Maximum eight agent pages. Disconnection retains pages, removes binds and client ownership,
-and returns a displayed departed page to system; a reused client slot cannot inherit it.
+Maximum eight agent pages. Disconnection frees all pages owned by that connection
+and returns a displayed departed page to system; reconnecting can allocate the freed
+slots but cannot inherit the departed page ids. Disable/e-stop keep pages as described below.
 
 | op | Fields / success |
 | --- | --- |
@@ -136,21 +142,25 @@ system/user/control pages and inactive-page bindings emit no key events.
 
 ## Flags, release switches, and keyboard-only work
 
-`--ctl PATH`, development-only `--ctl-allow`, `--hid-scroll`, `--k2-estop` are opt-in.
-Release config switches `FEATURE_AGENT_CTL`, `FEATURE_HID_SCROLL`, `FEATURE_K2_ESTOP`
-default to 0; 0/1 environment overrides `MK20_AGENT_CTL`, `MK20_HID_SCROLL`, `MK20_K2_ESTOP`
+`--ctl PATH`, development-only `--ctl-allow`, `--hid-scroll`, `--k2-estop`, `--k2-release` are opt-in.
+Release config switches `FEATURE_AGENT_CTL`, `FEATURE_HID_SCROLL`, `FEATURE_K2_ESTOP`, `FEATURE_K2_RELEASE`
+default to 0; 0/1 environment overrides `MK20_AGENT_CTL`, `MK20_HID_SCROLL`, `MK20_K2_ESTOP`, `MK20_K2_RELEASE`
 apply after config. `FEATURE_KBD`/`MK20_KBD` still select the replacement daemon.
-mk20d passes `--ctl /run/mk20/kbd.sock`, `--hid-scroll`, `--k2-estop` only when enabled;
+mk20d passes `--ctl /run/mk20/kbd.sock`, `--hid-scroll`, `--k2-estop`, `--k2-release` only when enabled;
 release never passes `--ctl-allow`. The resolved FEATURE_HID_SCROLL is exported as
 MK20_HID_SCROLL and persisted in gadget.env for manual gadget restarts, so descriptor
-selection and daemon report format use the same release value. Default descriptor
+selection and daemon report format use the same release value. Boot passes all four
+resolved switches into the fresh supervisor shell as MK20_* values; restarts retain
+these values even if mk20.conf changes after boot. Default descriptor
 bytes and launch arguments are unchanged. Reconfigure the gadget and daemon together
 when changing the scroll switch.
 
-K2 slot 103 only: once releases are known, held >=1000 ms triggers `k2_hold` from the
-poll timer while still down. Starts in press-only mode until the first observed release;
-three presses in a sliding <=1500 ms interval trigger `k2_triple` instead. Initial hold
-on unmeasured firmware cannot be inferred safely from a single press. Rotation slots
+K2 slot 103 only, with `--k2-estop`: `--k2-release` means firmware is known to report
+releases, so the first held press >=1000 ms triggers `k2_hold` from the poll timer
+while still down. Without `--k2-release`, start in press-only mode until the first
+observed release; three presses in a sliding <=1500 ms interval trigger `k2_triple`
+instead. Initial hold on unmeasured firmware cannot be inferred from a single press.
+The release-capability flag alone does not enable K2 e-stop. Rotation slots
 104/105 never contribute. The pure state machine never writes to GD32.
 
 Allow/disallow, confirm shown/key, screen grant and rendering are keyboard-side only.
