@@ -132,12 +132,18 @@ int ctl_json_quote(char *out, size_t cap, const char *s)
     out[n++] = '"'; out[n] = 0; return (int)n;
 }
 
+static int64_t mono_ms(void *ctx)
+{
+    (void)ctx;
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
 void ctl_init(ctl_t *c, hid_t *hid)
 {
     memset(c, 0, sizeof *c);
     strcpy(c->ui.state, "idle"); strcpy(c->ui.input, "hid");
     ctl_screen_init(c);
-    c->lfd = -1; c->hid = hid; c->holder = -1;
+    c->lfd = -1; c->hid = hid; c->holder = -1; c->clock_ms = mono_ms;
     for (int i = 0; i < CTL_MAX_CLIENTS; i++) c->cfd[i] = -1;
     struct timespec t; clock_gettime(CLOCK_REALTIME, &t);
     c->next_token = (uint32_t)(((uint32_t)t.tv_nsec ^ ((uint32_t)t.tv_sec << 7) ^ getpid()) % 900000000u) + 1000u;
@@ -447,28 +453,44 @@ static void accept_one(ctl_t *c)
     close(fd); c->st.rejects++;
 }
 
-static void read_client(ctl_t *c, int ci, int64_t now)
+/* Ticks may themselves wait for neutral HID output. Re-sample and check again if time advanced,
+ * so a lease revoke crossing a K2/confirm/grant deadline cannot leave validation with stale time.
+ * Never service queued HID here: safety must purge it before any implicit act flush. */
+static int64_t dispatch_time(ctl_t *c)
+{
+    for (;;) {
+        int64_t now = c->clock_ms(c->clock_ctx);
+        if (c->safety_tick) c->safety_tick(c->safety_ctx, now);
+        ctl_tick(c, now);
+        if (c->clock_ms(c->clock_ctx) == now) return now;
+    }
+}
+
+static void read_client(ctl_t *c, int ci)
 {
     char b[512];
     ssize_t r = recv(c->cfd[ci], b, sizeof b, MSG_DONTWAIT);
-    if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) { ctl_client_gone(c, ci, now); return; }
+    if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) { ctl_client_gone(c, ci, c->clock_ms(c->clock_ctx)); return; }
     for (ssize_t i = 0; i < r && c->cfd[ci] >= 0; i++) {
         if (b[i] != '\n') {
-            if (c->inlen[ci] + 1 >= CTL_LINE_MAX) { c->st.bad++; ctl_client_gone(c, ci, now); return; }   /* overlong: drop */
+            if (c->inlen[ci] + 1 >= CTL_LINE_MAX) { c->st.bad++; ctl_client_gone(c, ci, c->clock_ms(c->clock_ctx)); return; }   /* overlong: drop */
             c->in[ci][c->inlen[ci]++] = b[i]; continue;
         }
         char rep[CTL_LINE_MAX];
+        int64_t now = dispatch_time(c);
+        if (c->cfd[ci] < 0) return; /* a safety notification may have dropped this client */
         int n = ctl_handle_line(c, ci, c->in[ci], c->inlen[ci], now, rep, sizeof rep);
         c->inlen[ci] = 0;
+        dispatch_time(c);   /* includes the last request in a batch: allup/release may have waited */
         if (n > 0) { rep[n] = 0; ctl_notify(c, ci, rep); }
     }
 }
 
-void ctl_on_poll(ctl_t *c, const struct pollfd *pf, int n, int64_t now)
+void ctl_on_poll(ctl_t *c, const struct pollfd *pf, int n)
 {
     for (int k = 0; k < n; k++) {
         if (!(pf[k].revents & (POLLIN | POLLERR | POLLHUP))) continue;
         if (pf[k].fd == c->lfd) { accept_one(c); continue; }
-        for (int i = 0; i < CTL_MAX_CLIENTS; i++) if (c->cfd[i] == pf[k].fd) { read_client(c, i, now); break; }
+        for (int i = 0; i < CTL_MAX_CLIENTS; i++) if (c->cfd[i] == pf[k].fd) { read_client(c, i); break; }
     }
 }

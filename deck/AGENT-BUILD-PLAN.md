@@ -323,7 +323,9 @@
   发布开关 FEATURE_AGENT_CTL / FEATURE_HID_SCROLL / FEATURE_K2_ESTOP / FEATURE_K2_RELEASE（均默认 0）已接入，release 不传 --ctl-allow；boot 把解析值通过 MK20_* 传入新 supervisor shell，与 gadget.env / scroll 描述符一致，启动后改配置不影响重启参数。
   K2 默认先用 1500 ms 内三击，观察到 release 后启用 1 s hold；已测出 release 能力的固件可设 FEATURE_K2_RELEASE=1 / --k2-release，使冷启动首次 hold 就能由 poll 定时触发；真机 press/release 尚待测。
   撤销租约/急停先丢弃未发送的 pointer/scroll，再发 neutral；断连释放连接的 agent 页（禁用/急停保留页）；单调毫秒时基和期限统一为 64 位，覆盖 armhf 长 uptime。
-  macOS 可运行 ASan/UBSan 控制规则单测和 host 编译；完整 Linux kbd suite / 静态 armhf / 真机验收仍待 Linux 和设备。详见 kbd/CTL-PROTOCOL.md。
+  b46c562 的完整 Linux suite 已全绿：24 sim，kbd 3829 checks ×2（ASan/UBSan、TSan），real-binary e2e（含 stalled-host 急停），45 agent，58 tools，546 pytest；shellcheck 通过。
+  R3 修复：每条 socket 请求（同批次及跨客户端）验证前和 dispatch 后均用新单调时间跑 ctl/K2 safety tick，覆盖 allup 等有界等待；补充 fake-clock socket/HID 背压回归。本轮改动仍需 Linux suite / 静态 armhf 复验；真机描述符、滚轮、K2 press/release、probation/rollback 验收及 release 二进制重建/source-match/MANIFEST 前置条件仍未完成。详见 kbd/CTL-PROTOCOL.md。
+  kimi r3 follow-up：gd32io.c knob-init 的 32 位毫秒时基已改 int64_t；K2 timer-only e2e 的 [0.95,1.10] s 窗口仍无法区分 K2 timeout bound 与 100 ms HID base tick，后续用关闭 HID 的 250 ms base tick 或 poll-timeout 单测加强区分。
 - **A1b 屏幕 API（D8）**：协议/规则引擎已实现，draw/text 返回 rendered:false；A7 实现字体/像素 binary framing 和渲染、固定急停键视觉、物理允许/确认 UI。
 
 ### A2 VNC 抓帧（box + [D] 测量）

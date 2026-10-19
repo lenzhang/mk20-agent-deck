@@ -166,16 +166,16 @@ static void test_ctl_socket(void)
         fds[i] = socket(AF_UNIX, SOCK_STREAM, 0);
         struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX; snprintf(a.sun_path, sizeof a.sun_path, "%s", path);
         CHECK(connect(fds[i], (struct sockaddr *)&a, sizeof a) == 0);
-        struct pollfd pf[4]; int n = ctl_pollfds(&c, pf, 4); poll(pf, (nfds_t)n, 200); ctl_on_poll(&c, pf, n, 0);
+        struct pollfd pf[4]; int n = ctl_pollfds(&c, pf, 4); poll(pf, (nfds_t)n, 200); ctl_on_poll(&c, pf, n);
     }
     CHECK(c.cfd[0] >= 0 && c.cfd[1] >= 0);
     char b[4096]; ssize_t r = read(fds[2], b, sizeof b - 1); b[r > 0 ? r : 0] = 0;
     CHECK(has(b, "too_many_clients"));
     /* request split across writes + two requests in one write */
     CHECK(write(fds[0], "{\"op\":\"hel", 10) == 10);
-    struct pollfd pf[4]; int n = ctl_pollfds(&c, pf, 4); poll(pf, (nfds_t)n, 200); ctl_on_poll(&c, pf, n, 0);
+    struct pollfd pf[4]; int n = ctl_pollfds(&c, pf, 4); poll(pf, (nfds_t)n, 200); ctl_on_poll(&c, pf, n);
     CHECK(write(fds[0], "lo\",\"id\":3}\n{\"op\":\"estop\",\"id\":4}\n", 34) == 34);
-    n = ctl_pollfds(&c, pf, 4); poll(pf, (nfds_t)n, 200); ctl_on_poll(&c, pf, n, 0);
+    n = ctl_pollfds(&c, pf, 4); poll(pf, (nfds_t)n, 200); ctl_on_poll(&c, pf, n);
     usleep(20000);
     r = read(fds[0], b, sizeof b - 1); b[r > 0 ? r : 0] = 0;
     CHECK(has(b, "\"id\":3") && has(b, "\"ev\":\"estop\"") && has(b, "\"id\":4"));
@@ -184,7 +184,7 @@ static void test_ctl_socket(void)
     /* overlong line -> client dropped */
     char big[CTL_LINE_MAX + 10]; memset(big, 'a', sizeof big);
     CHECK(write(fds[1], big, sizeof big) == (ssize_t)sizeof big);
-    for (int k = 0; k < 4 && c.cfd[1] >= 0; k++) { n = ctl_pollfds(&c, pf, 4); poll(pf, (nfds_t)n, 200); ctl_on_poll(&c, pf, n, 0); }
+    for (int k = 0; k < 4 && c.cfd[1] >= 0; k++) { n = ctl_pollfds(&c, pf, 4); poll(pf, (nfds_t)n, 200); ctl_on_poll(&c, pf, n); }
     CHECK(c.cfd[1] < 0);
     for (int i = 0; i < 3; i++) close(fds[i]);
     ctl_close(&c);
@@ -505,6 +505,140 @@ static void test_kbd_safety_backpressure(void)
         CHECK(!h.ptr_n && !h.dirty);
         close(p[0]); close(p[1]);
     }
+}
+
+/* One fake monotonic clock shared by socket dispatch and the bounded HID release. On the
+ * first EAGAIN inside allup, advance across the deadline and release pipe backpressure.
+ * No sleeps/threads: exercise the actual write/retry path without scheduler-dependent timing. */
+typedef struct { int64_t now, after_wait; int rd, wait_reads; hid_t *hid; unsigned eagain; } dispatch_clock;
+static int64_t dispatch_clock_ms(void *ctx) { return ((dispatch_clock *)ctx)->now; }
+static int64_t dispatch_wait_ms(void *ctx)
+{
+    dispatch_clock *t = ctx;
+    if (++t->wait_reads == 2) {
+        CHECK(t->hid->eagain > t->eagain); /* allup really encountered the full pipe */
+        t->now = t->after_wait;
+        char filler[256]; while (read(t->rd, filler, sizeof filler) > 0) {}
+    }
+    return t->now;
+}
+
+static void dispatch_poll(ctl_t *c)
+{
+    struct pollfd pf[CTL_MAX_CLIENTS]; int n = ctl_pollfds(c, pf, CTL_MAX_CLIENTS);
+    CHECK(poll(pf, (nfds_t)n, 0) == n); /* every supplied client has a buffered request */
+    ctl_on_poll(c, pf, n);
+}
+static void dispatch_send(int fd, const char *s) { CHECK(write(fd, s, strlen(s)) == (ssize_t)strlen(s)); }
+static void dispatch_recv(int fd, char *r, size_t cap)
+{
+    ssize_t n = recv(fd, r, cap - 1, MSG_DONTWAIT); r[n > 0 ? n : 0] = 0; CHECK(n > 0);
+}
+
+/* Real read_client batches, not direct ctl_handle_line calls: no old-lease input or renewal
+ * can survive allup's bounded wait. A second client must also see the new deadline state. */
+static void test_ctl_dispatch_backpressure(void)
+{
+    for (int k2 = 0; k2 < 2; k2++) for (int clients = 1; clients <= 2; clients++) for (int last = 0; last < 2; last++) {
+        int p[2], sv[2][2]; CHECK(nb_pipe(p) == 0);
+        hid_t h; hid_init(&h, "/nonexistent", NULL); hid_set_scroll(&h, 1); hid_attach_fd(&h, p[1]);
+        uint8_t rep[64][9]; rd_reports_n(p[0], rep, 64, 8);
+        ctl_t c; ctl_init(&c, &h); ctl_set_allowed(&c, 1); char r[4096], q[512], allup[128];
+        CHECK(H(&c, 0, 0, k2 ? "{\"op\":\"lease.acquire\",\"ttl_ms\":10000}" : "{\"op\":\"lease.acquire\",\"ttl_ms\":1000}", r) > 0);
+        long token = tok_of(r);
+        snprintf(q, sizeof q, "{\"op\":\"act\",\"token\":%ld,\"seq\":1,\"kind\":\"key\",\"usage\":4,\"down\":1}", token);
+        CHECK(H(&c, 0, 0, q, r) > 0 && has(r, "\"ok\":true"));
+        CHECK(rd_reports_n(p[0], rep, 64, 8) == 1 && rep[0][3] == 4); /* agent key is held */
+        hid_pointer_abs(&h, 1, 30, 40); rd_reports_n(p[0], rep, 64, 8);
+        char filler[256]; memset(filler, 0x7f, sizeof filler);
+        while (write(p[1], filler, sizeof filler) > 0) {}
+        while (write(p[1], filler, 1) > 0) {}
+        CHECK(errno == EAGAIN);
+        hid_pointer_abs(&h, 1, 1000, 2000); hid_scroll(&h, 3, -2); /* queued input must be purged too */
+        dispatch_clock t = {990, 1020, p[0], 0, &h, h.eagain};
+        c.clock_ms = dispatch_clock_ms; c.clock_ctx = &t; h.clock_ms = dispatch_wait_ms; h.clock_ctx = &t;
+        kbd_t k; memset(&k, 0, sizeof k); k.hid = &h; k.ctl = &c; k.k2_estop = k2;
+        k2_estop_init(&k.k2, 1); if (k2) CHECK(!k2_estop_event(&k.k2, 103, 1, 0));
+        c.safety_tick = kbd_ctl_safety; c.safety_ctx = &k; /* same callback as run() */
+        for (int i = 0; i < clients; i++) { CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv[i]) == 0); c.cfd[i] = sv[i][0]; }
+        snprintf(allup, sizeof allup, "{\"op\":\"act\",\"id\":2,\"token\":%ld,\"seq\":2,\"kind\":\"allup\"}\n", token);
+        snprintf(q, sizeof q, "%s", allup);
+        if (!last) snprintf(q, sizeof q,
+            "%s{\"op\":\"act\",\"id\":3,\"token\":%ld,\"seq\":3,\"kind\":\"key\",\"usage\":5,\"down\":1}\n"
+            "{\"op\":\"lease.renew\",\"id\":4,\"token\":%ld}\n"
+            "{\"op\":\"act\",\"id\":5,\"token\":%ld,\"seq\":4,\"kind\":\"ptr\",\"buttons\":1,\"x\":300,\"y\":400}\n", allup, token, token, token);
+        dispatch_send(sv[0][1], q); /* allup + key act in ONE write / read batch */
+        if (clients == 2) dispatch_send(sv[1][1], "{\"op\":\"status\",\"id\":6}\n{\"op\":\"lease.acquire\",\"id\":7,\"ttl_ms\":1000}\n");
+        dispatch_poll(&c);
+        CHECK(t.now == 1020 && t.wait_reads == 2 && c.st.acts == 2 && c.st.renews == 0 && c.last_seq == (clients == 2 && !k2 ? 0u : 2u));
+        CHECK(c.estopped == k2 && (k2 ? !strcmp(c.stop_reason, "k2_hold") : c.st.expiries == 1));
+        CHECK(clients == 2 && !k2 ? c.token && c.holder == 1 && c.expiry_ms == 2020 : !c.token);
+        dispatch_recv(sv[0][1], r, sizeof r);
+        CHECK(has(r, "\"ok\":true,\"id\":2,\"seq\":2"));
+        if (!last) {
+            char expected[64]; snprintf(expected, sizeof expected, "\"ok\":false,\"id\":3,\"err\":\"%s\"", k2 ? "stopped" : "no_lease");
+            CHECK(has(r, expected));
+            CHECK(has(r, "\"ok\":false,\"id\":4") && has(r, "\"ok\":false,\"id\":5"));
+        }
+        if (clients == 2) {
+            dispatch_recv(sv[1][1], r, sizeof r);
+            CHECK(has(r, "\"leased\":0") && has(r, k2 ? "\"state\":\"stopped\"" : "\"state\":\"idle\""));
+            CHECK(has(r, k2 ? "\"ok\":false,\"id\":7,\"err\":\"stopped\"" : "\"ok\":true,\"id\":7,\"token\":"));
+        }
+        int n = rd_reports_n(p[0], rep, 64, 8);
+        CHECK(n == 2 && rep[0][0] == 1 && !memcmp(rep[0] + 1, (uint8_t[8]){0}, 8));
+        CHECK(rep[1][0] == 2 && !rep[1][1] && rep[1][2] == 30 && rep[1][4] == 40 && !rep[1][6] && !rep[1][7]);
+        CHECK(!h.dirty && !h.ptr_n && !memcmp(h.keys, (uint8_t[6]){0}, 6));
+        ctl_close(&c); for (int i = 0; i < clients; i++) close(sv[i][1]);
+        close(p[0]); close(p[1]);
+    }
+}
+
+static void test_ctl_dispatch_deadlines(void)
+{
+    /* The pre-dispatch lease tick can itself wait across K2's deadline. Recheck before acquire. */
+    int p[2], sv[2]; CHECK(nb_pipe(p) == 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    hid_t h; hid_init(&h, "/nonexistent", NULL); hid_attach_fd(&h, p[1]);
+    uint8_t rep[64][9]; rd_reports_n(p[0], rep, 64, 6);
+    ctl_t c; ctl_init(&c, &h); ctl_set_allowed(&c, 1); c.cfd[0] = sv[0]; char r[4096];
+    CHECK(H(&c, 0, 0, "{\"op\":\"lease.acquire\",\"ttl_ms\":1000}", r) > 0);
+    hid_key(&h, 4, 1); rd_reports_n(p[0], rep, 64, 6);
+    char filler[256]; memset(filler, 0x7f, sizeof filler);
+    while (write(p[1], filler, sizeof filler) > 0) {}
+    while (write(p[1], filler, 1) > 0) {}
+    CHECK(errno == EAGAIN);
+    dispatch_clock t = {1000, 1020, p[0], 0, &h, h.eagain};
+    c.clock_ms = dispatch_clock_ms; c.clock_ctx = &t; h.clock_ms = dispatch_wait_ms; h.clock_ctx = &t;
+    kbd_t k; memset(&k, 0, sizeof k); k.ctl = &c; k.k2_estop = 1;
+    k2_estop_init(&k.k2, 1); CHECK(!k2_estop_event(&k.k2, 103, 1, 10)); /* K2 expires at 1010 */
+    c.safety_tick = kbd_ctl_safety; c.safety_ctx = &k;
+    dispatch_send(sv[1], "{\"op\":\"lease.acquire\",\"id\":8}\n"); dispatch_poll(&c);
+    CHECK(t.wait_reads == 2 && c.st.expiries == 1 && c.estopped && !c.token);
+    dispatch_recv(sv[1], r, sizeof r); CHECK(has(r, "\"ok\":false,\"id\":8,\"err\":\"stopped\""));
+    ctl_close(&c); close(sv[1]); close(p[0]); close(p[1]);
+
+    /* Confirmation and screen grants must expire between batched requests as well. */
+    CHECK(nb_pipe(p) == 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    hid_init(&h, "/nonexistent", NULL); hid_attach_fd(&h, p[1]); rd_reports_n(p[0], rep, 64, 6);
+    ctl_init(&c, &h); ctl_set_allowed(&c, 1); c.cfd[0] = sv[0];
+    CHECK(H(&c, 0, 0, "{\"op\":\"lease.acquire\",\"ttl_ms\":10000}", r) > 0); long token = tok_of(r);
+    CHECK(H(&c, 0, 0, "{\"op\":\"confirm.request\",\"cid\":1,\"summary\":\"x\",\"risk\":\"low\",\"timeout_ms\":1000}", r) > 0 && c.confirm.pending);
+    ctl_screen_grant(&c, 1000, 0); hid_key(&h, 4, 1); rd_reports_n(p[0], rep, 64, 6);
+    while (write(p[1], filler, sizeof filler) > 0) {}
+    while (write(p[1], filler, 1) > 0) {}
+    CHECK(errno == EAGAIN);
+    t = (dispatch_clock){990, 1020, p[0], 0, &h, h.eagain};
+    c.clock_ms = dispatch_clock_ms; c.clock_ctx = &t; h.clock_ms = dispatch_wait_ms; h.clock_ctx = &t;
+    char q[512]; snprintf(q, sizeof q,
+        "{\"op\":\"act\",\"token\":%ld,\"seq\":1,\"kind\":\"allup\"}\n"
+        "{\"op\":\"screen.text\",\"id\":9,\"page_id\":0,\"fb\":1,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}\n"
+        "{\"op\":\"confirm.request\",\"id\":10,\"cid\":2,\"summary\":\"y\",\"risk\":\"low\",\"timeout_ms\":1000}\n", token);
+    dispatch_send(sv[1], q); dispatch_poll(&c);
+    CHECK(t.wait_reads == 2 && !c.screen.grant_until && c.confirm.pending && c.confirm.cid == 2 && c.confirm.deadline_ms == 2020);
+    dispatch_recv(sv[1], r, sizeof r);
+    CHECK(has(r, "\"cid\":1,\"ok\":false,\"reason\":\"timeout\""));
+    CHECK(has(r, "\"ok\":false,\"id\":9,\"err\":\"forbidden\"") && has(r, "\"ok\":true,\"id\":10"));
+    ctl_close(&c); close(sv[1]); close(p[0]); close(p[1]);
 }
 
 /* Newly stalled host, not the fail-fast-after-an-earlier-timeout case. Both opt-ins must

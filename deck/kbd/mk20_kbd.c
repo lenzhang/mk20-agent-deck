@@ -148,6 +148,7 @@ static int run(const struct run_opts *o)
     static ctl_t ctl;
     if (o->k2_estop || (o->ctl && o->ctl[0])) {   /* agent A1, opt-in: control socket or K2 safety */
         ctl_init(&ctl, k.hid);
+        ctl.safety_tick = kbd_ctl_safety; ctl.safety_ctx = &k;
         if (o->k2_estop) k.ctl = &ctl;
         if (!o->ctl || !o->ctl[0]) { /* K2 safety only, no listening socket */ }
         else if (ctl_listen(&ctl, o->ctl)) fprintf(stderr, "mk20-kbd: control socket %s failed: %s (agent input disabled)\n", o->ctl, strerror(errno));
@@ -185,7 +186,7 @@ static int run(const struct run_opts *o)
             for (ssize_t i = 0; i < n; i++) { int l = gd32_feed(&gp, buf[i]); if (l > 0) kbd_on_gd32(&k, gp.buf, l); }
         }
         /* Physical safety and control requests precede host work, including buffered host frames. */
-        if (r > 0 && nctl) { kbd_safety_tick(&k, mono_ms()); ctl_on_poll(k.ctl, pf + 3, nctl, mono_ms()); }
+        if (r > 0 && nctl) ctl_on_poll(k.ctl, pf + 3, nctl);
         if (r > 0 && pf[2].fd >= 0 && (pf[2].revents & (POLLOUT | POLLERR))) kbd_service(&k, mono_ms());
         if (r > 0 && k.host_fd >= 0 && pf[1].fd >= 0 && (pf[1].revents & (POLLIN | POLLERR | POLLHUP))) {
             ssize_t n = read(k.host_fd, buf, sizeof buf);

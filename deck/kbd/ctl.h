@@ -33,6 +33,8 @@ typedef struct ctl_s {
     int cfd[CTL_MAX_CLIENTS]; char in[CTL_MAX_CLIENTS][CTL_LINE_MAX]; size_t inlen[CTL_MAX_CLIENTS];
     ctl_screen_t screen;
     hid_t *hid;              /* NULL = no HID (acts fail "no_hid") */
+    int64_t (*clock_ms)(void *ctx); void *clock_ctx; /* injectable; defaults to CLOCK_MONOTONIC */
+    void (*safety_tick)(void *ctx, int64_t now_ms); void *safety_ctx; /* keyboard's K2 + ctl tick; no HID service */
     int allowed, estopped;
     uint32_t token, next_token, last_seq; int holder; int64_t expiry_ms; char owner[32];
     char stop_reason[32];
@@ -59,7 +61,7 @@ void ctl_notify(ctl_t *c, int ci, const char *line);
 void ctl_tick(ctl_t *c, int64_t now_ms);                 /* lease, confirmation and grant expiry */
 int ctl_timeout_ms(const ctl_t *c, int64_t now_ms, int dflt);   /* poll bounded by lease + confirmation deadlines */
 int ctl_pollfds(const ctl_t *c, struct pollfd *pf, int max);
-void ctl_on_poll(ctl_t *c, const struct pollfd *pf, int n, int64_t now_ms);
+void ctl_on_poll(ctl_t *c, const struct pollfd *pf, int n); /* fresh safety check before EVERY request, and after dispatch */
 void ctl_estop(ctl_t *c, const char *reason, int64_t now_ms);
 void ctl_human_input(ctl_t *c, int64_t now_ms);          /* physical key press: lease yields to the human */
 void ctl_set_allowed(ctl_t *c, int on);               /* keyboard only (agent page); clears the e-stop latch */

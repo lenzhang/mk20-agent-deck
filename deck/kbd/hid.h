@@ -35,6 +35,7 @@
 typedef struct {
     char path[128], stop_file[128];
     int fd;
+    int64_t (*clock_ms)(void *ctx); void *clock_ctx; /* bounded release clock; injectable, default CLOCK_MONOTONIC */
     uint8_t mods, keys[6];        /* desired keyboard state */
     uint8_t sent[HID_KBD_LEN];    /* last report the gadget accepted */
     int dirty, hard_fail;

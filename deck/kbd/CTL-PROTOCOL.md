@@ -65,7 +65,12 @@ Host writes never wait for ttyGS0: backpressure drops the unsent frame/remainder
 counted in `kbd.status` as `host_tx_errors` and `host_tx_timeouts`. Host framing
 resynchronizes at the next magic header. The loop polls control and safety deadlines
 between host frames and checks fresh deadlines before servicing queued HID output,
-including after poll and host decode/render. The no-safety-flags host path retains
+including after poll and host decode/render. Every socket request gets a fresh monotonic
+timestamp and both the K2 hold tick and lease/confirmation/grant tick before validation,
+including concatenated requests in one read and requests from different clients. Safety
+is checked again after dispatch (including bounded all-up waits); if a safety tick itself
+waits across a deadline, time is refreshed and safety rechecked before validation.
+The no-safety-flags host path retains
 its existing 200 ms timeout. With writable HID, stop/preemption must release within 100 ms.
 Events: `{"ev":"lease_revoked","reason":"expired"}` (holder only; other reasons:
 `released`, `human`, `disabled`, `client_gone`, `estop`) and

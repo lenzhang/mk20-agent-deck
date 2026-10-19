@@ -33,6 +33,8 @@ void kbd_safety_tick(kbd_t *k, int64_t now)
     ctl_tick(k->ctl, now);
 }
 
+void kbd_ctl_safety(void *ctx, int64_t now) { kbd_safety_tick((kbd_t *)ctx, now); }
+
 void kbd_service(kbd_t *k, int64_t now)
 {
     kbd_safety_tick(k, now);

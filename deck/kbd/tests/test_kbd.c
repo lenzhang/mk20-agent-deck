@@ -267,6 +267,11 @@ int main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "--ctl-unit")) {
         test_hid_scroll(); test_ctl_lease(); test_ctl_scroll_act(); test_ctl_confirm(); test_ctl_ui(); test_ctl_screen(); test_k2_estop(); test_ctl_edges();
         test_ctl_backpressure(); test_kbd_safety_backpressure(); test_kbd_safety_host(); test_ctl_screen_disconnect(); test_ctl_json_edges(); test_ctl_long_uptime(); test_ctl_malformed_seeded();
+        test_ctl_dispatch_backpressure(); test_ctl_dispatch_deadlines();
+        printf("%d checks, %d failures\n", checks, fails); return fails ? 1 : 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--ctl-dispatch-unit")) {
+        test_ctl_dispatch_backpressure(); test_ctl_dispatch_deadlines();
         printf("%d checks, %d failures\n", checks, fails); return fails ? 1 : 0;
     }
     test_gd32_roundtrip(); test_gd32_corrupt(); test_gd32_fuzz(); test_gd32_allowlist(); test_knob_frames();
@@ -274,6 +279,7 @@ int main(int argc, char **argv)
     test_knob_init(); test_jpeg(); test_kbd_core(); test_writers(); test_hid(); test_hid_replace();
     test_hid_scroll(); test_ctl_lease(); test_ctl_scroll_act(); test_ctl_socket(); test_ctl_confirm(); test_ctl_ui(); test_ctl_screen(); test_k2_estop(); test_ctl_edges();
     test_ctl_backpressure(); test_kbd_safety_backpressure(); test_kbd_safety_host(); test_ctl_screen_disconnect(); test_ctl_json_edges(); test_ctl_long_uptime(); test_ctl_malformed_seeded();
+    test_ctl_dispatch_backpressure(); test_ctl_dispatch_deadlines();
     printf("%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }

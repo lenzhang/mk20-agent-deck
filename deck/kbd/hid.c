@@ -8,12 +8,13 @@
 #include <time.h>
 #include <unistd.h>
 
-static int64_t mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
+static int64_t mono_ms(void *ctx) { (void)ctx; struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 
 void hid_init(hid_t *h, const char *path, const char *stop_file)
 {
     memset(h, 0, sizeof *h);
     h->fd = -1;
+    h->clock_ms = mono_ms;
     snprintf(h->path, sizeof h->path, "%s", path ? path : HID_DEFAULT_PATH);
     snprintf(h->stop_file, sizeof h->stop_file, "%s", stop_file ? stop_file : "");
     h->dirty = 1;
@@ -223,10 +224,10 @@ int hid_release_all(hid_t *h, int timeout_ms)
     if (h->fd < 0) return -1;
     if (!h->dirty && !memcmp(h->sent, up, sizeof up)) { flush(h); return 0; }
     h->dirty = 1;
-    int64_t end = mono_ms() + timeout_ms;
+    int64_t end = h->clock_ms(h->clock_ctx) + timeout_ms;
     for (;;) {
         if (wr(h, up, sizeof up) == 0) { memcpy(h->sent, up, sizeof up); h->dirty = 0; flush(h); return 0; }
-        int64_t left = end - mono_ms();
+        int64_t left = end - h->clock_ms(h->clock_ctx);
         if (left <= 0) break;
         struct pollfd pf = {h->fd, POLLOUT, 0};
         poll(&pf, 1, left < 50 ? (int)left : 50);

@@ -41,18 +41,18 @@ const char *gd32_knob_state_name(int s)
     return (s >= 0 && s <= 4) ? n[s] : "?";
 }
 
-static long now_ms(void)
+static int64_t now_ms(void)
 {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 /* wait for the echo of want[] for up to timeout_ms; 1 = got it, 0 = timeout, -1 = read error */
 static int wait_echo(int fd, gd32_parser *p, const uint8_t *want, int timeout_ms, gd32_knob_status *st, gd32_frame_cb cb, void *ctx)
 {
-    long deadline = now_ms() + timeout_ms;
+    int64_t deadline = now_ms() + timeout_ms;
     for (;;) {
-        long left = deadline - now_ms();
+        int64_t left = deadline - now_ms();
         if (left <= 0) return 0;
         struct pollfd pf = {fd, POLLIN, 0};
         int r = poll(&pf, 1, (int)left);

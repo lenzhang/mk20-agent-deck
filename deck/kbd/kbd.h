@@ -39,6 +39,7 @@ int kbd_init(kbd_t *k, const char *fbdir, const char *bl_dir, const char *versio
 void kbd_free(kbd_t *k);
 /* Loop boundary: expire safety deadlines BEFORE any queued HID output. now_ms must be fresh. */
 void kbd_safety_tick(kbd_t *k, int64_t now_ms);
+void kbd_ctl_safety(void *ctx, int64_t now_ms); /* ctl pre-dispatch adapter */
 void kbd_service(kbd_t *k, int64_t now_ms);
 /* One parsed GD32 payload (key event, echo, other). */
 void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len);
