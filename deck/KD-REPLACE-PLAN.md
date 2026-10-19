@@ -142,11 +142,15 @@
 - Inbound GD32 LEN capped at 64 (a false header can no longer swallow 255 bytes).
 - Tests: `make -C deck/kbd test` = ASan/UBSan unit tests + `tests/e2e_run.py` (real binary on two ptys, the console's own `mk20deck.protocol` codec). Wired into `deck/Makefile` `test`.
 
-**K3 remaining:**
-- Per-bus writer threads (both SPI buses in parallel; today flushes are serial in the main loop, so a full-canvas update blocks key handling for ~70 ms).
-- Router merge (HID via `/dev/hidg0`, keymap/actions, PTT, all-keys-up on start/EOF/signal), so mk20-kbd replaces the bridge tap path.
-- Backlight param scale: **assumed** 0..100 → 0..255 (floor 8). KD's exact conversion is not decoded yet; verify on the device.
-- getInfo field parity with KD beyond what the console reads (KD sends more keys; the console only needs the rects and size).
-- Console e2e through the real TCP bridge and the Mac console in the simulator.
+**K3 chunk 2 (2026-10-19):**
+- **Per-bus writer threads:** one thread per SPI bus (bus 0: fb1–9 + fb21, bus 1: fb10–20). Producers only copy into `pending` under the bus mutex; the writer snapshots a panel under the lock and writes+fsyncs unlocked. Latest content wins per panel; a panel re-dirtied during its write is written again (unless it went back to the written content); a failing fb is retried with a 200 ms back-off; stop = bounded drain or immediate. Tests: producer never blocked (40 updates with 200 ms writes < 60 ms), coalescing, re-dirty, parallel buses, missing fb, shutdown variants; whole suite also under TSan (`make -C deck/kbd tsan`, part of `make test`).
+- **Backlight = KD exactly:** `BacklightAdjuster` = `Adjuster(0, 100, 10, 255)` (@0xd16b8), `mapToControl` (@0xd1228): `param = 10 + (int)(level/100.0 * 245)`, clamped 10..255; dispdbg `name=lcd0, command=setbl, param, start=1` (`backlightValueChanged` @0x52c68). Reply `{"ack_method":"setBacklight","success":true,"result":<level>}`; out of range → KD's text `Backlight level must be between 0 and 100, got N`.
+- **getInfo parity:** `handleGetInfo` (@0x63550) fields deviceVersion/deviceWidth/deviceHeight/deviceModel/devicePanel; devicePanel adds `screenWidth`/`screenHeight`. e2e compares field-for-field with a captured KD V2.32 getInfo (`tests/data/kd-getinfo-v232.json`); only deviceVersion differs (`mk20-kbd-0.3`).
+- **Router merge, step 1 (`hid.c`):** `/dev/hidg0` output inside mk20-kbd: keyboard report 1 (mods + 6 keys), absolute pointer report 2 (FIFO, button edges never dropped), PTT key (doc 1,4 → fw col 0,row 3; `--ptt C,R`) holds Right Alt; knobs and other keys local. r120 rules kept: all-up at open, exit, EOF and SIGTERM (bounded 1.5 s, under gadget.sh's TERM→KILL window); state only changes on a fully accepted write; dirty re-send on POLLOUT; non-EAGAIN errors throttled to 100 ms. **Teardown:** the daemon checks `/tmp/mk20-router-stop` every ≤100 ms tick while hidg0 is open (and closes immediately on SIGUSR1), sends a short all-up and closes; it reopens only after the file is gone. e2e covers all of this with a FIFO as hidg0.
 
-**On-device checks still needed (user at home):** knob init echo on the real GD32 and K2 events `16 .. 67/68/69`; JPEG frames from the Mac console shown correctly; setBacklight brightness scale; host link reopen across a bridge restart; latency press→keyStateChanged and press→panel.
+**K3 remaining:**
+- **gadget.sh / mk20d integration (K4):** `router_stop` must also cover mk20-kbd: send SIGUSR1 (or rely on the stop file), then wait until `/proc/<pid>/fd` no longer points at `/dev/hidg0` before any UDC/configfs change. Today it only signals `bin/mk20-router --src` pids. The standalone router and the bridge `--tap` path go away when mk20-kbd is the release default.
+- Router features beyond PTT that lived on the Mac/agent side (keymaps/actions, MCP agent hooks), keytrace (`MK20_KEYTRACE`) not yet ported.
+- Console e2e through the real TCP bridge plus the Mac console in the simulator.
+
+**On-device checks still needed (user at home):** knob init echo on the real GD32 and K2 events `16 .. 67/68/69`; JPEG frames from the Mac console shown correctly; brightness levels look right with the KD mapping; PTT RAlt from the on-board daemon and the hidg0 close on gadget teardown; host link reopen across a bridge restart; latency press→keyStateChanged and press→panel.
