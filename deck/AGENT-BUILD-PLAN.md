@@ -178,7 +178,7 @@
 - **预算**：每个任务最多 30 步（可配，上限 100），时长 10 min，模型调用 40 次，输入字符 256/次；
   单个动作执行超时 2 s；连续 3 步截图哈希不变就判定“无进展”，暂停并请示用户。
 - **高风险动作必须确认**：本地规则加模型自报 `risk` 字段，二者**取并集**。命中下面任一条就必须按确认键：
-  - `key` 命中危险组合：cmd+q/w/delete/shift+3/4/5 之外的系统级组合、cmd+opt+esc、ctrl+cmd+q 等，有可配的黑名单。
+  - `key` 命中危险组合黑名单（可配）：cmd+q、cmd+w、cmd+delete、cmd+opt+esc、ctrl+cmd+q、cmd+shift+delete、return/enter（在发送类界面）等。
   - `type` 内容含换行加终端关键字，或含 `sudo`、`rm`、`curl|sh` 等。
   - 点击目标的 OCR 或模型描述含“删除 / 发送 / 付款 / 购买 / 提交 / 确认支付 / Delete / Send / Pay / Submit”。
   - 任务首个动作，以及切换到新 App 时（可配）。
