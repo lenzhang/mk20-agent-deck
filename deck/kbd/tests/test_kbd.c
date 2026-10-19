@@ -203,6 +203,7 @@ static void test_host(void)
     CHECK(jl > 0 && strstr(j, "\"deviceWidth\":640") && strstr(j, "\"deviceHeight\":656"));
     CHECK(strstr(j, "{\"col\":4,\"height\":128,\"isKey\":true,\"row\":3,\"width\":128,\"x\":512,\"y\":528}"));
     CHECK(strstr(j, "{\"height\":142,\"isKey\":false,\"width\":428,\"x\":106,\"y\":0}"));
+    CHECK(strstr(j, "],\"screenHeight\":656,\"screenWidth\":640}"));
     CHECK(host_json_getinfo_ack(j, 50, "x") == -1);
     CHECK(host_json_key_state(j, sizeof j, 100, 100, 1) > 0 && !strcmp(j, "{\"method\":\"keyStateChanged\",\"parameters\":{\"col\":100,\"pressed\":true,\"row\":100}}"));
 }

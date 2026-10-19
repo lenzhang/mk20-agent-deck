@@ -82,7 +82,7 @@ int host_json_getinfo_ack(char *out, size_t cap, const char *ver)
         else
             AP("%s{\"height\":%d,\"isKey\":false,\"width\":%d,\"x\":%d,\"y\":%d}", i ? "," : "", pn->h, pn->w, pn->x, pn->y);
     }
-    AP("]}}}");
+    AP("],\"screenHeight\":%d,\"screenWidth\":%d}}}", CANVAS_H, CANVAS_W);
 #undef AP
     return (int)o;
 }

@@ -146,10 +146,14 @@ int kbd_json_int(const char *s, size_t n, const char *key, long *val)
 /* ------------------------------------------------------------------ backlight */
 int kbd_bl_param(int level)
 {
-    /* dispdbg setbl takes the sunxi PWM duty 0..255. Floor 8 so "0" from a slider
-     * never blacks the panels out completely (plan §4: never dark). */
-    int v = level * 255 / 100;
-    return v < 8 ? 8 : v > 255 ? 255 : v;
+    /* KD V2.32 exactly: BacklightAdjuster = Adjuster(min 0, max 100, ctrlMin 10, ctrlMax 255)
+     * (@0xd16b8); Adjuster::mapToControl (@0xd1228):
+     *   ctrl = ctrlMin + (int)((double)(v - min) / (max - min) * (ctrlMax - ctrlMin)), clamped.
+     * v is clamped to [min,max] first by Adjuster::setValue (@0xd1284). Floor 10 = never dark. */
+    if (level < 0) level = 0;
+    if (level > 100) level = 100;
+    int c = 10 + (int)((double)level / 100.0 * 245.0);
+    return c < 10 ? 10 : c > 255 ? 255 : c;
 }
 
 static int put_file(const char *dir, const char *name, const char *val)
@@ -176,6 +180,13 @@ int kbd_set_backlight(kbd_t *k, int level)
 }
 
 /* ------------------------------------------------------------------ host frames */
+static void ack_json_result(kbd_t *k, uint32_t id, const char *method, const char *result)
+{
+    char j[256];
+    int n = snprintf(j, sizeof j, "{\"ack_method\":\"%s\",\"success\":true,\"result\":%s}", method, result);
+    if (n > 0 && (size_t)n < sizeof j) kbd_host_send(k, id, HOST_CMD_JSON, j, (size_t)n);
+}
+
 static void ack_json(kbd_t *k, uint32_t id, const char *method, int ok, const char *err)
 {
     char j[256]; int n;
@@ -194,12 +205,15 @@ static void on_json(kbd_t *k, const host_frame *f)
         char j[8192]; int l = host_json_getinfo_ack(j, sizeof j, k->version);
         if (l > 0) kbd_host_send(k, f->id, HOST_CMD_JSON, j, (size_t)l);
     } else if (!strcmp(m, "setBacklight") || !strcmp(m, "setDeviceBl")) {
-        long lv;
-        if (kbd_json_int(s, n, "level", &lv) || lv < 0 || lv > 100)
-            ack_json(k, f->id, m, 0, "Backlight level must be between 0 and 100");
-        else if (kbd_set_backlight(k, (int)lv))
-            ack_json(k, f->id, m, 0, "backlight write failed");
-        else ack_json(k, f->id, m, 1, NULL);
+        /* KD handleSetBacklight (@0x60eb0): needs "level" (JSON number), 0..100, then
+         * replies {"success":true,"result":<level>} */
+        long lv; char eb[96];
+        if (kbd_json_int(s, n, "level", &lv)) ack_json(k, f->id, m, 0, "Missing or invalid level");
+        else if (lv < 0 || lv > 100) {
+            snprintf(eb, sizeof eb, "Backlight level must be between 0 and 100, got %ld", lv);
+            ack_json(k, f->id, m, 0, eb);
+        } else if (kbd_set_backlight(k, (int)lv)) ack_json(k, f->id, m, 0, "backlight write failed");
+        else { char r[16]; snprintf(r, sizeof r, "%ld", lv); ack_json_result(k, f->id, m, r); }
     } else {
         k->st.json_unsupported++;
         ack_json(k, f->id, m, 0, "unsupported");

@@ -76,6 +76,11 @@ def main():
         check(gi and gi[0].frame_id == 5 and gi[0].json()["ack_method"] == "getInfo"
               and gi[0].json()["result"]["deviceWidth"] == 640, "getInfo ack")
         if gi:
+            # field-for-field parity with a real KD V2.32 getInfo capture (only deviceVersion differs)
+            kd = json.load(open(os.path.join(HERE, "data", "kd-getinfo-v232.json")))
+            ours = gi[0].json()
+            kd["result"]["deviceVersion"] = ours["result"]["deviceVersion"]
+            check(ours == kd, f"getInfo parity with KD V2.32: {ours} vs {kd}")
             from mk20deck.layout import DeviceLayout
             lay = DeviceLayout.from_get_info(gi[0].json()["result"])
             check(len(lay.keys) == 20, "console layout parses getInfo")
@@ -99,7 +104,7 @@ def main():
         # setBacklight (bl disabled -> success, no files)
         os.write(hm, P.encode_frame(P.CMD_JSON, json.dumps(P.set_backlight(80)).encode(), 11))
         a = [f.json() for f in par.feed(read_for(hm, 0.5)) if f.cmd == P.CMD_JSON]
-        check(a and a[0].get("ack_method") == "setBacklight" and a[0].get("success") is True, f"backlight {a}")
+        check(a and a[0].get("ack_method") == "setBacklight" and a[0].get("success") is True and a[0].get("result") == 80, f"backlight {a}")
         time.sleep(1.2)
         s = json.load(open(st))
         check(s["knob_init"] == "ok" and s["knob_ok"] == 6 and s["panels_written"] == 21 and s["echo_frames"] == 1

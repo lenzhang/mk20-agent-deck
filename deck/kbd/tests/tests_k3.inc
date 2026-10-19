@@ -261,13 +261,15 @@ static void test_kbd_core(void)
     send_frame(&k, 50, HOST_CMD_JSON, sb, sizeof sb - 1); drain(sv[1], &rx);
     CHECK(strstr(rx.lastjson, "\"ack_method\":\"setBacklight\",\"success\":true") && k.backlight == 80);
     snprintf(path, sizeof path, "%s/param", bl); f = fopen(path, "r"); char pv[16] = {0}; if (f) { CHECK(fgets(pv, sizeof pv, f) != NULL); fclose(f); }
-    CHECK(!strcmp(pv, "204"));
+    CHECK(!strcmp(pv, "206"));   /* 10 + (int)(0.80 * 245) */
+    CHECK(strstr(rx.lastjson, "\"result\":80}") != NULL);
     snprintf(path, sizeof path, "%s/command", bl); f = fopen(path, "r"); char cv[16] = {0}; if (f) { CHECK(fgets(cv, sizeof cv, f) != NULL); fclose(f); }
     CHECK(!strcmp(cv, "setbl"));
     const char sbx[] = "{\"method\":\"setBacklight\",\"parameters\":{\"level\":101}}";
     send_frame(&k, 51, HOST_CMD_JSON, sbx, sizeof sbx - 1); drain(sv[1], &rx);
     CHECK(strstr(rx.lastjson, "\"success\":false") && k.backlight == 80);
-    CHECK(kbd_bl_param(0) == 8 && kbd_bl_param(100) == 255);
+    CHECK(kbd_bl_param(0) == 10 && kbd_bl_param(100) == 255 && kbd_bl_param(1) == 12 && kbd_bl_param(50) == 132 && kbd_bl_param(-5) == 10 && kbd_bl_param(300) == 255);
+    CHECK(strstr(rx.lastjson, "got 101") != NULL);
     /* unsupported method */
     const char sv2[] = "{\"method\":\"setVolume\",\"parameters\":{\"level\":3}}";
     send_frame(&k, 52, HOST_CMD_JSON, sv2, sizeof sv2 - 1); drain(sv[1], &rx);

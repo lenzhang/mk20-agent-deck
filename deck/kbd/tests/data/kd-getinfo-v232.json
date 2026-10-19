@@ -1,0 +1,205 @@
+{
+ "ack_method": "getInfo",
+ "result": {
+  "deviceHeight": 656,
+  "deviceModel": "MK20",
+  "devicePanel": {
+   "rectCols": 5,
+   "rectRows": 4,
+   "rects": [
+    {
+     "col": 0,
+     "height": 128,
+     "isKey": true,
+     "row": 0,
+     "width": 128,
+     "x": 0,
+     "y": 144
+    },
+    {
+     "col": 1,
+     "height": 128,
+     "isKey": true,
+     "row": 0,
+     "width": 128,
+     "x": 128,
+     "y": 144
+    },
+    {
+     "col": 2,
+     "height": 128,
+     "isKey": true,
+     "row": 0,
+     "width": 128,
+     "x": 256,
+     "y": 144
+    },
+    {
+     "col": 3,
+     "height": 128,
+     "isKey": true,
+     "row": 0,
+     "width": 128,
+     "x": 384,
+     "y": 144
+    },
+    {
+     "col": 4,
+     "height": 128,
+     "isKey": true,
+     "row": 0,
+     "width": 128,
+     "x": 512,
+     "y": 144
+    },
+    {
+     "col": 0,
+     "height": 128,
+     "isKey": true,
+     "row": 1,
+     "width": 128,
+     "x": 0,
+     "y": 272
+    },
+    {
+     "col": 1,
+     "height": 128,
+     "isKey": true,
+     "row": 1,
+     "width": 128,
+     "x": 128,
+     "y": 272
+    },
+    {
+     "col": 2,
+     "height": 128,
+     "isKey": true,
+     "row": 1,
+     "width": 128,
+     "x": 256,
+     "y": 272
+    },
+    {
+     "col": 3,
+     "height": 128,
+     "isKey": true,
+     "row": 1,
+     "width": 128,
+     "x": 384,
+     "y": 272
+    },
+    {
+     "col": 4,
+     "height": 128,
+     "isKey": true,
+     "row": 1,
+     "width": 128,
+     "x": 512,
+     "y": 272
+    },
+    {
+     "col": 0,
+     "height": 128,
+     "isKey": true,
+     "row": 2,
+     "width": 128,
+     "x": 0,
+     "y": 400
+    },
+    {
+     "col": 1,
+     "height": 128,
+     "isKey": true,
+     "row": 2,
+     "width": 128,
+     "x": 128,
+     "y": 400
+    },
+    {
+     "col": 2,
+     "height": 128,
+     "isKey": true,
+     "row": 2,
+     "width": 128,
+     "x": 256,
+     "y": 400
+    },
+    {
+     "col": 3,
+     "height": 128,
+     "isKey": true,
+     "row": 2,
+     "width": 128,
+     "x": 384,
+     "y": 400
+    },
+    {
+     "col": 4,
+     "height": 128,
+     "isKey": true,
+     "row": 2,
+     "width": 128,
+     "x": 512,
+     "y": 400
+    },
+    {
+     "col": 0,
+     "height": 128,
+     "isKey": true,
+     "row": 3,
+     "width": 128,
+     "x": 0,
+     "y": 528
+    },
+    {
+     "col": 1,
+     "height": 128,
+     "isKey": true,
+     "row": 3,
+     "width": 128,
+     "x": 128,
+     "y": 528
+    },
+    {
+     "col": 2,
+     "height": 128,
+     "isKey": true,
+     "row": 3,
+     "width": 128,
+     "x": 256,
+     "y": 528
+    },
+    {
+     "col": 3,
+     "height": 128,
+     "isKey": true,
+     "row": 3,
+     "width": 128,
+     "x": 384,
+     "y": 528
+    },
+    {
+     "col": 4,
+     "height": 128,
+     "isKey": true,
+     "row": 3,
+     "width": 128,
+     "x": 512,
+     "y": 528
+    },
+    {
+     "height": 142,
+     "isKey": false,
+     "width": 428,
+     "x": 106,
+     "y": 0
+    }
+   ],
+   "screenHeight": 656,
+   "screenWidth": 640
+  },
+  "deviceVersion": "V2.32",
+  "deviceWidth": 640
+ },
+ "success": true
+}
