@@ -61,12 +61,44 @@ static void reply(http_response_t *r, const cJSON *id, cJSON *result, int code, 
     r->status = 200; r->body = cJSON_PrintUnformatted(j); r->len = r->body ? strlen(r->body) : 0; if (!r->body) r->status = 500;
     cJSON_Delete(j);
 }
+static void shots_clear(mcp_t *m)
+{
+    for (size_t i = 0; i < 5; i++) { free(m->shots[i].jpeg); memset(&m->shots[i],0,sizeof m->shots[i]); }
+    m->shot_next = 0;
+}
+static void frame_ready(void *v, const loop_frame_t *f, unsigned step)
+{
+    mcp_t *m = v; if (!m->task.live || !f->jpeg || !f->jpeg_len || f->jpeg_len > OAI_IMAGE_MAX) return;
+    unsigned char *p = malloc(f->jpeg_len); if (!p) return;
+    memcpy(p,f->jpeg,f->jpeg_len); agent_shot_t *s = &m->shots[m->shot_next++ % 5];
+    free(s->jpeg); *s = (agent_shot_t){step,p,f->jpeg_len};
+}
 void mcp_init(mcp_t *m, agent_loop_t *loop, const char token[65], const char *host)
 {
     memset(m,0,sizeof *m); m->loop = loop; memcpy(m->token,token,65); snprintf(m->host,sizeof m->host,"%s",host);
+    loop->frame_ready = frame_ready; loop->frame_ctx = m;
 }
-void mcp_free(mcp_t *m) { cJSON_Delete(m->pending_id); m->pending_id = NULL; memset(m->token,0,sizeof m->token); memset(m->task.goal,0,sizeof m->task.goal); }
+void mcp_free(mcp_t *m) { shots_clear(m); m->loop->frame_ready = NULL; m->loop->frame_ctx = NULL; cJSON_Delete(m->pending_id); m->pending_id = NULL; memset(m->token,0,sizeof m->token); memset(m->task.goal,0,sizeof m->task.goal); }
+static void log_status(mcp_t *, const char *, const char *, int, int64_t);
 static int active(const agent_loop_t *l) { return l->state >= S_OBSERVING && l->state <= S_AWAITING_CONFIRM; }
+static int session_busy(const mcp_t *m, const mcp_session_t *s)
+{
+    return (m->pending && !strcmp(m->pending_owner,s->id)) ||
+        (m->task.live && !strcmp(m->task.owner,s->id));
+}
+static void session_remove(mcp_t *m, mcp_session_t *s)
+{
+    if (m->pending && !strcmp(m->pending_owner,s->id)) loop_stop(m->loop);
+    if (m->task.live && !strcmp(m->task.owner,s->id)) (void)mcp_task_cancel(m,m->task.id);
+    memset(s,0,sizeof *s);
+}
+static void sessions_expire(mcp_t *m, int64_t now)
+{
+    for (int i = 0; i < MCP_SESSIONS; i++) {
+        mcp_session_t *s = &m->sessions[i];
+        if (*s->id && (now < s->last_activity || now-s->last_activity > MCP_SESSION_IDLE_MS)) session_remove(m,s);
+    }
+}
 static const char *gate(mcp_t *m)
 {
     (void)loop_service(m->loop);
@@ -75,21 +107,32 @@ static const char *gate(mcp_t *m)
     if (m->task.live || m->pending || active(m->loop)) return "busy";
     return NULL;
 }
-const char *mcp_task_submit(mcp_t *m, const char *goal, const char *owner)
+static const char *task_create(mcp_t *m, const char *goal, const char *owner)
 {
-    const char *why = gate(m); if (why) return why;
     if (!goal || !*goal || strlen(goal) > 4096 || m->task.serial == 999999999) return "rejected";
-    unsigned serial = m->task.serial+1; memset(&m->task,0,sizeof m->task); m->task.serial = serial;
+    unsigned serial = m->task.serial+1; shots_clear(m); m->loop->paused = 0;
+    memset(&m->task,0,sizeof m->task); m->task.serial = serial;
+    m->task.stop_epoch = m->loop->stop_epoch;
     snprintf(m->task.id,sizeof m->task.id,"t%u",serial); strcpy(m->task.goal,goal);
     snprintf(m->task.owner,sizeof m->task.owner,"%s",owner ? owner : "");
-    strcpy(m->task.state,"queued"); m->task.live = m->task.queued = 1;
+    strcpy(m->task.state,m->loop->allowed && !m->loop->cancelled ? "queued" : "waiting_allow"); m->task.live = m->task.queued = 1;
     for (int i = 0; i < MCP_SESSIONS; i++) m->sessions[i].has_frame = 0;
     return NULL;
+}
+const char *mcp_task_submit(mcp_t *m, const char *goal, const char *owner)
+{
+    const char *why = gate(m); return why ? why : task_create(m,goal,owner);
+}
+const char *mcp_task_queue(mcp_t *m, const char *goal, const char *owner)
+{
+    (void)loop_service(m->loop);
+    if (m->task.live || m->pending || active(m->loop)) return "busy";
+    return task_create(m,goal,owner);
 }
 const char *mcp_task_cancel(mcp_t *m, const char *id)
 {
     if (!id || strcmp(id,m->task.id) || !*id) return "rejected";
-    if (m->task.live) { loop_stop(m->loop); m->task.live = m->task.queued = 0; strcpy(m->task.state,"stopped"); memset(m->task.goal,0,sizeof m->task.goal); }
+    if (m->task.live) { loop_stop(m->loop); shots_clear(m); m->task.live = m->task.queued = 0; strcpy(m->task.state,"stopped"); memset(m->task.goal,0,sizeof m->task.goal); }
     return NULL;
 }
 void mcp_attach_pump(void *v, void (*pump)(void *), void *ctx)
@@ -98,23 +141,27 @@ void mcp_attach_pump(void *v, void (*pump)(void *), void *ctx)
 }
 void mcp_tick(void *v)
 {
-    mcp_t *m = v; (void)loop_service(m->loop);
-    if (m->task.live && m->task.queued) {
+    mcp_t *m = v; sessions_expire(m,m->loop->ports.now(m->loop->ports.ctx)); (void)loop_service(m->loop);
+    /* A stop after acceptance cancels queued work too; a future allow cannot
+     * revive a goal the keyboard has stopped. New work queued while already
+     * stopped may wait for a fresh physical allow. */
+    if (m->task.live && m->task.queued && m->task.stop_epoch != m->loop->stop_epoch) (void)mcp_task_cancel(m,m->task.id);
+    if (m->task.live && m->task.queued && m->loop->allowed && !m->loop->cancelled && !m->loop->paused) {
         m->task.queued = 0;
         if (m->task_goal) m->task_goal(m->ctx,m->task.goal);
         if (loop_submit(m->loop)) { m->task.live = 0; strcpy(m->task.state,m->loop->cancelled ? "stopped" : "disabled"); memset(m->task.goal,0,sizeof m->task.goal); }
     }
     if (active(m->loop)) loop_tick(m->loop);
-    if (m->pending && m->loop->state == S_AWAITING_CONFIRM) m->confirmation_seen = 1;
-    if (m->task.live) {
+    if (m->task.live && !m->task.queued) {
         snprintf(m->task.summary,sizeof m->task.summary,"%s",m->loop->history);
-        m->task.steps = m->loop->steps; snprintf(m->task.state,sizeof m->task.state,"%s",loop_state_name(m->loop->state));
-        if (!active(m->loop)) { m->task.live = 0; memset(m->task.goal,0,sizeof m->task.goal); }
+        m->task.steps = m->loop->steps; snprintf(m->task.state,sizeof m->task.state,"%s",m->loop->paused && active(m->loop) ? "paused" : loop_state_name(m->loop->state));
+        if (!active(m->loop)) { m->task.live = 0; shots_clear(m); memset(m->task.goal,0,sizeof m->task.goal); }
     }
 }
 void mcp_disconnect(void *v, uint64_t tag)
 {
-    mcp_t *m = v; if (tag != m->pending) return;
+    mcp_t *m = v; if (!m->pending || tag != m->pending) return;
+    log_status(m,"tools/call",m->pending_tool,499,m->pending_start);
     loop_stop(m->loop); m->pending = 0; cJSON_Delete(m->pending_id); m->pending_id = NULL;
 }
 static const char *outcome(mcp_t *m)
@@ -196,7 +243,6 @@ static cJSON *call(mcp_t *m, mcp_session_t *s, const tool_t *t, const cJSON *arg
     cJSON *a = cJSON_Duplicate(args,1); cJSON_AddStringToObject(a,"action",action_name(kind)); action_t action;
     int rc = action_parse(a,&action); cJSON_Delete(a); if (rc) return text_result("rejected",1);
     if (loop_direct(m->loop,&action,&s->frame)) return text_result("error",1);
-    m->confirmation_seen = m->loop->state == S_AWAITING_CONFIRM;
     if (!active(m->loop)) { why = outcome(m); return text_result(why,strcmp(why,"ok") != 0); }
     m->pending_start = m->loop->ports.now(m->loop->ports.ctx); m->pending_tool = t->name;
     m->pending = tag; m->pending_id = cJSON_Duplicate(id,1); strcpy(m->pending_owner,s->id); return NULL;
@@ -209,8 +255,10 @@ static mcp_session_t *session(mcp_t *m, const char *id)
 static void log_status(mcp_t *m, const char *method, const char *tool, int status, int64_t start)
 {
     if (!m->log) return;
+    const char *fixed = "none";
+    for (size_t i = 0; i < NTOOLS; i++) if (tool == registry[i].name) fixed = registry[i].name;
     char raw[256], safe[256]; const char *secrets[] = {m->token};
-    snprintf(raw,sizeof raw,"method=%s tool=%s status=%d latency_ms=%" PRId64,method,tool,status,m->loop->ports.now(m->loop->ports.ctx)-start);
+    snprintf(raw,sizeof raw,"method=%s tool=%s status=%d latency_ms=%" PRId64,method,fixed,status,m->loop->ports.now(m->loop->ports.ctx)-start);
     agent_redact(raw,secrets,1,safe,sizeof safe); m->log(m->ctx,safe);
 }
 int mcp_handle(void *v, const http_request_t *q, http_response_t *r)
@@ -218,6 +266,7 @@ int mcp_handle(void *v, const http_request_t *q, http_response_t *r)
     mcp_t *m = v; int64_t start = m->loop->ports.now(m->loop->ports.ctx);
     const char *logged_method = "request", *logged_tool = "none";
     cJSON *j = NULL;
+    sessions_expire(m,start);
     if (!httpd_authorized(q->has_auth ? q->auth : NULL,m->token)) { r->status = 401; goto end; }
     if (strcmp(q->host,m->host) || (q->has_origin && strcmp(q->origin,"http://172.30.250.2:8765")) || (q->has_version && strcmp(q->version,MCP_VERSION))) { r->status = 400; goto end; }
     if (strcmp(q->path,"/mcp")) { r->status = 404; goto end; }
@@ -229,11 +278,10 @@ int mcp_handle(void *v, const http_request_t *q, http_response_t *r)
     }
     mcp_session_t *s = q->has_session ? session(m,q->session) : NULL;
     if (q->has_session && !s) { r->status = 404; goto end; }
+    if (s) s->last_activity = start;
     if (!strcmp(q->method,"DELETE")) {
         if (!s) { r->status = 400; goto end; }
-        if (m->pending && !strcmp(m->pending_owner,s->id)) loop_stop(m->loop);
-        if (m->task.live && !strcmp(m->task.owner,s->id)) (void)mcp_task_cancel(m,m->task.id);
-        memset(s,0,sizeof *s); r->status = 200; goto end;
+        session_remove(m,s); r->status = 200; goto end;
     }
     if (strcasecmp(q->content_type,"application/json") && strcasecmp(q->content_type,"application/json; charset=utf-8")) { r->status = 415; goto end; }
     j = agent_json_parse(q->body,q->body_len,HTTPD_BODY);
@@ -252,7 +300,15 @@ int mcp_handle(void *v, const http_request_t *q, http_response_t *r)
         logged_method = "initialize";
         if (s || !cJSON_IsObject(params) || !cJSON_IsString(get(params,"protocolVersion")) || !cJSON_IsObject(get(params,"capabilities")) || !cJSON_IsObject(get(params,"clientInfo"))) { reply(r,id,NULL,-32602,"Invalid params"); goto end; }
         for (int i = 0; i < MCP_SESSIONS; i++) if (!*m->sessions[i].id) { s = &m->sessions[i]; break; }
+        if (!s) {
+            for (int i = 0; i < MCP_SESSIONS; i++) {
+                mcp_session_t *candidate = &m->sessions[i];
+                if (!session_busy(m,candidate) && (!s || candidate->last_activity < s->last_activity)) s = candidate;
+            }
+            if (s) session_remove(m,s);
+        }
         if (!s || httpd_random_hex(s->id,16)) { r->status = 503; goto end; }
+        s->last_activity = start;
         cJSON *result = cJSON_CreateObject(); cJSON_AddStringToObject(result,"protocolVersion",MCP_VERSION);
         cJSON *cap = cJSON_AddObjectToObject(result,"capabilities"), *tools = cJSON_AddObjectToObject(cap,"tools"); cJSON_AddBoolToObject(tools,"listChanged",0);
         cJSON *info = cJSON_AddObjectToObject(result,"serverInfo"); cJSON_AddStringToObject(info,"name","mk20-agent"); cJSON_AddStringToObject(info,"version","A6");

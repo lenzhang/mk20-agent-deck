@@ -1,0 +1,14 @@
+F.......................                                                 [100%]
+=================================== FAILURES ===================================
+______________________________ test_full_flow_ipc ______________________________
+deck/agent/tests/test_web.py:218: in test_full_flow_ipc
+    def test_full_flow_ipc(web_binary,kbd_build,tmp_path,web_certs): full_flow(web_binary,kbd_build,tmp_path,web_certs,False)
+                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+deck/agent/tests/test_web.py:201: in full_flow
+    assert len(d["shots"]) == 5 and len(d["actions"]) == 7
+E   AssertionError: assert (5 == 5 and 8 == 7)
+E    +  where 5 = len([6, 7, 3, 4, 5])
+E    +  and   8 = len(['step 1: wait', ' step 2: wait', ' step 3: wait', ' step 4: wait', ' step 5: wait', ' step 6: wait', ...])
+=========================== short test summary info ============================
+FAILED deck/agent/tests/test_web.py::test_full_flow_ipc - AssertionError: ass...
+1 failed, 23 passed, 2 deselected in 14.47s

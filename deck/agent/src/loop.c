@@ -16,10 +16,10 @@ int arbitration_wants_hid(const arbitration_t *a, int idle) { return idle && a->
 static int active(const agent_loop_t *l) { return l->state >= S_OBSERVING && l->state <= S_AWAITING_CONFIRM; }
 static void finish(agent_loop_t *l, loop_state_t s, const char *why, int emergency)
 {
-    int was_busy = l->busy;
+    int was_busy = l->busy; l->paused = 0;
     l->state = s; snprintf(l->reason, sizeof l->reason, "%s", why); l->busy = 0;
     /* Ordinary task completion preserves keyboard permission for a new task. */
-    if (emergency) { l->allowed = 0; l->cancelled = 1; }
+    if (emergency) { l->allowed = 0; l->cancelled = 1; l->stop_epoch++; }
     if ((emergency || was_busy) && l->ports.cancel) l->ports.cancel(l->ports.ctx);
     /* After e-stop, kbd owns all-up/revocation. Send no release or input. */
     if (l->leased && !emergency && l->ports.lease) (void)l->ports.lease(l->ports.ctx, LEASE_RELEASE);
@@ -161,6 +161,7 @@ void loop_tick(agent_loop_t *l)
         finish(l,S_STOPPED,"kbd_lost",1); return;
     }
     if (loop_service(l) || !active(l)) return;
+    if (l->paused && (l->state == S_OBSERVING || (l->state == S_ACTING && !l->busy))) return;
     switch (l->state) {
     case S_OBSERVING:
         if (l->steps >= l->policy.max_steps) { finish(l,S_ERROR,"step_budget",0); return; }
@@ -169,6 +170,7 @@ void loop_tick(agent_loop_t *l)
         if (loop_service(l) || !active(l)) return;
         if (rc == 1) return;
         if (rc || l->frame.width < 1 || l->frame.height < 1 || l->frame.jpeg_len > OAI_IMAGE_MAX || (l->frame.jpeg_len && !l->frame.jpeg)) { finish(l,S_ERROR,"observe",0); return; }
+        if (l->frame_ready) l->frame_ready(l->frame_ctx,&l->frame,l->steps+1);
         l->frame.title[sizeof l->frame.title - 1] = l->frame.app[sizeof l->frame.app - 1] = 0;
         if (l->same_hash && l->frame.hash == l->previous_hash) l->same_hash++; else l->same_hash = 1;
         l->previous_hash = l->frame.hash;

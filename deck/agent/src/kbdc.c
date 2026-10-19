@@ -292,3 +292,14 @@ int kbdc_execute(kbdc_t *c, const action_t *a, int vnc, int64_t d, loop_guard_t 
     if (rc && rc != -3) return !strcmp(c->error,"unsupported") ? -3 : -1;
     return rc;
 }
+
+int kbdc_pair_display(kbdc_t *c, const char code[7])
+{
+    cJSON *q = request("screen.text"), *r = NULL;
+    cJSON_AddNumberToObject(q,"page_id",1); cJSON_AddNumberToObject(q,"fb",21);
+    cJSON_AddStringToObject(q,"text",code); cJSON_AddNumberToObject(q,"size",48);
+    cJSON_AddNumberToObject(q,"fg",65535); cJSON_AddNumberToObject(q,"bg",0);
+    int rc = rpc(c,q,&r);
+    int rendered = !rc && cJSON_IsTrue(get(r,"rendered")); cJSON_Delete(r);
+    return rendered ? 0 : -1;
+}

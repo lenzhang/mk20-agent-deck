@@ -1,0 +1,279 @@
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#endif
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
+#include "web_store.h"
+#include <assert.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+static unsigned checks;
+#define CHECK(x) do { checks++; assert(x); } while (0)
+typedef struct { int64_t now; int displays, unavailable, allow, stopped, observes, models, executes, tests; char code[7]; } fake_t;
+typedef struct { fake_t fake; agent_loop_t loop; mcp_t mcp; web_t web; http_request_t q; http_response_t r; char root[4096]; } fixture_t;
+static int64_t now(void *v) { return ((fake_t *)v)->now; }
+static int display(void *v, const char code[7]) { fake_t *f = v; f->displays++; memcpy(f->code,code,7); return f->unavailable ? -1 : 0; }
+static int poll_event(void *v, kbd_event_t *e) { fake_t *f = v; if (!f->allow) return 0; f->allow = 0; *e = (kbd_event_t){.kind=K_ALLOW}; return 1; }
+static int lease(void *v, lease_op_t op) { if (op == LEASE_ESTOP) ((fake_t *)v)->stopped++; return 0; }
+static int observe(void *v, loop_frame_t *frame, loop_guard_t guard, void *ctx)
+{
+    fake_t *f = v; if (guard(ctx)) return -1;
+    static const unsigned char jpeg[] = {255,216,255,217};
+    *frame = (loop_frame_t){.width=320,.height=200,.jpeg=jpeg,.jpeg_len=4,.hash=(unsigned)++f->observes};
+    strcpy(frame->app,"Notes"); strcpy(frame->title,"Notes"); return 0;
+}
+static int model(void *v, const loop_frame_t *frame, const char *history, loop_reply_t *reply, loop_guard_t guard, void *ctx)
+{
+    (void)frame; (void)history; fake_t *f = v; if (guard(ctx)) return -1;
+    f->models++; memset(reply,0,sizeof *reply); reply->action.kind = f->models >= 8 ? A_DONE : A_WAIT;
+    reply->action.ms = 1; strcpy(reply->action.target,"Notes"); return 0;
+}
+static int execute(void *v, const action_t *a, int input, int64_t deadline, loop_guard_t guard, void *ctx)
+{
+    (void)a; (void)input; (void)deadline; if (guard(ctx)) return -1; ((fake_t *)v)->executes++; return 0;
+}
+static int test_connection(void *v, const llm_provider_t *p, const netcfg_t *n, const char **error)
+{
+    fake_t *f = v; net_route_t route; CHECK(!netcfg_route_for(n,p->route,&route) && route == NET_PROXY);
+    f->tests++; f->now += 17; *error = "none"; return 0;
+}
+static void setup(fixture_t *f)
+{
+    memset(f,0,sizeof *f); f->fake.now = INT64_C(5000000000);
+    char path[] = "/tmp/a7-unit-XXXXXX"; CHECK(mkdtemp(path)); CHECK(realpath(path,f->root));
+    char secrets[4096], config[4096]; CHECK(strlen(f->root) < 4000);
+    snprintf(secrets,sizeof secrets,"%.4000s/secrets",f->root); snprintf(config,sizeof config,"%.4000s/config",f->root);
+    loop_ports_t ports = {.ctx=&f->fake,.now=now,.poll=poll_event,.lease=lease,.observe=observe,.model=model,.execute=execute};
+    policy_config_t p; policy_defaults(&p); p.confirm_first = p.confirm_app_switch = 0;
+    loop_init(&f->loop,&p,&ports); char token[65] = {0}; mcp_init(&f->mcp,&f->loop,token,"127.0.0.1:8765");
+    web_init(&f->web,&f->mcp,NULL,"127.0.0.1:8780",secrets,config); f->web.display = display; f->web.display_ctx = &f->fake;
+    f->web.connection_test = test_connection; f->web.test_ctx = &f->fake;
+    strcpy(f->q.host,f->web.host); strcpy(f->q.content_type,"application/json"); f->q.has_origin = 1; strcpy(f->q.origin,"http://172.30.250.2:8780"); f->q.tag = 1;
+}
+static void cleanup(fixture_t *f)
+{
+    free(f->r.body); web_free(&f->web); mcp_free(&f->mcp);
+    /* All test-created files have fixed names; no shell/path expansion. */
+    const char *dirs[] = {f->web.secrets,f->web.config,f->root};
+    for (size_t i = 0; i < 3; i++) {
+        DIR *d = opendir(dirs[i]); if (!d) continue;
+        int dir = dirfd(d); struct dirent *e;
+        while ((e = readdir(d))) if (strcmp(e->d_name,".") && strcmp(e->d_name,"..")) (void)unlinkat(dir,e->d_name,0);
+        closedir(d); CHECK(!rmdir(dirs[i]));
+    }
+}
+static cJSON *request(fixture_t *f, const char *method, const char *path, const char *body)
+{
+    free(f->r.body); memset(&f->r,0,sizeof f->r);
+    strcpy(f->q.method,method); strcpy(f->q.path,path); f->q.body = body; f->q.body_len = body ? strlen(body) : 0;
+    CHECK(web_handle(&f->web,&f->q,&f->r) == 0);
+    return f->r.body ? agent_json_parse(f->r.body,f->r.len,HTTPD_BODY) : NULL;
+}
+static void pair_browser(fixture_t *f)
+{
+    cJSON_Delete(request(f,"POST","/pair/start","{}")); CHECK(f->r.status == 200);
+    CHECK(strlen(f->fake.code) == 6); for (size_t i = 0; i < 6; i++) CHECK(f->fake.code[i] >= '0' && f->fake.code[i] <= '9');
+    char body[64]; snprintf(body,sizeof body,"{\"code\":\"%s\"}",f->fake.code);
+    cJSON *j = request(f,"POST","/pair",body); CHECK(f->r.status == 200 && j);
+    CHECK(strstr(f->r.cookie,"HttpOnly; SameSite=Strict; Path=/") && !strstr(f->r.cookie,"Secure"));
+    memcpy(f->q.cookie,f->r.cookie,37); f->q.cookie[37] = 0; f->q.has_cookie = 1;
+    strcpy(f->q.csrf,cJSON_GetObjectItemCaseSensitive(j,"csrf")->valuestring); f->q.has_csrf = 1; cJSON_Delete(j);
+    CHECK(!f->web.pairing && !*f->web.code);
+}
+static void pairing(void)
+{
+    fixture_t f; setup(&f); f.fake.unavailable = 1;
+    cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.r.status == 503 && strstr(f.r.body,"display_unavailable"));
+    CHECK(!f.web.pairing && !*f.web.code);
+    char code[64]; snprintf(code,sizeof code,"{\"code\":\"%s\"}",f.fake.code);
+    cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 401);
+    f.fake.unavailable = 0; cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.web.pairing);
+    snprintf(code,sizeof code,"{\"code\":\"%s\"}",f.fake.code);
+    f.fake.now += WEB_PAIR_MS; cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 401 && !f.web.pairing);
+    cJSON_Delete(request(&f,"POST","/pair/start","{}"));
+    int displays = f.fake.displays; cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.fake.displays == displays);
+    char wrong[7]; strcpy(wrong,f.fake.code); wrong[0] = wrong[0] == '0' ? '1' : '0';
+    snprintf(code,sizeof code,"{\"code\":\"%s\"}",wrong);
+    for (int i = 0; i < 5; i++) { cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 401); }
+    CHECK(!f.web.pairing && !*f.web.code); pair_browser(&f);
+    /* One-time code cannot establish another session. */
+    snprintf(code,sizeof code,"{\"code\":\"%s\"}",f.fake.code); cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 401);
+    pair_browser(&f); cJSON_Delete(request(&f,"POST","/pair/start","{}"));
+    snprintf(code,sizeof code,"{\"code\":\"%s\"}",f.fake.code); cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 503);
+    f.fake.now += WEB_IDLE_MS; web_tick(&f.web);
+    CHECK(!*f.web.sessions[0].cookie && !*f.web.sessions[1].cookie); cleanup(&f);
+}
+static void auth(void)
+{
+    fixture_t f; setup(&f);
+    const char *paths[] = {"/secret/qwen","/config/net","/test","/api/tasks","/api/events","/unknown","/web.js"};
+    for (size_t i = 0; i < sizeof paths/sizeof *paths; i++) { cJSON_Delete(request(&f,"GET",paths[i],NULL)); CHECK(f.r.status == 401 && !strcmp(f.r.body,"{\"error\":\"unauthorized\"}")); }
+    cJSON_Delete(request(&f,"GET","/",NULL)); CHECK(f.r.status == 200 && f.r.len >= 9000 && f.r.csp && strstr(f.r.csp,"sha256-"));
+    cJSON_Delete(request(&f,"GET","/chat",NULL)); CHECK(f.r.status == 200 && f.r.len >= 10000);
+    pair_browser(&f);
+    f.q.has_csrf = 0; cJSON_Delete(request(&f,"POST","/secret/qwen","{\"value\":\"fixture-value\"}")); CHECK(f.r.status == 403);
+    f.q.has_csrf = 1; char saved = f.q.csrf[0]; f.q.csrf[0] ^= 1;
+    cJSON_Delete(request(&f,"POST","/secret/qwen","{}")); CHECK(f.r.status == 403); f.q.csrf[0] = saved;
+    strcpy(f.q.origin,"http://evil"); cJSON_Delete(request(&f,"GET","/config/net",NULL)); CHECK(f.r.status == 403);
+    f.q.has_origin = 0; cJSON_Delete(request(&f,"POST","/secret/qwen","{}")); CHECK(f.r.status == 403);
+    f.q.has_fetch_site = 1; strcpy(f.q.fetch_site,"cross-site"); cJSON_Delete(request(&f,"POST","/secret/qwen","{}")); CHECK(f.r.status == 403);
+    strcpy(f.q.fetch_site,"same-origin"); cJSON_Delete(request(&f,"POST","/secret/qwen","{}")); CHECK(f.r.status == 400);
+    char cookie[256]; strcpy(cookie,f.q.cookie); strcat(f.q.cookie,"; "); strcat(f.q.cookie,cookie);
+    cJSON_Delete(request(&f,"GET","/config/net",NULL)); CHECK(f.r.status == 401); strcpy(f.q.cookie,cookie);
+    f.q.cookie[5] ^= 1; cJSON_Delete(request(&f,"GET","/config/net",NULL)); CHECK(f.r.status == 401); f.q.cookie[5] ^= 1;
+    f.fake.now += WEB_IDLE_MS; cJSON_Delete(request(&f,"GET","/config/net",NULL)); CHECK(f.r.status == 401);
+    pair_browser(&f); int64_t created = f.fake.now;
+    for (int i = 0; i < 24; i++) { f.fake.now = created+(i+1)*(WEB_IDLE_MS-1); cJSON_Delete(request(&f,"GET","/config/net",NULL)); CHECK(f.r.status == 404); }
+    f.fake.now = created+WEB_ABSOLUTE_MS; cJSON_Delete(request(&f,"GET","/config/net",NULL)); CHECK(f.r.status == 401); cleanup(&f);
+}
+static void secrets(void)
+{
+    fixture_t f; setup(&f); pair_browser(&f);
+    cJSON_Delete(request(&f,"POST","/secret/qwen","{\"value\":\"fixture-value\"}")); CHECK(f.r.status == 200 && !strcmp(f.r.body,"{\"set\":true,\"len\":13}"));
+    struct stat st; CHECK(!stat(f.web.secrets,&st) && (st.st_mode & 07777) == 0700);
+    int dir = web_directory(f.web.secrets,0); CHECK(dir >= 0); int old = openat(dir,"qwen.key",O_RDONLY); CHECK(old >= 0);
+    CHECK(!fstat(old,&st) && (st.st_mode & 07777) == 0600);
+    cJSON_Delete(request(&f,"POST","/secret/qwen","{\"value\":\"replacement\"}")); CHECK(f.r.status == 200);
+    char b[64] = {0}; CHECK(read(old,b,sizeof b) == 13 && !strcmp(b,"fixture-value")); close(old);
+    cJSON_Delete(request(&f,"GET","/secret/qwen",NULL)); CHECK(f.r.status == 200 && !strcmp(f.r.body,"{\"set\":true}"));
+    const char *bad[] = {"{\"value\":\"\"}","{\"value\":\"a\\nb\"}","{\"value\":\"a\\rb\"}","{\"value\":\"a\\u0000b\"}","{\"value\":\"a\",\"api_key\":\"b\"}"};
+    for (size_t i = 0; i < sizeof bad/sizeof *bad; i++) { cJSON_Delete(request(&f,"POST","/secret/qwen",bad[i])); CHECK(f.r.status == 400); }
+    cJSON_Delete(request(&f,"POST","/secret/mcp","{\"value\":\"bad\"}")); CHECK(f.r.status == 404);
+    cJSON_Delete(request(&f,"POST","/secret/../file","{\"value\":\"bad\"}")); CHECK(f.r.status == 404);
+    char *large = malloc(4200); CHECK(large); strcpy(large,"{\"value\":\""); memset(large+10,'x',4096); strcpy(large+4106,"\"}");
+    cJSON_Delete(request(&f,"POST","/secret/vnc",large)); CHECK(f.r.status == 200);
+    memset(large+10,'x',4097); strcpy(large+4107,"\"}"); cJSON_Delete(request(&f,"POST","/secret/vnc",large)); CHECK(f.r.status == 400); free(large);
+    CHECK(!symlinkat("qwen.key",dir,"glm.key")); cJSON_Delete(request(&f,"POST","/secret/glm","{\"value\":\"new\"}")); CHECK(f.r.status == 500);
+    cJSON_Delete(request(&f,"GET","/secret/glm",NULL)); CHECK(f.r.status == 500);
+    cJSON_Delete(request(&f,"DELETE","/secret/glm",NULL)); CHECK(f.r.status == 500); CHECK(!unlinkat(dir,"glm.key",0));
+    CHECK(!mkdirat(dir,"glm.key",0700)); cJSON_Delete(request(&f,"POST","/secret/glm","{\"value\":\"new\"}")); CHECK(f.r.status == 500); CHECK(!unlinkat(dir,"glm.key",AT_REMOVEDIR));
+    cJSON_Delete(request(&f,"DELETE","/secret/qwen",NULL)); CHECK(f.r.status == 200);
+    cJSON_Delete(request(&f,"GET","/secret/qwen",NULL)); CHECK(f.r.status == 200 && !strcmp(f.r.body,"{\"set\":false}"));
+    close(dir);
+    char link[4096]; snprintf(link,sizeof link,"%.4000s/link",f.root); CHECK(!symlink(f.web.secrets,link));
+    char original[4096]; strcpy(original,f.web.secrets); strcpy(f.web.secrets,link);
+    cJSON_Delete(request(&f,"POST","/secret/glm","{\"value\":\"new\"}")); CHECK(f.r.status == 500);
+    snprintf(f.web.secrets,sizeof f.web.secrets,"%.4000s/link/child",f.root);
+    cJSON_Delete(request(&f,"POST","/secret/glm","{\"value\":\"new\"}")); CHECK(f.r.status == 500);
+    CHECK(!unlink(link)); strcpy(f.web.secrets,original); cleanup(&f);
+}
+static const char *net_json = "{\"version\":1,\"profile\":\"mac_proxy\",\"proxy\":{\"url\":\"http://172.30.250.1:7890\",\"fallbacks\":[\"http://10.20.0.1:7890\",\"http://169.254.7.1:7890\"]},\"routes\":{\"domestic\":\"proxy\",\"foreign\":\"proxy\"}}";
+static void configs(void)
+{
+    fixture_t f; setup(&f); pair_browser(&f);
+    cJSON_Delete(request(&f,"PUT","/config/net",net_json)); CHECK(f.r.status == 200);
+    cJSON_Delete(request(&f,"GET","/config/net",NULL)); CHECK(f.r.status == 200 && !strcmp(f.r.body,net_json));
+    char provider[8192]; snprintf(provider,sizeof provider,"{\"version\":1,\"provider\":\"qwen\",\"model\":\"qwen-vl-max\",\"base_url\":\"https://dashscope.aliyuncs.com/compatible-mode/v1\",\"domestic\":true,\"route\":\"domestic\",\"api_key_file\":\"%s/qwen.key\"}",f.web.secrets);
+    cJSON_Delete(request(&f,"PUT","/config/provider",provider)); CHECK(f.r.status == 200);
+    cJSON_Delete(request(&f,"POST","/test","{}")); CHECK(f.r.status == 200 && f.fake.tests == 1 && strstr(f.r.body,"\"latency_ms\":17"));
+    const char *invalid[] = {
+        "{\"version\":1,\"profile\":\"usb_wifi\",\"mode\":\"direct\",\"routes\":{\"domestic\":\"direct\",\"foreign\":\"direct\"},\"proxy\":{\"url\":null,\"fallbacks\":[]}}",
+        "{\"version\":1,\"profile\":\"board_wifi\",\"routes\":{\"domestic\":\"direct\",\"foreign\":\"direct\"},\"proxy\":{\"url\":null,\"fallbacks\":[]}}",
+        "{\"version\":1,\"profile\":\"mac_proxy\",\"proxy\":{\"url\":\"http://8.8.8.8:7890\",\"fallbacks\":[]},\"routes\":{\"domestic\":\"proxy\",\"foreign\":\"proxy\"}}",
+        "{\"version\":1,\"profile\":\"mac_proxy\",\"unknown\":true,\"proxy\":{\"url\":\"http://172.30.250.1:7890\"},\"routes\":{\"domestic\":\"proxy\",\"foreign\":\"proxy\"}}",
+        "{\"version\":1,\"profile\":\"board_wifi\",\"proxy\":{\"url\":null,\"password\":\"x\"},\"routes\":{\"domestic\":\"direct\",\"foreign\":\"blocked\"}}",
+        "{\"version\":1,\"profile\":\"board_wifi\",\"proxy\":{\"url\":null},\"routes\":{\"domestic\":\"direct\",\"foreign\":\"blocked\",\"extra\":1}}"
+    };
+    for (size_t i = 0; i < sizeof invalid/sizeof *invalid; i++) { cJSON_Delete(request(&f,"PUT","/config/net",invalid[i])); CHECK(f.r.status == 400); }
+    cJSON *j = agent_json_parse(provider,strlen(provider),LLM_PROVIDER_MAX); CHECK(j);
+    const char *fields[] = {"base_url","api_key_file","provider","route"};
+    for (size_t i = 0; i < sizeof fields/sizeof *fields; i++) {
+        cJSON *copy = cJSON_Duplicate(j,1); cJSON_ReplaceItemInObjectCaseSensitive(copy,fields[i],cJSON_CreateString("invalid"));
+        char *s = cJSON_PrintUnformatted(copy); cJSON_Delete(request(&f,"PUT","/config/provider",s)); CHECK(f.r.status == 400); free(s); cJSON_Delete(copy);
+    }
+    cJSON *copy = cJSON_Duplicate(j,1); cJSON_ReplaceItemInObjectCaseSensitive(copy,"base_url",cJSON_CreateString("https://example.invalid/v1"));
+    char *unpinned = cJSON_PrintUnformatted(copy); cJSON_Delete(copy);
+    cJSON_Delete(request(&f,"PUT","/config/provider",unpinned)); CHECK(f.r.status == 400); free(unpinned);
+    const char *board = "{\"version\":1,\"profile\":\"board_wifi\",\"proxy\":{\"url\":\"http://127.0.0.1:7890\",\"fallbacks\":[]},\"routes\":{\"domestic\":\"direct\",\"foreign\":\"proxy\"}}";
+    CHECK(!web_config_validate(&f.web,"net",board,strlen(board)));
+    cJSON_AddStringToObject(j,"api_key","never-allowed"); char *bad = cJSON_PrintUnformatted(j); cJSON_Delete(j);
+    cJSON_Delete(request(&f,"PUT","/config/provider",bad)); CHECK(f.r.status == 400); free(bad);
+    struct stat st; CHECK(!stat(f.web.config,&st) && (st.st_mode & 07777) == 0700);
+    int dir = web_directory(f.web.config,0); CHECK(dir >= 0); CHECK(!fstatat(dir,"net.json",&st,0) && (st.st_mode & 07777) == 0600); close(dir); cleanup(&f);
+}
+static void tasks(void)
+{
+    fixture_t f; setup(&f); pair_browser(&f);
+    cJSON_Delete(request(&f,"POST","/api/tasks","{\"goal\":\"private-goal-fixture\"}")); CHECK(f.r.status == 202 && strstr(f.r.body,"waiting_allow") && !strstr(f.r.body,"private-goal-fixture"));
+    for (int i = 0; i < 3; i++) web_tick(&f.web);
+    CHECK(!f.fake.observes && !f.fake.models && !f.fake.executes && !f.loop.allowed);
+    cJSON_Delete(request(&f,"POST","/test","{}")); CHECK(f.r.status == 409 && !f.fake.tests);
+    cJSON_Delete(request(&f,"POST","/api/tasks/t1/pause","{}")); CHECK(f.r.status == 200);
+    f.fake.allow = 1; web_tick(&f.web); CHECK(f.loop.allowed && !f.fake.observes);
+    cJSON_Delete(request(&f,"POST","/api/tasks/t1/resume","{}")); CHECK(f.r.status == 200);
+    for (int i = 0; i < 19; i++) web_tick(&f.web);
+    cJSON_Delete(request(&f,"POST","/api/tasks/t1/pause","{}")); CHECK(f.loop.paused && f.mcp.task.live);
+    unsigned shots = 0; for (size_t i = 0; i < 5; i++) if (f.mcp.shots[i].jpeg) shots++;
+    CHECK(shots == 5);
+    cJSON_Delete(request(&f,"GET","/api/tasks/t1/steps/1/shot.jpg",NULL)); CHECK(f.r.status == 404);
+    cJSON_Delete(request(&f,"GET","/api/tasks/t1/steps/7/shot.jpg",NULL)); CHECK(f.r.status == 200 && f.r.len == 4 && !strcmp(f.r.content_type,"image/jpeg"));
+    cJSON_Delete(request(&f,"GET","/api/tasks/t1",NULL)); CHECK(f.r.status == 200 && !strstr(f.r.body,"private-goal-fixture") && strstr(f.r.body,"wait"));
+    cJSON_Delete(request(&f,"POST","/api/tasks/t1/resume","{}"));
+    for (int i = 0; i < 10; i++) web_tick(&f.web);
+    CHECK(!f.mcp.task.live && f.mcp.task.steps == 8 && !*f.mcp.task.goal);
+    for (size_t i = 0; i < 5; i++) CHECK(!f.mcp.shots[i].jpeg);
+    cJSON_Delete(request(&f,"GET","/api/tasks/t1/steps/7/shot.jpg",NULL)); CHECK(f.r.status == 404);
+    cJSON_Delete(request(&f,"POST","/api/tasks","{\"goal\":\"new-goal-fixture\"}")); CHECK(f.r.status == 202);
+    for (size_t i = 0; i < 5; i++) CHECK(!f.mcp.shots[i].jpeg);
+    cJSON_Delete(request(&f,"POST","/api/tasks/t2/stop","{}")); CHECK(f.r.status == 200 && f.fake.stopped >= 1 && !f.loop.allowed && f.loop.cancelled && !*f.mcp.task.goal);
+    cJSON_Delete(request(&f,"POST","/api/tasks","{\"goal\":\"queued\"}")); CHECK(f.r.status == 202 && strstr(f.r.body,"waiting_allow"));
+    f.fake.now += WEB_IDLE_MS; web_tick(&f.web); CHECK(!f.mcp.task.live && !*f.mcp.task.goal); cleanup(&f);
+}
+static void events(void)
+{
+    fixture_t f; setup(&f); pair_browser(&f);
+    strcpy(f.q.method,"GET"); strcpy(f.q.path,"/api/events"); f.q.body = NULL; f.q.body_len = 0;
+    for (uint64_t tag = 1; tag <= 2; tag++) {
+        free(f.r.body); memset(&f.r,0,sizeof f.r); f.q.tag = tag;
+        CHECK(web_handle(&f.web,&f.q,&f.r) == 2 && f.r.stream && f.r.len < 8192);
+        CHECK(strstr(f.r.body,"event: task"));
+    }
+    free(f.r.body); memset(&f.r,0,sizeof f.r); f.q.tag = 3;
+    CHECK(!web_handle(&f.web,&f.q,&f.r) && f.r.status == 503);
+    web_disconnect(&f.web,1); free(f.r.body); memset(&f.r,0,sizeof f.r);
+    CHECK(web_handle(&f.web,&f.q,&f.r) == 2);
+    free(f.r.body); memset(&f.r,0,sizeof f.r);
+    CHECK(web_handle(&f.web,&f.q,&f.r) == 1 && !f.r.body);
+    f.fake.now += WEB_IDLE_MS;
+    CHECK(web_handle(&f.web,&f.q,&f.r) == 3); web_disconnect(&f.web,3);
+    cleanup(&f);
+}
+static void paused_budget(void)
+{
+    fixture_t f; setup(&f); pair_browser(&f); f.fake.allow = 1; web_tick(&f.web);
+    cJSON_Delete(request(&f,"POST","/api/tasks","{\"goal\":\"paused private goal\"}")); CHECK(f.r.status == 202);
+    web_tick(&f.web); CHECK(f.loop.state == S_PLANNING);
+    cJSON_Delete(request(&f,"POST","/api/tasks/t1/pause","{}")); CHECK(f.loop.paused);
+    f.fake.now += f.loop.policy.wall_ms; web_tick(&f.web);
+    CHECK(!f.loop.paused && !f.mcp.task.live && !strcmp(f.mcp.task.state,"error") && !*f.mcp.task.goal);
+    f.fake.allow = 1; web_tick(&f.web); CHECK(f.loop.allowed);
+    action_t a = {.kind=A_WAIT,.ms=1}; strcpy(a.target,"Notes");
+    CHECK(!loop_direct(&f.loop,&a,&f.loop.frame)); loop_tick(&f.loop); CHECK(f.fake.executes == 1);
+    /* Restart invalidates even a still-valid cookie. */
+    char secrets[4096], config[4096]; strcpy(secrets,f.web.secrets); strcpy(config,f.web.config);
+    web_free(&f.web); web_init(&f.web,&f.mcp,NULL,"127.0.0.1:8780",secrets,config);
+    cJSON_Delete(request(&f,"GET","/config/net",NULL)); CHECK(f.r.status == 401);
+    cleanup(&f);
+}
+static void queued_stop(void)
+{
+    fixture_t f; setup(&f); pair_browser(&f);
+    cJSON_Delete(request(&f,"POST","/api/tasks","{\"goal\":\"waiting private goal\"}")); CHECK(f.r.status == 202);
+    loop_stop(&f.loop); web_tick(&f.web);
+    CHECK(!f.mcp.task.live && !*f.mcp.task.goal && !strcmp(f.mcp.task.state,"stopped"));
+    f.fake.allow = 1; web_tick(&f.web); CHECK(!f.fake.observes);
+    loop_stop(&f.loop);
+    cJSON_Delete(request(&f,"POST","/api/tasks","{\"goal\":\"new waiting goal\"}")); CHECK(f.r.status == 202);
+    web_tick(&f.web); CHECK(f.mcp.task.live && f.mcp.task.queued && !f.fake.observes);
+    f.fake.allow = 1; web_tick(&f.web); CHECK(f.fake.observes == 1);
+    CHECK(!mcp_task_cancel(&f.mcp,f.mcp.task.id));
+    f.fake.allow = 1; web_tick(&f.web); CHECK(!mcp_task_submit(&f.mcp,"MCP queued goal",NULL));
+    loop_stop(&f.loop); web_tick(&f.web); CHECK(!f.mcp.task.live && !*f.mcp.task.goal);
+    cleanup(&f);
+}
+int main(void) { pairing(); auth(); secrets(); configs(); tasks(); events(); paused_budget(); queued_stop(); printf("A7 web: %u checks passed\n",checks); return 0; }

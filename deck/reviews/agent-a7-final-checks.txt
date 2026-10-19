@@ -1,0 +1,13 @@
+git diff --check: PASS
+Path scope: PASS
+Plan change limited to A7 status line: PASS
+Page 0 JS syntax: PASS; HTML bytes: 10336
+Page 1 JS syntax: PASS; HTML bytes: 14711
+CSP script/style hashes: PASS
+Dead confirmation_seen removed: PASS
+Final sanitized C checks and nonsanitized host link: PASS
+C checks: A7 web 439, A6 MCP 267, A5 262, LLM 256, OAI 3145, net/clock 349
+Full standard regression: 188 passed, 197 listener EPERM failures only, no skip/xfail
+Broad IPC supplement: 361 passed, 1 existing skip, 16 explicitly deselected
+armhf/static cross-build: NOT-RUN (compiler absent)
+Final affected web/MCP suite: 60 passed / 7 listener EPERM failures only

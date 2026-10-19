@@ -45,10 +45,11 @@ typedef struct {
     void (*cooperate)(void *); void *cooperate_ctx;
     loop_state_t state; policy_config_t policy; loop_ports_t ports; arbitration_t input;
     int allowed, cancelled, leased, busy, confirmed, ask_user, retry_wait;
-    int direct, direct_epoch;
+    int direct, direct_epoch, paused;
+    void (*frame_ready)(void *, const loop_frame_t *, unsigned); void *frame_ctx;
     unsigned steps, model_calls, retries, cid, same_hash;
     int64_t start, action_start, model_start, renew_at, confirm_until, retry_at, last_now;
-    uint64_t previous_hash;
+    uint64_t previous_hash, stop_epoch;
     loop_frame_t frame; loop_reply_t reply;
     char reason[40], history[2049], previous_title[513], previous_app[129];
 } agent_loop_t;

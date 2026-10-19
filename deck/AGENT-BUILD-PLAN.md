@@ -378,6 +378,7 @@
 - 验收：MCP 动作同样受急停、预算和确认约束（e2e 证明）。
 
 ### A7 键面 UI、配置下发、密钥页（box + sim + [D]）
+- **A7 agent host 状态（2026-10-19，本 worktree）**：`--web`/MCP 共用 HTTP pump、单槽任务与安全链，已实现 fail-closed 配对、只写密钥、设备侧配置校验/连接测试、waiting_allow/暂停/急停、5 帧内存截图环和 SSE；并修复 A6 Kimi 三项 MINOR。C/ASan/UBSan 与 IPC 验证见 `agent/NOTES-agent-a7.md`、`reviews/agent-a7-codex-summary.md`；真实监听受 EPERM 阻断，armhf/[D] 待验。kbd L5/状态组件/实际屏幕渲染及 mk20deck push 属其他轨道；未确认 rendered:true 时配对返回 display_unavailable，不宣称设备可用。
 - mk20-kbd：agent 状态组件和 L5 agent 页（仿真里先做，JSON cases 覆盖急停、确认、允许开关）。
 - mk20deck：设置页的应用改成推送到设备；连接测试改由设备侧执行；增加“智能体”状态镜像。
 - 配置网页新增：网络出口 profile（D1′）、ASR 模型配置（D5′b）。

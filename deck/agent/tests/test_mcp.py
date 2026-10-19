@@ -462,3 +462,18 @@ def test_disabled_readonly_screenshot_ipc(mcp_binary, kbd_build, tmp_path):
             assert text(c.tool("click", **click_args())) == "disabled"
         kbd.shutdown(socket.SHUT_RDWR); out, err = proc.communicate(timeout=3)
         assert json.loads(out)["acts"] == 0 and not err
+
+
+def test_disconnect_pending_logs_fixed_registry_ipc(mcp_binary, kbd_build, tmp_path):
+    with keyboard(kbd_build,tmp_path) as (kbd,_,controls,_), FakeVNC(socketpair=True) as vnc:
+        with server(mcp_binary,tmp_path,kbd,vnc=vnc,connections=2,policy=dict(confirm_first=False,confirm_ms=1000)) as (cs,_,log):
+            c,other=cs; c.initialize(); other.session=c.session
+            allowed(c,controls); c.tool("screenshot")
+            c.sock.sendall(c.packet(dict(jsonrpc="2.0",id=99,method="tools/call",params=dict(name="key",arguments=dict(combo="cmd+q",risk="low",target="Notes")))))
+            time.sleep(.05); c.sock.shutdown(socket.SHUT_RDWR)
+            deadline=time.monotonic()+2
+            while time.monotonic()<deadline:
+                if "status=499" in log.read_text(): break
+                time.sleep(.01)
+            assert "method=tools/call tool=key status=499 latency_ms=" in log.read_text()
+            assert "allowed=false" in text(other.tool("status"))

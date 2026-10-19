@@ -216,7 +216,7 @@ output:;
 }
 int main(int argc, char **argv)
 {
-    if (argc > 1 && !strcmp(argv[1], "--mcp")) return mcp_cli(argc,argv);
+    if (argc > 1 && (!strcmp(argv[1], "--mcp") || !strcmp(argv[1], "--web"))) return mcp_cli(argc,argv);
     if (argc > 1 && !strcmp(argv[1], "--loop-test")) return loop_test_cli(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "--llm-test")) return llm_cli(argc, argv);
     if (argc > 1 && (!strcmp(argv[1], "--net-test") || !strcmp(argv[1], "--time-sync"))) return network_cli(argc, argv);

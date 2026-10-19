@@ -121,6 +121,9 @@ int httpd_parse(const char *in, size_t n, http_request_t *r)
         else HDR("Mcp-Session-Id",r->session,r->has_session)
         else HDR("MCP-Protocol-Version",r->version,r->has_version)
         else HDR("Content-Type",r->content_type,ct)
+        else HDR("Cookie",r->cookie,r->has_cookie)
+        else HDR("X-CSRF-Token",r->csrf,r->has_csrf)
+        else HDR("Sec-Fetch-Site",r->fetch_site,r->has_fetch_site)
         else if (!strcasecmp(p,"Content-Length")) {
             if (length++ || !*colon) return 400;
             for (char *c = colon; *c; c++) { if (*c < '0' || *c > '9') return 400; if (r->body_len > (HTTPD_BODY-(unsigned)(*c-'0'))/10) return 413; r->body_len = r->body_len*10+(unsigned)(*c-'0'); }
@@ -132,7 +135,7 @@ int httpd_parse(const char *in, size_t n, http_request_t *r)
     }
     if (host != 1 || !*r->host) return 400;
     if (te) return length ? 400 : 411;
-    if (!strcmp(r->method,"POST") && !length) return 411;
+    if ((!strcmp(r->method,"POST") || !strcmp(r->method,"PUT")) && !length) return 411;
     if (r->body_len > HTTPD_BODY) return 413;
     if (n-head < r->body_len) return 0;
     r->body = in+head; r->consumed = head+r->body_len; return 1;
@@ -175,67 +178,97 @@ bad:;
     int saved = errno; close(fd); errno = saved; return -1;
 }
 typedef struct {
-    int fd, pending, closing; unsigned requests;
+    int fd, pending, closing, stream; unsigned requests;
+    const http_handler_t *handler;
     int64_t start; uint64_t tag;
     char *in, *out; size_t used, out_len, sent;
     http_request_t req;
 } connection_t;
-static void drop(connection_t *c, const http_handler_t *h)
+static void drop(connection_t *c, const http_handler_t *unused)
 {
-    if (c->fd >= 0) { if (c->pending && h->disconnect) h->disconnect(h->ctx,c->tag); close(c->fd); }
+    (void)unused; const http_handler_t *h = c->handler;
+    if (c->fd >= 0) { if (c->pending && h && h->disconnect) h->disconnect(h->ctx,c->tag); close(c->fd); }
     free(c->in); free(c->out); memset(c,0,sizeof *c); c->fd = -1;
 }
 static int respond(connection_t *c, http_response_t *r)
 {
     const char *reason = r->status == 200 ? "OK" : r->status == 202 ? "Accepted" : r->status == 401 ? "Unauthorized" : r->status == 404 ? "Not Found" : r->status == 405 ? "Method Not Allowed" : "Error";
-    char head[512]; int n = snprintf(head,sizeof head,"HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nContent-Type: application/json\r\nConnection: %s\r\n%s%s%s%s\r\n",r->status,reason,r->len,c->closing ? "close" : "keep-alive",
-        r->status == 401 ? "WWW-Authenticate: Bearer\r\n" : "",r->status == 405 ? "Allow: POST\r\n" : "",*r->session ? "Mcp-Session-Id: " : "",*r->session ? r->session : "");
-    /* Session header needs its own CRLF before the final empty line. */
-    if (*r->session && n > 2 && (size_t)n+2 < sizeof head) { head[n++] = '\r'; head[n++] = '\n'; head[n] = 0; }
+    char head[2048]; int n = 0;
+    if (!c->stream) {
+        n = snprintf(head,sizeof head,"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: %s\r\n",
+            r->status,reason,r->content_type ? r->content_type : "application/json",r->stream || c->closing ? "close" : "keep-alive");
+#define APPEND(...) do { if (n < 0 || (size_t)n >= sizeof head) return -1; int k = snprintf(head+n,sizeof head-(size_t)n,__VA_ARGS__); if (k < 0 || (size_t)k >= sizeof head-(size_t)n) return -1; n += k; } while (0)
+        if (!r->stream) APPEND("Content-Length: %zu\r\n",r->len);
+        if (r->status == 401) APPEND("WWW-Authenticate: Bearer\r\n");
+        if (r->status == 405) APPEND("Allow: POST\r\n");
+        if (*r->session) APPEND("Mcp-Session-Id: %s\r\n",r->session);
+        if (*r->cookie) APPEND("Set-Cookie: %s\r\n",r->cookie);
+        if (r->csp) APPEND("Content-Security-Policy: %s\r\n",r->csp);
+        APPEND("\r\n");
+#undef APPEND
+    }
     if (n < 0 || (size_t)n >= sizeof head || r->len > 4*1024*1024) return -1;
     c->out = malloc((size_t)n+r->len); if (!c->out) return -1;
     memcpy(c->out,head,(size_t)n); if (r->len) memcpy(c->out+n,r->body,r->len);
-    c->out_len = (size_t)n+r->len; c->sent = 0; c->pending = 0; c->start = now_ms(); return 0;
+    c->out_len = (size_t)n+r->len; c->sent = 0; c->stream = r->stream; c->pending = r->stream; c->start = now_ms(); return 0;
 }
 typedef struct {
-    int listener, failed, pumping;
+    int failed, pumping; size_t services;
+    const http_service_t *service;
     uint64_t tag;
     connection_t c[HTTPD_CONNECTIONS];
-    const http_handler_t *handler;
 } server_t;
 static void pump(void *ctx)
 {
     server_t *server = ctx; if (server->pumping) return; server->pumping = 1;
-    connection_t *c = server->c; int listener = server->listener; const http_handler_t *h = server->handler;
-        struct pollfd p[HTTPD_CONNECTIONS+1]; p[0] = (struct pollfd){listener,POLLIN,0};
+    connection_t *c = server->c;
+        struct pollfd p[HTTPD_CONNECTIONS+2];
+        for (size_t i = 0; i < server->services; i++) p[i] = (struct pollfd){server->service[i].listener,POLLIN,0};
         int64_t now = now_ms();
         for (int i = 0; i < HTTPD_CONNECTIONS; i++) {
-            if (c[i].fd >= 0 && !c[i].pending && httpd_expired(c[i].start,now)) drop(&c[i],h);
-            p[i+1] = (struct pollfd){c[i].fd,c[i].out ? POLLOUT : POLLIN,0};
+            if (c[i].fd >= 0 && (c[i].out || !c[i].pending) && httpd_expired(c[i].start,now)) drop(&c[i],NULL);
+            p[i+server->services] = (struct pollfd){c[i].fd,c[i].out ? POLLOUT : POLLIN,0};
         }
-        int rc = poll(p,HTTPD_CONNECTIONS+1,0); if (rc < 0 && errno != EINTR) { server->failed = 1; server->pumping = 0; return; }
-        if (listener >= 0 && (p[0].revents & POLLIN)) {
-            int fd = accept(listener,NULL,NULL); if (fd >= 0) {
-                int slot = -1; for (int i = 0; i < HTTPD_CONNECTIONS; i++) if (c[i].fd < 0) { slot = i; break; }
+        int rc = poll(p,(nfds_t)(HTTPD_CONNECTIONS+server->services),0); if (rc < 0 && errno != EINTR) { server->failed = 1; server->pumping = 0; return; }
+        for (size_t i = 0; i < server->services; i++) if (p[i].revents & POLLIN) {
+            int fd = accept(p[i].fd,NULL,NULL); if (fd >= 0) {
+                int slot = -1; for (int k = 0; k < HTTPD_CONNECTIONS; k++) if (c[k].fd < 0) { slot = k; break; }
                 if (slot < 0 || nonblock(fd)) close(fd);
-                else { c[slot].fd = fd; c[slot].start = now_ms(); }
+                else { c[slot].fd = fd; c[slot].start = now_ms(); c[slot].handler = &server->service[i].handler; }
             }
         }
         for (int i = 0; i < HTTPD_CONNECTIONS; i++) {
             connection_t *v = &c[i]; if (v->fd < 0) continue;
-            if (p[i+1].revents & (POLLERR | POLLNVAL)) { drop(v,h); continue; }
-            if (v->out && (p[i+1].revents & POLLOUT)) {
+            const http_handler_t *h = v->handler;
+            if (p[i+server->services].revents & (POLLERR | POLLNVAL)) { drop(v,h); continue; }
+            if (v->out && (p[i+server->services].revents & POLLOUT)) {
                 ssize_t k = send(v->fd,v->out+v->sent,v->out_len-v->sent,MSG_NOSIGNAL);
                 if (k > 0) v->sent += (size_t)k;
                 else if (!k || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { drop(v,h); continue; }
                 if (v->sent == v->out_len) {
-                    if (v->closing) { drop(v,h); continue; }
+                    if (v->closing && !v->stream) {
+                        /* Deliver the complete rejection before draining unread
+                         * request bytes. A hard close with unread TCP input can
+                         * reset the response (and race a socketpair writer). */
+                        if (shutdown(v->fd,SHUT_WR)) { drop(v,h); continue; }
+                        free(v->out); free(v->in); v->out = v->in = NULL;
+                        v->out_len = v->sent = v->used = 0; v->closing = 2;
+                        v->start = now_ms(); continue;
+                    }
                     free(v->out); v->out = NULL; v->out_len = v->sent = 0;
+                    if (v->stream) continue;
                     memmove(v->in,v->in+v->req.consumed,v->used-v->req.consumed); v->used -= v->req.consumed; v->start = now_ms();
                 }
             }
-            if ((p[i+1].revents & POLLIN) && !v->out) {
-                if (v->pending) { char ch; ssize_t k = recv(v->fd,&ch,1,MSG_PEEK); if (!k) { drop(v,h); continue; } }
+            if (v->closing == 2) {
+                if (p[i+server->services].revents & (POLLIN | POLLHUP)) {
+                    char discard[4096]; ssize_t k = recv(v->fd,discard,sizeof discard,0);
+                    if (!k || (k < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) drop(v,h);
+                }
+                continue;
+            }
+            if ((p[i+server->services].revents & POLLIN) && !v->out) {
+                if (v->pending) { char ch; ssize_t k = recv(v->fd,&ch,1,MSG_PEEK); if (!k || (v->stream && k > 0) || (k < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { drop(v,h); continue; } }
                 else {
                     if (!v->in) v->in = malloc(HTTPD_HEADERS+HTTPD_BODY+1);
                     if (!v->in) { drop(v,h); continue; }
@@ -252,7 +285,8 @@ static void pump(void *ctx)
                     if (!v->pending) { v->tag = ++server->tag; v->req.tag = v->tag; v->closing = v->req.close || ++v->requests >= 32; }
                     pending = h->handle(h->ctx,&v->req,&r);
                 }
-                if (pending) { v->pending = 1; continue; }
+                if (pending == 3) { free(r.body); drop(v,h); continue; }
+                if (pending == 1) { v->pending = 1; continue; }
                 if (!r.status) r.status = 500;
                 if (respond(v,&r)) drop(v,h);
                 free(r.body);
@@ -260,27 +294,43 @@ static void pump(void *ctx)
         }
     server->pumping = 0;
 }
-int httpd_run_fds(int listener, const int *fds, size_t count, const http_handler_t *h, volatile sig_atomic_t *stop)
+int httpd_run_services(const http_service_t *services, size_t count, volatile sig_atomic_t *stop)
 {
-    server_t server; memset(&server,0,sizeof server); server.listener = listener; server.handler = h;
+    if (!count || count > 2) return -1;
+    server_t server; memset(&server,0,sizeof server); server.service = services; server.services = count;
     connection_t *c = server.c; for (int i = 0; i < HTTPD_CONNECTIONS; i++) c[i].fd = -1;
-    if (listener >= 0 && nonblock(listener)) { close(listener); return -1; }
-    if (count > HTTPD_CONNECTIONS) return -1;
-    for (size_t i = 0; i < count; i++) { if (nonblock(fds[i])) { for (size_t k = 0; k < i; k++) drop(&c[k],h); close(fds[i]); return -1; } c[i].fd = fds[i]; c[i].start = now_ms(); }
-    if (h->attach_pump) h->attach_pump(h->ctx,pump,&server);
+    size_t slot = 0;
+    for (size_t i = 0; i < count; i++) {
+        const http_service_t *s = &services[i];
+        if (s->listener >= 0 && nonblock(s->listener)) goto bad;
+        for (size_t k = 0; k < s->count; k++) {
+            if (slot == HTTPD_CONNECTIONS || nonblock(s->fds[k])) goto bad;
+            c[slot].fd = s->fds[k]; c[slot].start = now_ms(); c[slot++].handler = &s->handler;
+        }
+        if (s->handler.attach_pump) s->handler.attach_pump(s->handler.ctx,pump,&server);
+    }
     while (!*stop && !server.failed) {
-        if (h->tick) h->tick(h->ctx);
+        for (size_t i = 0; i < count; i++) if (services[i].handler.tick) services[i].handler.tick(services[i].handler.ctx);
         pump(&server);
-        if (listener < 0) { int open = 0; for (int i = 0; i < HTTPD_CONNECTIONS; i++) if (c[i].fd >= 0) open = 1; if (!open) break; }
-        /* Short bounded idle sleep; cooperative action guards pump without it. */
+        int open = 0;
+        for (size_t i = 0; i < count; i++) if (services[i].listener >= 0) open = 1;
+        for (int i = 0; i < HTTPD_CONNECTIONS; i++) if (c[i].fd >= 0) open = 1;
+        if (!open) break;
         (void)poll(NULL,0,5);
     }
-    if (h->attach_pump) h->attach_pump(h->ctx,NULL,NULL);
-    for (int i = 0; i < HTTPD_CONNECTIONS; i++) drop(&c[i],h);
-    if (listener >= 0) close(listener);
+    goto end;
+bad:
+    server.failed = 1;
+end:
+    for (size_t i = 0; i < count; i++) if (services[i].handler.attach_pump) services[i].handler.attach_pump(services[i].handler.ctx,NULL,NULL);
+    for (int i = 0; i < HTTPD_CONNECTIONS; i++) drop(&c[i],NULL);
+    for (size_t i = 0; i < count; i++) if (services[i].listener >= 0) close(services[i].listener);
     return server.failed ? -1 : 0;
 }
-
+int httpd_run_fds(int listener, const int *fds, size_t count, const http_handler_t *h, volatile sig_atomic_t *stop)
+{
+    http_service_t s = {listener,fds,count,*h}; return httpd_run_services(&s,1,stop);
+}
 int httpd_run(int listener, int connected, const http_handler_t *h, volatile sig_atomic_t *stop)
 {
     return httpd_run_fds(listener,connected >= 0 ? &connected : NULL,connected >= 0 ? 1 : 0,h,stop);

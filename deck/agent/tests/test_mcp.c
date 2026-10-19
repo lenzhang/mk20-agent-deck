@@ -120,4 +120,38 @@ static void dispatch(void)
     j = request(&m,&q,&r,""); CHECK(r.status == 404); cJSON_Delete(j);
     mcp_free(&m);
 }
-int main(void) { parser(); tokens(); dispatch(); printf("A6: %u checks passed\n",checks); return 0; }
+static char last_log[256];
+static void log_line(void *ctx, const char *line) { (void)ctx; snprintf(last_log,sizeof last_log,"%s",line); }
+static void session_lifecycle(void)
+{
+    fake_t f = {.now=100}; loop_ports_t ports = {.ctx=&f,.now=now,.poll=poll_event,.lease=lease};
+    agent_loop_t l; policy_config_t p; policy_defaults(&p); loop_init(&l,&p,&ports);
+    char token[65]; memset(token,'b',64); token[64] = 0;
+    mcp_t m; mcp_init(&m,&l,token,"127.0.0.1:8765"); m.log = log_line;
+    http_request_t q = {.tag=1,.has_auth=1}; http_response_t r;
+    strcpy(q.method,"POST"); strcpy(q.path,"/mcp"); strcpy(q.host,m.host); strcpy(q.content_type,"application/json");
+    snprintf(q.auth,sizeof q.auth,"Bearer %s",token);
+    const char *init = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{}}}";
+    char ids[MCP_SESSIONS][33];
+    for (int i = 0; i < MCP_SESSIONS; i++) { cJSON_Delete(request(&m,&q,&r,init)); CHECK(r.status == 200); strcpy(ids[i],r.session); f.now++; }
+    /* Touch oldest slot; second slot becomes LRU. */
+    q.has_session = 1; strcpy(q.session,ids[0]); cJSON_Delete(request(&m,&q,&r,"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}"));
+    q.has_session = 0; f.now++; cJSON_Delete(request(&m,&q,&r,init)); CHECK(r.status == 200);
+    q.has_session = 1; strcpy(q.session,ids[1]); cJSON_Delete(request(&m,&q,&r,"{}")); CHECK(r.status == 404);
+    /* Pending owner and task owner cannot be chosen for capacity eviction. */
+    strcpy(m.pending_owner,ids[2]); m.pending = 99; strcpy(m.task.owner,ids[3]); m.task.live = 1;
+    q.has_session = 0; f.now++; cJSON_Delete(request(&m,&q,&r,init)); CHECK(r.status == 200);
+    CHECK(!strcmp(m.sessions[2].id,ids[2]) && !strcmp(m.sessions[3].id,ids[3]));
+    /* Idle expiration uses DELETE semantics, including owner's stop path. */
+    f.now += MCP_SESSION_IDLE_MS+1; mcp_tick(&m); CHECK(!m.task.live && f.stops >= 1);
+    for (int i = 0; i < MCP_SESSIONS; i++) CHECK(!*m.sessions[i].id);
+    q.has_session = 1; strcpy(q.session,ids[2]); cJSON_Delete(request(&m,&q,&r,"{}")); CHECK(r.status == 404);
+    mcp_disconnect(&m,99); CHECK(strstr(last_log,"method=tools/call tool=none status=499")); CHECK(!m.pending);
+    CHECK(!strstr(last_log,token));
+    /* Expire on access without a server tick, strict greater-than boundary. */
+    q.has_session = 0; cJSON_Delete(request(&m,&q,&r,init)); strcpy(q.session,r.session); q.has_session = 1;
+    f.now += MCP_SESSION_IDLE_MS; cJSON_Delete(request(&m,&q,&r,"{}")); CHECK(r.status == 200);
+    f.now += MCP_SESSION_IDLE_MS+1; cJSON_Delete(request(&m,&q,&r,"{}")); CHECK(r.status == 404);
+    mcp_free(&m);
+}
+int main(void) { parser(); tokens(); dispatch(); session_lifecycle(); printf("A6: %u checks passed\n",checks); return 0; }
