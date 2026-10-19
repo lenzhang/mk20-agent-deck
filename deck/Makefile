@@ -1,4 +1,4 @@
-test: sim-test kbd-test agent-test
+test: sim-test kbd-test agent-test onboard-ui-test
 	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh tools/mk20-build-bins.sh
 	shellcheck -s bash -S warning tools/tf-identify.sh tools/tf-restore-boot.sh
 	python3 -m py_compile tools/mk20_key_latency.py tools/mk20_accept.py tools/mk20_soak.py tools/mk20_host_net.py tools/tcp_transport.py tools/tf_gpt_check.py
@@ -24,3 +24,8 @@ sim:
 	uv run python -m mk20sim --port 8766
 
 .PHONY: test bins release sim-test sim kbd-test agent-test
+
+onboard-ui-test:   # U1: offline C buffers/files only; no device or network access
+	$(MAKE) -C kbd ui-test
+
+.PHONY: onboard-ui-test

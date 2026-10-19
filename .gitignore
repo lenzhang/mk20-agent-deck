@@ -7,3 +7,11 @@ out/
 .DS_Store
 logs/
 deck/agent/build-armhf/
+
+# Host-only UI test executables
+deck/kbd/tests/ui_test
+deck/kbd/tests/ui_headless
+deck/kbd/tests/uicfg_cli
+deck/kbd/tests/ui_load
+
+*.dSYM/

@@ -20,7 +20,7 @@ build-backend = "setuptools.build_meta"
 include = ["mk20deck*", "mk20sim*"]
 
 [tool.setuptools.package-data]
-mk20deck = ["py.typed"]
+mk20deck = ["py.typed", "providers.json"]
 mk20sim = ["cases/*.json", "cases/drafts/*.json"]
 
 [tool.pytest.ini_options]

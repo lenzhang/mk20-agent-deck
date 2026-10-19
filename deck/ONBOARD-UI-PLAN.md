@@ -1,10 +1,11 @@
 # On-board UI plan (2026-10-19)
 
-Status: user-approved design; implementation is U1–U7 below. This document changes no code.
+Status: user-approved design; U1 host foundation implemented (2026-10-19); U2–U7 pending.
 The keyboard must be fully usable without the Mac app. This supersedes the earlier
 “no Mac helper” decision with **optional helper, never required** (2026-10-19).
-No AirPlay. Network access still requires a reachable configured proxy; independence
-from mk20deck does not imply that a selected Mac-proxy profile works without its Mac.
+No AirPlay. Network access uses only the explicitly selected egress: Mac proxy is
+proxy-only; USB WiFi may be direct or proxy. A failed proxy never falls back to direct.
+Independence from mk20deck does not make a selected Mac proxy work without its Mac.
 
 ## 1. Baseline and architecture
 
@@ -142,7 +143,7 @@ once. Test uses applied config only; refuse while draft is nonempty.
 
 | Tab | item1..10 in display order (unused cells blank/disabled) |
 |---|---|
-| Network | Mac proxy; USB WiFi; proxy host; proxy port; WiFi SSID/status; WiFi proxy host; WiFi proxy port; route policy (proxy only); link status; setup help |
+| Network | Mac proxy; USB WiFi; proxy host; proxy port; WiFi SSID/status; WiFi proxy host; WiFi proxy port; route policy (selected direct/proxy); link status; setup help |
 | Provider | qwen; glm-coding (default GLM choice); glm (metered); kimi; deepseek; openai; anthropic; gemini; blank; blank |
 | Model | Catalogue models for selected provider, up to ten per view; K2 moves/scrolls through further models if needed |
 | Test | Run/cancel test; result/error class; latency; profile; proxy; provider; model; clock state; key presence; blank |
@@ -273,11 +274,11 @@ Hard rules, unchanged unless a stricter rule here supersedes older prose:
 - **Never log/print keys.** No secret content, prefix/suffix, Authorization header,
   raw echoed provider errors, transcript credentials, debug dump or core dump.
   Keys never enter/render from config; only `/data/mk20/secrets/<provider>.key` paths.
-- **Never direct-connect** to cloud/model/ASR endpoints, and never fall back to direct.
-  USB WiFi is a link choice with an explicitly configured reachable HTTP CONNECT
-  proxy; without one, blocked. This supersedes old `board_wifi` domestic-direct and
-  `usb_wifi mode:direct` policy for this design. Numeric USB-local web/fast-path/VNC
-  traffic is local control/capture, not an unproxied cloud route.
+- **Never fall back to direct** from a proxy profile and never use an unselected
+  route. D1′ permits explicitly user-chosen USB WiFi `mode: direct | proxy`.
+  Mac-proxy is proxy-only; proxy failure stays failure. USB-local web/fast-path/VNC
+  traffic is local control/capture. U1 preserves existing agentcfg WiFi route bytes;
+  explicit mode selection/consumer validation belongs to U3.
 - mk20-kbd is the sole HID writer; physical enable only; e-stop independent of Mac,
   agent, network, renderer and web service. Stop release <=100 ms with writable HID;
   surface degraded HID without promising delivery when transport is unavailable.
@@ -335,12 +336,12 @@ Keep version1 `net.json` shape from `agentcfg.py::net_config()`:
 `profile, proxy:{url,fallbacks}, routes:{domestic,foreign}`, plus existing version/note
 where applicable. Mac default stays `http://172.30.250.1:7890` and legacy proxy-address
 fallbacks `10.20.0.1`, `169.254.7.1` only for the default Mac host. A custom host:port
-gets no invented fallbacks. USB WiFi serializes as existing `board_wifi`, but U1
-updates **both** writer oracles to routes proxy/proxy with a proxy, blocked/blocked
-without one. Never emit direct. U3 adds the same rejection at the agent consumer:
-current `netcfg.c` still accepts direct (A3); UI validation alone is insufficient.
-Existing direct configs are displayed “migration required / blocked”, never silently
-used. Schema compatibility does not preserve the superseded routing policy.
+gets no invented fallbacks. U1 adds an optional proxy_host to the Python oracle,
+retaining its existing defaults and WiFi route semantics. USB WiFi serializes as existing `board_wifi`. D1′ allows an explicitly
+selected direct or proxy egress, never automatic proxy-to-direct fallback or an
+unselected route. **U1 keeps agentcfg.py net semantics unchanged**: domestic direct,
+foreign proxy when wifi_proxy is set, otherwise blocked. U3 adds explicit mode/schema
+selection and consumer validation without silently changing existing profiles.
 
 ### Apply and durability
 
@@ -371,8 +372,8 @@ used. Schema compatibility does not preserve the superseded routing policy.
    request's profile. fsync/rename/dir-fsync failure means “Apply failed”, retain draft,
    no success toast and no network until a valid coherent snapshot is confirmed.
 
-Current `_atomic_write()` lacks directory fsync and pair coordination; U1 updates
-its host oracle/durability tests alongside the C writer. `SettingsStore`'s Mac JSON
+U1 adds directory fsync to `_atomic_write()` and tests its bytes alongside the C
+writer. Python pair coordination and the existing agent consumer marker gate remain U3. `SettingsStore`'s Mac JSON
 is no longer device authority; UI preferences may persist separately, but networking
 never falls back to its defaults after corrupt runtime config.
 
@@ -446,7 +447,7 @@ for home/settings/agent control, key setup, ASR or VNC/UVC fallback.
 | Missing config directory | Show unconfigured defaults in memory; create0700 only on explicit Apply; no background cloud request |
 | Corrupt/oversized/symlink config, incomplete pair marker | Config error; networking/test blocked; retain files for diagnosis without printing contents; web/local re-Apply repairs |
 | Missing/insecure/empty key file | “无 Key / key config”; no secret render; no request, web setup hint; never try another provider/key silently |
-| Proxy absent/USB WiFi without proxy | Blocked/proxy error; no direct socket, no alternate unconfigured profile |
+| Selected proxy absent/fails | Proxy error stays failure; no direct fallback or alternate unselected route. Explicit USB WiFi direct remains permitted by D1′ |
 | Test timeout/stale result | Deadline cancels; no UI/safety-loop block; ignore late completion after edit/re-Apply/navigation |
 | Board mic/ASR absent or fails | Visible unavailable/error; PTT reservation and pause gate retained; no fabricated task or remote enable |
 | Agent dies while recording | TTL/client-loss revokes; stop recording; no automatic resume on restart |
@@ -533,14 +534,14 @@ files; modes0700/0600, symlink rejection; no secret sentinels in output. Compare
 C provider/net serialization **byte-for-byte against the corrected agentcfg.py** for
 every catalogue/model/profile, custom host, escaping and missing WiFi proxy. Also
 load emitted provider files with the actual `llm_provider_load()` and net files with
-`netcfg_load()`; injected socket counters prove invalid config/missing key/direct
+`netcfg_load()`; injected socket counters prove invalid config/missing key/unselected-route
 policy uses zero cloud dials. Existing GD32 allow-list tests remain mandatory.
 
 | Milestone | Deliverable and concrete acceptance |
 |---|---|
-| **U1 — on-board renderer foundation, host only** | Host-buildable C state/renderer to buffers and exact PPM/PNG-review goldens; embedded bitmap ASCII + all required fixed CJK and ⟲⟳ icons; home and LS navigation/editing in memory; shared provider catalogue including glm-coding, glm-5.3 text/tools and glm-5.3-flash vision; atomic config writer with configurable temp root; agentcfg.py glm-coding/durability/no-direct-policy corrections and byte-conformance tests; sim JSON cases and C-backend harness. `ui-test`/`onboard-ui-test` pass without network/devices, every fixed glyph covered, filesystem faults never report success. **No mk20-kbd main-loop/device integration in U1.** |
+| **U1 — on-board renderer foundation, host only** | **Implemented 2026-10-19.** C99 HOME/LS state/rendering to caller RGB565 panels; fixed ASCII/CJK/icons and visible replacement; focus/selection/draft count, bounded host/port/preferences editors, network double Apply and discard confirmation, fake int64 knob clock, fb20 e-stop face/state only, injected fake Test. Shared catalogue + stale generator check (glm-coding endpoints/models), Python legacy API/positions retained, directory fsync; WiFi route semantics unchanged. C writer: configurable canonical root, 0700/0600, no-follow exclusive temps, full writes/fsync/rename/dir-fsync, process lock/commit marker, symlink validation and injected faults. Byte conformance for every preset/model/profile plus custom hosts; actual llm_provider_load/netcfg_load acceptance; 13 scenes / 286 exact P6 goldens (lossless gzip), explicit make ui-golden only. make ui-test / onboard-ui-test offline with ASan/UBSan; optional static armhf compile when toolchain exists. See kbd/UI.md for contracts/font sources/licenses and validation counts. **Deferred to U2:** C-backend simulator adapter and cases/onboard.json: current harness is Python-controller/JPEG-specific, so cannot honestly replay C HOME without adapter changes. Existing sim regressions retained. Main-loop/ownership, real ctl safety/PTT and physical status remain U2/U4; consumer marker coordination, explicit D1′ mode selection, capability gating and real device Test are U3. No device integration or acceptance claimed. |
 | **U2 — loop integration and ownership** | Wire C renderer into mk20-kbd main loop/screen writer, map built-in routes without changing ctl page ids, enforce reserved faces/strip for cmd100/200 and agent grants, host handshake/hysteresis, home boot and Mac-offline fallback. Host-only fake-fd/buffer integration proves stale host frames never overwrite LS/L5/home, no Mac required, no short action after K2 hold, safety deadlines survive render/backpressure. No device acceptance claimed. |
-| **U3 — device-side config/test service** | Shared commit lock/marker and consumer snapshot reload, root-bound write-only key/config web service, proxy-only route enforcement in netcfg/net consumers, test worker using net.c/llm.c; injected offline tests prove per-error classes, 10 s deadline/cancel, zero direct dials, coherent crash recovery, key redaction and no agent-loop block. Later authorized device test must use the selected profile; Mac absent with USB WiFi+proxy must be possible. |
+| **U3 — device-side config/test service** | Shared commit lock/marker and consumer snapshot reload, root-bound write-only key/config web service, selected direct/proxy route enforcement in netcfg/net consumers, test worker using net.c/llm.c; injected offline tests prove per-error classes, 10 s deadline/cancel, zero unselected-route or proxy-to-direct fallback dials, coherent crash recovery, key redaction and no agent-loop block. Later authorized device test must use the selected profile; Mac absent with explicitly selected USB WiFi direct or proxy must be possible. |
 | **U4 — L5, reserved PTT and e-stop** | Render allow/confirm/pause/state page; implement/document pause gate + events/errors as explicit CTL protocol extension; reserve fb16/fb20 and voice target now, ASR may still be unavailable. Fake-clock tests prove held PTT renews same lease while actions stop, ordinary/L1 PTT revokes, TTL/disable/stop wins, >=300 ms confirmation, cold-start K2 capability handling. No remote enable or key override. |
 | **U5 — optional Mac fast paths** | USB-address-only authenticated screenshot/AX endpoints with permissions/errors/limits, per-display/window geometry; agent fast-path->VNC->UVC chooser integrated with feature/uvc dependency. Offline fakes prove ordering, demotion/promotion, stale-coordinate rejection, no-helper operation and no AirPlay. Mac runtime permissions/actual capture remain a later authorized acceptance step. |
 | **U6 — board voice/ASR** | Board-mic worker, <=30 s PCM capture, configured proxied ASR <=15 s, transcript becomes task revision; no keys on keyboard/config; fake audio/ASR tests cover silence, failure, manual pause, stop/TTL/client loss during recording and no stale resume. Preserve L1 Right Option. Real mic capability awaits U7. |

@@ -20,17 +20,15 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from .catalogue import CATALOGUE
+
 log = logging.getLogger(__name__)
 
 TABS = [("net", "网络"), ("provider", "模型商"), ("model", "模型"), ("test", "连接测试"), ("info", "设备信息")]
-PROVIDERS = [  # (id, label, domestic)
-    ("qwen", "Qwen 通义", True), ("glm", "GLM 智谱", True), ("kimi", "Kimi", True), ("deepseek", "DeepSeek", True),
-    ("openai", "OpenAI", False), ("anthropic", "Anthropic", False), ("gemini", "Gemini", False)]
-MODELS = {  # example names only — the real list comes from the provider at runtime
-    "qwen": ["qwen3-max", "qwen3-coder-plus", "qwen-vl-max"], "glm": ["glm-4.6", "glm-4.5v"],
-    "kimi": ["kimi-k2", "kimi-k2-turbo"], "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-    "openai": ["gpt-5", "gpt-5-mini"], "anthropic": ["claude-sonnet-4.5", "claude-haiku-4.5"],
-    "gemini": ["gemini-2.5-pro", "gemini-2.5-flash"]}
+# Preserve legacy key positions for the optional Python page; C uses catalogue order.
+PROVIDERS = [(p["id"], p["label"], p["domestic"])
+             for p in sorted(CATALOGUE, key=lambda p: p["legacy_order"])]
+MODELS = {p["id"]: [m["id"] for m in p["models"]] for p in CATALOGUE}
 WEB_HINT = "密钥/Wi-Fi 密码不在设备上输入：请在 Mac 端或网页 http://172.30.250.1:8780 设置"
 DEFAULTS = {"profile": "mac_proxy", "proxy_port": 7890, "provider": "qwen", "model": "qwen3-max",
             "brightness": 80, "volume": 50, "wifi_proxy": ""}

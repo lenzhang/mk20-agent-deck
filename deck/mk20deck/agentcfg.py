@@ -19,26 +19,23 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
+from .catalogue import CATALOGUE
+
 DEVICE_ROOT = "/data/mk20/agent"
 DEVICE_SECRETS = "/data/mk20/secrets"
 # Mac end of the USB link, M4 addressing order (fw>=1.1.0 ECM → 1.0.x → link-local)
 MAC_HOSTS = ("172.30.250.1", "10.20.0.1", "169.254.7.1")
 
 PROVIDERS: dict[str, dict] = {
-    "qwen": {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "domestic": True},
-    "glm": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "domestic": True},
-    "kimi": {"base_url": "https://api.moonshot.cn/v1", "domestic": True},
-    "deepseek": {"base_url": "https://api.deepseek.com/v1", "domestic": True},
-    "openai": {"base_url": "https://api.openai.com/v1", "domestic": False},
-    "anthropic": {"base_url": "https://api.anthropic.com/v1", "domestic": False},
-    "gemini": {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "domestic": False},
+    p["id"]: {"base_url": p["base_url"], "domestic": p["domestic"]} for p in CATALOGUE
 }
 
 
 def net_config(full: dict) -> dict:
     if full["profile"] == "mac_proxy":
         port = int(full["proxy_port"])
-        urls = [f"http://{h}:{port}" for h in MAC_HOSTS]
+        host = full.get("proxy_host", MAC_HOSTS[0])
+        urls = [f"http://{h}:{port}" for h in (MAC_HOSTS if host == MAC_HOSTS[0] else (host,))]
         return {"version": 1, "profile": "mac_proxy", "proxy": {"url": urls[0], "fallbacks": urls[1:]},
                 "routes": {"domestic": "proxy", "foreign": "proxy"},
                 "note": "Mac mihomo rules split domestic/foreign; never fall back to direct for foreign"}
@@ -75,6 +72,11 @@ def _atomic_write(path: str, data: dict) -> None:
         os.fsync(f.fileno())
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 class ConnectionTester(Protocol):

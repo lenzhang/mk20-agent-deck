@@ -30,7 +30,7 @@
 | D5 聊天/任务入口（修订 2026-10-19） | HTTP API + usb0 极简网页继续保留；**L5 固定不可覆盖 PTT -> 板载麦克风 -> 配置的 ASR -> 键盘 agent 任务**。按住暂停动作、**不撤销租约**（继续续约）；松开取得新目标后恢复，急停/超时/人手接管优先。**L1 PTT 仍为 Mac Right-Option，按原规则撤销租约**；fb21 明示语音目标 Mac / 键盘 agent。ASR 可后做，键位/状态现在定义。中文粘贴机制见 §3.3 | §3.4、§3.8、ONBOARD-UI-PLAN U4/U6 |
 | D6 MCP | MCP **可以提交任务，但不能启用 agent**；总开关只在键盘上 | §3.7 |
 | D7 密钥 | key 通过板载配置网页录入，存 `/data/mk20/secrets/<provider>.key`（root 0600） | §3.8 |
-| **D1′ 网络出口（修订，2026-10-19）** | 出口是**用户在板载配置网页上选的 profile**：① “Mac 代理”（填 host:port，走 HTTP CONNECT）；② “USB WiFi dongle”（配置可达的 CONNECT 代理；无代理则 blocked）。**可达性由用户保证，键盘只按所选 profile 走。**计划里不再设计转发；launchd 转发只作为可选备注（§3.1） | §3.1、A3、A7 配置页 |
+| **D1′ 网络出口（修订，2026-10-19）** | 出口是**用户在板载配置网页上选的 profile**：① “Mac 代理”（填 host:port，走 HTTP CONNECT）；② “USB WiFi dongle”（显式选择 `mode: direct / proxy`；proxy 模式配置可达的 CONNECT 代理，失败不回落 direct）。**可达性由用户保证，键盘只按所选 profile 走。**计划里不再设计转发；launchd 转发只作为可选备注（§3.1） | §3.1、A3、A7 配置页 |
 | **D5′ 语音（按 D5 修订）** | L1 保留 Mac Right-Option；L5 保留 PTT 录板载麦克风送配置 ASR，pause-not-revoke。旧 USB 麦克风/UAC 路线仅保留 §3.9 可行性研究，**不是本次实现前置条件** | §3.9、ONBOARD-UI-PLAN U4/U6 |
 | **D8 屏幕开放给 agent（修订 2026-10-19）** | 保留现有 21 屏 API、属主/授权/限速；**home/LS/L5 始终由 mk20-kbd 板载渲染**，L1/L4 仅 Mac 在线时为 host 页面，否则板载离线占位。固定急停键、L5/agent 页 PTT 与 fb21 安全/语音条不可覆盖（授权也不行）。Mac helper **optional, never required**，取代旧 no-helper 决定；采屏顺序 **Mac fast path -> VNC(A2) -> UVC(feature/uvc)**，无 AirPlay | §3.2、§3.4b、ONBOARD-UI-PLAN U1/U2/U4/U5 |
 | D6 | 再次确认：MCP 可提交任务，不能启用 agent | §3.7 |
@@ -111,11 +111,11 @@
   设备侧**绝不直连**：`net.json` 缺失或解析失败时一律不发请求（fail-closed）。
 - **出口选择归网关/代理（D2）**：设备侧不做出口 IP 证明、不读 mihomo API。国外 provider 走 112 US 出口这件事由 Mac 上
   mihomo 的规则保证（AI 组），**任何情况下都不改代理配置**。设备只保证“所有模型流量只经代理端口，绝不直连”。
-- **网络出口 profile（D1′，2026-10-19 板载 UI 修订）**：LS / usb0 配置网页选择 `mac_proxy{host,port}` 或 USB WiFi + 配置的 CONNECT 代理（写现有 `board_wifi` 格式）。**never direct-connect，never fall back to direct**：两类云端路由均为 proxy，无 WiFi 代理则 blocked；旧 domestic-direct / `usb_wifi mode:direct` 决定被本次取代。可达性由用户保证；配置缺失/损坏则 fail-closed。当前 A3 reader 仍接受 direct，须在 ONBOARD-UI-PLAN U3 收紧消费者，不能仅靠 UI。
+- **网络出口 profile（D1′，用户确认）**：LS / usb0 配置网页选择 `mac_proxy{host,port}` 或 USB WiFi `mode: direct | proxy`（现有格式 `board_wifi`）。Mac 代理只走 proxy，失败就是失败；USB WiFi 可显式选 direct 或 proxy。never direct 指绝不从 proxy 回落 direct、绝不使用未选路线。U1 保留 agentcfg.py 现有 WiFi 路由语义；U3 增加显式模式与消费者校验。配置缺失/损坏 fail-closed。
 - （可选备注，非计划项）**代理接入（D1，旧）**：Mac 上不装驱动。若 mihomo `allow-lan` 且在 172.30.250.1 可达，`net.json.proxy.url` 直接指向该端口；
   否则在 Mac 上加一个极小的 **launchd TCP 转发**（plist + 几十行的转发程序），**只绑 172.30.250.1**，转发
   `172.30.250.1:17891 → 127.0.0.1:7890`。不改 mihomo 配置。哪种方式可行，等用户回家时在设备上实测 [D][M]。
-- **Profile `board_wifi`**：USB WiFi + 显式代理，国内/国外均 proxy，无代理均 blocked；U1 同步修订 agentcfg writer，U3 接设备消费者（详见 ONBOARD-UI-PLAN）。
+- **Profile `board_wifi`**：D1′ 允许用户显式选择 USB WiFi direct 或 proxy；proxy 失败不回落。U1 保留现有 writer 的 domestic=direct、foreign=proxy（无代理 blocked），不改路由策略；U3 接显式模式和设备消费者。
 - **时间同步（TLS 证书校验依赖正确时钟）**：T113 有没有可靠 RTC 待确认。方案：mk20d 或 agent 启动时，向 Mac 侧
   （`mk20deck` 新增 `GET /time`，或直接读代理返回的 HTTP `Date` 头）取时间，偏差超过 120 s 就 `settimeofday`，并记录日志。
   时钟没校准就**不发 TLS 请求**（不能为了绕过时钟问题而跳过证书校验）。
@@ -352,7 +352,7 @@
 ### A3 网络：CONNECT 代理 + mbedTLS + 时间（box + [M]）
 - **A3 状态（2026-10-19）**：host 实现与 ASan/UBSan C 测试完成；离线 IPC 补充测试 164 pass，标准 TCP 测试受 sandbox EPERM 阻断；armhf/[M][D] 待验，见 `agent/NOTES-agent-a3.md` 与 `reviews/agent-a3-codex-summary.md`。
 - `net.c`：TCP 连接（10 s 超时）→ `CONNECT` → mbedTLS 握手（SNI，用随包 CA 校验）→ HTTP/1.1。
-  `net.json` fail-closed；`mac_proxy` 两类只走代理。A3 当前实现仍支持旧 WiFi direct profile；2026-10-19 的 never-direct 决定由 U3 收紧 reader/transport，不能把本条旧“没有直连路径”表述当作实现事实。
+  `net.json` fail-closed；`mac_proxy` 两类只走代理。WiFi direct 是 D1′ 允许的显式出口；never direct 指绝不从 proxy 回落 direct 或走未选路线，U3 校验所选模式。
 - 时间同步：从 Mac `GET /time` 或代理 `Date` 头取时间；时钟没校准就拒绝 TLS。
 - **不做出口证明（D2）**。如果 mihomo 不在 172.30.250.1 可达，就装 D1 的 launchd TCP 转发（只绑 USB 接口，不改代理配置）。
 - box：fake_proxy 加本地 TLS 测试服务器（自签 CA 注入测试 bundle）；证书错误、过期、域名不符都必须失败。
@@ -431,12 +431,12 @@
 
 ### 6.2 net.json / provider.json 规则（2026-10-19 板载 UI 修订）
 - `mac_proxy`：`routes.domestic=proxy`、`routes.foreign=proxy`，回落只在 Mac 的三个地址之间切换。
-- `board_wifi`（USB WiFi）：两类路由有代理则 proxy，无代理则 blocked；拒绝任何 cloud/ASR direct 路由，绝不 direct fallback。
+- `board_wifi`（USB WiFi）：显式 `mode: direct | proxy`；绝不 proxy-to-direct fallback 或走未选路线。U1 保留 agentcfg 现有路由字节，显式模式属 U3。
 - `mac_proxy` 支持显式 host:port；默认 Mac 地址保留原代理回落顺序，自定义 host 不自动添加回落。所有值经过 schema/host/port 校验。
 - provider.json 保留 version1 和 `provider/model/base_url/domestic/route/api_key_file`，密钥只引用 `/data/mk20/secrets/<provider>.key`；
   glm-coding 与 glm 的 URL/模型见 §3.5，共享 catalogue 保证 C/Python writer byte-compatible。
 - 写入：目录0700、文件0600，临时文件写满 -> fsync -> rename -> **fsync 目录**；双文件不是天然事务，必须有提交 marker 和消费者 reload 闸门，见 ONBOARD-UI-PLAN §4。
-- 上述 writer/consumer 修订属于 U1/U3；当前 agentcfg 的 directory-fsync 缺口和 A3 direct 支持不能视作已修复。
+- 上述 writer/consumer 修订属于 U1/U3；U1 补 directory-fsync；A3 direct 支持本身不是缺陷，U3 校验显式所选路线。
 
 ---
 

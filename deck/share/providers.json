@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "qwen",
+      "label": "Qwen 通义",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "domestic": true,
+      "adapter": "openai",
+      "legacy_order": 0,
+      "models": [
+        {
+          "id": "qwen3-max",
+          "vision": false,
+          "tools": true
+        },
+        {
+          "id": "qwen3-coder-plus",
+          "vision": false,
+          "tools": true
+        },
+        {
+          "id": "qwen-vl-max",
+          "vision": true,
+          "tools": true
+        }
+      ]
+    },
+    {
+      "id": "glm-coding",
+      "label": "GLM Coding",
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "domestic": true,
+      "adapter": "openai",
+      "legacy_order": 7,
+      "models": [
+        {
+          "id": "glm-5.3",
+          "vision": false,
+          "tools": true
+        },
+        {
+          "id": "glm-5.3-flash",
+          "vision": true,
+          "tools": true
+        }
+      ]
+    },
+    {
+      "id": "glm",
+      "label": "GLM 智谱 (metered)",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "domestic": true,
+      "adapter": "openai",
+      "legacy_order": 1,
+      "models": [
+        {
+          "id": "glm-4.6",
+          "vision": false,
+          "tools": true
+        },
+        {
+          "id": "glm-4.5v",
+          "vision": true,
+          "tools": true
+        }
+      ]
+    },
+    {
+      "id": "kimi",
+      "label": "Kimi",
+      "base_url": "https://api.moonshot.cn/v1",
+      "domestic": true,
+      "adapter": "openai",
+      "legacy_order": 2,
+      "models": [
+        {
+          "id": "kimi-k2",
+          "vision": false,
+          "tools": true
+        },
+        {
+          "id": "kimi-k2-turbo",
+          "vision": false,
+          "tools": true
+        }
+      ]
+    },
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "base_url": "https://api.deepseek.com/v1",
+      "domestic": true,
+      "adapter": "openai",
+      "legacy_order": 3,
+      "models": [
+        {
+          "id": "deepseek-chat",
+          "vision": false,
+          "tools": true
+        },
+        {
+          "id": "deepseek-reasoner",
+          "vision": false,
+          "tools": true
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "label": "OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "domestic": false,
+      "adapter": "openai",
+      "legacy_order": 4,
+      "models": [
+        {
+          "id": "gpt-5",
+          "vision": true,
+          "tools": true
+        },
+        {
+          "id": "gpt-5-mini",
+          "vision": true,
+          "tools": true
+        }
+      ]
+    },
+    {
+      "id": "anthropic",
+      "label": "Anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "domestic": false,
+      "adapter": "unsupported",
+      "legacy_order": 5,
+      "models": [
+        {
+          "id": "claude-sonnet-4.5",
+          "vision": true,
+          "tools": true
+        },
+        {
+          "id": "claude-haiku-4.5",
+          "vision": true,
+          "tools": true
+        }
+      ]
+    },
+    {
+      "id": "gemini",
+      "label": "Gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "domestic": false,
+      "adapter": "openai",
+      "legacy_order": 6,
+      "models": [
+        {
+          "id": "gemini-2.5-pro",
+          "vision": true,
+          "tools": true
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "vision": true,
+          "tools": true
+        }
+      ]
+    }
+  ]
+}
