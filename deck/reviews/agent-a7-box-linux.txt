@@ -1,0 +1,8 @@
+A7 box Linux verification (2026-10-19 23:40-23:57 SGT, box mirror /workspace/kdr-agent = 3535496 + A7 tree)
+make -C deck test: EXIT=0 (tests_sim 24, kbd, agent pytest 384 passed incl. real-socket/netns web+mcp tests, 58, mk20deck 546). No skip/xfail.
+Baseline 3535496 same day: EXIT=0 (agent 352).
+armhf static (arm-linux-gnueabihf-gcc Debian 14.2.0-19, make -C deck/agent armhf -> build-armhf/mk20-agent-nosan):
+  3535496: 2789816 B sha256 e904136ab5200c8de2574d713efa8cbb7efb4b71b1051d4077c85a90b20b5739; stripped 857640 B sha256 f448c7dbfa1d156021a31715fdad2a3b1e3858548d6209c9bf6fc83f6385ae55; text 799884 data 18364 bss 24040
+  A7:      2924364 B sha256 132925fb7f3eb9dfbae2117881b5d8d010d82feeff01d882f08a92131ff56362; stripped 923192 B sha256 2b2603aa2cbc147a24154caa06c5c04f7d08330f20d36252a7f1739d8ba5b1a1
+  Only linker warning: glibc static getaddrinfo (net.c resolver child, rfb.c) needs NSS libs at runtime for non-numeric hosts -> A8 follow-up.
+Kimi K3 r1: VERDICT GO, 9 MINOR (deferred). Route checks AI=US-Exit-Hy2 exit=203.0.113.10 (codex 23:14, kimi 23:40).

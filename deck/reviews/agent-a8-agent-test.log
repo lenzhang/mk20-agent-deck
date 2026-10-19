@@ -1,0 +1,13 @@
+DNS: 180 checks passed (parser/literals/config)
+HTTP receive buffer: drop wipes full allocation
+A7 web: 707 checks passed
+A6: 268 checks passed
+262 A5 policy/calibration/arbitration checks passed
+256 LLM checks passed
+3145 checks, 0 failures
+rfb/scale/img unit checks passed
+net/clock: 366 checks passed, invalid-config socket calls: 0
+CLI RSS fallback and JPEG/deadline precedence checks passed
+DNS UDP fixture bind 127.0.0.1: Operation not permitted
+dns line 146: f.fd[0]>=0 (errno=1)
+make: *** [test] Abort trap: 6

@@ -1,0 +1,96 @@
+.F.......................F..F.....................FFF...........F..      [100%]
+=================================== FAILURES ===================================
+__________________________ test_real_socket_full_flow __________________________
+deck/agent/tests/test_web.py:234: in test_real_socket_full_flow
+    def test_real_socket_full_flow(web_binary,kbd_build,tmp_path,web_certs): full_flow(web_binary,kbd_build,tmp_path,web_certs,True)
+                                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+deck/agent/tests/test_web.py:173: in full_flow
+    with keyboard(kbd_build, tmp_path) as (kbd, reader, controls, _), FakeVNC(socketpair=not tcp, changing=True) as vnc, ScriptedTLSModel(certs / "server.pem", certs / "server.key", script, socketpair=True, key="web-synthetic-key") as model:
+                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+deck/agent/tests/fakes/fake_vnc.py:45: in __init__
+    self.sock.bind((host, 0)); self.sock.listen(4)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^
+E   PermissionError: [Errno 1] Operation not permitted
+_________________________ test_real_socket_daemon_web __________________________
+deck/agent/tests/test_web.py:354: in test_real_socket_daemon_web
+    with real_daemon(kbd_build,tmp_path,allowed=False) as (path,_), server(web_binary,tmp_path,path,tcp=True) as (cs,fd,_,_,_,_,_):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_loop.py:378: in real_daemon
+    raise RuntimeError("real Unix kbd listener unavailable: " + err.decode())
+E   RuntimeError: real Unix kbd listener unavailable: mk20-kbd: host link /dev/ttys005 open
+E   mk20-kbd: GD32 write disabled (--no-gd32-write); knob K2 stays as configured in the GD32
+E   mk20-kbd: control socket /tmp/a5-kbd-vh5th6x8/kbd.sock failed: Operation not permitted (agent input disabled)
+________________________ test_real_socket_web_listener _________________________
+deck/agent/tests/test_web.py:401: in test_real_socket_web_listener
+    with keyboard(kbd_build,tmp_path) as (kbd,_,_,_), server(web_binary,tmp_path,kbd,tcp=True) as (cs,fd,_,_,secrets,_,_):
+                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_web.py:134: in server
+    if "web ready" not in logpath.read_text(): raise AssertionError("web startup failed: " + logpath.read_text())
+                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: web startup failed: web startup: bind refused errno=1
+__________________________ test_real_socket_protocol ___________________________
+deck/agent/tests/test_mcp.py:328: in test_real_socket_protocol
+    with keyboard(kbd_build, tmp_path) as (kbd, _, _, _), server(mcp_binary, tmp_path, kbd, tcp=True) as (cs, _, _):
+                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_mcp.py:147: in server
+    assert "mcp ready" in logpath.read_text(), "MCP startup failed: " + logpath.read_text()
+E   AssertionError: MCP startup failed: mcp startup: bind refused
+E     mcp bind errno=1
+E     
+E   assert 'mcp ready' in 'mcp startup: bind refused\nmcp bind errno=1\n'
+E    +  where 'mcp startup: bind refused\nmcp bind errno=1\n' = read_text()
+E    +    where read_text = PosixPath('/private/var/folders/_6/v8ptvn4x1gvdhnx06swqtm_80000gn/T/pytest-of-leo/pytest-95/test_real_socket_protocol0/mcp.log').read_text
+______________________ test_real_socket_daemon_mcp[False] ______________________
+deck/agent/tests/test_mcp.py:335: in test_real_socket_daemon_mcp
+    with real_daemon(kbd_build, tmp_path, allowed=allow) as (path, reader), FakeVNC() as vnc:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_loop.py:378: in real_daemon
+    raise RuntimeError("real Unix kbd listener unavailable: " + err.decode())
+E   RuntimeError: real Unix kbd listener unavailable: mk20-kbd: host link /dev/ttys005 open
+E   mk20-kbd: GD32 write disabled (--no-gd32-write); knob K2 stays as configured in the GD32
+E   mk20-kbd: control socket /tmp/a5-kbd-2bh7w9l3/kbd.sock failed: Operation not permitted (agent input disabled)
+______________________ test_real_socket_daemon_mcp[True] _______________________
+deck/agent/tests/test_mcp.py:335: in test_real_socket_daemon_mcp
+    with real_daemon(kbd_build, tmp_path, allowed=allow) as (path, reader), FakeVNC() as vnc:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_loop.py:378: in real_daemon
+    raise RuntimeError("real Unix kbd listener unavailable: " + err.decode())
+E   RuntimeError: real Unix kbd listener unavailable: mk20-kbd: host link /dev/ttys005 open
+E   mk20-kbd: GD32 write disabled (--no-gd32-write); knob K2 stays as configured in the GD32
+E   mk20-kbd: control socket /tmp/a5-kbd-695xeokt/kbd.sock failed: Operation not permitted (agent input disabled)
+_______________________ test_real_socket_estop_mid_drag ________________________
+deck/agent/tests/test_mcp.py:440: in test_real_socket_estop_mid_drag
+    with real_daemon(kbd_build, tmp_path) as (path, reader), FakeVNC() as vnc:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_loop.py:378: in real_daemon
+    raise RuntimeError("real Unix kbd listener unavailable: " + err.decode())
+E   RuntimeError: real Unix kbd listener unavailable: mk20-kbd: host link /dev/ttys005 open
+E   mk20-kbd: GD32 write disabled (--no-gd32-write); knob K2 stays as configured in the GD32
+E   mk20-kbd: control socket /tmp/a5-kbd-4ba0uru4/kbd.sock failed: Operation not permitted (agent input disabled)
+=========================== short test summary info ============================
+FAILED deck/agent/tests/test_web.py::test_real_socket_full_flow - PermissionE...
+FAILED deck/agent/tests/test_web.py::test_real_socket_daemon_web - RuntimeErr...
+FAILED deck/agent/tests/test_web.py::test_real_socket_web_listener - Assertio...
+FAILED deck/agent/tests/test_mcp.py::test_real_socket_protocol - AssertionErr...
+FAILED deck/agent/tests/test_mcp.py::test_real_socket_daemon_mcp[False] - Run...
+FAILED deck/agent/tests/test_mcp.py::test_real_socket_daemon_mcp[True] - Runt...
+FAILED deck/agent/tests/test_mcp.py::test_real_socket_estop_mid_drag - Runtim...
+7 failed, 60 passed in 53.72s

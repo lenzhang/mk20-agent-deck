@@ -1123,3 +1123,165 @@ cleanup
     assert calls == expected * 2
     assert (tmp_path / 'dev/ttyGS0').exists() and not (tmp_path / 'dev/ttyGS0.real').exists()
     assert (tmp_path / 'g/UDC').read_text().strip() == ''
+
+
+@pytest.mark.parametrize("config,overrides,fat,kbd,agent", [
+    ("", "", False, "1", "0"),
+    ("", "MK20_AGENT=1", False, "1", "0"),
+    ("FEATURE_KBD=0\nFEATURE_AGENT=1\n", "", False, "0", "1"),
+    ("FEATURE_KBD=1\nFEATURE_AGENT=0\n", "MK20_AGENT=1", False, "1", "0"),
+    ("FEATURE_KBD=1\nFEATURE_AGENT=1\n", "MK20_AGENT=0", False, "1", "0"),
+    ("FEATURE_KBD=1\nFEATURE_AGENT=1\n", "MK20_KBD=0; MK20_AGENT=1", True, "0", "0"),
+])
+def test_merged_kbd_and_agent_flag_contract(hook_shell, config, overrides, fat, kbd, agent):
+    root, run = hook_shell
+    (root / "mk20.conf").write_text(config)
+    if fat:
+        flags = root / "mnt/SDCARD"; flags.mkdir(parents=True)
+        (flags / "mk20-no-agent").touch()
+    result = run('CONF=$R/mk20.conf\n' + overrides + '\ncfg_load; cfg_print\n')
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in result.stdout.splitlines())
+    assert values["FEATURE_KBD"] == kbd and values["FEATURE_AGENT"] == agent
+
+
+@pytest.mark.parametrize("inbox", ["data/mk20/state/maint", "tmp/mk20/maint"])
+def test_debug_update_stages_and_syncs_on_persistent_filesystem(hook_shell, inbox):
+    root, run = hook_shell
+    config = root / "data/mk20/state/maint/debug.conf"
+    config.write_text("verbose=0\n")
+    (root / inbox / "debug").write_text("verbose=1\n")
+    result = run('''
+sync() { echo sync >> "$R/operations"; }
+mv() {
+  if [ "$3" = "$MP/debug.conf" ]; then
+    [ "$(dirname "$2")" = "$MP" ] || exit 91
+    [ "$(cat "$MP/debug.conf")" = verbose=0 ] || exit 92
+    [ "$(cat "$2")" = verbose=1 ] || exit 93
+    echo rename >> "$R/operations"
+  fi
+  command mv "$@"
+}
+kbd_hooks
+''')
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == "verbose=1\n"
+    assert config.stat().st_mode & 0o777 == 0o600
+    assert (root / "operations").read_text().splitlines() == ["sync", "rename"]
+    assert not list(config.parent.glob(".debug.*"))
+
+
+def test_debug_sync_failure_preserves_previous_config(hook_shell):
+    root, run = hook_shell
+    config = root / "data/mk20/state/maint/debug.conf"; config.write_text("verbose=0\n")
+    (root / "tmp/mk20/maint/debug").write_text("verbose=1\n")
+    result = run('sync() { return 1; }; kbd_hooks\n')
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == "verbose=0\n" and not list(config.parent.glob(".debug.*"))
+
+
+def run_supervisor_cutout(hook_shell, shims):
+    """Execute the production loop with fake child/signals and no device access."""
+    root, run = hook_shell
+    release = root.parent / "rel"
+    (release / "bin").mkdir(exist_ok=True)
+    binary = release / "bin/mk20-kbd"; binary.write_text("#!/bin/sh\nexit 0\n"); binary.chmod(0o755)
+    src = (DECK / "firmware/release/sbin/mk20d").read_text()
+    prefix = (root.parent / "hooks.sh").read_text().split("maint_init || exit 99")[0]
+    # Keep the real hook consumer callable from scripted request producers.
+    prefix = prefix.replace('kbd_hooks() {', 'real_kbd_hooks() {')
+    script = root.parent / "supervisor-cutout.sh"
+    script.write_text(prefix + '''
+cut() { case "$*" in *'/proc/uptime') echo 100;; *) command cut "$@";; esac; }
+flock() { return 0; }
+kd_svc() { return 0; }
+kd_count() { echo 0; }
+kbd_recent() { echo 0; }
+sleep() { :; }
+''' + shims + '\ncase kbd in' + src[src.index('\nkbd)\n'):src.index('\nselftest) cfg_load;')] + '\nesac\n')
+    return subprocess.run(run.shell + [str(script)], env=run.env, text=True, capture_output=True, timeout=10)
+
+
+@pytest.mark.parametrize("hook", ["restart-kbd", "exit-safe-mode"])
+def test_hook_interrupts_backoff_and_resets_next_delay(hook_shell, hook):
+    root, _ = hook_shell
+    result = run_supervisor_cutout(hook_shell, '''
+kill() { return 1; }
+wait() { return 7; }
+kbd_hooks() {
+  if [ "$(kbd_total)" = 3 ] && [ ! -f "$TM/submitted" ]; then
+    touch "$MR/HOOK" "$TM/submitted"
+  fi
+  real_kbd_hooks
+  [ "$(kbd_total)" -ge 4 ] && touch "$KSTOP"
+}
+'''.replace('HOOK', hook))
+    assert result.returncode == 0, result.stderr
+    log = (root / "tmp/mk20/kbd.log").read_text()
+    assert re.findall(r'restart #\d+ in (\d+)s', log) == ['1', '2', '4', '1']
+    assert json.loads((root / "tmp/mk20/maint/state.json").read_text())["restarts"] == 4
+
+
+@pytest.mark.parametrize("trigger", ["restart", "stop", "kd-respawn"])
+def test_unstoppable_child_exits_supervision_with_reason(hook_shell, trigger):
+    root, _ = hook_shell
+    shims = '''
+kill() { echo "$1" >> "$TM/signals"; return 0; }
+wait() { echo unexpected-wait >> "$TM/signals"; return 99; }
+kbd_hooks() { restart=0; }
+'''
+    if trigger == "restart":
+        shims += 'kbd_hooks() { restart=1; }\n'
+    elif trigger == "stop":
+        shims += 'kbd_hooks() { restart=0; touch "$KSTOP"; }\n'
+    else:
+        shims += 'kd_count() { if [ -f "$TM/kd-checked" ]; then echo 1; else touch "$TM/kd-checked"; echo 0; fi; }\n'
+    result = run_supervisor_cutout(hook_shell, shims)
+    assert result.returncode == 0, result.stderr
+    signals = (root / "tmp/mk20/signals").read_text().splitlines()
+    assert signals.count('-TERM') == signals.count('-KILL') == 1
+    assert signals.count('-0') <= 35 and 'unexpected-wait' not in signals
+    state = json.loads((root / "tmp/mk20/maint/state.json").read_text())
+    assert state['reason'] == 'child-stop-failed'
+    assert not (root / "tmp/mk20/kbd-loop.pid").exists()
+    assert not (root / "tmp/mk20/kbd.crashes").exists()
+    assert 'ERROR mk20d kbd' in (root / 'data/mk20/logs/mk20d.log').read_text()
+
+
+@pytest.mark.parametrize("blocker", ["busy-clears", "lock-clears", "busy-stuck", "lock-stuck"])
+def test_boot_retries_transition_before_kbd_launch_with_cap(hook_shell, blocker):
+    root, run = hook_shell
+    release = root.parent / "rel"
+    (release / "sbin").mkdir()
+    (release / "sbin/mk20d").write_text('echo launched > "$MK20_ROOT/launched"\n')
+    busy = root / "tmp/mk20/gadget.busy"
+    if blocker.startswith('busy'):
+        busy.touch()
+    stop = root / 'tmp/mk20-kbd-stop'; stop.touch()
+    src = (DECK / 'firmware/release/sbin/mk20d').read_text()
+    block = src[src.index('  if [ $KBDM = 1 ]; then'):src.index('  # 1.2.0 on-board router:')]
+    shims = '''
+KBDM=1; NOHID=0; n=0
+flock() { BLOCK_LOCK; }
+sleep() {
+  [ "$1" = 1 ] || exit 94
+  n=$((n+1))
+  CLEAR_BUSY
+}
+'''
+    shims = shims.replace('BLOCK_LOCK', '[ "$n" -ge 3 ]' if blocker == 'lock-clears' else
+             'return 1' if blocker == 'lock-stuck' else 'return 0')
+    shims = shims.replace('CLEAR_BUSY', '[ "$n" -lt 3 ] || rm -f "$TM/gadget.busy"' if blocker == 'busy-clears' else ':')
+    result = run(shims + block + '\necho "polls=$n"\n')
+    assert result.returncode == 0, result.stderr
+    log = (root / 'data/mk20/logs/mk20d.log').read_text()
+    assert 'launch deferred' in log
+    if blocker.endswith('clears'):
+        assert result.stdout.strip() == 'polls=3'
+        assert wait(lambda: (root / 'launched').exists(), t=2)
+        assert not stop.exists() and (root / 'tmp/mk20/kbd.mode').exists()
+        assert 'supervisor launched' in log and 'gave up' not in log
+    else:
+        assert result.stdout.strip() == 'polls=60'
+        assert not (root / 'launched').exists() and stop.exists()
+        assert 'launch gave up after 60s' in log

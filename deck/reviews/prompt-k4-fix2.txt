@@ -1,0 +1,14 @@
+K4 fix round 2 in this worktree (branch k4). A `git merge --no-commit origin/feature/agent` (704e268 = agent A8 part 2: FEATURE_AGENT default 0, mk20d agent supervisor, health.json agent block, maint agent.log trim) is IN PROGRESS with 5 conflicts. deck/reviews/prompt-k4.txt, prompt-k4-fix1.txt and deck/reviews/prompt-agent-a8b.txt are binding for their sides: never start stock KD (no fallback, no kd_start); crash loop -> mk20-kbd --safe-mode; GD32 TX only `05 00 r r 00 00` r=100..105, never 0x19 / 02 AA E2 78; FEATURE_AGENT=0 default, env cannot enable agent.
+A. Resolve conflicts keeping BOTH features fully:
+ - deck/firmware/release/sbin/mk20d and share/mk20lib.sh: union of K4 (FEATURE_KBD=1 default, mk20-kbd supervisor, safe mode, maint hooks, KD stop-only suppression, fix1 changes, preserved arg ordering) and A8b (FEATURE_AGENT=0, agent supervisor gated on composite + kbd.sock + !gadget.busy, health agent block, agent.log trim). Feature flag parsing/defaults/print lists must include both FEATURE_KBD and FEATURE_AGENT.
+ - deck/tools/mk20-build-bins.sh: feature/agent structure (TZ=UTC, SOURCE_DATE_EPOCH, agent make build, ca-bundle copy, loop incl. mk20-agent, `-ffile-prefix-map=$D=. -fdebug-prefix-map=$D=.`) but K4/onboard mk20-kbd source list (+onboard.c ui.c ui_font.c ui_font_render.c uicfg.c) and `-std=c99` for kbd (match kbd/Makefile armhf). One consistent prefix map (drop `=deck`).
+ - deck/tests/test_mk20d_router.py test_release_binaries_match_source: exactly the script's flags/sources.
+ - deck/firmware/release/bin/mk20-kbd: `git checkout --ours`; all bins are rebuilt on a Linux box afterwards. Never hand-edit binaries.
+ mk20-agent SHIPS in this RC (default off via FEATURE_AGENT=0).
+B. Kimi K4 minors in sbin/mk20d (busybox ash compatible, tests in deck/tests/test_mk20d_kbd.py). A previous partial attempt (pre-A8b base) is in ~/worktrees/k4-fix2-partial.patch — reuse its mk20d/test ideas where they fit, but re-apply against the merged file:
+ 1. debug hook: no cross-fs `mv` /tmp/mk20/maint -> /data/mk20/state/maint; copy to a temp file inside the persistent dir then rename locally (atomic replace).
+ 2. interruptible backoff: when a maintenance hook interrupts the wait, don't double `d` (reset d=1).
+ 3. `kbd_child_stop && break`: after bounded failed SIGKILLs, `log ERROR`, record reason in state.json, exit the loop.
+ 4. boot "transition busy -> mk20-kbd launch deferred": bounded retry (poll until gadget.busy clears, max ~60 s) then launch; log if giving up.
+C. Run what you can on macOS (tests needing BusyBox/Linux may fail here; say which). The Linux box run is authoritative.
+Do not touch deck/agent/**. Do not commit. Final answer: conflict resolutions, files changed, tests run + results.

@@ -1,0 +1,68 @@
+# MK20 agent phase A7 (agent side only) — `mk20-agent --web` + A6 Kimi minors (host build only)
+Repo root = cwd. Work ONLY under deck/agent/ (src, tests, Makefile, README, NOTES-agent-a7.md), deck/reviews/agent-a7-*, and the A7
+status line in deck/AGENT-BUILD-PLAN.md. Read first: deck/AGENT-BUILD-PLAN.md (§0.1 D1′/D5/D6/D7/D8, §3.1, §3.7, §3.8, "A7" section,
+§6), deck/agent/NOTES-agent-a6.md, src/httpd.c/.h, src/mcp.c/.h, src/mcp_cli.c, src/loop.h/.c, src/runtime.h/.c, src/kbdc.h, src/net.h,
+src/llm.h, src/json_util.h, tests/test_mcp.py, tests/test_mcp.c, tests/fakes/. READ ONLY references: deck/mk20deck/agentcfg.py
+(net/provider schema + provider table), deck/kbd/CTL-PROTOCOL.md.
+
+HARD RULES: no git commit/push; no network access; no device/adb/serial; do NOT modify deck/kbd/**, deck/mk20deck/** (agentcfg.py,
+settings), vendor/, firmware, kernel, tools/, or anything outside this worktree (another agent is editing kbd/mk20deck right now).
+C11 -Wall -Wextra -Werror, ASan/UBSan like the existing Makefile, armhf/32-bit safe, static-link friendly (no getaddrinfo-dependent
+new code paths beyond what net.c already uses), no new warning suppressions, no new dependencies. Never print/log API keys, secrets
+contents, the pairing code, session cookies/tokens, Authorization headers, vnc.pass, or task goal text. Keep A2–A6 behaviour and ALL
+existing tests green. Your sandbox denies listening sockets (EPERM): write real-socket tests anyway (Linux box CI runs them), do NOT
+skip/xfail them; add socketpair/fd-injected variants that run here; report EPERM failures separately like NOTES-agent-a6.md.
+Work in the order below and keep the tree compiling + `make -C deck/agent test` green after each part (you may be stopped early).
+
+## Part 0 — A6 Kimi minors (mcp.c), do first
+1. Session expiry: sessions get last_activity (monotonic); idle > 10 min (constant, test-overridable) is evicted on access/tick;
+   when all 4 slots are full on initialize, evict the least-recently-used session that has NO live/pending direct call or running
+   task it owns; if none evictable → 503 as today. Evicting/expiring a session behaves like DELETE (stops only its own live work).
+   Tests: stale session evicted, LRU eviction, busy session never evicted, evicted id → 404.
+2. Log a fixed log_status line (via agent_redact, tool name from the fixed registry only) when a pending direct call is cancelled
+   by client disconnect. Test it.
+3. Remove dead `confirmation_seen` (mcp.c/mcp.h).
+
+## Part 1 — web server `--web` (reuse httpd.c; same fail-closed listener rules as MCP)
+- Listener default exactly 172.30.250.2:8780 + SO_BINDTODEVICE("usb0"); no fallback; wildcard/IPv6/non-loopback others refused;
+  test-only `--web-listen 127.0.0.1:PORT --web-no-bindtodevice`. May run in the same process/event loop as `--mcp` (preferred:
+  one poll loop, shared task store) — keep limits (headers 8 KiB, body 64 KiB, 4 conns, 5 s read deadline). Host/Origin checks
+  as MCP (Origin must be exactly http://172.30.250.2:8780 when present; for state-changing requests require Origin or
+  Sec-Fetch-Site same-origin AND the CSRF token below).
+- Pairing (D7/§3.8): `POST /pair/start` generates a 6-digit one-time code (CSPRNG, uniform), valid 5 min, max 5 wrong attempts then
+  invalidated; displayed via a pairing display port: real impl sends kbd.sock `screen.text` to the agent control page / secondary
+  screen (kbd currently may return rendered:false — treat as "display unavailable", fail closed: no code accepted, report
+  `display_unavailable`), test binary (MK20_WEB_TEST like MK20_MCP_TEST) exposes the code via an injected fd only. `POST /pair
+  {code}` → session cookie (128-bit random, HttpOnly, SameSite=Strict, Path=/, no Secure since plain http on usb0) + CSRF token;
+  max 2 web sessions, 12 h absolute / 30 min idle expiry, power-cycle invalidates (memory only). Constant-time compare.
+- Secrets page: `GET /` ~10 KB static HTML (no external deps, CSP default-src 'self'; inline script via hash or none) with the
+  pairing + secret form. `POST /secret/{name}` name ∈ provider key files from the provider table + `vnc` (→ vnc.pass); writes
+  /data/mk20/secrets/<name>.key (dir configurable for tests) via O_CREAT|O_EXCL 0600 tmp in same dir → full write → fsync → rename →
+  fsync dir; refuse symlinked/non-dir parent; value length 1..4096, no NUL/CR/LF. Response only {"set":true,"len":N}. `DELETE
+  /secret/{name}`. `GET /secret/{name}` → {"set":bool} only. There is NO endpoint that returns secret contents. Secrets never logged.
+- Config: `PUT /config/net` and `PUT /config/provider` → device-side schema validation in C mirroring agentcfg.py (read it; do not
+  edit it): reject unknown fields, reject routes.foreign=direct (any profile), proxy url only from the allowed set (Mac 172.30.250.1
+  and the other addresses agentcfg allows, or board proxy), base_url must match the provider table; then atomic write
+  /data/mk20/agent/{net,provider}.json 0600 (dir 0700). Add a test that parses agentcfg.py's provider table/allowed proxies (python,
+  read-only) and asserts the C table matches, so drift is caught. `GET /config/{net,provider}` returns the config with api key paths
+  only (never contents). `POST /test` runs the existing net/llm connection test through the configured route (fake provider in tests)
+  and returns {ok, latency_ms, error_class}; never direct when profile requires proxy.
+- Task API (D5) on the shared single-slot task store from A6: `POST /api/tasks {goal}` → id (while kbd not allowed → queued, state
+  `waiting_allow`, not executed; becomes runnable only after keyboard allow; web/API can never allow); `GET /api/tasks/{id}` (state,
+  steps with fixed action-name summary, no typed text, no goal echo in logs); `GET /api/tasks/{id}/steps/{n}/shot.jpg` from an
+  in-memory ring of last 5 scaled JPEGs (never written to disk, freed on task end+new task); `POST /api/tasks/{id}/pause|resume|stop`
+  (stop uses the same kbd revoke/stop path as estop button semantics described in §3.8; if the A5 loop cannot pause safely,
+  implement pause as "hold before next observe/act" and document); `GET /api/events` SSE (≤2 clients, bounded buffers, drop slow
+  clients). `GET /chat`: ~15 KB static HTML/JS, input box + progress list + screenshot + pause/stop, no external deps.
+- All endpoints except GET /, GET /chat, POST /pair/start, POST /pair require a valid paired session (+CSRF for non-GET).
+  Unpaired → 401 identical bodies.
+
+## Part 2 — tests + docs
+- C unit tests: pairing (expiry, attempts, display_unavailable fail-closed), cookie/CSRF, secret write atomicity/permissions/
+  symlink refusal/no-read endpoint, config validation (foreign=direct, unknown field, bad base_url/proxy), session expiry.
+- pytest (real listener on Linux + socketpair/fd variants): full flow pair → secret set → GET shows only set/len → config PUT →
+  task submit while disabled = waiting_allow → allow via kbd daemon harness → runs with fake VNC/fake model → steps/shot ring →
+  stop; CSRF/Origin rejection; logs never contain secret/pairing code/goal/cookie; secrets dir not in backup lists (grep the backup
+  exclude list read-only and assert /data/mk20/secrets excluded).
+- NOTES-agent-a7.md (design, what is NOT done: kbd-side L5 page/status widget/screen rendering and mk20deck push are other tracks),
+  deck/reviews/agent-a7-codex-summary.md (requirement → impl → test evidence, first acceptance verdict), A7 status line in plan.

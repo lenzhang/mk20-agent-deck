@@ -1,0 +1,29 @@
+.F.......................F..                                             [100%]
+=================================== FAILURES ===================================
+__________________________ test_real_socket_full_flow __________________________
+deck/agent/tests/test_web.py:221: in test_real_socket_full_flow
+    def test_real_socket_full_flow(web_binary,kbd_build,tmp_path,web_certs): full_flow(web_binary,kbd_build,tmp_path,web_certs,True)
+                                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+deck/agent/tests/test_web.py:173: in full_flow
+    with keyboard(kbd_build, tmp_path) as (kbd, reader, controls, _), FakeVNC(socketpair=not tcp, changing=True) as vnc, ScriptedTLSModel(certs / "server.pem", certs / "server.key", script, socketpair=True, key="web-synthetic-key") as model:
+                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+deck/agent/tests/fakes/fake_vnc.py:45: in __init__
+    self.sock.bind((host, 0)); self.sock.listen(4)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^
+E   PermissionError: [Errno 1] Operation not permitted
+_________________________ test_real_socket_daemon_web __________________________
+deck/agent/tests/test_web.py:341: in test_real_socket_daemon_web
+    with real_daemon(kbd_build,tmp_path,allowed=False) as (path,_), server(web_binary,tmp_path,path,tcp=True) as (cs,fd,_,_,_,_,_):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_loop.py:378: in real_daemon
+    raise RuntimeError("real Unix kbd listener unavailable: " + err.decode())
+E   RuntimeError: real Unix kbd listener unavailable: mk20-kbd: host link /dev/ttys005 open
+E   mk20-kbd: GD32 write disabled (--no-gd32-write); knob K2 stays as configured in the GD32
+E   mk20-kbd: control socket /tmp/a5-kbd-wvjy72fe/kbd.sock failed: Operation not permitted (agent input disabled)
+=========================== short test summary info ============================
+FAILED deck/agent/tests/test_web.py::test_real_socket_full_flow - PermissionE...
+FAILED deck/agent/tests/test_web.py::test_real_socket_daemon_web - RuntimeErr...
+2 failed, 26 passed in 24.99s

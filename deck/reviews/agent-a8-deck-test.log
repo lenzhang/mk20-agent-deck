@@ -1,0 +1,4 @@
+uv run --with pytest python -m pytest -q tests_sim
+error: Failed to initialize cache at `/Users/dev/.cache/uv`
+  cause: failed to open file `/Users/dev/.cache/uv/sdists-v9/.git`: Operation not permitted (os error 1)
+make: *** [sim-test] Error 2

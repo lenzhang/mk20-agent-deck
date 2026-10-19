@@ -5,7 +5,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netdb.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +15,7 @@
 #define TEXT_MAX (1024u * 1024u)
 #define SKIP_MAX (16u * 1024u * 1024u)
 struct rfb {
+    int (*service)(void *); void *service_ctx;
     int fd, timeout, zinit; int64_t deadline; const char *error;
     mem_t mem; rfb_info_t info; scale_t scale; z_stream z;
     unsigned char input[8192], tile[64 * 64 * 3], row[8192 * 4];
@@ -27,7 +27,8 @@ int64_t rfb_now_ms(void)
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 static int fail(rfb_t *c, const char *s) { c->error = s; return -1; }
-int rfb_check_deadline(rfb_t *c) { return rfb_now_ms() >= c->deadline ? fail(c, "timeout") : 0; }
+void rfb_set_service(rfb_t *c, int (*fn)(void *), void *ctx) { c->service = fn; c->service_ctx = ctx; }
+int rfb_check_deadline(rfb_t *c) { if (c->service && c->service(c->service_ctx)) return fail(c,"cancelled"); return rfb_now_ms() >= c->deadline ? fail(c, "timeout") : 0; }
 static unsigned u16(const unsigned char *p) { return (unsigned)p[0] * 256 + p[1]; }
 static uint32_t u32(const unsigned char *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static void p16(unsigned char *p, unsigned n) { p[0] = (unsigned char)(n >> 8); p[1] = (unsigned char)n; }
@@ -35,10 +36,11 @@ static void p32(unsigned char *p, uint32_t n) { for (int i = 3; i >= 0; i--) { p
 static int ready(rfb_t *c, short events)
 {
     for (;;) {
+        if (rfb_check_deadline(c)) return -1;
         int64_t left = c->deadline - rfb_now_ms(); if (left <= 0) return fail(c, "timeout");
-        struct pollfd p = {c->fd, events, 0}; int r = poll(&p, 1, (int)left);
+        struct pollfd p = {c->fd, events, 0}; int r = poll(&p, 1, c->service && left > 25 ? 25 : (int)left);
         if (r > 0) return 0;
-        if (!r) return fail(c, "timeout");
+        if (!r) continue;
         if (errno != EINTR) return fail(c, "io");
     }
 }
@@ -83,30 +85,29 @@ static int sized_skip(rfb_t *c, uint32_t cap)
 }
 static int dial(rfb_t *c, const char *host, unsigned port)
 {
-    struct addrinfo hints, *list = NULL; char service[6]; memset(&hints, 0, sizeof hints);
-    hints.ai_socktype = SOCK_STREAM; hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;
-    if (!strcmp(host, "localhost")) host = "127.0.0.1";
-    /* Numeric service, without stdio or DNS. */
-    unsigned n = port, digits = 0; do { service[digits++] = (char)('0' + n % 10); n /= 10; } while (n);
-    for (unsigned i = 0; i < digits / 2; i++) { char b = service[i]; service[i] = service[digits - 1 - i]; service[digits - 1 - i] = b; }
-    service[digits] = 0;
-    if (getaddrinfo(host, service, &hints, &list)) return fail(c, "bad_host");
-    int ok = -1;
-    for (struct addrinfo *a = list; a; a = a->ai_next) {
-        c->fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol); if (c->fd < 0) continue;
+    if (!strcmp(host,"localhost")) host = "127.0.0.1"; /* preserve local VNC alias */
+    /* VNC authentication must never be redirected by DNS/NSS. Validate before socket(). */
+    if (strchr(host,'%')) return fail(c,"vnc_host_not_literal");
+    struct sockaddr_storage addr; memset(&addr,0,sizeof addr); socklen_t len;
+    struct sockaddr_in *v4 = (void *)&addr; struct sockaddr_in6 *v6 = (void *)&addr;
+    if (inet_pton(AF_INET,host,&v4->sin_addr) == 1) {
+        v4->sin_family = AF_INET; v4->sin_port = htons((uint16_t)port); len = sizeof *v4;
+    } else if (inet_pton(AF_INET6,host,&v6->sin6_addr) == 1) {
+        v6->sin6_family = AF_INET6; v6->sin6_port = htons((uint16_t)port); len = sizeof *v6;
+    } else return fail(c,"vnc_host_not_literal");
+    if (rfb_check_deadline(c)) return -1;
+    c->fd = socket(addr.ss_family, SOCK_STREAM, 0);
+    if (c->fd < 0) return fail(c,"connect");
 #ifdef SO_NOSIGPIPE
-        int one = 1; (void)setsockopt(c->fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    int one = 1; (void)setsockopt(c->fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
-        if (fcntl(c->fd, F_SETFL, O_NONBLOCK)) { close(c->fd); c->fd = -1; continue; }
-        int r = connect(c->fd, a->ai_addr, a->ai_addrlen);
-        if (!r || (errno == EINPROGRESS && !ready(c, POLLOUT))) {
-            int err = 0; socklen_t len = sizeof err;
-            if (!getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &len) && !err) { ok = 0; break; }
-        }
-        close(c->fd); c->fd = -1;
+    if (fcntl(c->fd, F_SETFL, O_NONBLOCK)) return fail(c,"connect");
+    int r = connect(c->fd, (const void *)&addr, len);
+    if (!r || (errno == EINPROGRESS && !ready(c, POLLOUT))) {
+        int err = 0; socklen_t errlen = sizeof err;
+        if (!getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &errlen) && !err) return 0;
     }
-    freeaddrinfo(list); if (ok) return fail(c, c->error ? c->error : "connect");
-    return 0;
+    return fail(c, c->error ? c->error : "connect");
 }
 static voidpf zalloc(voidpf opaque, uInt n, uInt size)
 {

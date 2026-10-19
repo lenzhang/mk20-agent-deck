@@ -158,12 +158,17 @@ def test_prune_keeps_referenced(dev):
 
 
 def test_uninstall_to_legacy(dev):
+    kept = [dev.p("data/mk20/" + name) for name in ("agent", "secrets")]
+    for directory in kept:
+        directory.mkdir()
+    inodes = [directory.stat().st_ino for directory in kept]
     t = tarball(dev, "1.0.0")
     inst(dev, t); dev.run(L, "boot"); dev.run(L, "confirm", "1.0.0")
     r = dev.run(L, "uninstall")
     assert r.returncode == 0
     assert dev.run(L, "boot").returncode == 10
     assert dev.p("data/mk20/releases/1.0.0").exists()
+    assert [directory.stat().st_ino for directory in kept] == inodes
 
 
 def run_group(dev, args, env):

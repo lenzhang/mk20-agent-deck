@@ -16,8 +16,9 @@ class FakeVNC:
                  encoding=None, version=8, resize=None, copyrect=False, cursor=False, extended=False,
                  cut_length=0, cut_wire_length=None, delay=0, truncate=False, malformed=None,
                  zrle_mode=0, hextile_mode="raw", split=False, name_length=None, security_reason=None,
-                 socketpair=False, messages=False, resize_at=0, solid=None):
+                 socketpair=False, messages=False, resize_at=0, solid=None, changing=False):
         self.w, self.h, self.password, self.sec_type = width, height, password, sec_type
+        self.changing = changing
         self.solid = solid
         self.rgb = None if solid is not None else image if image is not None else gradient(width, height)
         assert len(solid) == 3 if solid is not None else len(self.rgb) == width * height * 3
@@ -122,6 +123,8 @@ class FakeVNC:
             elif t == 3:  # FramebufferUpdateRequest
                 inc, x, y, w, h = struct.unpack(">BHHHH", r(c, 9))
                 self.requests.append((inc, x, y, w, h))
+                if self.changing and self.rgb is not None:
+                    self.rgb = bytes([(self.updates+1) & 255]) + self.rgb[1:]
                 first = self.updates == 0
                 if self.delay: time.sleep(self.delay)
                 if first and self.cut_wire_length is not None:

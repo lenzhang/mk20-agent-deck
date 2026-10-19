@@ -54,7 +54,8 @@ int llm_provider_parse(const char *s, size_t n, llm_provider_t *out)
 done:
     cJSON_Delete(j); return rc;
 }
-int llm_provider_load(const char *path, llm_provider_t *out)
+int llm_provider_load_reader(const char *path, llm_provider_t *out,
+                             ssize_t (*reader)(int, void *, size_t))
 {
     memset(out, 0, sizeof *out);
     int fd = path ? open(path, O_RDONLY | O_NONBLOCK) : -1;
@@ -64,7 +65,7 @@ int llm_provider_load(const char *path, llm_provider_t *out)
     char *s = malloc(LLM_PROVIDER_MAX + 1); if (!s) { close(fd); return -1; }
     size_t n = 0; int bad = 0;
     while (n <= LLM_PROVIDER_MAX) {
-        ssize_t k = read(fd, s + n, LLM_PROVIDER_MAX + 1 - n);
+        ssize_t k = (reader ? reader : read)(fd, s + n, LLM_PROVIDER_MAX + 1 - n);
         if (k < 0 && errno == EINTR) continue;
         if (k < 0) { bad = 1; break; }
         if (!k) break;
@@ -72,6 +73,10 @@ int llm_provider_load(const char *path, llm_provider_t *out)
     }
     if (close(fd)) bad = 1;
     int rc = bad ? -1 : llm_provider_parse(s, n, out); free(s); return rc;
+}
+int llm_provider_load(const char *path, llm_provider_t *out)
+{
+    return llm_provider_load_reader(path, out, NULL);
 }
 const char *llm_error_name(llm_error_t e)
 {
@@ -89,8 +94,11 @@ const char *llm_error_name(llm_error_t e)
 }
 int llm_error_retryable(llm_error_t e)
 {
-    return e == LLM_RATE || e == LLM_SERVER || e == LLM_TIMEOUT || e == LLM_NETWORK ||
-           e == LLM_DNS || e == LLM_CONNECT || e == LLM_IO;
+    /* Explicit retryable set; adding an enum never silently permits retries. */
+    static const llm_error_t retry[] = {LLM_RATE, LLM_SERVER, LLM_TIMEOUT,
+        LLM_NETWORK, LLM_DNS, LLM_CONNECT, LLM_IO};
+    for (size_t i = 0; i < sizeof retry / sizeof *retry; i++) if (e == retry[i]) return 1;
+    return 0;
 }
 llm_error_t llm_http_error(int s)
 {
@@ -101,12 +109,20 @@ llm_error_t llm_http_error(int s)
     if (s == 400 || s == 404 || s == 422) return LLM_BAD_REQUEST;
     return LLM_BAD_RESPONSE;
 }
+static int known_net(const char *s)
+{
+    static const char *names[] = {"timeout", "network", "proxy", "tls", "tls_verify",
+        "clock", "too_large", "bad_response", "blocked", "config", "coord_range",
+        "coord_type", "dns", "connect", "io", "http_parse"};
+    for (size_t i = 0; s && i < sizeof names / sizeof *names; i++)
+        if (!strcmp(s, names[i])) return 1;
+    return 0;
+}
 llm_error_t llm_net_error(const char *s)
 {
-    if (!s) return LLM_NETWORK;
+    if (!known_net(s)) return LLM_NETWORK;
     for (int i = LLM_TIMEOUT; i <= LLM_IO; i++) if (!strcmp(s, llm_error_name((llm_error_t)i))) return (llm_error_t)i;
-    if (!strcmp(s, "http_parse")) return LLM_BAD_RESPONSE;
-    return LLM_NETWORK;
+    return LLM_BAD_RESPONSE; /* http_parse */
 }
 void llm_response_free(llm_response_t *r)
 {
@@ -153,13 +169,18 @@ int llm_decode(const llm_provider_t *c, const llm_request_t *q, const net_respon
     memset(r, 0, sizeof *r); r->reason = "ok";
     if (!c || c->valid != PROVIDER_VALID || !q || !n) return fail(r, LLM_CONFIG, "request");
     r->http_status = n->http_status;
-    if (!n->ok) return fail(r, llm_net_error(n->class_name), "transport");
+    if (!n->ok) {
+        int rc = fail(r, llm_net_error(n->class_name), "transport");
+        if (!known_net(n->class_name)) r->retryable = 0;
+        return rc;
+    }
     if (n->bytes > LLM_BODY_MAX) return fail(r, LLM_TOO_LARGE, "body_cap");
     if (n->close_delimited && !n->tls_close_notify) return fail(r, LLM_BAD_RESPONSE, "truncated");
     llm_error_t error = llm_http_error(n->http_status);
     if (error != LLM_OK) return fail(r, error, "http_status");
     if (oai_parse_response_limit((const char *)n->body, n->bytes, LLM_BODY_MAX, n->http_status, &r->message)) return fail(r, LLM_BAD_RESPONSE, "response");
     cJSON *tools = q->tools_json ? agent_json_parse(q->tools_json, strlen(q->tools_json), OAI_SCHEMA_MAX) : NULL;
+    if (q->tools_json && !cJSON_IsArray(tools)) { cJSON_Delete(tools); return fail(r, LLM_CONFIG, "request"); }
     int required = c->supports_tool_choice && cJSON_GetArraySize(tools);
     if (required && !r->message.ncalls) { cJSON_Delete(tools); return fail(r, LLM_BAD_RESPONSE, "missing_tool_call"); }
     for (size_t i = 0; i < r->message.ncalls; i++) {
@@ -170,7 +191,13 @@ int llm_decode(const llm_provider_t *c, const llm_request_t *q, const net_respon
         error = coordinates(c, q, call, get(schema, "properties"));
         if (error != LLM_OK) { cJSON_Delete(tools); return fail(r, error, llm_error_name(error)); }
     }
-    cJSON_Delete(tools); return 0;
+    cJSON_Delete(tools);
+    cJSON *root = agent_json_parse((const char *)n->body, n->bytes, LLM_BODY_MAX);
+    const cJSON *usage = get(root,"usage"), *in = get(usage,"prompt_tokens"), *out = get(usage,"completion_tokens");
+    int value;
+    if (in && !integer(in,0,1000000000,&value)) r->input_tokens = (unsigned)value;
+    if (out && !integer(out,0,1000000000,&value)) r->output_tokens = (unsigned)value;
+    cJSON_Delete(root); return 0;
 }
 int llm_chat(const llm_provider_t *c, const netcfg_t *nc, const llm_request_t *q, llm_response_t *r)
 {

@@ -224,7 +224,7 @@
   - 任务首个动作，以及切换到新 App 时（可配）。
 - **永不做**：输入密码、解锁锁屏、修改系统安全或隐私设置、操作 Screen Sharing / mihomo / 代理设置（窗口标题黑名单），
   命中直接拒绝，**不提供确认通道**。
-- **日志**：`/data/mk20/logs/agent.log`，maint 负责轮转，上限 1 MB × 3。只记步骤号、动作类型、坐标、模型 id、延迟、token 用量。
+- **日志**：`/tmp/mk20/agent.log`（tmpfs），maint 按 router.log 模式在超过 256 KiB 时原 inode 保留末 64 KiB。只记步骤号、动作类型、坐标、模型 id、延迟、token 用量。
   `type` 的文本只记长度和哈希，截图默认不落盘（调试开关打开时写 tmpfs，上限 5 张）。统一过一遍脱敏函数：
   `Authorization`、`sk-…`、`vnc.pass` 内容、任何 secrets 文件内容都不会出现在日志里。CI 用测试 grep 守住（§14.5-8）。
 
@@ -265,6 +265,13 @@
   - 语音任务：L5 保留 PTT -> 板载麦克风 -> 配置 ASR -> `goal` 修订；按住 pause-not-revoke，取得新目标才恢复；L1 Right-Option 仍撤销。键/状态 U4，ASR U6。
 
 ---
+
+### 3.8b usb0 管理页唯一性
+
+`mk20-agent --web`（仅 usb0 `172.30.250.2:8780`）是 **唯一的 usb0 管理 Web 服务**。
+按用户 K4 决定，维护入口也由这个服务承载：调试开关、退出安全模式、查看日志、重启 `mk20-kbd`；
+这些维护操作仍待后续实现，Mac 侧 `mk20deck` 配置页镜像同一入口。
+`ONBOARD-UI-PLAN` U3 必须复用此服务，不能再启动第二个占用 8780 的服务器。
 
 ### 3.9 语音（D5′）与 UAC 可行性（box 上只读调研，2026-10-19，未碰设备）
 
@@ -369,6 +376,7 @@
 - 验收：每个 provider 至少通过 8/10 定位基准；请求日志 grep 不到 key。
 
 ### A5 Agent loop + 安全闸 + 校准（box + [D][U]）
+- **A5 host 状态（2026-10-19，本 worktree）**：policy/loop/kbdc/calib、真实 RFB/LLM ports、--loop-test 与 sanitizer/socketpair 主机测试已实现；真实 Unix/TCP 监听验收受沙箱限制，kbd v1 的 VNC 租约/health 与 [D][U] 校准、检测、急停/任务实测待验收，详见 `agent/NOTES-agent-a5.md`、`reviews/agent-a5-codex-summary.md`。
 - `loop.c`、`policy.c`：状态机、预算、无进展检测、风险规则、永不做清单、确认流程、VNC 备用仲裁、锁屏检测、`calibrate`。
 - box e2e：fake_vnc + fake_model + 真 mk20-kbd（FIFO hidg0）跑完整任务；覆盖急停（各状态下）、确认拒绝/超时/早按、预算耗尽、
   HID 故障注入切到 VNC 再切回、锁屏拒绝 `type`。
@@ -377,12 +385,14 @@
 - 验收：§14.5 第 3、4、5、6、7 条。
 
 ### A6 MCP 服务（box + [M]）
+- **A6 host 状态（2026-10-19，本 worktree）**：Streamable HTTP/MCP、token/session/usb0 fail-closed、13 工具、A5 direct-action 安全链和单槽任务队列已实现；make test（含 236 A6 检查）通过，IPC 回归 331 passed（1 既有 skip / 13 显式 deselect），A6 pytest 30 passed / 4 监听 EPERM；Linux 真实监听/netns、armhf、可信窗口检测及 [D][M][U] 实测待验收，详见 `agent/NOTES-agent-a6.md`、`reviews/agent-a6-codex-summary.md`。
 - `mcp.c`：Streamable HTTP、JSON-RPC、工具注册、bearer token、usb0 绑定。
 - box：用官方 MCP inspector 或自写客户端做协议一致性测试；未认证 401；非 usb0 地址不可达（测试 netns）。
 - **[M]**：在 Mac 上把它注册成 Claude/Codex 的 MCP server，只读调用 `status` 和 `screenshot`。动作类调用要等用户在场。
 - 验收：MCP 动作同样受急停、预算和确认约束（e2e 证明）。
 
 ### A7 键面 UI、配置下发、密钥页（box + sim + [D]）
+- **A7 agent host 状态（2026-10-19，本 worktree）**：`--web`/MCP 共用 HTTP pump、单槽任务与安全链，已实现 fail-closed 配对、只写密钥、设备侧配置校验/连接测试、waiting_allow/暂停/急停、5 帧内存截图环和 SSE；并修复 A6 Kimi 三项 MINOR。C/ASan/UBSan 与 IPC 验证见 `agent/NOTES-agent-a7.md`、`reviews/agent-a7-codex-summary.md`；真实监听受 EPERM 阻断，armhf/[D] 待验。kbd L5/状态组件/实际屏幕渲染及 mk20deck push 属其他轨道；未确认 rendered:true 时配对返回 display_unavailable，不宣称设备可用。
 - mk20-kbd：agent 状态组件和 L5 agent 页（仿真里先做，JSON cases 覆盖急停、确认、允许开关）。
 - LS/home 提前到 ONBOARD-UI-PLAN U1（纯 host）/U2（kbd 集成）；L5/PTT 状态 U4，连接测试由 U3 设备侧执行；mk20deck 只保留可选增强功能。
 - 配置网页新增：网络出口 profile（D1′）、ASR 模型配置（D5′b）。
@@ -393,6 +403,7 @@
 - **[D]**：真机看页面效果，用户回家后核对一次。
 
 ### A8 发布集成（box）
+- **A8 part 2 host 状态（2026-10-20，本 worktree）**：发布级 FEATURE_AGENT、mk20d agent 监管、selftest INFO/WARN、health 白名单状态、tmpfs agent.log trim、VNC literal-only 与 UDP 权限跳过已接入。运行级 allowed 上电仍关闭；当前 C runtime 不写 agent.status，缺失时 health 返回 null/unknown。host 验证与限制见 `agent/NOTES-agent-a8.md`、`reviews/agent-a8b-codex-summary.md`；BusyBox 1.27/Linux procfs/真实监听及 A9 设备验收仍待开放环境。静态 armhf 二进制由 box 构建，本 Mac 未改 release/bin。
 - `tools/mk20-build-bins.sh` 加入 `bin/mk20-agent`，binary-match 测试；MANIFEST 带上 `share/ca-bundle.pem`。
 - `mk20lib.sh`：`FEATURE_AGENT=0` 默认，接入 FAT 标志 `mk20-no-agent` 和 `MK20_AGENT`。
 - `mk20d agent`：照 router/kbd 的模式监管（flock 单实例，backoff 1→30 s，60 s 正常运行后重置）；

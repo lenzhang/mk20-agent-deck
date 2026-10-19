@@ -1,0 +1,109 @@
+make: Entering directory '/workspace/kdr-agent/deck'
+uv run --with pytest python -m pytest -q tests_sim
+........................                                                 [100%]
+24 passed in 2.05s
+make -C kbd test
+make[1]: Entering directory '/workspace/kdr-agent/deck/kbd'
+./tests/test_kbd
+mk20-kbd: /nonexistent/hidg0 replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20hrhSia74/hidg0 replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20hrhSia74/hidg0 replaced/gone: parking stale fd (#2), reopening
+mk20-kbd: /tmp/mk20hrhSia74/hidg0 replaced/gone: parking stale fd (#3), reopening
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+4018 checks, 0 failures
+./tests/test_kbd_tsan
+mk20-kbd: /nonexistent/hidg0 replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20hrOXw6c6/hidg0 replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20hrOXw6c6/hidg0 replaced/gone: parking stale fd (#2), reopening
+mk20-kbd: /tmp/mk20hrOXw6c6/hidg0 replaced/gone: parking stale fd (#3), reopening
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+4018 checks, 0 failures
+python3 tests/e2e_run.py
+e2e: estop -> all-up in 1.1 ms
+e2e: initially stalled host socket -> all-up in 0.2 ms
+e2e: initially stalled host reserved_key -> all-up in 0.2 ms
+e2e: initially stalled host human -> all-up in 0.2 ms
+e2e: initially stalled host k2_triple -> all-up in 0.0 ms
+e2e: initially stalled host k2_hold -> all-up in 1000.6 ms
+e2e: OK
+make[1]: Leaving directory '/workspace/kdr-agent/deck/kbd'
+uv run --with pytest python -m pytest -q agent/tests
+........................................................................ [ 18%]
+........................................................................ [ 37%]
+........................................................................ [ 56%]
+........................................................................ [ 74%]
+........................................................................ [ 93%]
+.........................                                                [100%]
+385 passed in 153.28s (0:02:33)
+shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh tools/mk20-build-bins.sh
+shellcheck -s bash -S warning tools/tf-identify.sh tools/tf-restore-boot.sh
+python3 -m py_compile tools/mk20_key_latency.py tools/mk20_accept.py tools/mk20_soak.py tools/mk20_host_net.py tools/tcp_transport.py tools/tf_gpt_check.py
+(cd tools && uv run --with pytest python -m pytest -q test_tcp_transport.py test_mk20_host_net.py test_mk20_soak.py test_mk20_accept.py test_tf_gpt.py)
+..........................................................               [100%]
+58 passed in 0.90s
+MK20_TEST_BUSYBOX=${MK20_TEST_BUSYBOX:-$( [ -x /workspace/tools/bb127/busybox ] && echo /workspace/tools/bb127/busybox )} uv run --with pytest python -m pytest -q tests
+........................................................................ [ 13%]
+........................................................................ [ 26%]
+........................................................................ [ 39%]
+........................................................................ [ 52%]
+........................................................................ [ 65%]
+........F............................................................... [ 78%]
+........................................................................ [ 92%]
+...........................................                              [100%]
+=================================== FAILURES ===================================
+______________________ test_release_binaries_match_source ______________________
+
+tmp_path = PosixPath('/tmp/pytest-of-box/pytest-318/test_release_binaries_match_so0')
+
+    @pytest.mark.skipif(not shutil.which("arm-linux-gnueabihf-gcc"), reason="needs armhf cross gcc")
+    def test_release_binaries_match_source(tmp_path):
+        """firmware/release/bin/{ttygs_tcp_bridge,mk20-router,mk20-kbd,mk20-agent} are the static armhf builds of the current sources."""
+        rel = DECK / "firmware/release/bin"
+        kbd = ["-std=c11", "-D_DEFAULT_SOURCE"] + [str(DECK / "kbd" / f) for f in (
+            "mk20_kbd.c", "gd32.c", "gd32io.c", "host.c", "panels.c", "screen.c", "jpeg.c", "kbd.c", "hid.c", "ctl.c", "ctlscr.c", "k2estop.c")] + ["-pthread"]
+        for name, src in (("ttygs_tcp_bridge", [str(DECK / "m2-scripts/bridge/ttygs_tcp_bridge.c")]),
+                          ("mk20-router", [str(DECK / "router/mk20_router.c")]), ("mk20-kbd", kbd)):
+            out = tmp_path / name
+            subprocess.run(["arm-linux-gnueabihf-gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-static", f"-ffile-prefix-map={DECK}=.", f"-fdebug-prefix-map={DECK}=.", "-o", str(out)] + src,
+                           check=True)
+            subprocess.run(["arm-linux-gnueabihf-strip", str(out)], check=True)
+>           assert out.read_bytes() == (rel / name).read_bytes(), f"{name}: run tools/mk20-build-bins.sh"
+E           AssertionError: mk20-kbd: run tools/mk20-build-bins.sh
+E           assert b'\x7fELF\x01...0\x00\x00\x00' == b'\x7fELF\x01...0\x00\x00\x00'
+E             
+E             At index 56 diff: b'\xe0' != b'\xf8'
+E             Use -v to get more diff
+
+tests/test_mk20d_router.py:152: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_mk20d_router.py::test_release_binaries_match_source - Asser...
+1 failed, 546 passed in 774.03s (0:12:54)
+make: *** [Makefile:6: test] Error 1
+make: Leaving directory '/workspace/kdr-agent/deck'
+EXIT=2

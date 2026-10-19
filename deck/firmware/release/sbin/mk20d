@@ -4,6 +4,9 @@
 # Crash loops latch minimal safe mode; ECM/adb remain up. Loader alone owns A/B rollback.
 # mk20d kbd supervises with 1..30 s backoff and consumes MAINT-HOOKS.md requests.
 # Restart after a Tina HID node re-bind may need a reboot to restore HID (RECOVERY.md).
+# mk20d agent supervises the optional web runtime (FEATURE_AGENT=0 by default), waiting for
+# composite + kbd.sock + no gadget transition. Run-level permission stays off; agent health
+# is INFO/WARN only. Log /tmp/mk20/agent.log, metadata /run/mk20/agent.status.
 R=${MK20_ROOT:-}
 REL=${MK20_REL:-$(cd "$(dirname "$0")/.." && pwd)}
 V=${MK20_VERSION:-$(sed -n 's/^version=//p' "$REL/MANIFEST" 2>/dev/null)}
@@ -37,6 +40,36 @@ listening() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !o
 lock_held() { ( exec 5>"$1"; ! flock -n 5 ) 2>/dev/null; }   # a live instance holds the lock
 router_running() { pgrep -f 'bin/mk20-router --src' >/dev/null; }
 kbd_running() { pgrep -f 'bin/mk20-kbd --run' >/dev/null; }
+AST=${MK20_AGENT_STATUS:-$R/run/mk20/agent.status}
+ASOCK=${MK20_AGENT_KBD_SOCK:-$R/run/mk20/kbd.sock}
+agent_running() { pgrep -f "$REL/bin/mk20-agent --web" >/dev/null; }
+agent_recent() {
+  local now count; now=$(cut -d. -f1 /proc/uptime)
+  count=$(awk -v n="$now" '$1 ~ /^[0-9]+$/ && n >= $1 && n - $1 < 300 {c++} END{print c+0}' "$TM/agent-crash.times" 2>/dev/null)
+  num "$count"; }
+agent_status_load() {
+  local k v
+  AALLOWED=null; ASTATE=unknown; APROVIDER=unknown; AROUTE=unknown; AERROR=unknown
+  [ -f "$AST" ] && [ ! -L "$AST" ] && [ "$(wc -c < "$AST")" -le 4096 ] || return 0
+  while IFS='=' read -r k v; do
+    case "$k" in allowed) AALLOWED=$v;; state) ASTATE=$v;; provider) APROVIDER=$v;; route) AROUTE=$v;; last_error_class) AERROR=$v;; esac
+  done <<EOT
+$(LC_ALL=C awk -f "$REL/share/mk20-agent-status.awk" "$AST" 2>/dev/null)
+EOT
+}
+agent_report() { # Always INFO/WARN, never changes the selftest result or prints raw status.
+  local age
+  if [ "$FEATURE_AGENT" != 1 ]; then echo "INFO agent disabled"; return 0; fi
+  agent_running && echo "INFO agent running" || echo "WARN agent not running"
+  [ "$(agent_recent)" -lt 3 ] || echo "WARN agent crash loop (3+ exits in 300s)"
+  if [ ! -f "$AST" ] || [ -L "$AST" ]; then echo "WARN agent status missing"
+  else
+    age=$(( $(date +%s) - $(num "$(stat -c %Y "$AST" 2>/dev/null)") ))
+    if [ "$age" -gt "${MK20_AGENT_STATUS_MAX_AGE:-10}" ] || [ "$age" -lt 0 ]; then echo "WARN agent status stale"
+    else agent_status_load; [ "$ASTATE" != unknown ] || echo "WARN agent status unknown"; fi
+  fi
+  return 0
+}
 KDSVC=${MK20_KDSVC:-/etc/init.d/qt_app2}   # procd service: `stop` also stops the respawn (plain kill -> respawned)
 KST=$R/run/mk20/kbd.status
 kbd_wanted() { [ "$FEATURE_KBD" = 1 ]; }
@@ -81,6 +114,15 @@ maint_replace() {
   elif [ -e "$2" ] && [ ! -f "$2" ]; then return 1; fi
   mv -f "$1" "$2"
 }
+# The request may be on tmpfs. Stage on the persistent filesystem so the
+# final replace is always a local atomic rename, even for runtime debug hooks.
+debug_store() {
+  ( umask 077
+    tmp=$(mktemp "$MP/.debug.XXXXXX") || exit 1
+    trap 'rm -f "$tmp"' 0
+    cat "$1" > "$tmp" && chmod 600 "$tmp" && sync &&
+      maint_replace "$tmp" "$MP/debug.conf" )
+}
 # Rename first, then inspect the claimed inode. Never read/chmod a symlink or hard link.
 hook_take() { # $1=trusted inbox $2=fixed basename; sets HF
   HF=$1/.$2.consume
@@ -115,7 +157,7 @@ kbd_hooks() {
       case "$hook" in
         debug)
           case "$(cat "$HF")" in
-            verbose=0|verbose=1) chmod 600 "$HF" && maint_replace "$HF" "$MP/debug.conf";;
+            verbose=0|verbose=1) debug_store "$HF";;
             *) log WARN maint "invalid debug hook";;
           esac;;
         restart-kbd|exit-safe-mode)
@@ -174,6 +216,7 @@ selftest() { # FAIL = host-independent breakage. KD is forbidden in every mode. 
   # on-board router (1.2.0): reported only (INFO), never FAIL/WARN, so it can neither block confirm nor degrade status
   if [ "${FEATURE_ROUTER:-1}" != 1 ]; then echo "INFO router disabled"
   elif composite_up; then router_running && echo "INFO router running" || echo "INFO router not running"; fi
+  agent_report
   return $f
 }
 
@@ -183,6 +226,7 @@ jbool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
 health() {
   local kl up fat dat mem links l st rc mounts
   cfg_load
+  agent_status_load
   kl=$(kernel_line); up=$(cut -d. -f1 /proc/uptime)
   fat=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); dat=$(df -Pk "$MK20_HOME" 2>/dev/null | awk 'END{print $4}')
   mem=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
@@ -205,6 +249,9 @@ health() {
     printf '"kbd":{"enabled":%s,"mode":%s,"running":%s,"restarts":%s,"recent_crashes":%s,"degraded":%s,"status":%s},' \
       "$([ "${FEATURE_KBD:-0}" = 1 ] && echo true || echo false)" "$(jstr "$(kbd_mode)")" "$(jbool kbd_running)" \
       "$(kbd_total)" "$(num "$(kbd_recent)")" "$(jstr "$(head -n 1 "$TM/kbd-degraded" 2>/dev/null)")" "$(jstr "$(head -c 700 "$KST" 2>/dev/null)")"
+    printf '"agent":{"enabled":%s,"allowed":%s,"state":%s,"provider":%s,"route":%s,"last_error_class":%s,"running":%s},' \
+      "$([ "$FEATURE_AGENT" = 1 ] && echo true || echo false)" "$AALLOWED" "$(jstr "$ASTATE")" \
+      "$(jstr "$APROVIDER")" "$(jstr "$AROUTE")" "$(jstr "$AERROR")" "$(jbool agent_running)"
     printf '"watchdog":%s,"mem_avail_kb":%s,"fat_free_kb":%s,"data_free_kb":%s,' "$(jbool wdt_armed)" "$(num "$mem")" "$(num "$fat")" "$(num "$dat")"
     printf '"release":{"good":%s,"pending":%s,"last_rollback":%s},' "$(jstr "$(head -n 1 "$MK20_HOME/state/good" 2>/dev/null)")" \
       "$(jstr "$(head -n 1 "$MK20_HOME/state/pending" 2>/dev/null)")" "$(jstr "$(head -n 1 "$MK20_HOME/state/last-rollback" 2>/dev/null)")"
@@ -271,14 +318,24 @@ boot)
     # boot is the transition owner here: under the gadget transition mutex (no failsafe/rollback in progress, composite
     # still up) clear teardown's stop markers (setup_main's kbd_stop left them) and launch; the supervisor itself never
     # clears them, so a late supervisor cannot undo a later teardown
-    if ( exec 7>"$TM/transition.lock" && flock -n 7 || exit 1; [ ! -f "$TM/gadget.busy" ] || exit 1
+    launch_wait=0
+    while :; do
+      if ( exec 7>"$TM/transition.lock" && flock -n 7 || exit 1; [ ! -f "$TM/gadget.busy" ] || exit 1
          rm -f "$R/tmp/mk20-kbd-stop" "$R/tmp/mk20-router-stop"; touch "$TM/kbd.mode"
          ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V MK20_NOHID=$NOHID \
              MK20_AGENT_CTL=$FEATURE_AGENT_CTL MK20_HID_SCROLL=$FEATURE_HID_SCROLL \
              MK20_K2_ESTOP=$FEATURE_K2_ESTOP MK20_K2_RELEASE=$FEATURE_K2_RELEASE \
              exec sh "$REL/sbin/mk20d" kbd </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) & ); then
-      log INFO kbd "supervisor launched (nohid=$NOHID); router off"
-    else log WARN kbd "transition busy -> mk20-kbd launch deferred"; fi
+        log INFO kbd "supervisor launched (nohid=$NOHID); router off"
+        break
+      fi
+      [ "$launch_wait" = 0 ] && log WARN kbd "transition busy -> mk20-kbd launch deferred"
+      if [ "$launch_wait" -ge "${MK20_KBD_LAUNCH_WAIT:-60}" ]; then
+        log ERROR kbd "transition busy -> mk20-kbd launch gave up after ${launch_wait}s"
+        break
+      fi
+      sleep 1; launch_wait=$((launch_wait+1))
+    done
   fi
   # 1.2.0 on-board router: only on a composite that set up cleanly with HID; never part of the confirm decision
   # (mk20-kbd mode: the router's job is done inside mk20-kbd)
@@ -286,6 +343,11 @@ boot)
     ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V exec sh "$REL/sbin/mk20d" router </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) &
     log INFO router "supervisor launched"
   else log INFO router "not started (mode=$MODE grc=${grc:-} nohid=$NOHID enabled=$FEATURE_ROUTER kbd=$KBDM)"; fi
+  # Optional agent is detached and has no part in composite/kbd/router setup or confirmation.
+  if [ "$FEATURE_AGENT" = 1 ] && [ -x "$REL/bin/mk20-agent" ]; then
+    ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V exec sh "$REL/sbin/mk20d" agent </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) &
+    log INFO agent "supervisor launched"
+  fi
   sleep "${MK20_STABLE:-30}"
   # a gadget failsafe (flap rollback + adb re-add, up to ~2.5 min) in progress is not a failure: wait it out (cap)
   # The marker is set by flapmon BEFORE it launches a rollback and by cleanup(); a sample taken while (or just
@@ -335,6 +397,7 @@ maint)
     b=$TM/bridge.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }   # O_APPEND writers keep appending
     b=$TM/router.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
     b=$TM/kbd.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
+    b=$TM/agent.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
     health > /dev/null 2>&1
     sleep "${MK20_MAINT_S:-300}" 5>&-   # the lock dies with this loop, not with an orphaned sleep
   done;;
@@ -358,6 +421,46 @@ router)
     sleep "$d" 5>&-; d=$((d * 2)); [ $d -gt "${MK20_ROUTER_BACKOFF_MAX:-30}" ] && d=${MK20_ROUTER_BACKOFF_MAX:-30}
   done
   rm -f "$TM/router-loop.pid"; log INFO router "stop ($why)";;
+agent)
+  exec 5>"$TM/agent.lock"; flock -n 5 || exit 0
+  AB=$REL/bin/mk20-agent; AL=$TM/agent.log; ASTOP=$R/tmp/mk20-agent-stop
+  d=1; ap=""; why=""; echo $$ > "$TM/agent-loop.pid"
+  agent_enabled() { cfg_load; [ "$FEATURE_AGENT" = 1 ] && [ ! -f "$ASTOP" ]; }
+  agent_ready() { composite_up && [ -e "$ASOCK" ] && [ ! -f "$TM/gadget.busy" ]; }
+  agent_reap() {
+    [ -n "$ap" ] || return 0
+    kill -TERM "$ap" 2>/dev/null
+    i=0; while kill -0 "$ap" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2 5>&-; i=$((i+1)); done
+    kill -KILL "$ap" 2>/dev/null; wait "$ap" 2>/dev/null; ap=""
+  }
+  agent_cleanup() { agent_reap; rm -f "$TM/agent-loop.pid"; }
+  trap 'agent_cleanup; exit 0' TERM
+  log INFO agent "start pid=$$"
+  while :; do
+    agent_enabled || { why="disabled/stop file"; break; }
+    [ -x "$AB" ] || { why="binary unavailable"; break; }
+    if ! agent_ready; then sleep 1 5>&-; continue; fi   # dependencies can appear later; no busy loop
+    t0=$(cut -d. -f1 /proc/uptime)
+    # Supported production CLI only: no run-level permission/grant flag. --web starts disabled.
+    sh "$REL/share/mk20-agent-child.sh" "$AB" --web --kbd-sock "$ASOCK" \
+      --web-config-dir "$MK20_HOME/agent" --web-secrets-dir "$MK20_HOME/secrets" </dev/null >>"$AL" 2>&1 5>&- &
+    ap=$!; gated=0
+    while kill -0 "$ap" 2>/dev/null; do
+      if ! agent_enabled || ! agent_ready; then agent_reap; gated=1; break; fi
+      sleep 1 5>&-
+    done
+    [ "$gated" = 1 ] && continue   # dependency/stop change is not a crash
+    wait "$ap"; rc=$?; ap=""; t1=$(cut -d. -f1 /proc/uptime)
+    agent_enabled || { why="disabled/stop file"; break; }
+    [ $((t1 - t0)) -ge 60 ] && d=1
+    { tail -n 19 "$TM/agent-crash.times" 2>/dev/null; echo "$t1"; } > "$TM/agent-crash.times.t" && mv -f "$TM/agent-crash.times.t" "$TM/agent-crash.times"
+    echo "$(date '+%F %T') mk20-agent exit rc=$rc after $((t1 - t0)) s; retry in ${d}s" >> "$AL"
+    # Poll kill switches during backoff too (maximum response one second).
+    left=$d; while [ "$left" -gt 0 ] && agent_enabled; do sleep 1 5>&-; left=$((left-1)); done
+    d=$((d * 2)); [ "$d" -gt 30 ] && d=30
+  done
+  agent_cleanup; log INFO agent "stop ($why)";;
+
 kbd)
   exec 5>"$TM/kbd.lock"; flock -n 5 || exit 0
   KB=$REL/bin/mk20-kbd; HID=$R/dev/hidg0; KSTOP=$R/tmp/mk20-kbd-stop; HSTOP=$R/tmp/mk20-router-stop; KL=$TM/kbd.log
@@ -409,11 +512,13 @@ kbd)
     t0=$(cut -d. -f1 /proc/uptime)
     # Markers are cleared only by boot under the transition lock. The binary rechecks --exit-file.
     "$KB" --run --host "$R/dev/ttyGS0" "$@" </dev/null >>"$KL" 2>&1 5>&- &
-    child=$!; requested=0; state_tick=0
+    child=$!; requested=0; state_tick=0; stop_failed=0
     while kill -0 "$child" 2>/dev/null; do
       kbd_hooks
       if [ "$restart" = 1 ] || [ -f "$KSTOP" ]; then
-        requested=1; kbd_child_stop && break
+        requested=1
+        if ! kbd_child_stop; then stop_failed=1; fi
+        break
       fi
       state_tick=$((state_tick + 1))
       if [ "$state_tick" -ge 5 ]; then
@@ -422,16 +527,22 @@ kbd)
           # A respawn means procd ownership is uncertain, even if its next stop
           # removes the PID but fails. Quiesce our writer before any stop/retry.
           stopped=0; requested=1; reason=kd-stop
-          kbd_child_stop && break
+          if ! kbd_child_stop; then stop_failed=1; fi
+          break
         fi
       fi
       sleep 0.2 5>&-
     done
+    if [ "$stop_failed" = 1 ]; then
+      why=child-stop-failed; reason=$why
+      log ERROR kbd "mk20-kbd did not stop after bounded TERM/KILL; supervisor exiting"
+      break
+    fi
     wait "$child"; rc=$?
     [ "$requested" = 1 ] && rc=0
     [ -f "$KSTOP" ] && { why="stop file"; break; }
     # Maintenance restarts (and signals requested above) never contribute to crash history.
-    if [ "$requested" = 1 ]; then rm -f "$KST"; kbd_state; continue; fi
+    if [ "$requested" = 1 ]; then d=1; rm -f "$KST"; kbd_state; continue; fi
     last_rc=$rc; t1=$(cut -d. -f1 /proc/uptime)
     total=$(( $(kbd_total) + 1 )); [ $((t1 - t0)) -ge 60 ] && d=1
     { tail -n 19 "$TM/kbd-crash.times" 2>/dev/null; echo "$t1"; } > "$TM/kbd-crash.times.t" && mv -f "$TM/kbd-crash.times.t" "$TM/kbd-crash.times"
@@ -445,11 +556,12 @@ kbd)
       [ -f "$KSTOP" ] && break
       sleep 0.2 5>&-; iwait=$((iwait+1))
     done
-    d=$((d * 2)); [ $d -gt "${MK20_KBD_BACKOFF_MAX:-30}" ] && d=${MK20_KBD_BACKOFF_MAX:-30}
+    if [ "$restart" = 1 ]; then d=1
+    else d=$((d * 2)); [ $d -gt "${MK20_KBD_BACKOFF_MAX:-30}" ] && d=${MK20_KBD_BACKOFF_MAX:-30}; fi
   done
   kbd_state; rm -f "$TM/kbd-loop.pid"; log INFO kbd "stop ($why)";;
 selftest) cfg_load; selftest; exit $?;;
 config) cfg_load; cfg_print;;
 version) echo "$V";;
-*) echo "usage: mk20d boot|health|selftest|config|maint|router|kbd|version"; exit 2;;
+*) echo "usage: mk20d boot|health|selftest|config|maint|router|kbd|agent|version"; exit 2;;
 esac

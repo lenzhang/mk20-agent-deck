@@ -1,0 +1,14 @@
+........................................................................ [ 33%]
+.........F.............................................................. [ 66%]
+........................................................................ [ 99%]
+s                                                                        [100%]
+=================================== FAILURES ===================================
+__________________ test_compressed_frame_decode_timeout[True] __________________
+deck/agent/tests/test_rfb.py:226: in test_compressed_frame_decode_timeout
+    assert time.monotonic() - start < 1
+E   assert (218323.647856666 - 218322.577212208) < 1
+E    +  where 218323.647856666 = <built-in function monotonic>()
+E    +    where <built-in function monotonic> = time.monotonic
+=========================== short test summary info ============================
+FAILED deck/agent/tests/test_rfb.py::test_compressed_frame_decode_timeout[True]
+1 failed, 215 passed, 1 skipped, 3 deselected in 70.70s (0:01:10)

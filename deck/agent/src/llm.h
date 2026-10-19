@@ -1,6 +1,7 @@
 #ifndef MK20_LLM_H
 #define MK20_LLM_H
 #include "net.h"
+#include <sys/types.h>
 #include "oai.h"
 #define LLM_PROVIDER_MAX 16384u
 #define LLM_BODY_MAX (1024u * 1024u)
@@ -26,12 +27,16 @@ typedef struct {
 typedef struct {
     llm_error_t error;
     int retryable, http_status;
+    unsigned input_tokens, output_tokens;
     const char *reason; /* Stable literal, e.g. truncated; never peer errors. */
     oai_response_t message;
 } llm_response_t;
 /* Fresh destinations only. Failed loads leave a zeroed, invalid config. */
 int llm_provider_parse(const char *json, size_t len, llm_provider_t *out);
 int llm_provider_load(const char *path, llm_provider_t *out);
+/* Bounded reader injection, including deterministic post-fstat growth tests. */
+int llm_provider_load_reader(const char *path, llm_provider_t *out,
+                             ssize_t (*reader)(int, void *, size_t));
 int llm_chat(const llm_provider_t *cfg, const netcfg_t *netcfg,
              const llm_request_t *request, llm_response_t *response);
 /* Factored response handling also permits deterministic offline acceptance. */

@@ -6,7 +6,7 @@
 typedef struct rfb rfb_t;
 typedef struct {
     const char *host; unsigned port; const unsigned char *password; size_t password_len;
-    int timeout_ms; /* 0: 5000; numeric IPv4/IPv6 or localhost (no unbounded DNS lookup) */
+    int timeout_ms; /* 0: 5000; literal IPv4/IPv6 or localhost only; NEVER DNS/NSS */
 } rfb_options_t;
 typedef struct { double connect_ms, auth_ms, fb_ms, finish_ms; unsigned w, h; int extended_clipboard; } rfb_info_t;
 int64_t rfb_now_ms(void);
@@ -21,6 +21,7 @@ mem_t *rfb_memory(rfb_t *c);
 int rfb_request(rfb_t *c, int incremental);
 /* Check the active request's monotonic deadline, including CPU-only work. */
 int rfb_check_deadline(rfb_t *c);
+void rfb_set_service(rfb_t *c, int (*service)(void *), void *ctx);
 int rfb_snapshot(rfb_t *c, unsigned max_w, unsigned max_h);
 const scale_t *rfb_frame(const rfb_t *c);
 /* UTF-8 input, converted only if every code point is Latin-1. Otherwise "unsupported".

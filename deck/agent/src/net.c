@@ -4,6 +4,7 @@
 #define _DARWIN_C_SOURCE
 #endif
 #include "net.h"
+#include "dns.h"
 #include "mem.h"
 #include "json_util.h"
 #include "mbedtls/ssl.h"
@@ -17,7 +18,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <netdb.h>
 #include <net/if.h>
 #include <poll.h>
 #include <signal.h>
@@ -27,7 +27,6 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #define HTTP_HEAD_MAX 16384u
@@ -286,19 +285,25 @@ int net_http_parse(const unsigned char *b, size_t n, int eof, size_t cap, net_re
     net_response_free(r); return eof ? -1 : 0;
 }
 
-typedef struct { int fd; int64_t deadline; } transport_t;
+typedef struct { int fd; int64_t deadline; const net_options_t *options; } transport_t;
 static int64_t now_ms(void)
 {
     struct timespec ts; if (clock_gettime(CLOCK_MONOTONIC, &ts)) return 0;
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
-static int wait_fd(int fd, short events, int64_t deadline)
+static int cancelled(const net_options_t *o)
+{
+    if (o && ((o->cancelled && *o->cancelled) || (o->service && o->service(o->service_ctx)))) { errno = ECANCELED; return 1; }
+    return 0;
+}
+static int wait_fd(int fd, short events, int64_t deadline, const net_options_t *o)
 {
     for (;;) {
+        if (cancelled(o)) return -1;
         int64_t left = deadline - now_ms(); if (left <= 0) { errno = ETIMEDOUT; return -1; }
-        struct pollfd p = {fd, events, 0}; int rc = poll(&p, 1, left > INT_MAX ? INT_MAX : (int)left);
+        struct pollfd p = {fd, events, 0}; int rc = poll(&p, 1, o && (o->service || o->cancelled) && left > 25 ? 25 : left > INT_MAX ? INT_MAX : (int)left);
         if (rc > 0) return 0;
-        if (!rc) { errno = ETIMEDOUT; return -1; }
+        if (!rc) continue;
         if (errno != EINTR) return -1;
     }
 }
@@ -326,11 +331,12 @@ static ssize_t socket_send(int fd, const void *b, size_t n)
 static int raw_send(transport_t *t, const unsigned char *b, size_t n)
 {
     while (n) {
+        if (cancelled(t->options)) return -1;
         if (now_ms() >= t->deadline) { errno = ETIMEDOUT; return -1; }
         ssize_t k = socket_send(t->fd, b, n);
         if (k > 0) { b += k; n -= (size_t)k; continue; }
         if (k < 0 && errno == EINTR) continue;
-        if (k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { if (!wait_fd(t->fd, POLLOUT, t->deadline)) continue; }
+        if (k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { if (!wait_fd(t->fd, POLLOUT, t->deadline, t->options)) continue; }
         return -1;
     }
     return 0;
@@ -338,63 +344,42 @@ static int raw_send(transport_t *t, const unsigned char *b, size_t n)
 static ssize_t raw_recv(transport_t *t, unsigned char *b, size_t cap)
 {
     for (;;) {
+        if (cancelled(t->options)) return -1;
         if (now_ms() >= t->deadline) { errno = ETIMEDOUT; return -1; }
         ssize_t k = recv(t->fd, b, cap, 0);
         if (k >= 0) return k;
         if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) { if (!wait_fd(t->fd, POLLIN, t->deadline)) continue; }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) { if (!wait_fd(t->fd, POLLIN, t->deadline, t->options)) continue; }
         return -1;
     }
 }
-/* Resolve in a short-lived child: libc getaddrinfo has no deadline API.
- * Parent bounds DNS with the same monotonic deadline, then reaps on every path. */
-typedef struct { int error; unsigned n; struct sockaddr_storage addr[8]; socklen_t len[8]; } addresses_t;
-static int resolve(const net_endpoint_t *e, int64_t deadline, addresses_t *out)
+typedef dns_addresses_t addresses_t;
+static int resolve(const net_endpoint_t *e, int64_t deadline, addresses_t *out, const net_options_t *o, const char **error)
 {
-    memset(out, 0, sizeof *out);
-    struct sockaddr_in v4 = {.sin_family = AF_INET, .sin_port = htons((uint16_t)e->port)};
-    if (inet_pton(AF_INET, e->host, &v4.sin_addr) == 1) {
-        memcpy(&out->addr[0], &v4, sizeof v4); out->len[0] = sizeof v4; out->n = 1; return 0;
-    }
-    int fds[2]; if (pipe(fds)) return -1;
-    pid_t pid = fork();
-    if (pid < 0) { close(fds[0]); close(fds[1]); return -1; }
-    if (!pid) {
-        close(fds[0]); addresses_t result = {0}; char port[6]; snprintf(port, sizeof port, "%u", e->port);
-        struct addrinfo hints = {0}, *list = NULL; hints.ai_socktype = SOCK_STREAM; hints.ai_family = AF_UNSPEC;
-        result.error = getaddrinfo(e->host, port, &hints, &list);
-        if (!result.error) for (struct addrinfo *p = list; p && result.n < 8; p = p->ai_next) {
-            if ((p->ai_family != AF_INET && p->ai_family != AF_INET6) || p->ai_addrlen > sizeof result.addr[0]) continue;
-            memcpy(&result.addr[result.n], p->ai_addr, p->ai_addrlen); result.len[result.n++] = (socklen_t)p->ai_addrlen;
-        }
-        if (list) freeaddrinfo(list);
-        const unsigned char *b = (const unsigned char *)&result; size_t n = sizeof result;
-        while (n) { ssize_t k = write(fds[1], b, n); if (k < 0 && errno == EINTR) continue; if (k <= 0) break; b += k; n -= (size_t)k; }
-        close(fds[1]); _exit(0);
-    }
-    close(fds[1]); size_t n = 0; int bad = 0;
-    while (n < sizeof *out) {
-        if (wait_fd(fds[0], POLLIN, deadline)) { bad = 1; break; }
-        ssize_t k = read(fds[0], (unsigned char *)out + n, sizeof *out - n);
-        if (k < 0 && errno == EINTR) continue;
-        if (k <= 0) { bad = 1; break; }
-        n += (size_t)k;
-    }
-    int saved = errno; close(fds[0]); if (bad) kill(pid, SIGKILL);
-    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
-    errno = saved;
-    if (bad) return -1;
-    if (out->error || !out->n) { errno = EHOSTUNREACH; return -1; }
-    return 0;
+    dns_options_t options = o ? o->dns : (dns_options_t){0};
+    options.service = o ? o->service : NULL; options.ctx = o ? o->service_ctx : NULL;
+    options.cancelled = o ? o->cancelled : NULL;
+    return dns_resolve(!strcasecmp(e->host,"localhost") ? "127.0.0.1" : e->host,e->port,deadline,&options,out,error);
 }
 static int tcp_connect(const net_endpoint_t *e, int64_t deadline, int usb,
                        int (*factory)(int, int, int),
-                       int (*connector)(int, const struct sockaddr *, socklen_t), net_response_t *r)
+                       int (*connector)(int, const struct sockaddr *, socklen_t), net_response_t *r, const net_options_t *o)
 {
+    /* Proxy route may resolve only a configured proxy endpoint, never target. */
+    net_route_t route;
+    if (o && !netcfg_route_for(o->config,o->provider_route ? o->provider_route : "foreign",&route) && route == NET_PROXY) {
+        int proxy = 0;
+        for (size_t i = 0; i < o->config->proxy_count; i++) if (e == &o->config->proxies[i]) proxy = 1;
+        if (!proxy) { fail(r,"config","proxy route forbids local target resolution"); return -1; }
+    }
     addresses_t a;
-    if (resolve(e, deadline, &a)) { io_error(r, "dns"); return -1; }
+    const char *error;
+    if (resolve(e, deadline, &a, o, &error)) {
+        fail(r,errno == ECANCELED ? "cancelled" : errno == ETIMEDOUT ? "timeout" : "dns",error); return -1;
+    }
     int64_t limit = now_ms() + 10000; if (limit > deadline) limit = deadline;
     for (unsigned i = 0; i < a.n; i++) {
+        if (cancelled(o)) break;
         if (now_ms() >= limit) { errno = ETIMEDOUT; break; }
         int fd = factory ? factory(a.addr[i].ss_family, SOCK_STREAM, 0) : socket(a.addr[i].ss_family, SOCK_STREAM, 0);
         if (fd < 0) continue;
@@ -411,7 +396,7 @@ static int tcp_connect(const net_endpoint_t *e, int64_t deadline, int usb,
         }
         int rc = connector ? connector(fd, (struct sockaddr *)&a.addr[i], a.len[i]) :
                             connect(fd, (struct sockaddr *)&a.addr[i], a.len[i]);
-        if (rc && errno == EINPROGRESS && !wait_fd(fd, POLLOUT, limit)) {
+        if (rc && errno == EINPROGRESS && !wait_fd(fd, POLLOUT, limit, o)) {
             int error = 0; socklen_t n = sizeof error;
             if (!getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &n) && !error) rc = 0;
             else if (error) errno = error;
@@ -424,6 +409,7 @@ static int tcp_connect(const net_endpoint_t *e, int64_t deadline, int usb,
 static int tls_send(void *ctx, const unsigned char *b, size_t n)
 {
     transport_t *t = ctx;
+    if (cancelled(t->options)) return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
     if (now_ms() >= t->deadline) return MBEDTLS_ERR_SSL_TIMEOUT;
     ssize_t k = socket_send(t->fd, b, n);
     if (k >= 0) return (int)k;
@@ -433,6 +419,7 @@ static int tls_send(void *ctx, const unsigned char *b, size_t n)
 static int tls_recv(void *ctx, unsigned char *b, size_t n)
 {
     transport_t *t = ctx;
+    if (cancelled(t->options)) return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
     if (now_ms() >= t->deadline) return MBEDTLS_ERR_SSL_TIMEOUT;
     ssize_t k = recv(t->fd, b, n, 0);
     if (k >= 0) return (int)k;
@@ -441,14 +428,16 @@ static int tls_recv(void *ctx, unsigned char *b, size_t n)
 }
 static int tls_wait(transport_t *t, int rc)
 {
+    if (errno == ECANCELED) return -1;
     if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE)
-        return wait_fd(t->fd, rc == MBEDTLS_ERR_SSL_WANT_READ ? POLLIN : POLLOUT, t->deadline);
+        return wait_fd(t->fd, rc == MBEDTLS_ERR_SSL_WANT_READ ? POLLIN : POLLOUT, t->deadline, t->options);
     errno = rc == MBEDTLS_ERR_SSL_TIMEOUT || now_ms() >= t->deadline ? ETIMEDOUT : EIO;
     return -1;
 }
 static int tls_write_all(mbedtls_ssl_context *ssl, transport_t *t, const unsigned char *b, size_t n)
 {
     while (n) {
+        if (cancelled(t->options)) return -1;
         if (now_ms() >= t->deadline) { errno = ETIMEDOUT; return -1; }
         size_t part = n > 4096 ? 4096 : n;
         int rc = mbedtls_ssl_write(ssl, b, part);
@@ -503,10 +492,10 @@ static int header_valid(const net_header_t *h)
 }
 int net_request(const net_options_t *o, net_response_t *r)
 {
-    memset(r, 0, sizeof *r); r->class_name = "config";
+    memset(r, 0, sizeof *r); r->class_name = "config"; errno = 0;
     net_url_t u; net_route_t route; char key[4097] = {0}; char *request = NULL;
     int result = -1, tls_ready = 0;
-    transport_t t = {-1, now_ms() + (o && o->timeout_ms > 0 ? o->timeout_ms : 60000)};
+    transport_t t = {-1, now_ms() + (o && o->timeout_ms > 0 ? o->timeout_ms : 60000), o};
     mbedtls_ssl_context ssl; mbedtls_ssl_config conf; mbedtls_x509_crt ca;
     mbedtls_entropy_context entropy; mbedtls_ctr_drbg_context rng;
     mbedtls_ssl_init(&ssl); mbedtls_ssl_config_init(&conf); mbedtls_x509_crt_init(&ca);
@@ -517,10 +506,17 @@ int net_request(const net_options_t *o, net_response_t *r)
         fail(r, "config", "invalid request or network configuration"); goto done;
     }
     for (size_t i = 0; i < o->header_count; i++) if (!header_valid(&o->headers[i])) { fail(r, "config", "invalid extra header"); goto done; }
+    if (cancelled(o)) { fail(r,"cancelled","cancelled"); goto done; }
     if (route == NET_BLOCKED) { fail(r, "blocked", "route is blocked by selected profile"); goto done; }
     if (o->key_file && net_read_key(o->key_file, key)) { fail(r, "config", "invalid key file (***)"); goto done; }
     if (!agent_clock_trusted(&o->clock) && !(route == NET_PROXY && o->clock.set_clock)) { fail(r, "clock", "clock is not trusted"); goto done; }
-    if (read_ca(&ca, o->ca_file ? o->ca_file : NET_CA_DEFAULT)) { fail(r, "config", "cannot parse CA bundle"); goto done; }
+    const char *ca_path = o->ca_file, *release = getenv("MK20_REL"); char release_ca[4096];
+    if (!ca_path && release && *release) {
+        int n = snprintf(release_ca,sizeof release_ca,"%s/share/ca-bundle.pem",release);
+        if (n < 0 || (size_t)n >= sizeof release_ca) { fail(r,"config","invalid release CA path"); goto done; }
+        ca_path = release_ca;
+    }
+    if (read_ca(&ca, ca_path ? ca_path : NET_CA_DEFAULT)) { fail(r, "config", "cannot parse CA bundle"); goto done; }
     if (route == NET_PROXY) {
         for (size_t i = 0; i < o->config->proxy_count; i++) {
             const net_endpoint_t *p = &o->config->proxies[i];
@@ -529,7 +525,7 @@ int net_request(const net_options_t *o, net_response_t *r)
             if (o->connected_fd >= 0) { t.fd = dup(o->connected_fd); if (t.fd >= 0 && nonblock(t.fd)) { close(t.fd); t.fd = -1; } }
             else
 #endif
-            t.fd = tcp_connect(p, t.deadline, 0, o->socket_fn, o->connect_fn, r);
+            t.fd = tcp_connect(p, t.deadline, 0, o->socket_fn, o->connect_fn, r, o);
             if (t.fd >= 0) break;
             /* Only TCP/DNS establishment failure advances to another proxy. */
             if (now_ms() >= t.deadline) break;
@@ -540,7 +536,7 @@ int net_request(const net_options_t *o, net_response_t *r)
         if (o->connected_fd >= 0) { t.fd = dup(o->connected_fd); if (t.fd >= 0 && nonblock(t.fd)) { close(t.fd); t.fd = -1; } }
         else
 #endif
-        t.fd = tcp_connect(&u.endpoint, t.deadline, 0, o->socket_fn, o->connect_fn, r);
+        t.fd = tcp_connect(&u.endpoint, t.deadline, 0, o->socket_fn, o->connect_fn, r, o);
     }
     if (t.fd < 0) goto done;
     if (route == NET_PROXY && proxy_connect(&t, &u.endpoint, r)) goto done;
@@ -616,9 +612,10 @@ int net_request(const net_options_t *o, net_response_t *r)
     }
     r->ok = 1; r->class_name = ""; r->detail[0] = 0; result = 0;
 done:
+    if (o && ((o->cancelled && *o->cancelled) || errno == ECANCELED)) { fail(r,"cancelled","cancelled"); result = -1; }
     mem_wipe(key, sizeof key);
     if (request) { mem_wipe(request, HTTP_HEAD_MAX + 1); free(request); }
-    if (tls_ready && now_ms() < t.deadline) (void)mbedtls_ssl_close_notify(&ssl);
+    if (tls_ready && !(o && o->cancelled && *o->cancelled) && errno != ECANCELED && now_ms() < t.deadline) (void)mbedtls_ssl_close_notify(&ssl);
     if (t.fd >= 0) close(t.fd);
     mbedtls_ssl_free(&ssl); mbedtls_ssl_config_free(&conf); mbedtls_x509_crt_free(&ca);
     mbedtls_ctr_drbg_free(&rng); mbedtls_entropy_free(&entropy); mbedtls_psa_crypto_free();
@@ -638,13 +635,13 @@ int net_time_sync(const char *host, unsigned port, const agent_clock_options_t *
     }
     if (!port || port > 65535) return fail(r, "config", "invalid time port");
     net_endpoint_t e = {{0}, port}; strcpy(e.host, host);
-    transport_t t = {-1, now_ms() + 10000};
+    transport_t t = {-1, now_ms() + 10000, NULL};
 #ifdef MK20_NET_TEST
     const char *test_fd = getenv("MK20_TIME_TEST_FD");
     if (test_fd) { t.fd = dup(atoi(test_fd)); if (t.fd >= 0 && nonblock(t.fd)) { close(t.fd); t.fd = -1; } }
     else
 #endif
-    t.fd = tcp_connect(&e, t.deadline, usb, NULL, NULL, r);
+    t.fd = tcp_connect(&e, t.deadline, usb, NULL, NULL, r, NULL);
     if (t.fd < 0) return -1;
     char request[600]; int n = snprintf(request, sizeof request, "GET /time HTTP/1.1\r\nHost: %s:%u\r\nConnection: close\r\n\r\n", host, port);
     int rc = -1;
