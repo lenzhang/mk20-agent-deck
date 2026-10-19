@@ -1,0 +1,36 @@
+E
+==================================== ERRORS ====================================
+__________________ ERROR at setup of test_defaults_unchanged ___________________
+
+tmp_path = PosixPath('/private/var/folders/_6/v8ptvn4x1gvdhnx06swqtm_80000gn/T/pytest-of-leo/pytest-109/test_defaults_unchanged0')
+
+    @pytest.fixture
+    def dev(tmp_path):
+>       yield Dev(tmp_path)
+              ^^^^^^^^^^^^^
+
+deck/tests/conftest.py:90: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+deck/tests/conftest.py:35: in __init__
+    self.bb = _bbdir(tmp)
+              ^^^^^^^^^^^
+deck/tests/conftest.py:19: in _bbdir
+    (d / "busybox").symlink_to(bb)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = PosixPath('/private/var/folders/_6/v8ptvn4x1gvdhnx06swqtm_80000gn/T/pytest-of-leo/pytest-109/test_defaults_unchanged0/bb/busybox')
+target = None, target_is_directory = False
+
+    def symlink_to(self, target, target_is_directory=False):
+        """
+        Make this path a symlink pointing to the target path.
+        Note the order of arguments (link, target) is the reverse of os.symlink.
+        """
+>       os.symlink(target, self, target_is_directory)
+E       TypeError: symlink: src should be string, bytes or os.PathLike, not NoneType
+
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/pathlib/_local.py:789: TypeError
+=========================== short test summary info ============================
+ERROR deck/tests/test_mk20d.py::test_defaults_unchanged - TypeError: symlink:...
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 error in 0.35s

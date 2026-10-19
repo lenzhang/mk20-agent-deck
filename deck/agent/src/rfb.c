@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rfb.h"
-#include "dns.h"
 #include "des.h"
 #include "zlib.h"
 #include <arpa/inet.h>
@@ -87,26 +86,28 @@ static int sized_skip(rfb_t *c, uint32_t cap)
 static int dial(rfb_t *c, const char *host, unsigned port)
 {
     if (!strcmp(host,"localhost")) host = "127.0.0.1"; /* preserve local VNC alias */
-    dns_addresses_t list; const char *error;
-    dns_options_t options = {.service=c->service,.ctx=c->service_ctx};
-    if (dns_resolve(host,port,c->deadline,&options,&list,&error)) return fail(c,errno == ECANCELED ? "cancelled" : errno == ETIMEDOUT ? "timeout" : "dns");
-    int ok = -1;
-    for (unsigned i = 0; i < list.n; i++) {
-        if (rfb_check_deadline(c)) return -1;
-        c->fd = socket(list.addr[i].ss_family, SOCK_STREAM, 0); if (c->fd < 0) continue;
+    /* VNC authentication must never be redirected by DNS/NSS. Validate before socket(). */
+    if (strchr(host,'%')) return fail(c,"vnc_host_not_literal");
+    struct sockaddr_storage addr; memset(&addr,0,sizeof addr); socklen_t len;
+    struct sockaddr_in *v4 = (void *)&addr; struct sockaddr_in6 *v6 = (void *)&addr;
+    if (inet_pton(AF_INET,host,&v4->sin_addr) == 1) {
+        v4->sin_family = AF_INET; v4->sin_port = htons((uint16_t)port); len = sizeof *v4;
+    } else if (inet_pton(AF_INET6,host,&v6->sin6_addr) == 1) {
+        v6->sin6_family = AF_INET6; v6->sin6_port = htons((uint16_t)port); len = sizeof *v6;
+    } else return fail(c,"vnc_host_not_literal");
+    if (rfb_check_deadline(c)) return -1;
+    c->fd = socket(addr.ss_family, SOCK_STREAM, 0);
+    if (c->fd < 0) return fail(c,"connect");
 #ifdef SO_NOSIGPIPE
-        int one = 1; (void)setsockopt(c->fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    int one = 1; (void)setsockopt(c->fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
-        if (fcntl(c->fd, F_SETFL, O_NONBLOCK)) { close(c->fd); c->fd = -1; continue; }
-        int r = connect(c->fd, (const void *)&list.addr[i], list.len[i]);
-        if (!r || (errno == EINPROGRESS && !ready(c, POLLOUT))) {
-            int err = 0; socklen_t len = sizeof err;
-            if (!getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &len) && !err) { ok = 0; break; }
-        }
-        close(c->fd); c->fd = -1;
+    if (fcntl(c->fd, F_SETFL, O_NONBLOCK)) return fail(c,"connect");
+    int r = connect(c->fd, (const void *)&addr, len);
+    if (!r || (errno == EINPROGRESS && !ready(c, POLLOUT))) {
+        int err = 0; socklen_t errlen = sizeof err;
+        if (!getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &errlen) && !err) return 0;
     }
-    if (ok) return fail(c, c->error ? c->error : "connect");
-    return 0;
+    return fail(c, c->error ? c->error : "connect");
 }
 static voidpf zalloc(voidpf opaque, uInt n, uInt size)
 {

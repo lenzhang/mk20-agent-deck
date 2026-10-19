@@ -217,7 +217,7 @@
   - 任务首个动作，以及切换到新 App 时（可配）。
 - **永不做**：输入密码、解锁锁屏、修改系统安全或隐私设置、操作 Screen Sharing / mihomo / 代理设置（窗口标题黑名单），
   命中直接拒绝，**不提供确认通道**。
-- **日志**：`/data/mk20/logs/agent.log`，maint 负责轮转，上限 1 MB × 3。只记步骤号、动作类型、坐标、模型 id、延迟、token 用量。
+- **日志**：`/tmp/mk20/agent.log`（tmpfs），maint 按 router.log 模式在超过 256 KiB 时原 inode 保留末 64 KiB。只记步骤号、动作类型、坐标、模型 id、延迟、token 用量。
   `type` 的文本只记长度和哈希，截图默认不落盘（调试开关打开时写 tmpfs，上限 5 张）。统一过一遍脱敏函数：
   `Authorization`、`sk-…`、`vnc.pass` 内容、任何 secrets 文件内容都不会出现在日志里。CI 用测试 grep 守住（§14.5-8）。
 
@@ -396,7 +396,7 @@
 - **[D]**：真机看页面效果，用户回家后核对一次。
 
 ### A8 发布集成（box）
-- **A8 part 1 host 状态（2026-10-20，本 worktree）**：DNS 内置解析器、build-bins/reproducible flags/CA 打包、指定 A7 minors 已完成；验证与沙箱阻断见 `agent/NOTES-agent-a8.md`、`reviews/agent-a8-codex-summary.md`。余下 A8：mk20lib FEATURE_AGENT、mk20d agent 监管、selftest INFO/WARN、health.json agent block、maint agent.log 轮转。静态 armhf 二进制由 box 构建并提交，本 Mac 未交叉构建；UDP/真实监听及设备验收待开放环境。
+- **A8 part 2 host 状态（2026-10-20，本 worktree）**：发布级 FEATURE_AGENT、mk20d agent 监管、selftest INFO/WARN、health 白名单状态、tmpfs agent.log trim、VNC literal-only 与 UDP 权限跳过已接入。运行级 allowed 上电仍关闭；当前 C runtime 不写 agent.status，缺失时 health 返回 null/unknown。host 验证与限制见 `agent/NOTES-agent-a8.md`、`reviews/agent-a8b-codex-summary.md`；BusyBox 1.27/Linux procfs/真实监听及 A9 设备验收仍待开放环境。静态 armhf 二进制由 box 构建，本 Mac 未改 release/bin。
 - `tools/mk20-build-bins.sh` 加入 `bin/mk20-agent`，binary-match 测试；MANIFEST 带上 `share/ca-bundle.pem`。
 - `mk20lib.sh`：`FEATURE_AGENT=0` 默认，接入 FAT 标志 `mk20-no-agent` 和 `MK20_AGENT`。
 - `mk20d agent`：照 router/kbd 的模式监管（flock 单实例，backoff 1→30 s，60 s 正常运行后重置）；

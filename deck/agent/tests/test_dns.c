@@ -83,9 +83,17 @@ static void packets(void)
 typedef struct { int fd[2], spoof; unsigned count[2], type[8], types; int mode; } fake_t;
 static int udp_socket(unsigned *port)
 {
-    int fd=socket(AF_INET,SOCK_DGRAM,0); CHECK(fd>=0);
+    int fd=socket(AF_INET,SOCK_DGRAM,0);
+    if (fd < 0) {
+        if (errno == EPERM || errno == EACCES) { puts("SKIP: UDP sockets not permitted (EPERM/EACCES)"); exit(0); }
+        CHECK(fd>=0);
+    }
     struct sockaddr_in a={.sin_family=AF_INET,.sin_addr={htonl(0x7f000001)}};
-    if (bind(fd,(void *)&a,sizeof a)) { fprintf(stderr,"DNS UDP fixture bind 127.0.0.1: %s\n",strerror(errno)); close(fd); return -1; }
+    if (bind(fd,(void *)&a,sizeof a)) {
+        int saved=errno; close(fd);
+        if (saved == EPERM || saved == EACCES) { puts("SKIP: UDP sockets not permitted (EPERM/EACCES)"); exit(0); }
+        errno=saved; CHECK(0);
+    }
     socklen_t len=sizeof a;CHECK(!getsockname(fd,(void *)&a,&len));*port=ntohs(a.sin_port);CHECK(!fcntl(fd,F_SETFL,O_NONBLOCK));return fd;
 }
 static int service(void *v)

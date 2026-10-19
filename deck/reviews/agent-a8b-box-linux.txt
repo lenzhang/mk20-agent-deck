@@ -1,0 +1,14 @@
+Box Linux 2026-10-20 01:18:50 +0800
+24 passed in 2.38s
+385 passed in 159.69s (0:02:39)
+58 passed in 0.88s
+EXIT=2
+deck/tests rerun (first full run SIGTERM'd externally at ~61% of tests/):
+======================= 586 passed in 813.41s (0:13:33) ========================
+EXIT=0
+agent C: test_dns --udp 274 checks (real UDP) ok; test_rfb_literal ok
+9f925f80c75593b3b9789f4fc03c18f6377f7178bf4868349983b8c14799134a 398572 bin/ttygs_tcp_bridge
+612ca55039cf8cd6dceb432daf88b19dfdcd1c1a99fcfafe14a16b9235c57a1b 398588 bin/mk20-router
+f62973c5d227a36192111cc123de25b74dfef20163ec98647cd9b327ed167f11 529728 bin/mk20-kbd
+a202abf550589ad2af1b785a09523b28f5e1dfecb8562e5f671b8699350d244a 792084 bin/mk20-agent
+BINS_EXIT=0

@@ -149,11 +149,16 @@ def test_switch_refusals(dev):
 
 
 def test_manual_rollback(dev):
+    kept = [dev.p("data/mk20/" + name) for name in ("agent", "secrets")]
+    for directory in kept:
+        directory.mkdir()
+    inodes = [directory.stat().st_ino for directory in kept]
     setup_rel(dev, "1.0.0"); dev.run(L, "switch", "1.0.0"); dev.run(L, "confirm", "1.0.0")
     setup_rel(dev, "1.0.1"); dev.run(L, "switch", "1.0.1"); dev.run(L, "confirm", "1.0.1")
     r = dev.run(L, "rollback"); assert r.returncode == 0 and "pending" in r.stdout, r.stdout
     assert dev.run(L, "boot").returncode == 0 and dev.read("tmp/mk20/release-active") == "1.0.0"
     assert dev.read("data/mk20/state/pending") == "1.0.0"       # older release runs on probation
+    assert [directory.stat().st_ino for directory in kept] == inodes
 
 
 def test_manual_rollback_to_good_from_pending(dev):
