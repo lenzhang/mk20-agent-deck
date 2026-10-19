@@ -134,11 +134,25 @@ def main():
         r3 = hid_reports()
         check(r3 == [b"\x01" + bytes(8)], f"all-up on reopen {r3}")
         os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0])); hid_reports()
+        # fw 1.2.0: hidg0 node deleted + re-created after gadget setup -> detected (~1 s check), reopened,
+        # all-up then the held RAlt re-sent on the new node; nothing more goes to the dead one
+        os.rename(hidp, hidp + ".old"); os.mkfifo(hidp)
+        hr2 = os.open(hidp, os.O_RDONLY | os.O_NONBLOCK)
+        t0 = time.time()
+        while fd_mode(p.pid, hidp) is None and time.time() - t0 < 3: time.sleep(0.05)
+        check(fd_mode(p.pid, hidp) == 1 and fd_mode(p.pid, hidp + ".old") is None, "hidg0 replacement: old closed, new opened")
+        b = read_for(hr2, 0.3); r5 = [b[i:i + 9] for i in range(0, len(b), 9)]
+        check(r5 == [b"\x01" + bytes(8), b"\x01\x40" + bytes(7)], f"replacement: all-up then held RAlt {r5}")
+        check(hid_reports() == [], "nothing written to the dead node")
+        time.sleep(1.2)
+        s = json.load(open(st))
+        check(s["hid_open"] == 1 and s["hid_replaced"] == 1 and s["hid_reopens"] == 1, f"status hid counters {s}")
+        hr_old, hr = hr, hr2
         p.send_signal(signal.SIGTERM); p.wait(3)
         check(p.returncode == 0, "clean exit")
         r4 = hid_reports()
         check(r4 == [b"\x01" + bytes(8)], f"all-up on SIGTERM {r4}")
-        os.close(hr)
+        os.close(hr); os.close(hr_old)
 
         # read-only modes: flag and kill file
         kill = os.path.join(tmp, "nowrite")

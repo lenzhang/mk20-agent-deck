@@ -519,9 +519,65 @@ static void test_hid(void)
     signal(SIGPIPE, SIG_IGN);
     hid_attach_fd(&h, r2[1]);
     CHECK(h.hard_fail >= 1 && h.dirty && !hid_wants_pollout(&h));
-    unsigned e0 = h.errors; hid_service(&h, 6000000); hid_service(&h, 6000010);
-    CHECK(h.errors == e0 + 1);   /* second call inside 100 ms is throttled */
+    /* EPIPE is a "node gone" error: no retry spin on the dead fd, it is closed and reopened (path missing here) */
+    CHECK(h.reopen_req == 1);
+    unsigned e0 = h.errors, rp0 = h.replaced; hid_service(&h, 6000000); hid_service(&h, 6000010);
+    CHECK(h.errors == e0 && h.fd < 0 && h.replaced == rp0 + 1 && h.next_open_ms == 6000100);
+    hid_service(&h, 6000100); CHECK(h.fd < 0 && h.next_open_ms == 6000200);   /* back-off 100, 200, 400 .. 1000 */
+    hid_service(&h, 6000200); CHECK(h.next_open_ms == 6000400);
+    hid_service(&h, 6000400); hid_service(&h, 6000800); hid_service(&h, 6001600); CHECK(h.next_open_ms == 6002600);
     hid_close(&h, 0);
     close(p[0]); close(q[0]);
     kbd_free(&k); rmdir(dir);
+}
+
+/* fw 1.2.0: /dev/hidg0 is deleted and re-created ~13 s after gadget setup. Simulated with regular files at the path:
+ * identity check every ~1 s -> close + reopen, all-keys-up then the held state on the new node. */
+static int rd_file(const char *p, uint8_t out[][9], int max)
+{
+    int fd = open(p, O_RDONLY); if (fd < 0) return -1;
+    int n = rd_reports(fd, out, max); close(fd); return n;
+}
+static void test_hid_replace(void)
+{
+    char dir[] = "/tmp/mk20hrXXXXXX"; CHECK(mkdtemp(dir) != NULL);
+    char path[256], old[256]; snprintf(path, sizeof path, "%s/hidg0", dir); snprintf(old, sizeof old, "%s/old", dir);
+    FILE *f = fopen(path, "w"); fclose(f);
+    hid_t h; hid_init(&h, path, NULL);
+    uint8_t rep[64][9]; int n;
+    hid_service(&h, 1000);
+    CHECK(h.fd >= 0 && h.watch && h.opens == 1 && fsize(path) == 9);     /* startup all-up */
+    hid_set_mod(&h, HID_MOD_RALT, 1); CHECK(fsize(path) == 18);           /* PTT held */
+    hid_service(&h, 1500); CHECK(h.fd >= 0 && !hid_node_replaced(&h));    /* same node: nothing happens */
+    /* replacement: old node renamed away (unlinked from the path), a new one created */
+    CHECK(rename(path, old) == 0);
+    hid_service(&h, 1900); CHECK(h.fd >= 0);                              /* not checked before ~1 s */
+    hid_service(&h, 2000); CHECK(h.fd < 0 && h.replaced == 1 && h.next_open_ms == 2100);
+    CHECK(fsize(old) == 18);                                               /* no all-up into the dead node */
+    hid_service(&h, 2100); CHECK(h.fd < 0 && h.next_open_ms == 2200 && h.backoff_ms == 200);   /* path missing (link down): back-off */
+    f = fopen(path, "w"); fclose(f);
+    hid_service(&h, 2200);
+    CHECK(h.fd >= 0 && h.reopens == 1 && h.watch);
+    n = rd_file(path, rep, 64);
+    CHECK(n == 2 && rep[0][1] == 0 && rep[1][1] == HID_MOD_RALT);          /* all-up, then the held RAlt re-sent */
+    CHECK(h.mods == HID_MOD_RALT && !h.dirty);
+    /* deleted node (nlink 0) is detected too */
+    CHECK(unlink(path) == 0); f = fopen(path, "w"); fclose(f);
+    hid_set_mod(&h, HID_MOD_RALT, 0);
+    hid_service(&h, 3300); CHECK(h.fd < 0 && h.replaced == 2);
+    hid_service(&h, 3400); CHECK(h.fd >= 0 && h.reopens == 2);
+    n = rd_file(path, rep, 64); CHECK(n == 1 && rep[0][1] == 0);           /* nothing held: one all-up only */
+    /* a write error that means "node gone" triggers the same path without waiting for the 1 s check */
+    hid_close(&h, 0);
+    int r2[2]; CHECK(pipe(r2) == 0); fcntl(r2[1], F_SETFL, O_NONBLOCK); close(r2[0]); signal(SIGPIPE, SIG_IGN);
+    hid_attach_fd(&h, r2[1]); hid_set_mod(&h, HID_MOD_RALT, 1);
+    CHECK(h.reopen_req);
+    hid_service(&h, 5000); CHECK(h.fd < 0);
+    unlink(path); f = fopen(path, "w"); fclose(f);
+    hid_service(&h, 5100); CHECK(h.fd >= 0);
+    n = rd_file(path, rep, 64); CHECK(n == 2 && rep[0][1] == 0 && rep[1][1] == HID_MOD_RALT);
+    /* a stop-file / SIGUSR1 close in between does not carry "keep" over: next open is a fresh startup all-up */
+    hid_request_close(&h); hid_service(&h, 6000); CHECK(h.fd < 0 && !h.keep);
+    hid_close(&h, 0);
+    unlink(path); unlink(old); rmdir(dir);
 }

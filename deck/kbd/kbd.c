@@ -274,11 +274,12 @@ int kbd_write_status(kbd_t *k, const char *path)
     fprintf(f, "{\"version\":\"%s\",\"gd32_rw\":%d,\"knob_init\":\"%s\",\"knob_ok\":%d,\"knob_timeouts\":%d,"
                "\"knob_tx_errors\":%d,\"panels_written\":%d,\"panels_dirty\":%d,\"write_errors\":%u,\"key_events\":%u,\"knob_events\":%u,"
                "\"echo_frames\":%u,\"other_frames\":%u,\"jpg_ok\":%u,\"jpg_bad\":%u,\"jpg_size\":%u,\"json_in\":%u,"
-               "\"host\":%d,\"host_tx_errors\":%u,\"backlight\":%d}\n",
+               "\"host\":%d,\"host_tx_errors\":%u,\"backlight\":%d,\"hid_open\":%d,\"hid_reopens\":%u,\"hid_replaced\":%u}\n",
             k->version, k->gd32_rw, gd32_knob_state_name(ks->state), ks->ok_count, ks->timeouts, ks->tx_errors,
             panels_written, dirty, werr, k->st.key_events, k->st.knob_events, k->st.echo_frames,
             k->st.other_frames, k->st.jpg_ok, k->st.jpg_bad, k->st.jpg_size, k->st.json_in, k->host_fd >= 0,
-            k->st.host_tx_errors, k->backlight);
+            k->st.host_tx_errors, k->backlight, k->hid ? k->hid->fd >= 0 : -1, k->hid ? k->hid->reopens : 0u,
+            k->hid ? k->hid->replaced : 0u);
     if (fclose(f)) { unlink(tmp); return -1; }
     return rename(tmp, path);
 }

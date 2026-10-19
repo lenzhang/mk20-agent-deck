@@ -4,6 +4,7 @@
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -16,7 +17,10 @@ void hid_init(hid_t *h, const char *path, const char *stop_file)
     snprintf(h->path, sizeof h->path, "%s", path ? path : HID_DEFAULT_PATH);
     snprintf(h->stop_file, sizeof h->stop_file, "%s", stop_file ? stop_file : "");
     h->dirty = 1;
+    h->backoff_ms = 1000;
 }
+
+static int gone_errno(int e) { return e == ENXIO || e == ESHUTDOWN || e == ENODEV || e == EPIPE; }
 
 static void kbd_report(const hid_t *h, uint8_t *r)
 {
@@ -30,7 +34,7 @@ static int wr(hid_t *h, const uint8_t *rep, size_t n)
     do w = write(h->fd, rep, n); while (w < 0 && errno == EINTR && !h->close_req);
     if (w == (ssize_t)n) { h->writes++; h->hard_fail = 0; return 0; }
     if (w >= 0) errno = EIO;
-    if (errno == EAGAIN) h->eagain++; else { h->errors++; h->hard_fail++; }
+    if (errno == EAGAIN) h->eagain++; else { h->errors++; h->hard_fail++; if (gone_errno(errno)) h->reopen_req = 1; }
     return -1;
 }
 
@@ -64,7 +68,25 @@ void hid_close(hid_t *h, int release)
     if (h->fd < 0) return;
     if (release) hid_release_all(h, 300);   /* short: teardown is waiting */
     close(h->fd); h->fd = -1; h->closes++;
-    h->ptr_n = 0;
+    h->ptr_n = 0; h->watch = 0; h->reopen_req = 0; h->keep = 0;
+}
+
+int hid_node_replaced(const hid_t *h)
+{
+    struct stat a, b;
+    if (h->fd < 0 || fstat(h->fd, &a)) return 1;
+    if (a.st_nlink == 0) return 1;                       /* "/dev/hidg0 (deleted)" */
+    if (stat(h->path, &b)) return 1;                     /* node gone (link down, re-creating) */
+    return a.st_dev != b.st_dev || a.st_ino != b.st_ino || a.st_rdev != b.st_rdev;
+}
+
+/* reopen after a node replacement: all-keys-up on the new node, then re-send what is still held */
+static void reattach_keep(hid_t *h, int fd)
+{
+    static const uint8_t up[HID_KBD_LEN] = {1, 0, 0, 0, 0, 0, 0, 0, 0};
+    h->fd = fd; h->opens++; h->reopens++; h->hard_fail = 0; h->dirty = 1;
+    if (wr(h, up, sizeof up) == 0) { memcpy(h->sent, up, sizeof up); h->dirty = 0; }
+    flush(h);
 }
 
 void hid_request_close(hid_t *h) { h->close_req = 1; }
@@ -75,12 +97,30 @@ void hid_service(hid_t *h, long now)
         hid_close(h, 1);
         h->next_open_ms = now + 200;
     }
+    if (h->fd >= 0 && h->watch && !h->reopen_req && now >= h->next_check_ms) {
+        h->next_check_ms = now + 1000;
+        if (hid_node_replaced(h)) h->reopen_req = 1;
+    }
+    if (h->fd >= 0 && h->reopen_req) {   /* dead node: no all-up there (it cannot reach the host), reopen soon */
+        fprintf(stderr, "mk20-kbd: %s replaced/gone, reopening\n", h->path);
+        close(h->fd); h->fd = -1; h->closes++; h->replaced++; h->ptr_n = 0;
+        h->reopen_req = 0; h->watch = 0; h->keep = 1;
+        h->backoff_ms = 100; h->next_open_ms = now + 100;
+        return;
+    }
     if (h->fd < 0) {
         if (h->close_req && !stop_present(h)) h->close_req = 0;   /* one-shot request; reopen next tick */
         if (h->close_req || stop_present(h) || now < h->next_open_ms) return;
         int fd = open(h->path, O_WRONLY | O_CLOEXEC | O_NONBLOCK);
-        if (fd < 0) { h->next_open_ms = now + 1000; return; }
-        hid_attach_fd(h, fd);
+        if (fd < 0) {   /* ENXIO until the link is up again: short back-off after a replacement */
+            h->next_open_ms = now + h->backoff_ms;
+            h->backoff_ms = h->backoff_ms * 2 > 1000 ? 1000 : h->backoff_ms * 2;
+            return;
+        }
+        struct stat st;
+        if (fstat(fd, &st) == 0) { h->dev = st.st_dev; h->ino = st.st_ino; h->rdev = st.st_rdev; }
+        if (h->keep) reattach_keep(h, fd); else hid_attach_fd(h, fd);
+        h->keep = 0; h->watch = 1; h->backoff_ms = 1000; h->next_check_ms = now + 1000;
         return;
     }
     if (h->dirty || h->ptr_n) {
