@@ -1,0 +1,5 @@
+Fixes #2 and #3 are resolved. #1 remains incomplete. Shell syntax and mocked service-stop checks pass; no device execution.
+
+1. **Teardown still loses surviving thread groups.** [gadget.sh:97](/Users/dev/worktrees/mk20-review-kdr/deck/firmware/release/share/gadget.sh:97) discards `kbd_hid_quiesce` failure. If SIGKILL leaves a zombie leader with a surviving worker, the subsequent `kbd_stop` initializes `krec` from empty cmdline discovery and returns success, permitting HID removal and KD startup. Additionally, [gadget.sh:138](/Users/dev/worktrees/mk20-review-kdr/deck/firmware/release/share/gadget.sh:138) resets `krec` on every call, so even a correctly detected survivor is forgotten on rollback retry. Mocked shell reproductions confirm both paths. **Minimal fix:** retain validated process identities across quiescence, full stop, and retries; propagate survival failure to both transition callers and prevent USB mutation/KD startup until those groups disappear, otherwise escalate to reboot.
+
+VERDICT: NO-GO
