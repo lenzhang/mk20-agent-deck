@@ -114,7 +114,8 @@ static void safety(void) {
     CHECK(k.host_out_len>0); /* drain later returns original empty ack id */
     while(read(p[0],fill,sizeof fill)>0) {} kbd_host_drain(&k);
     host_parser parser; host_parser_init(&parser,1024); uint8_t bytes[128]; ssize_t n=read(p[0],bytes,sizeof bytes); CHECK(n>0);
-    if(n>0) host_push(&parser,bytes,(size_t)n); host_frame f; CHECK(host_next(&parser,&f) && f.id==99 && f.cmd==100 && !f.size);
+    if(n>0) host_push(&parser,bytes,(size_t)n);
+    host_frame f; CHECK(host_next(&parser,&f) && f.id==99 && f.cmd==100 && !f.size);
     host_parser_free(&parser); close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
 }
 static void acknowledgements(void) {

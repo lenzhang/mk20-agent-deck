@@ -7,7 +7,7 @@ set -eu
 D=$(cd "$(dirname "$0")/.." && pwd)
 CC=${CROSS:-arm-linux-gnueabihf-}gcc
 command -v "$CC" >/dev/null || { echo "missing $CC" >&2; exit 1; }
-F="-Wall -Wextra -Werror -O2 -static"
+F="-Wall -Wextra -Werror -O2 -static -ffile-prefix-map=$D=deck"  # path-independent (__FILE__ in asserts/stb_image)
 B=$D/firmware/release/bin
 "$CC" $F -o "$B/ttygs_tcp_bridge.new" "$D/m2-scripts/bridge/ttygs_tcp_bridge.c"
 "$CC" $F -o "$B/mk20-router.new" "$D/router/mk20_router.c"
