@@ -1,0 +1,25 @@
+# Task: fix round 2 for MK20 agent A1 (this worktree, under deck/)
+
+Read deck/reviews/agent-a1-codex-accept-r2.md (R2-F1, R2-F2, R2-G1, R2-G2) and deck/reviews/agent-a1-kimi-r2.md (nits).
+Same HARD RULES as ../mk20-a1-task.md and ../mk20-a1-fix-task.md (no device/serial/adb/network, no git commit/push, do not
+touch deck/firmware/release/bin/* or the review files, no new GD32 writes, defaults OFF and byte-identical behaviour when
+no agent flag is given, C11 -Wall -Wextra -Werror Linux glibc + static armhf, scoped tests only).
+
+FIX:
+1. R2-F1 (major): with --ctl or --k2-estop active, e-stop (socket op, reserved-page key, K2) and human preemption must be
+   serviced within 100 ms even when the host link (ttyGS0) is stalled. Process physical safety (K2/estop key/human preempt)
+   BEFORE host forwarding; never block in kbd_host_send for longer than a small bound (e.g. <= 20 ms) when safety is active,
+   or make it nonblocking with a bounded queue (drop/coalesce per existing semantics, count drops); service the control
+   socket and safety timers between host work. Keep the default (no agent flags) path unchanged if possible; if it must
+   change, prove default behaviour by the existing tests. Add real-binary e2e tests (e2e_run.py) with an initially stalled
+   host (pty not read), writable HID, an agent holding a key: socket estop and physical stop each -> all-up report within
+   100 ms.
+2. R2-F2 (major): run ctl_tick and k2_estop_tick with a fresh timestamp before EVERY hid_service/HID flush (loop entry,
+   after poll, after any time-consuming work). Production-order regression: HID backpressure held across lease expiry, then
+   unblocked -> only neutral/release reports; same for an elapsed K2 hold deadline. Make test_ctl_backpressure (or a new
+   test) follow production order, ideally by factoring the loop step into a testable function.
+3. R2-G1: e2e K2 cold-start hold test that sends nothing after K2 down and still observes the e-stop event/all-up in time.
+4. R2-G2 / kimi nit 1: check the ctl_json_quote return (fail -> error reply) and add a small seeded random malformed-line
+   test for ctl_handle_line and oai_parse_response under the sanitizers (bounded iterations, deterministic seed).
+
+FINISH with a summary: per fix files changed + test added, what ran and results, what could not run on macOS.
