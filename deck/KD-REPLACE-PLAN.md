@@ -149,8 +149,25 @@
 - **Router merge, step 1 (`hid.c`):** `/dev/hidg0` output inside mk20-kbd: keyboard report 1 (mods + 6 keys), absolute pointer report 2 (FIFO, button edges never dropped), PTT key (doc 1,4 → fw col 0,row 3; `--ptt C,R`) holds Right Alt; knobs and other keys local. r120 rules kept: all-up at open, exit, EOF and SIGTERM (bounded 1.5 s, under gadget.sh's TERM→KILL window); state only changes on a fully accepted write; dirty re-send on POLLOUT; non-EAGAIN errors throttled to 100 ms. **Teardown:** the daemon checks `/tmp/mk20-router-stop` every ≤100 ms tick while hidg0 is open (and closes immediately on SIGUSR1), sends a short all-up and closes; it reopens only after the file is gone. e2e covers all of this with a FIFO as hidg0.
 
 **K3 remaining:**
-- **gadget.sh / mk20d integration (K4):** `router_stop` must also cover mk20-kbd: send SIGUSR1 (or rely on the stop file), then wait until `/proc/<pid>/fd` no longer points at `/dev/hidg0` before any UDC/configfs change. Today it only signals `bin/mk20-router --src` pids. The standalone router and the bridge `--tap` path go away when mk20-kbd is the release default.
 - Router features beyond PTT that lived on the Mac/agent side (keymaps/actions, MCP agent hooks), keytrace (`MK20_KEYTRACE`) not yet ported.
 - Console e2e through the real TCP bridge plus the Mac console in the simulator.
+
+**K4 release integration (2026-10-19, box only, `tests/test_mk20d_kbd.py`, 35 tests):**
+- **Opt-in + kill switches** (`mk20lib.sh`): `FEATURE_KBD` (default 0; mk20.conf or env `MK20_KBD=1`). `/data/mk20/use-kd` or FAT `mk20-use-kd` force 0 (beat the env too). Per-version mark `state/kbd-fallback` (contents = version) keeps stock KD for that release only; a new release retries.
+- **Boot** (`mk20d boot`): decided before gadget, composite only. `MK20_KBD=1` goes to gadget-boot.sh, which then starts the bridge without `--tap`. On gadget rc 0: touch `/tmp/mk20/kbd.mode`, launch `mk20d kbd`, and do NOT start the standalone router. On rc != 0, stock KD stays.
+- **Supervisor** (`mk20d kbd`, flock, `/tmp/mk20/kbd-loop.pid`):
+  - Stops stock KD with `/etc/init.d/qt_app2 stop` (procd; a plain kill gets respawned) and waits ≤5 s for KD to be gone. If KD is still there: `qt_app2 start`, no mk20-kbd (never two writers on ttyS1/fb).
+  - Runs `bin/mk20-kbd --run --host /dev/ttyGS0 --hid /dev/hidg0 --hid-stop-file /tmp/mk20-router-stop --status /run/mk20/kbd.status` (`--no-hid` when NOHID). Restarts it after 1 s.
+  - 3 exits within 300 s → `qt_app2 start`, mark, `/tmp/mk20/kbd-fallback`.
+  - Composite down → hand back to KD.
+  - `/tmp/mk20-kbd-stop` → exit (gadget.sh owns KD then).
+- **Selftest:**
+  - kbd mode: kd=0, mk20-kbd running, and status fresh ≤10 s with knob_ok=6 or any GD32 frame counted, plus panels_written=21. Each check FAILs, so no confirm and the loader rolls back.
+  - Fell back this boot: FAIL while `state/pending` = this version, WARN after confirm.
+  - health.json gains a `"kbd"` section.
+- **gadget.sh:**
+  - `router_stop` now ends with `kbd_hid_quiesce`: SIGUSR1 to validated `bin/mk20-kbd --run` pids (the stop file is already touched), then wait until no `/proc/<pid>/fd` points at `/dev/hidg0` (≤3 s). Otherwise SIGTERM (≤2 s), then SIGKILL: fail closed.
+  - `kbd_stop` (stop file, validated supervisor kill, TERM→KILL) runs right after `router_stop` in `cleanup()` and `setup_main`, before any UDC write and before `kd_start`.
+- **Not yet:** `mk20-kbd` is not in `firmware/release/bin` (the build script + binary-match test need extending), so `FEATURE_KBD=1` has no effect on a release built today (`kbd_wanted` needs the binary).
 
 **On-device checks still needed (user at home):** knob init echo on the real GD32 and K2 events `16 .. 67/68/69`; JPEG frames from the Mac console shown correctly; brightness levels look right with the KD mapping; PTT RAlt from the on-board daemon and the hidg0 close on gadget teardown; host link reopen across a bridge restart; latency press→keyStateChanged and press→panel.

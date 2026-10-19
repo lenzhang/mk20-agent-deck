@@ -47,7 +47,7 @@ cfg_set() { # $1=key $2=value: validated, then assigned explicitly (no eval)
   case "$1" in
     ECM_SUBNET) v_subnet "$2" ;;
     ECM_DEV_MAC|ECM_HOST_MAC) v_mac "$2" ;;
-    FEATURE_COMPOSITE|FEATURE_HID|FEATURE_ADB|FEATURE_ROUTER) v_bool "$2" ;;
+    FEATURE_COMPOSITE|FEATURE_HID|FEATURE_ADB|FEATURE_ROUTER|FEATURE_KBD) v_bool "$2" ;;
     BRIDGE_PORT) v_range "$2" 1024 65535 ;;
     FLAP_DROPS) v_range "$2" 2 50 ;;
     FLAP_WINDOW_S) v_range "$2" 10 600 ;;
@@ -57,7 +57,7 @@ cfg_set() { # $1=key $2=value: validated, then assigned explicitly (no eval)
   esac || { cfg_warn "invalid $1"; return 0; }
   case "$1" in
     ECM_SUBNET) ECM_SUBNET=$2;; ECM_DEV_MAC) ECM_DEV_MAC=$2;; ECM_HOST_MAC) ECM_HOST_MAC=$2;;
-    FEATURE_COMPOSITE) FEATURE_COMPOSITE=$2;; FEATURE_HID) FEATURE_HID=$2;; FEATURE_ADB) FEATURE_ADB=$2;; FEATURE_ROUTER) FEATURE_ROUTER=$2;;
+    FEATURE_COMPOSITE) FEATURE_COMPOSITE=$2;; FEATURE_HID) FEATURE_HID=$2;; FEATURE_ADB) FEATURE_ADB=$2;; FEATURE_ROUTER) FEATURE_ROUTER=$2;; FEATURE_KBD) FEATURE_KBD=$2;;
     BRIDGE_PORT) BRIDGE_PORT=$2;; FLAP_DROPS) FLAP_DROPS=$2;; FLAP_WINDOW_S) FLAP_WINDOW_S=$2;;
     LOG_MAX_KB) LOG_MAX_KB=$2;; LOG_KEEP) LOG_KEEP=$2;;
   esac
@@ -69,7 +69,7 @@ cfg_load() {
   CFG_WARN=""
   ECM_SUBNET=172.30.250.0/24; [ -n "${MK20_DEFAULT_SUBNET:-}" ] && cfg_set ECM_SUBNET "$MK20_DEFAULT_SUBNET"
   ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56
-  FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; FEATURE_ROUTER=1; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
+  FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; FEATURE_ROUTER=1; FEATURE_KBD=0; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
   LOG_MAX_KB=256; LOG_KEEP=3; CFG_SRC=defaults
   if [ -L "$CONF" ] || { [ -e "$CONF" ] && [ ! -f "$CONF" ]; }; then cfg_warn "config is not a regular file, ignored"
   elif [ -f "$CONF" ]; then
@@ -93,12 +93,17 @@ cfg_load() {
   [ -f "$S/mk20-gadget-nohid" ] && FEATURE_HID=0
   [ -f "$S/mk20-no-router" ] && FEATURE_ROUTER=0   # 1.2.0 on-board router (also MK20_ROUTER=0)
   [ "${MK20_ROUTER:-}" = 0 ] && FEATURE_ROUTER=0
+  # mk20-kbd (KD replacement, option D): opt-in (FEATURE_KBD=1 in mk20.conf or MK20_KBD=1). Kill switches keep stock
+  # KD: /data/mk20/use-kd (adb/ssh) or mk20-use-kd on the FAT (TF card / host).
+  [ "${MK20_KBD:-}" = 1 ] && FEATURE_KBD=1
+  [ "${MK20_KBD:-}" = 0 ] && FEATURE_KBD=0
+  { [ -f "$MK20_HOME/use-kd" ] || [ -f "$S/mk20-use-kd" ]; } && FEATURE_KBD=0
   [ "$ECM_DEV_MAC" = "$ECM_HOST_MAC" ] && { cfg_warn "dev/host MAC equal, defaults used"; ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56; }
   n=${ECM_SUBNET%/24}; ECM_PREFIX=${n%.0}; ECM_IP=$ECM_PREFIX.2; ECM_HOST_IP=$ECM_PREFIX.1; ECM_MASK=255.255.255.0
 }
 cfg_print() {
   local k
-  for k in CFG_SRC ECM_SUBNET ECM_IP ECM_HOST_IP ECM_DEV_MAC ECM_HOST_MAC FEATURE_COMPOSITE FEATURE_HID FEATURE_ADB FEATURE_ROUTER BRIDGE_PORT FLAP_DROPS FLAP_WINDOW_S LOG_MAX_KB LOG_KEEP; do
+  for k in CFG_SRC ECM_SUBNET ECM_IP ECM_HOST_IP ECM_DEV_MAC ECM_HOST_MAC FEATURE_COMPOSITE FEATURE_HID FEATURE_ADB FEATURE_ROUTER FEATURE_KBD BRIDGE_PORT FLAP_DROPS FLAP_WINDOW_S LOG_MAX_KB LOG_KEEP; do
     eval "echo \"$k=\$$k\""; done
   [ -n "$CFG_WARN" ] && echo "WARNINGS=$CFG_WARN"
   return 0

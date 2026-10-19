@@ -1,3 +1,14 @@
 #!/bin/sh
 # mock: prints $MOCK_DIR/pgrep.out lines (pids) if present
+# keyed mode ($MOCK_DIR/pgrep.keyed, mk20-kbd tests): KeyboardDevice -> $MOCK_DIR/pgrep.kd; mk20-kbd/mk20-router ->
+# the real pgrep (live test processes); anything else -> pgrep.out
+if [ -f "$MOCK_DIR/pgrep.keyed" ]; then
+  pat=""; for a in "$@"; do pat=$a; done
+  case "$pat" in
+    *KeyboardDevice*) f=$MOCK_DIR/pgrep.kd;;
+    *mk20-kbd*|*mk20-router*) for b in /usr/bin/pgrep /bin/pgrep; do [ -x $b ] && exec $b "$@"; done; exit 1;;
+    *) f=$MOCK_DIR/pgrep.out;;
+  esac
+  [ -s "$f" ] && { cat "$f"; exit 0; }; exit 1
+fi
 [ -s "$MOCK_DIR/pgrep.out" ] && { cat "$MOCK_DIR/pgrep.out"; exit 0; }; exit 1

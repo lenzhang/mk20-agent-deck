@@ -94,6 +94,45 @@ router_stop() {
     for rp in $rps; do kill -9 "$rp" 2>/dev/null; done
     ri=0; while [ -n "$(router_pids)" ] && [ $ri -lt 10 ]; do sleep 0.1; ri=$((ri+1)); done
     [ -n "$(router_pids)" ] && log "WARN router still present after SIGKILL"; fi
+  kbd_hid_quiesce
+  return 0
+}
+# mk20-kbd (KD replacement) also holds /dev/hidg0. Same UAF rule: before any UDC/configfs change it must have closed
+# it. It watches /tmp/mk20-router-stop (touched above) and closes on SIGUSR1; we wait until /proc shows no hidg0 fd.
+# Fail closed: still held after ~3 s -> SIGTERM, then SIGKILL (the fd dies with the process).
+# Only pids whose cmdline really is `.../bin/mk20-kbd --run ...` are signalled.
+kbd_pids() { for p in $(pgrep -f 'bin/mk20-kbd --run' 2>/dev/null); do
+  case "$p" in ''|*[!0-9]*) continue;; esac
+  tr '\000' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'bin/mk20-kbd --run' && echo "$p"; done; }
+kbd_hid_holders() { for p in $(kbd_pids); do for f in /proc/"$p"/fd/*; do
+  [ "$(readlink "$f" 2>/dev/null)" = "${MK20_HIDG:-/dev/hidg0}" ] && { echo "$p"; break; }; done; done; }
+kbd_hid_quiesce() {
+  kh=$(kbd_hid_holders); [ -n "$kh" ] || return 0
+  for kp in $kh; do kill -USR1 "$kp" 2>/dev/null; done
+  ki=0; while [ -n "$kh" ] && [ $ki -lt "${MK20_KBD_HID_TICKS:-15}" ]; do sleep 0.2; ki=$((ki+1)); kh=$(kbd_hid_holders); done
+  [ -n "$kh" ] || return 0
+  log "mk20-kbd still holds hidg0 after SIGUSR1 -> SIGTERM $kh"
+  for kp in $kh; do kill "$kp" 2>/dev/null; done
+  ki=0; while [ -n "$(kbd_hid_holders)" ] && [ $ki -lt 10 ]; do sleep 0.2; ki=$((ki+1)); done
+  kh=$(kbd_hid_holders); [ -n "$kh" ] || return 0
+  log "mk20-kbd ignored SIGTERM -> SIGKILL $kh"; for kp in $kh; do kill -9 "$kp" 2>/dev/null; done
+  ki=0; while [ -n "$(kbd_hid_holders)" ] && [ $ki -lt 10 ]; do sleep 0.1; ki=$((ki+1)); done
+  [ -n "$(kbd_hid_holders)" ] && log "WARN mk20-kbd still holds hidg0 after SIGKILL"
+  return 0
+}
+# Full stop (every cleanup/setup path, after router_stop): stock KD is restarted by these paths, so mk20-kbd must not
+# keep running beside it. Stop file (the mk20d kbd supervisor will not relaunch), validated supervisor kill, bounded
+# SIGTERM (mk20-kbd sends all-keys-up), then SIGKILL. The next boot decides again.
+kbd_stop() {
+  touch /tmp/mk20-kbd-stop
+  kl=$(cat /tmp/mk20/kbd-loop.pid 2>/dev/null)
+  case "$kl" in ''|*[!0-9]*|0|1) ;; *) tr '\000' ' ' < "/proc/$kl/cmdline" 2>/dev/null | grep -q 'mk20d kbd' && kill "$kl" 2>/dev/null;; esac
+  ki=0; kps=$(kbd_pids)
+  while [ -n "$kps" ] && [ $ki -lt "${MK20_KBD_TERM_TICKS:-15}" ]; do
+    for kp in $kps; do kill "$kp" 2>/dev/null; done; sleep 0.2; ki=$((ki+1)); kps=$(kbd_pids); done
+  if [ -n "$kps" ]; then log "mk20-kbd did not exit on SIGTERM -> SIGKILL $kps"; for kp in $kps; do kill -9 "$kp" 2>/dev/null; done
+    ki=0; while [ -n "$(kbd_pids)" ] && [ $ki -lt 10 ]; do sleep 0.1; ki=$((ki+1)); done; fi
+  rm -f /tmp/mk20/kbd.mode
   return 0
 }
 # KD stop: procd may respawn appLunch.sh right after `stop`; killing that sh later orphaned its fresh KD
@@ -139,6 +178,7 @@ cleanup() {
   mkdir -p /tmp/mk20; touch /tmp/mk20/gadget.busy
   log "FAILSAFE: undo composite"
   router_stop   # before ANY UDC/configfs change (hidg0 fd vs f_hid free)
+  kbd_stop      # mk20-kbd off too: these paths hand the panels back to stock KD
   touch /tmp/mk20-flapmon-stop
   killall adbd 2>/dev/null
   echo "" > $G/UDC 2>/dev/null
@@ -327,6 +367,7 @@ kd_stop; killall adbd 2>/dev/null; sleep 1
 pgrep -f /data/KeyboardDevice >/dev/null && die "KD still running/respawned after stop"
 # ---- unbind + clean stale links ----
 router_stop   # 1.2.0: no open /dev/hidg0 across unbind/unlink (re-setup over a live composite)
+kbd_stop      # KD replacement off too (stock KD restarted below; mk20d kbd retakes it after boot)
 i=0; while [ -n "$(udc_now)" ] && [ $i -lt 10 ]; do echo "" > $G/UDC 2>/dev/null; sleep 0.3; i=$((i+1)); done
 [ -z "$(udc_now)" ] || die "cannot unbind"
 for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
@@ -369,7 +410,8 @@ BRIDGE_LISTEN="--dev usb0 --listen $ECM_IP:$BRIDGE_PORT"
 if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
 else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
 # 1.2.0: KD->host copy for the on-board router (release bridge only; a legacy /data bridge has no --tap)
-[ -n "${MK20_REL:-}" ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --tap /tmp/mk20/kd-tap.sock"
+# mk20-kbd mode (MK20_KBD=1 from mk20d): no KD output to tap, mk20-kbd owns ttyGS0 and hidg0 itself
+[ -n "${MK20_REL:-}" ] && [ "${MK20_KBD:-0}" != 1 ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --tap /tmp/mk20/kd-tap.sock"
 rm -f /tmp/mk20-bridge-stop
 # ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
 mkdir -p /tmp/mk20
