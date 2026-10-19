@@ -599,7 +599,7 @@ def test_default_lock_is_the_supervised_lock():
 
 def test_kbd_alive_thread_group(tmp_path):
     """codex kdr-r2 #1: a zombie leader counts as gone only when no thread is left; a live process is alive."""
-    fn = FN[FN.index("kbd_alive() {"):FN.index("kbd_hid_holders() {")]
+    fn = FN[FN.index("kbd_st() {"):FN.index("kbd_hid_holders() {")]
     s = tmp_path / "a.sh"; s.write_text(fn + '\nfor p in "$@"; do kbd_alive "$p" && echo "$p alive" || echo "$p gone"; done\n')
     live = subprocess.Popen([sys.executable, "-c", "import threading,time; threading.Thread(target=time.sleep, args=(30,)).start(); time.sleep(30)"])
     z = subprocess.Popen(["sleep", "30"]); z.kill(); time.sleep(0.3)        # killed, not reaped: zombie, 1 task
@@ -608,3 +608,25 @@ def test_kbd_alive_thread_group(tmp_path):
         assert f"{live.pid} alive" in out and f"{z.pid} gone" in out and "999999 gone" in out
     finally:
         live.kill(); live.wait(); z.wait()
+
+
+
+def test_survivor_remembered_across_calls(gh):
+    """codex kdr-r3 #1: a pid signalled by kbd_hid_quiesce (or an earlier kbd_stop) is remembered in kbd-pids.rec, so a
+    later kbd_stop fails while that group lives even when cmdline discovery no longer finds it; a pid reused with
+    another start time is ignored; success clears the record."""
+    t, start, run, hid = gh
+    p = start("close")
+    st = open(f"/proc/{p.pid}/stat").read().rsplit(") ", 1)[1].split()[19]
+    (t / "mk20").mkdir(exist_ok=True)
+    (t / "mk20/kbd-pids.rec").write_text(f"{p.pid}:{st}\n")
+    # discovery blind (pgrep finds nothing), recorded survivor alive -> fail closed
+    s = t / "k2.sh"
+    s.write_text(f'log() {{ echo "$*" >> {t}/log; }}\npgrep() {{ return 1; }}\n'
+                 + FN.replace("/tmp/mk20-kbd-stop", str(t / "kstop")).replace("/tmp/mk20/", str(t / "mk20") + "/")
+                 + '\nkbd_stop; echo "rc=$?"\n')
+    r = subprocess.run([BB, "sh", str(s)], capture_output=True, text=True, timeout=30, env=dict(os.environ, MK20_KBD_TERM_TICKS="2"))
+    assert "rc=1" in r.stdout and (t / "mk20/kbd-pids.rec").exists()
+    (t / "mk20/kbd-pids.rec").write_text(f"{p.pid}:1\n")                  # same pid, other start time: not ours
+    r = subprocess.run([BB, "sh", str(s)], capture_output=True, text=True, timeout=30, env=dict(os.environ, MK20_KBD_TERM_TICKS="2"))
+    assert "rc=0" in r.stdout and not (t / "mk20/kbd-pids.rec").exists()

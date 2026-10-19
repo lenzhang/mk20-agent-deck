@@ -108,13 +108,22 @@ kbd_pids() { for p in $(pgrep -f 'bin/mk20-kbd --run' 2>/dev/null); do
 # a recorded pid is gone only when /proc/<pid> vanished or it is a zombie leader with no thread left: after SIGKILL
 # the leader can be a zombie (empty cmdline, fd dir unreadable) while a worker thread sits in uninterruptible fb I/O
 # and still holds the shared fd table (codex kdr-r2 #1)
-kbd_alive() { [ -d "/proc/$1" ] || return 1
+kbd_st() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }   # process start time (field 22)
+kbd_alive() { # $1 = pid or pid:starttime (a reused pid with another start time is not ours)
+  set -- "${1%%:*}" "$(case "$1" in *:*) echo "${1#*:}";; esac)"
+  [ -d "/proc/$1" ] || return 1
+  [ -z "$2" ] || [ "$(kbd_st "$1")" = "$2" ] || return 1
   [ "$(sed -n 's/^State:[[:space:]]*\(.\).*/\1/p' "/proc/$1/status" 2>/dev/null)" = Z ] || return 0
   [ "$(ls "/proc/$1/task" 2>/dev/null | wc -l)" -gt 1 ]; }
+# every validated mk20-kbd pid ever signalled is persisted (/tmp/mk20/kbd-pids.rec) until it is verifiably gone: a
+# zombie leader has an empty cmdline, so later discovery (kbd_stop, a rollback retry) would otherwise forget a
+# surviving worker thread (codex kdr-r3 #1)
+kbd_rec() { [ $# -gt 0 ] || return 0; mkdir -p /tmp/mk20; for p in "$@"; do echo "$p:$(kbd_st "$p")"; done >> /tmp/mk20/kbd-pids.rec; }
 kbd_any_alive() { for p in "$@"; do kbd_alive "$p" && { echo "$p"; return 0; }; done; return 1; }
 kbd_hid_holders() { for p in $(kbd_pids); do for f in /proc/"$p"/fd/*; do
   case "$(readlink "$f" 2>/dev/null)" in "${MK20_HIDG:-/dev/hidg0}"|"${MK20_HIDG:-/dev/hidg0} (deleted)") echo "$p"; break;; esac; done; done; }
 kbd_hid_quiesce() {
+  kbd_rec $(kbd_pids)
   kh=$(kbd_hid_holders); [ -n "$kh" ] || return 0
   for kp in $kh; do kill -USR1 "$kp" 2>/dev/null; done
   ki=0; while [ -n "$kh" ] && [ $ki -lt "${MK20_KBD_HID_TICKS:-15}" ]; do sleep 0.2; ki=$((ki+1)); kh=$(kbd_hid_holders); done
@@ -135,16 +144,17 @@ kbd_stop() {
   touch /tmp/mk20-kbd-stop
   kl=$(cat /tmp/mk20/kbd-loop.pid 2>/dev/null)
   case "$kl" in ''|*[!0-9]*|0|1) ;; *) tr '\000' ' ' < "/proc/$kl/cmdline" 2>/dev/null | grep -q 'mk20d kbd' && kill "$kl" 2>/dev/null;; esac
-  ki=0; kps=$(kbd_pids); krec=$kps   # krec: every validated pid ever seen (checked by thread group at the end)
+  ki=0; kps=$(kbd_pids); kbd_rec $kps
+  krec="$(cat /tmp/mk20/kbd-pids.rec 2>/dev/null) $kps"   # every validated pid ever seen, also by earlier calls
   while [ -n "$kps" ] && [ $ki -lt "${MK20_KBD_TERM_TICKS:-15}" ]; do
-    for kp in $kps; do kill "$kp" 2>/dev/null; done; sleep 0.2; ki=$((ki+1)); kps=$(kbd_pids); krec="$krec $kps"; done
+    for kp in $kps; do kill "$kp" 2>/dev/null; done; sleep 0.2; ki=$((ki+1)); kps=$(kbd_pids); kbd_rec $kps; krec="$krec $kps"; done
   if [ -n "$kps" ]; then log "mk20-kbd did not exit on SIGTERM -> SIGKILL $kps"; for kp in $kps; do kill -9 "$kp" 2>/dev/null; done
     ki=0; while [ -n "$(kbd_pids)" ] && [ $ki -lt 10 ]; do sleep 0.1; ki=$((ki+1)); done; fi
-  sleep 0.2; kps=$(kbd_pids); krec="$krec $kps"   # a launch forked just before the supervisor died execs late
+  sleep 0.2; kps=$(kbd_pids); kbd_rec $kps; krec="$krec $kps"   # a launch forked just before the supervisor died execs late
   [ -n "$kps" ] && { for kp in $kps; do kill -9 "$kp" 2>/dev/null; done; sleep 0.3; }
   ki=0; while kbd_any_alive $krec >/dev/null && [ $ki -lt 20 ]; do sleep 0.1; ki=$((ki+1)); done
   { [ -n "$(kbd_pids)" ] || kbd_any_alive $krec >/dev/null; } && { log "FAIL mk20-kbd survives SIGKILL ($(kbd_pids) $(kbd_any_alive $krec))"; return 1; }
-  rm -f /tmp/mk20/kbd.mode
+  rm -f /tmp/mk20/kbd.mode /tmp/mk20/kbd-pids.rec   # all recorded groups verifiably gone
   return 0
 }
 # KD stop: procd may respawn appLunch.sh right after `stop`; killing that sh later orphaned its fresh KD
