@@ -12,9 +12,16 @@ ZLIB_SRC = $(addprefix vendor/zlib/,inflate.c inftrees.c inffast.c zutil.c adler
 ZLIB_OBJ = $(patsubst vendor/zlib/%.c,$(BUILD)/z-%.o,$(ZLIB_SRC))
 ZLIB_NS = $(patsubst vendor/zlib/%.c,$(BUILD)/ns-z-%.o,$(ZLIB_SRC))
 CPPFLAGS += -Ivendor/zlib -DZ_SOLO
+LLM_HDR = src/llm.h src/oai.h
+LLM_OBJ = $(BUILD)/llm.o $(BUILD)/oai.o
+LLM_NS = $(BUILD)/ns-llm.o $(BUILD)/ns-oai.o
 NET_SRC = src/net.c src/netcfg.c src/clock.c src/json_util.c
 NET_HDR = src/net.h src/netcfg.h src/clock.h src/json_util.h src/mk20_mbedtls_config.h src/psa_config.h
 CPPFLAGS += -Ivendor/mbedtls/include -DMBEDTLS_CONFIG_FILE='"mk20_mbedtls_config.h"'
+$(LLM_OBJ): $(BUILD)/%.o: src/%.c $(LLM_HDR) $(NET_HDR) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -c -o $@ $<
+$(LLM_NS): $(BUILD)/ns-%.o: src/%.c $(LLM_HDR) $(NET_HDR) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 # Only translation units used by the client/selected crypto configuration.
 TLS_NAMES = aes asn1parse asn1write base64 bignum bignum_core \
  chacha20 chachapoly cipher cipher_wrap constant_time ctr_drbg ecdh ecdsa \
@@ -38,10 +45,10 @@ $(BUILD):
 	mkdir -p $@
 $(BUILD)/cJSON.o: vendor/cjson/cJSON.c vendor/cjson/cJSON.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(VENDOR_FLAGS) $(SAN) -c -o $@ $<
-$(BUILD)/oai_cli: src/oai_cli.c src/oai.c src/oai.h $(BUILD)/cJSON.o
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -o $@ src/oai_cli.c src/oai.c $(BUILD)/cJSON.o
-$(BUILD)/test_oai: tests/test_oai.c src/oai.c src/oai.h $(BUILD)/cJSON.o
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -o $@ tests/test_oai.c src/oai.c $(BUILD)/cJSON.o
+$(BUILD)/oai_cli: src/oai_cli.c $(BUILD)/oai.o src/oai.h src/json_util.c src/json_util.h $(BUILD)/cJSON.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -o $@ src/oai_cli.c $(BUILD)/oai.o src/json_util.c $(BUILD)/cJSON.o
+$(BUILD)/test_oai: tests/test_oai.c $(BUILD)/oai.o src/oai.h src/json_util.c src/json_util.h $(BUILD)/cJSON.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -o $@ tests/test_oai.c $(BUILD)/oai.o src/json_util.c $(BUILD)/cJSON.o
 $(BUILD)/z-%.o: vendor/zlib/%.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -c -o $@ $<
 $(BUILD)/ns-z-%.o: vendor/zlib/%.c | $(BUILD)
@@ -52,17 +59,20 @@ $(BUILD)/stb_jpeg.o: src/stb_jpeg.c vendor/stb/stb_image_write.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -fwrapv -w -c -o $@ $<
 $(BUILD)/ns-stb_jpeg.o: src/stb_jpeg.c vendor/stb/stb_image_write.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -fwrapv -w -c -o $@ $<
-$(BUILD)/mk20-agent: src/agent_cli.c src/img.c src/img.h src/oai.h $(RFB_SRC) $(RFB_HDR) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_OBJ) $(BUILD)/cJSON.o
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(TLS_OBJ) $(BUILD)/cJSON.o -lm
-$(BUILD)/mk20-agent-nosan: src/agent_cli.c src/img.c src/img.h src/oai.h $(RFB_SRC) $(RFB_HDR) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_NS) $(BUILD)/ns-cJSON.o
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(TLS_NS) $(BUILD)/ns-cJSON.o -lm
+$(BUILD)/mk20-agent: src/agent_cli.c src/img.c src/img.h src/oai.h $(RFB_SRC) $(RFB_HDR) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_OBJ) $(BUILD)/cJSON.o $(LLM_OBJ) $(LLM_HDR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(LLM_OBJ) $(TLS_OBJ) $(BUILD)/cJSON.o -lm
+$(BUILD)/mk20-agent-nosan: src/agent_cli.c src/img.c src/img.h src/oai.h $(RFB_SRC) $(RFB_HDR) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_NS) $(BUILD)/ns-cJSON.o $(LLM_NS) $(LLM_HDR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(LLM_NS) $(TLS_NS) $(BUILD)/ns-cJSON.o -lm
 $(BUILD)/test_rfb: tests/test_rfb.c $(RFB_SRC) $(RFB_HDR) src/img.c src/img.h $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_rfb.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o -lm
 $(BUILD)/test_net: tests/test_net.c $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_net.c $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
-$(BUILD)/test_cli: tests/test_cli.c src/agent_cli.c $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_cli.c $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
-test: $(BUILD)/test_oai $(BUILD)/oai_cli $(BUILD)/mk20-agent $(BUILD)/test_rfb $(BUILD)/test_net $(BUILD)/test_cli
+$(BUILD)/test_cli: tests/test_cli.c src/agent_cli.c $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o $(LLM_OBJ) $(LLM_HDR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_cli.c $(NET_SRC) $(LLM_OBJ) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
+$(BUILD)/test_llm: tests/test_llm.c $(LLM_OBJ) $(LLM_HDR) $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_llm.c $(LLM_OBJ) $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
+test: $(BUILD)/test_llm $(BUILD)/test_oai $(BUILD)/oai_cli $(BUILD)/mk20-agent $(BUILD)/test_rfb $(BUILD)/test_net $(BUILD)/test_cli
+	$(BUILD)/test_llm
 	$(BUILD)/test_oai
 	$(BUILD)/test_rfb
 	$(BUILD)/test_net

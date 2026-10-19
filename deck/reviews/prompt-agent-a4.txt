@@ -1,0 +1,60 @@
+# MK20 agent phase A4 — model adapter llm.c on top of net.c (host build only)
+Repo root = cwd. Work only under deck/agent/ (plus deck/reviews/agent-a4-* notes, the A4 status line in deck/AGENT-BUILD-PLAN.md, and .gitignore).
+Read first: deck/AGENT-BUILD-PLAN.md (D3 row, §3.5 if present, "A4" section), deck/agent/NOTES-agent-a2.md, deck/agent/NOTES-agent-a3.md,
+deck/reviews/agent-a3-kimi-r1.md, deck/agent/Makefile, src/oai.c/.h, src/net.c/.h, src/netcfg.c/.h, src/clock.h, src/agent_cli.c,
+deck/mk20deck/agentcfg.py (provider_config = provider.json writer; DO NOT modify it), deck/agent/tools/glm_smoke.py.
+
+HARD RULES: no git commit/push; no network access (sandbox); no device/adb/serial; no kbd/firmware/kernel changes; C11 -Wall -Wextra -Werror,
+ASan/UBSan test builds like the existing Makefile; never print/log API keys, Authorization headers or key file contents (mask "***");
+keys only ever come from a key file read via net_read_key and are wiped (mem_wipe) after use; keep A2/A3 behaviour and tests green;
+vendor/ untouched; no new warning suppressions on our code.
+
+## Deliverables
+1. src/llm.c/.h — the single OpenAI-compatible chat/completions adapter, built on net_request() (POST) + the existing oai.c
+   serializer/parser (extend oai.c/.h where needed, keep its existing tests passing).
+   - Provider is pure configuration: llm_provider_load(path) parses provider.json exactly as agentcfg.py writes it
+     {version:1, provider, model, base_url, domestic, route:"domestic"|"foreign", api_key_file} — fail-closed (regular file <=16 KiB,
+     strict JSON via the existing json_util/cJSON, version 1, https base_url via net_https_url, route value valid, key-file path present,
+     unknown extra fields ignored). Optional fields: "coord_mode" ("norm1000" default | "pixel"), "max_tokens", "temperature",
+     "timeout_ms", "supports_tool_choice", "vision" (bool). base_url is taken from the file (so the GLM coding-plan base
+     https://open.bigmodel.cn/api/coding/paas/v4 works without code change). No provider names or URLs hard-coded in llm.c.
+   - llm_chat(cfg, netcfg, request{system,user,tools_json,jpeg,jpeg_len,image_w,image_h}, response): builds the body, endpoint
+     base_url + "/chat/completions", headers Content-Type: application/json + Authorization via net.c key_file path (net.c already
+     reads/wipes the key; do not duplicate the key in llm.c memory if avoidable), route = provider route through netcfg_route_for.
+     Response body cap for the model path: 1 MiB (LLM_BODY_MAX), request body cap OAI_BODY_MAX; image <= OAI_IMAGE_MAX.
+   - coord_mode: unify to one convention for callers: tool-call arguments x/y (and x2/y2 if present) are returned as screen pixels
+     for the given image_w/image_h. norm1000 → oai_norm_to_pixel; pixel → must lie within the image. Out-of-range values: clamp only
+     within a small tolerance (≤2% of range, documented), otherwise REJECT the call (error "coord_range"), never silently clamp large errors.
+     Non-integer/missing coordinates for tools that declare them → reject that call ("coord_type").
+   - Error classification (stable literals, never raw peer data): ok, auth (401/403), rate (429), server (5xx), bad_request (400/404/422),
+     timeout, network/proxy/tls/clock (pass through net.c class), too_large (body cap), bad_response (malformed JSON, missing choices,
+     missing tool call when the request demanded tool_choice required, invalid arguments JSON, >OAI_TOOLS_MAX calls, oversized fields),
+     blocked (route blocked), config. Provide llm_error_name(). Retry policy: none inside llm.c (A5 decides); expose retryable flag
+     (rate, server, timeout, network).
+   - Kimi A3 #4 carry-over: llm.c MUST NOT enable clock.set_clock (set it to 0 explicitly; add a test asserting the model path never
+     calls the clock setter even when a proxy Date with huge skew is present). Time-setting stays only on the usb0 /time path.
+   - Kimi A3 #6 carry-over: for Connection:close-delimited bodies, net.c must report whether TLS close_notify was received; on the model
+     path a close-delimited body without close_notify is treated as truncated → bad_response class "truncated" (Content-Length/chunked
+     unchanged). Add C + pytest coverage. Also Kimi A3 #5 if trivial: read_ca fstat S_ISREG check.
+   - Memory: one request at a time, everything freed via llm_response_free; peak RSS documented (see 5).
+2. CLI: build/mk20-agent --llm-test --provider provider.json --net net.json [--image file.jpg --image-w W --image-h H]
+   [--tools tools.json] [--system S] --user U [--ca path] [--trust-clock] [--timeout ms]. Prints one JSON line to stdout:
+   {class, retryable, http_status, finish_reason, content (truncated 2000 chars), calls:[{name, args (with pixel coords)}],
+   elapsed_ms, peak_rss_kb}. Never prints the key, key path contents, Authorization or raw error bodies beyond oai's sanitized message.
+   Exit 0 only on class ok.
+3. Tests:
+   - C (ASan/UBSan) tests/test_llm.c: provider.json parsing (valid, each fail-closed case), coord mapping norm1000/pixel incl. tolerance
+     clamp vs reject, error classification table, no set_clock on model path, truncated close-delimited body.
+   - pytest tests/test_llm.py with tests/fakes/fake_model.py driven by scripts (reuse the A3 fake_proxy + throwaway-CA TLS server):
+     ok text, ok tool call, image request contains data:image/jpeg;base64 and correct body, malformed JSON, huge (>1 MiB) response →
+     too_large, missing tool call → bad_response, coordinates out of range → coord_range rejection, 401/429/500/400 classes, slowloris →
+     timeout, close-without-close_notify → truncated, Authorization reaches the fake server but never appears in stdout/stderr, proxy
+     unreachable → no direct connection to the fake model. Must also work under MK20_TEST_SOCKETPAIR=1 like A3 where TCP is blocked.
+     NOTE: your sandbox may forbid binding 127.0.0.1 — still write the TCP tests (they run on Linux afterwards); mark nothing xfail.
+4. Makefile: build llm objects in sanitized + nosan sets, add test_llm to `make test`; .gitignore (repo root): add deck/agent/build-armhf/.
+5. Docs: deck/agent/NOTES-agent-a4.md — provider.json schema, coord convention and tolerance, error table, retry flag, carry-over fixes,
+   peak RSS of a nosan --llm-test with a ~100 KiB JPEG against the local fake (device budget agent total <=16 MiB), and what remains
+   ([U] 10-screenshot benchmark, device run). Update the A4 status line in AGENT-BUILD-PLAN.md (one line).
+Finally run `make -C deck/agent test` and the pytest suites (report which TCP tests the sandbox blocked; also run the socketpair
+supplemental like A3), then act as first acceptance reviewer of your own diff against the A4 section: list each requirement PASS/FAIL.
+Write the summary (<=40 lines) to deck/reviews/agent-a4-codex-summary.md.

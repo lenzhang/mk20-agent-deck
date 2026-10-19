@@ -177,6 +177,7 @@ static int headers(parser_t *h)
     if (te && cl) return -1;
     if (r->http_status == 204 || r->http_status == 304) { h->state = H_DONE; return 0; }
     if (cl && length > h->cap) return -2;
+    r->close_delimited = !te && !cl;
     h->remaining = length;
     h->state = te ? H_CHUNK_SIZE : cl ? (length ? H_FIXED : H_DONE) : H_CLOSE;
     return 0;
@@ -600,7 +601,7 @@ int net_request(const net_options_t *o, net_response_t *r)
         unsigned char b[4096];
         if (now_ms() >= t.deadline) { errno = ETIMEDOUT; io_error(r, "io"); goto done; }
         int rc = mbedtls_ssl_read(&ssl, b, sizeof b);
-        if (rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) rc = 0;
+        if (rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) { r->tls_close_notify = 1; rc = 0; }
         if (rc < 0) { if (!tls_wait(&t, rc)) continue; io_error(r, "io"); goto done; }
         if (!rc) {
             if (parser.state == H_CLOSE) { parser.state = H_DONE; break; }

@@ -8,10 +8,10 @@ import select, socket, threading, time
 
 class FakeProxy:
     def __init__(self, allow=None, fail=None, delay_s=0.0, host="127.0.0.1",
-                 mode=None, targets=None, socketpair=False, upstream_factory=None, record=None):
+                 mode=None, targets=None, socketpair=False, upstream_factory=None, record=None, date=None):
         self.allow, self.fail, self.delay_s = allow, fail, delay_s
         self.mode, self.targets, self.upstream_factory = mode, targets or {}, upstream_factory
-        self.record = record
+        self.record, self.date = record, date
         self.client = None
         self.connects, self.violations, self.errors = [], [], []
         self._stop = False
@@ -81,7 +81,8 @@ class FakeProxy:
                      socket.create_connection(self.targets.get(target, (h, int(p))), timeout=5))
             except OSError:
                 c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"); return
-            c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            c.sendall(b"HTTP/1.1 200 Connection established\r\n" +
+                      (b"Date: " + self.date.encode("ascii") + b"\r\n" if self.date else b"") + b"\r\n")
             if rest: u.sendall(rest)
             self._pipe(c, u)
         except OSError as e:

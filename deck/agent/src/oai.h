@@ -25,11 +25,16 @@ typedef struct {
     size_t ncalls; oai_tool_call_t calls[OAI_TOOLS_MAX]; oai_error_t error;
 } oai_response_t;
 /* Output strings use cJSON_free. All input C strings must be NUL terminated. */
+/* The model path requests required tools; the offline API retains auto. */
+/* Body builders return -2 when serialization exceeds OAI_BODY_MAX, -1 for
+ * invalid fields or allocation failure. */
+int oai_build_body_choice(const oai_request_t *q, const char *choice, char **json);
 int oai_build_body(const oai_request_t *q, char **json);
 int oai_endpoint(const char *base_url, char *out, size_t cap);
 int oai_auth_header(const char *key, char *out, size_t cap); /* Authorization: Bearer ...; never body */
 /* Initialize a fresh response for each parse; call oai_response_free before reusing it. */
 int oai_parse_response(const char *body, size_t n, int http_status, oai_response_t *out);
+int oai_parse_response_limit(const char *body, size_t n, size_t cap, int http_status, oai_response_t *out);
 void oai_response_free(oai_response_t *r);
 const char *oai_error_name(oai_error_kind kind);
 /* Inclusive endpoints: norm 0..1000 maps to pixels 0..extent-1, rounded to nearest. */

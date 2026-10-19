@@ -5,6 +5,10 @@
 #include "rfb.h"
 #include "img.h"
 #include "net.h"
+#include "llm.h"
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "cJSON.h"
 #include <errno.h>
 #include <stdio.h>
@@ -106,8 +110,111 @@ output:;
     if (json) { puts(json); free(json); } else puts("{\"ok\":false,\"class\":\"io\"}");
     cJSON_Delete(j); net_response_free(&response); netcfg_free(&config); return rc == 0 ? 0 : 1;
 }
+/* Bounded regular files: no FIFO/device can bypass a request deadline. */
+static unsigned char *input_file(const char *path, size_t cap, size_t *len)
+{
+    int fd = open(path, O_RDONLY | O_NONBLOCK); if (fd < 0) return NULL;
+    struct stat st;
+    if (fstat(fd, &st)) { close(fd); return NULL; }
+    if (!S_ISREG(st.st_mode) || st.st_size < 1) { close(fd); errno = EINVAL; return NULL; }
+    if ((uintmax_t)st.st_size > cap) { close(fd); errno = EFBIG; return NULL; }
+    unsigned char *b = malloc(cap + 1); if (!b) { close(fd); return NULL; }
+    size_t n = 0; int bad = 0;
+    while (n <= cap) {
+        ssize_t k = read(fd, b + n, cap + 1 - n);
+        if (k < 0 && errno == EINTR) continue;
+        if (k < 0) { bad = 1; break; }
+        if (!k) break;
+        n += (size_t)k;
+    }
+    if (close(fd)) bad = 1;
+    if (bad || n > cap) { free(b); if (n > cap) errno = EFBIG; return NULL; }
+    b[n] = 0; *len = n; return b;
+}
+static int llm_cli(int argc, char **argv)
+{
+    const char *provider = NULL, *net = NULL, *image = NULL, *tools = NULL;
+    llm_provider_t cfg = {0}; netcfg_t nc = {0}; llm_response_t r = {0};
+    llm_request_t q = {0}; net_options_t transport = {0};
+    unsigned w = 0, h = 0, timeout = 0;
+    unsigned char *jpeg = NULL, *schema = NULL; size_t schema_len = 0;
+    int64_t start = rfb_now_ms(); int rc = -1;
+#ifdef MK20_NET_TEST
+    transport.connected_fd = -1;
+    const char *fd = getenv("MK20_NET_TEST_FD"); if (fd) transport.connected_fd = atoi(fd);
+#endif
+    for (int i = 2; i < argc;) {
+        const char *arg = argv[i++];
+        if (!strcmp(arg, "--trust-clock")) { transport.clock.trust_clock = 1; continue; }
+        if (i == argc) goto bad;
+        const char *v = argv[i++];
+        if (!strcmp(arg, "--provider")) provider = v;
+        else if (!strcmp(arg, "--net")) net = v;
+        else if (!strcmp(arg, "--image")) image = v;
+        else if (!strcmp(arg, "--tools")) tools = v;
+        else if (!strcmp(arg, "--system")) q.system = v;
+        else if (!strcmp(arg, "--user")) q.user = v;
+        else if (!strcmp(arg, "--ca")) transport.ca_file = v;
+        else if (!strcmp(arg, "--image-w")) { if (number(v, 1000000, &w)) goto bad; }
+        else if (!strcmp(arg, "--image-h")) { if (number(v, 1000000, &h)) goto bad; }
+        else if (!strcmp(arg, "--timeout")) { if (number(v, 600000, &timeout)) goto bad; }
+        else goto bad;
+    }
+    if (!q.user || !provider || !net || (image && (!w || !h)) ||
+        llm_provider_load(provider, &cfg) || netcfg_load(net, &nc)) goto bad;
+    if (image) {
+        jpeg = input_file(image, OAI_IMAGE_MAX, &q.jpeg_len);
+        if (!jpeg) {
+            if (errno == EFBIG) { r.error = LLM_TOO_LARGE; r.reason = "image_cap"; goto output; }
+            goto bad;
+        }
+        q.jpeg = jpeg;
+    }
+    if (tools) {
+        schema = input_file(tools, OAI_SCHEMA_MAX, &schema_len);
+        if (!schema || memchr(schema, 0, schema_len)) goto bad;
+        q.tools_json = (const char *)schema;
+    }
+    q.image_w = (int)w; q.image_h = (int)h;
+    transport.timeout_ms = (int)timeout; q.transport = &transport;
+    rc = llm_chat(&cfg, &nc, &q, &r); goto output;
+bad:
+    r.error = LLM_CONFIG; r.reason = "arguments";
+output:;
+    cJSON *j = cJSON_CreateObject(), *calls = cJSON_CreateArray();
+    if (j && calls) {
+        cJSON_AddStringToObject(j, "class", llm_error_name(r.error));
+        cJSON_AddStringToObject(j, "error", r.reason ? r.reason : "config");
+        cJSON_AddBoolToObject(j, "retryable", r.retryable);
+        cJSON_AddNumberToObject(j, "http_status", r.http_status);
+        cJSON_AddStringToObject(j, "finish_reason", r.message.finish_reason);
+        /* Truncate at 2000 Unicode characters, preserving UTF-8 boundaries. */
+        size_t at = 0, chars = 0;
+        while (r.message.content[at]) {
+            if (((unsigned char)r.message.content[at] & 0xc0) != 0x80 && chars++ == 2000) break;
+            at++;
+        }
+        r.message.content[at] = 0;
+        cJSON_AddStringToObject(j, "content", r.message.content);
+        for (size_t i = 0; i < r.message.ncalls; i++) {
+            oai_tool_call_t *call = &r.message.calls[i]; cJSON *entry = cJSON_CreateObject();
+            cJSON_AddStringToObject(entry, "name", call->name);
+            cJSON_AddItemToObject(entry, "args", cJSON_Duplicate(call->arguments, 1));
+            cJSON_AddItemToArray(calls, entry);
+        }
+        cJSON_AddItemToObject(j, "calls", calls); calls = NULL;
+        cJSON_AddNumberToObject(j, "elapsed_ms", (double)(rfb_now_ms() - start));
+        cJSON_AddNumberToObject(j, "peak_rss_kb", (double)rss_kb());
+        char *json = cJSON_PrintUnformatted(j);
+        if (json) { puts(json); cJSON_free(json); }
+        else { puts("{\"class\":\"config\",\"error\":\"allocation\"}"); rc = -1; }
+    } else { puts("{\"class\":\"config\",\"error\":\"allocation\"}"); rc = -1; }
+    cJSON_Delete(calls); cJSON_Delete(j); free(jpeg); free(schema);
+    llm_response_free(&r); netcfg_free(&nc); return rc == 0 ? 0 : 1;
+}
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--llm-test")) return llm_cli(argc, argv);
     if (argc > 1 && (!strcmp(argv[1], "--net-test") || !strcmp(argv[1], "--time-sync"))) return network_cli(argc, argv);
     const char *out = NULL, *host = "127.0.0.1", *passfile = NULL, *error = "bad_args";
     unsigned port = 5900, mw = 1280, mh = 800, quality = 70, timeout = 5000;

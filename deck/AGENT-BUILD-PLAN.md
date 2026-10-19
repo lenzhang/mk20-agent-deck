@@ -353,7 +353,7 @@
 - 验收：设备经代理拿到 Qwen 的 `/models` 401 或 200；代理不可达时请求失败且无任何直连。
 
 ### A4 模型适配器（box + [U] 真 key）
-- **box skeleton 已有**：agent/src/oai.c/.h、oai_cli.c（vendored cJSON 1.7.18），离线请求/响应/错误/坐标映射，ASan/UBSan 单测及 FakeModel HTTP pytest；不含传输/代理/TLS。真 provider 仍待 A3/A4。
+- **A4 host 已实现**：llm.c + net.c/OAI、配置驱动 provider、像素坐标校验、--llm-test、ASan/UBSan 与 TLS fake/socketpair 测试；TCP sandbox 验证、[U] 10 图真 provider 基准及 [D] 设备/RSS 仍待，见 agent/NOTES-agent-a4.md。
 - `llm.c`：单一 OpenAI 兼容适配器（chat/completions、tools、image_url base64）；provider 全是配置（Qwen 默认、GLM、Kimi、OpenAI）；
   `coord_mode` 统一坐标约定；做错误分类。
 - box：fake_model 跑剧本，包括畸形 JSON、超长响应、缺 tool call、坐标越界（clamp 后拒绝）。

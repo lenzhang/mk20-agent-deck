@@ -6,7 +6,8 @@ import time
 
 
 class FakeTLS:
-    def __init__(self, cert, key, *, response=None, socketpair=False, version=None, delay=0, fragment=False, handshake_delay=0):
+    def __init__(self, cert, key, *, response=None, socketpair=False, version=None, delay=0, fragment=False, handshake_delay=0,
+                 response_factory=None, close_notify=True, byte_delay=0):
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.load_cert_chain(cert, key)
         if version:
@@ -16,6 +17,7 @@ class FakeTLS:
         self.connections, self.requests, self.sni, self.versions, self.errors = 0, [], [], [], []
         self.delay, self.fragment, self.sock, self._stop = delay, fragment, None, False
         self.handshake_delay = handshake_delay
+        self.response_factory, self.close_notify, self.byte_delay = response_factory, close_notify, byte_delay
         self._streams = []
         self.port = 443
         if not socketpair:
@@ -63,12 +65,16 @@ class FakeTLS:
                     body += d
                 self.requests.append((head, body))
                 if self.delay: time.sleep(self.delay)
-                if self.fragment:
-                    for b in self.response: tls.sendall(bytes([b]))
-                else: tls.sendall(self.response)
+                response = self.response_factory(head, body) if self.response_factory else self.response
+                if self.fragment or self.byte_delay:
+                    for b in response:
+                        tls.sendall(bytes([b]))
+                        if self.byte_delay: time.sleep(self.byte_delay)
+                else: tls.sendall(response)
                 # Send close_notify so until-close framing also has an authenticated EOF.
-                try: tls.unwrap().close()
-                except (ssl.SSLError, OSError): pass
+                if self.close_notify:
+                    try: tls.unwrap().close()
+                    except (ssl.SSLError, OSError): pass
         except (ssl.SSLError, OSError) as error:
             self.errors.append(str(error))
         finally:

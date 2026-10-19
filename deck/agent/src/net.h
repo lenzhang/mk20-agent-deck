@@ -27,6 +27,7 @@ typedef struct {
 } net_options_t;
 typedef struct {
     int ok, http_status;
+    int close_delimited, tls_close_notify; /* EOF authentication for until-close bodies. */
     const char *class_name; /* Stable literal, never raw peer data. */
     char detail[160], via[280], date[128], proxy_date[128];
     unsigned char *body;

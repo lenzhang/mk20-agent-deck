@@ -1,4 +1,5 @@
 #include "oai.h"
+#include "json_util.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,90 +12,9 @@ static size_t bounded_len(const char *s, size_t max)
     while (n <= max && s[n]) n++;
     return n;
 }
-/* Validate strict JSON grammar and bound complexity before any cJSON allocation.
- * cJSON's strtod-based number parser also accepts non-JSON forms such as 01 / 1. */
-typedef struct { const char *p, *end; size_t nodes; } json_scan_t;
-static void json_ws(json_scan_t *j) { while (j->p < j->end && strchr(" \t\r\n", *j->p)) j->p++; }
-static int json_string(json_scan_t *j)
-{
-    if (j->p == j->end || *j->p++ != '"') return -1;
-    while (j->p < j->end) {
-        unsigned b = (unsigned char)*j->p++;
-        if (b == '"') return 0;
-        if (b < 32) return -1;
-        if (b != '\\') continue;
-        if (j->p == j->end) return -1;
-        b = (unsigned char)*j->p++;
-        if (b == 'u') {
-            unsigned u = 0;
-            for (int i = 0; i < 4; i++) {
-                if (j->p == j->end) return -1;
-                b = (unsigned char)*j->p++; unsigned d;
-                if (b >= '0' && b <= '9') d = b - '0';
-                else if (b >= 'a' && b <= 'f') d = b - 'a' + 10;
-                else if (b >= 'A' && b <= 'F') d = b - 'A' + 10;
-                else return -1;
-                u = u * 16 + d;
-            }
-            if (!u) return -1; /* cJSON's C strings cannot represent embedded NUL */
-        } else if (!strchr("\"\\/bfnrt", (int)b)) return -1;
-    }
-    return -1;
-}
-static int json_digits(json_scan_t *j)
-{
-    const char *start = j->p;
-    while (j->p < j->end && *j->p >= '0' && *j->p <= '9') j->p++;
-    return j->p == start ? -1 : 0;
-}
-static int json_value(json_scan_t *j, int depth)
-{
-    json_ws(j);
-    if (j->p == j->end || ++j->nodes > 4096) return -1;
-    char b = *j->p;
-    if (b == '"') return json_string(j);
-    if (b == '{' || b == '[') {
-        if (depth == 32) return -1;
-        j->p++; json_ws(j); char close = b == '{' ? '}' : ']';
-        if (j->p < j->end && *j->p == close) { j->p++; return 0; }
-        for (;;) {
-            if (b == '{') {
-                if (++j->nodes > 4096 || json_string(j)) return -1;
-                json_ws(j); if (j->p == j->end || *j->p++ != ':') return -1;
-            }
-            if (json_value(j, depth + 1)) return -1;
-            json_ws(j); if (j->p == j->end) return -1;
-            if (*j->p == close) { j->p++; return 0; }
-            if (*j->p++ != ',') return -1;
-            json_ws(j);
-        }
-    }
-    const char *literal = b == 't' ? "true" : b == 'f' ? "false" : b == 'n' ? "null" : NULL;
-    if (literal) {
-        size_t n = strlen(literal);
-        if ((size_t)(j->end - j->p) < n || memcmp(j->p, literal, n)) return -1;
-        j->p += n; return 0;
-    }
-    if (b == '-') j->p++;
-    if (j->p < j->end && *j->p == '0') j->p++;
-    else if (json_digits(j)) return -1;
-    if (j->p < j->end && *j->p == '.') { j->p++; if (json_digits(j)) return -1; }
-    if (j->p < j->end && (*j->p == 'e' || *j->p == 'E')) {
-        j->p++; if (j->p < j->end && (*j->p == '+' || *j->p == '-')) j->p++;
-        if (json_digits(j)) return -1;
-    }
-    return 0;
-}
 static cJSON *parse(const char *s, size_t n, size_t max)
 {
-    if (!s || !n || n > max || memchr(s, 0, n)) return NULL;
-    json_scan_t scan = {s, s + n, 0};
-    if (json_value(&scan, 0)) return NULL;
-    json_ws(&scan); if (scan.p != scan.end) return NULL;
-    const char *end = NULL; cJSON *j = cJSON_ParseWithLengthOpts(s, n, &end, 0);
-    while (end && end < s + n && (*end == ' ' || *end == '\n' || *end == '\r' || *end == '\t')) end++;
-    if (!j || end != s + n) { cJSON_Delete(j); return NULL; }
-    return j;
+    return agent_json_parse(s, n, max);
 }
 static int text(const cJSON *j, char *out, size_t cap, int optional)
 {
@@ -131,10 +51,11 @@ static char *image_uri(const unsigned char *jpeg, size_t n)
     }
     out[at] = 0; return out;
 }
-int oai_build_body(const oai_request_t *q, char **json)
+int oai_build_body_choice(const oai_request_t *q, const char *choice, char **json)
 {
     if (!json) return -1;
     *json = NULL;
+    if (!choice || (strcmp(choice, "auto") && strcmp(choice, "required"))) return -1;
     if (!q || !q->model || !*q->model || bounded_len(q->model, 128) > 128 ||
         bounded_len(q->system, OAI_TEXT_MAX) > OAI_TEXT_MAX || bounded_len(q->user, OAI_TEXT_MAX) > OAI_TEXT_MAX ||
         q->jpeg_len > OAI_IMAGE_MAX || (q->jpeg_len && !q->jpeg) || q->max_tokens < 1 || q->max_tokens > 32768 ||
@@ -173,14 +94,18 @@ int oai_build_body(const oai_request_t *q, char **json)
         }
         if (cJSON_GetArraySize(tools)) {
             bad = add(root, "tools", tools); tools = NULL; if (bad) goto done;
-            if (q->supports_tool_choice && add(root, "tool_choice", cJSON_CreateString("auto"))) goto done;
+            if (q->supports_tool_choice && add(root, "tool_choice", cJSON_CreateString(choice))) goto done;
         }
     }
     *json = cJSON_PrintUnformatted(root);
     if (*json && bounded_len(*json, OAI_BODY_MAX) <= OAI_BODY_MAX) rc = 0;
-    else { cJSON_free(*json); *json = NULL; }
+    else { if (*json) rc = -2; cJSON_free(*json); *json = NULL; }
 done:
     free(uri); cJSON_Delete(tools); cJSON_Delete(system); cJSON_Delete(user); cJSON_Delete(messages); cJSON_Delete(root); return rc;
+}
+int oai_build_body(const oai_request_t *q, char **json)
+{
+    return oai_build_body_choice(q, "auto", json);
 }
 int oai_endpoint(const char *base, char *out, size_t cap)
 {
@@ -208,12 +133,12 @@ static void error_field(const cJSON *j, char *out, size_t cap)
     if (cJSON_IsString(j)) snprintf(out, cap, "%s", j->valuestring);
     else if (cJSON_IsNumber(j)) snprintf(out, cap, "%.17g", j->valuedouble);
 }
-int oai_parse_response(const char *body, size_t n, int status, oai_response_t *out)
+int oai_parse_response_limit(const char *body, size_t n, size_t cap, int status, oai_response_t *out)
 {
     if (!out) return -1;
     memset(out, 0, sizeof *out); out->error.http_status = status;
     out->error.kind = status == 401 || status == 403 ? OAI_AUTH : status == 429 ? OAI_RATE : status >= 500 && status <= 599 ? OAI_SERVER : OAI_BAD_RESPONSE;
-    cJSON *root = parse(body, n, OAI_BODY_MAX); int rc = -1;
+    cJSON *root = parse(body, n, cap); int rc = -1;
     const cJSON *e = get(root, "error");
     if (e) {
         error_field(get(e, "message"), out->error.message, sizeof out->error.message);
@@ -242,6 +167,10 @@ done:
     cJSON_Delete(root);
     if (rc && !*out->error.message) strcpy(out->error.message, "invalid or unsuccessful model response");
     return rc;
+}
+int oai_parse_response(const char *body, size_t n, int status, oai_response_t *out)
+{
+    return oai_parse_response_limit(body, n, OAI_BODY_MAX, status, out);
 }
 void oai_response_free(oai_response_t *r)
 {
