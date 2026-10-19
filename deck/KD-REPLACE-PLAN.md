@@ -205,6 +205,7 @@
   - HID errors never end the process;
   - selftest WARNs about lost HID after a restart;
   - RECOVERY.md says to reboot.
+- **#3 decision (2026-10-19): no separate HID guardian process for now.** The real fix is the kernel side: the hidfix module (branch `feature/hidfix`, codex GO after r3) fixes the f_hid cdev lifetime ("open fails after re-bind" and "crash on function unlink"). It is tested on the device LAST, after all other work has landed. Until then the mitigations above stay as they are: HID errors never exit the process, selftest shows WARN (not FAIL) for lost HID after a restart, and RECOVERY.md says to reboot. A HID guardian is the fallback only if hidfix fails on the device; then it is designed as its own milestone (sole owner of hidg0 + parked fds, modifiers released on control-socket EOF, mk20-kbd talks to it over a socket).
 
 **Plan to make FEATURE_KBD default-on:**
 1. On-device trial with `FEATURE_KBD=1` in mk20.conf on a release that carries the binary. Pass criteria:

@@ -70,6 +70,21 @@ def _kill_strays(tmp):
             pass
 
 
+def scope_gadget_fn(fn, t):
+    """Cut-out gadget.sh helpers (router_stop / kbd_stop / kbd_hid_quiesce) bound to ONE test: every stop file, pid
+    record (kbd-pids.rec, *-loop.pid, kbd.mode) and lock dir moves under the test's tmp dir, and process discovery
+    (pgrep + cmdline check) only matches mk20-kbd / mk20-router started from <t>/bin, so a harness never signals the
+    fake mk20-kbd/router of a parallel test or another worktree's run."""
+    t = str(t)
+    for pat in ("bin/mk20-kbd --run", "bin/mk20-router --src"):
+        assert fn.count(f"'{pat}'") == 2, pat   # pgrep -f + cmdline validation
+        fn = fn.replace(f"'{pat}'", f"'{t}/{pat}'")
+    out = (fn.replace("/tmp/mk20-router-stop", f"{t}/stop").replace("/tmp/mk20-kbd-stop", f"{t}/kstop")
+           .replace("/tmp/mk20", f"{t}/mk20"))
+    assert "/tmp/" not in out.replace(t, ""), "unscoped /tmp path in gadget helper cut-out"
+    return out
+
+
 @pytest.fixture
 def dev(tmp_path):
     yield Dev(tmp_path)

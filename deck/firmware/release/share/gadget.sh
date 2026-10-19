@@ -123,6 +123,7 @@ kbd_any_alive() { for p in "$@"; do kbd_alive "$p" && { echo "$p"; return 0; }; 
 kbd_hid_holders() { for p in $(kbd_pids); do for f in /proc/"$p"/fd/*; do
   case "$(readlink "$f" 2>/dev/null)" in "${MK20_HIDG:-/dev/hidg0}"|"${MK20_HIDG:-/dev/hidg0} (deleted)") echo "$p"; break;; esac; done; done; }
 kbd_hid_quiesce() {
+  # shellcheck disable=SC2046   # numeric pids, word splitting intended
   kbd_rec $(kbd_pids)
   kh=$(kbd_hid_holders); [ -n "$kh" ] || return 0
   for kp in $kh; do kill -USR1 "$kp" 2>/dev/null; done

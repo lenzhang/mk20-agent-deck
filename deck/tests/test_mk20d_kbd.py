@@ -6,8 +6,9 @@ router (stock KD stopped via procd qt_app2, retried), restarts mk20-kbd with bac
 SIGUSR1, wait until /proc shows no hidg0 fd, fail closed TERM->KILL), stops it fully on every cleanup/setup path, and
 omits the bridge --tap in kbd mode."""
 import json, os, re, signal, subprocess, sys, time
+from pathlib import Path
 import pytest
-from conftest import BB, DECK
+from conftest import BB, DECK, scope_gadget_fn
 from test_mk20d import rel, g1, conf, cfg, run_boot  # noqa: F401  (fixtures)
 
 GOOD = {"version": "mk20-kbd-0.3", "gd32_rw": 1, "knob_init": "ok", "knob_ok": 6, "panels_written": 21,
@@ -447,8 +448,7 @@ while True:
 @pytest.fixture
 def gh(tmp_path):
     (tmp_path / "mk20").mkdir(); (tmp_path / "bin").mkdir()
-    body = (FN.replace("/tmp/mk20-router-stop", str(tmp_path / "stop")).replace("/tmp/mk20-kbd-stop", str(tmp_path / "kstop"))
-            .replace("/tmp/mk20/", str(tmp_path / "mk20") + "/"))
+    body = scope_gadget_fn(FN, tmp_path)
     (tmp_path / "bin/mk20-kbd").write_text(HOLDER)
     hid = tmp_path / "hidg0"; hid.write_bytes(b"")
     procs = []
@@ -573,7 +573,7 @@ def test_gadget_fails_closed_when_kbd_survives(gh):
     p = start("stubborn")
     s = t / "ks.sh"
     s.write_text(f'log() {{ echo "$*" >> {t}/log; }}\nkill() {{ :; }}\n'
-                 + FN.replace("/tmp/mk20-kbd-stop", str(t / "kstop")).replace("/tmp/mk20/", str(t / "mk20") + "/")
+                 + scope_gadget_fn(FN, t)
                  + '\nkbd_stop; echo "rc=$?"\nkbd_hid_quiesce; echo "rq=$?"\n')
     r = subprocess.run([BB, "sh", str(s)], capture_output=True, text=True, timeout=30,
                        env=dict(os.environ, MK20_HIDG=str(hid), MK20_KBD_TERM_TICKS="2", MK20_KBD_HID_TICKS="2"))
@@ -623,10 +623,27 @@ def test_survivor_remembered_across_calls(gh):
     # discovery blind (pgrep finds nothing), recorded survivor alive -> fail closed
     s = t / "k2.sh"
     s.write_text(f'log() {{ echo "$*" >> {t}/log; }}\npgrep() {{ return 1; }}\n'
-                 + FN.replace("/tmp/mk20-kbd-stop", str(t / "kstop")).replace("/tmp/mk20/", str(t / "mk20") + "/")
+                 + scope_gadget_fn(FN, t)
                  + '\nkbd_stop; echo "rc=$?"\n')
     r = subprocess.run([BB, "sh", str(s)], capture_output=True, text=True, timeout=30, env=dict(os.environ, MK20_KBD_TERM_TICKS="2"))
     assert "rc=1" in r.stdout and (t / "mk20/kbd-pids.rec").exists()
     (t / "mk20/kbd-pids.rec").write_text(f"{p.pid}:1\n")                  # same pid, other start time: not ours
     r = subprocess.run([BB, "sh", str(s)], capture_output=True, text=True, timeout=30, env=dict(os.environ, MK20_KBD_TERM_TICKS="2"))
     assert "rc=0" in r.stdout and not (t / "mk20/kbd-pids.rec").exists()
+
+
+def test_harness_scoped_to_own_fakes(gh, tmp_path_factory):
+    """Cross-test isolation: the cut-out kbd_stop only sees mk20-kbd started from this test's tmp dir, never a
+    parallel test's fake (another `.../bin/mk20-kbd --run` on the same box) and never its pid record."""
+    t, start, run, hid = gh
+    o = tmp_path_factory.mktemp("other"); (o / "bin").mkdir()
+    (o / "bin/mk20-kbd").write_text(HOLDER); ohid = o / "hidg0"; ohid.write_bytes(b""); ready = o / "ready"
+    other = subprocess.Popen([sys.executable, str(o / "bin/mk20-kbd"), "--run", str(ohid), "stubborn", str(ready)])
+    try:
+        assert wait(ready.exists, 10)
+        p = start("stubborn")
+        r, dt = run("kbd_stop", MK20_KBD_TERM_TICKS="2")
+        assert r.stdout.strip() == "done" and p.wait(3) == -signal.SIGKILL and other.poll() is None
+        assert not (Path("/tmp/mk20/kbd-pids.rec").exists() and str(p.pid) in Path("/tmp/mk20/kbd-pids.rec").read_text())
+    finally:
+        other.kill(); other.wait()
