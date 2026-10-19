@@ -1,0 +1,51 @@
+# Task: MK20 agent A2 — VNC capture (repo: this worktree, work under deck/agent/)
+
+Read first: deck/AGENT-BUILD-PLAN.md (§A2, §14.5, memory budget, A2 中文剪贴板路线), deck/agent/Makefile, deck/agent/src/oai.{h,c},
+deck/agent/tests/fakes/fake_vnc.py, deck/agent/tests/fakes/des.py, deck/agent/tests/test_oai.py, deck/agent/tests/test_fakes.py.
+Vendored (already present, do not modify): deck/agent/vendor/zlib (zlib 1.3.1 inflate subset) and deck/agent/vendor/stb/stb_image_write.h (v1.16, JPEG writer).
+
+HARD RULES
+- Host-only code work. Network only to 127.0.0.1 fakes in tests. No device, serial, adb, /dev. No git commit/push; leave changes uncommitted.
+  Do not touch deck/firmware/release/bin/*, deck/kbd/* (A1 is accepted and frozen), or anything outside deck/agent/ except the A2 status
+  lines in deck/AGENT-BUILD-PLAN.md and a new deck/agent/NOTES-agent-a2.md.
+- C11, -Wall -Wextra -Werror; must build on macOS clang and Linux gcc (glibc), and be portable to static armhf (arm-linux-gnueabihf, 32-bit:
+  watch size_t/int overflow on width*height*bpp). ASan/UBSan in tests, as the existing Makefile does. Never log or print the VNC password.
+- Tests: `cd deck && uv run --with pytest python -m pytest -q agent/tests` and `make -C deck/agent test` must be green.
+- Keep diffs tight; match existing style (dense C, small helpers).
+
+ITEMS
+1. src/rfb.{h,c}: RFB 3.8 client (accept 3.3/3.7 servers if cheap). Security type 2 VNC auth (DES, password truncated/padded to 8, bit-reversed
+   key bytes per VNC convention; write a tiny self-contained DES or reuse a public-domain one — test vectors vs fakes/des.py), type 1 None.
+   Reject anything else with a clear error (macOS Apple ARD type 30 → error "unsupported_security", do not implement).
+   SetPixelFormat 32bpp true-colour little-endian; SetEncodings: ZRLE(16), Hextile(5), Raw(0), CopyRect(1), plus pseudo DesktopSize(-223),
+   Cursor(-239, parse and discard). Full or incremental FramebufferUpdateRequest. Robust bounds checks: every rect must lie inside the fb;
+   cap fb at 8192x8192 and reject larger; all reads with timeouts (connect 5 s, read 5 s; configurable); never trust lengths (reason strings,
+   ServerCutText length capped, e.g. 1 MiB, excess skipped by streaming not allocated). Bell / SetColourMapEntries handled or rejected safely.
+2. Streaming downscale (src/scale.{h,c}): the client must NOT hold a full-resolution framebuffer when the source is large (Retina 2880x1800 x4 =
+   20 MB > budget). Design: keep a downscaled RGB888 target (default fit within 1280x800, keep aspect, area-average box filter, integer math) and
+   accumulate decoded pixels from rects into per-target-pixel sums as tiles arrive (ZRLE 64x64 tiles / Hextile 16x16 / Raw rows), so peak memory is
+   O(target + one tile row + zlib window). For a full-frame snapshot request (incremental=0) every source pixel arrives once; document that.
+   CopyRect on a downscaled target: request a non-incremental refresh instead (or handle approximately) — document. Scale factor arbitrary (not
+   only integer). Unit test: scaled output equals a Python reference box-filter of the fake gradient within ±2 per channel.
+3. src/img.{h,c}: JPEG encode of the scaled RGB via stb_image_write (quality default 70, configurable), into a memory buffer with a hard cap
+   (OAI_IMAGE_MAX 128 KiB from oai.h; if over, retry once at lower quality, then fail cleanly). Compile stb in its own TU with
+   STBI_WRITE_NO_STDIO; silence only vendor warnings in that TU.
+4. CLI: src/agent_cli.c → build/mk20-agent with `--snap OUT.jpg --host H --port P [--password-file F] [--max-w 1280 --max-h 800] [--quality 70]
+   [--timeout-ms N]`. Password only from a file (0600 recommended) or env MK20_VNC_PASSWORD; never argv. Stdout: one JSON line
+   {"ok":true,"src_w":..,"src_h":..,"w":..,"h":..,"jpeg_bytes":..,"ms":{"connect":..,"auth":..,"fb":..,"scale_enc":..,"total":..}} or
+   {"ok":false,"error":"..."} with exit code !=0. Keep oai_cli unchanged.
+5. Memory: add a test that runs the CLI against a fake 2880x1800 ZRLE server and asserts peak RSS (getrusage ru_maxrss in the CLI, report it in the
+   JSON as "peak_rss_kb"; note macOS units are bytes, Linux KiB — normalise) stays ≤ 16 MB in a non-sanitizer build (add a `build/mk20-agent-nosan`
+   target for this). Also log allocation high-water of the scaler/decoder in the JSON ("heap_hw_bytes", from the code's own accounting).
+6. Fake server: extend fakes/fake_vnc.py as needed (Hextile, CopyRect, DesktopSize, Cursor pseudo-rects, large fb, ServerCutText, malformed
+   rects/oversize lengths for negative tests). Tests in agent/tests/test_rfb.py: auth ok/fail (wrong password → clean error, no password in output),
+   None auth, unsupported security, Raw/ZRLE/Hextile pixel correctness after scaling (and 1:1 when fb ≤ max), DesktopSize change mid-session,
+   malformed rect outside fb, oversize cut text, slow server timeout, truncated stream. C unit tests where cheaper (tests/test_rfb.c ok).
+7. Clipboard (only because it is cheap): implement sending classic ClientCutText (Latin-1 only; refuse non-Latin-1 input with "unsupported" — never
+   send mojibake) and parsing/skipping ServerCutText. Detect whether the server advertises the Extended Clipboard pseudo-encoding 0xC0A1E5CE and
+   expose a capability flag; do NOT implement extended clipboard send yet (plan says device measurement first). Never read back/store user clipboard
+   contents beyond discarding them. Test with the fake.
+8. NOTES-agent-a2.md: design, memory accounting, measured host timings/RSS for 1280x800 and 2880x1800 fakes, what remains for device/[D][M]
+   (real Mac Screen Sharing: security types offered, Retina/multi-monitor shape, P95, Extended Clipboard). Update the A2 status in the plan briefly.
+
+Finish with a short summary of files changed and test results.
