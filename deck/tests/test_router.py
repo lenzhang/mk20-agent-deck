@@ -21,6 +21,9 @@ def router(tmp_path_factory):
     return out
 
 
+UP = bytes([1] + [0] * 8)
+
+
 def ksc(col, row, pressed, fid=1, wrap=True):
     p = {"col": col, "row": row, "pressed": pressed}
     obj = {"method": "keyStateChanged", "parameters": p} if wrap else {"method": "keyStateChanged", **p}
@@ -39,7 +42,9 @@ def run(router, tmp_path, stream: bytes, *args, trace=True):
                        capture_output=True, text=True, timeout=10)
     assert r.returncode == 0, r.stderr
     tl = (tmp_path / "k.log").read_text() if trace and (tmp_path / "k.log").exists() else ""
-    return hid.read_bytes(), parse(tl), r.stderr
+    out = hid.read_bytes()
+    assert out[:9] == UP, "startup all-keys-up report missing"   # r120 fix: sent once at startup
+    return out[9:], parse(tl), r.stderr
 
 
 def reports(b):
@@ -107,3 +112,144 @@ def test_armhf_static_build(tmp_path):
                     str(SRC)], check=True)
     head = out.read_bytes()[:20]
     assert head[:4] == b"\x7fELF" and head[4] == 1 and head[18] == 40  # 32-bit, EM_ARM
+
+
+# ---- r120 fixes: state only after a successful write, resend on POLLOUT, bounded release on EOF/SIGTERM ----
+import fcntl, signal, socket, threading, time  # noqa: E402
+
+F_SETPIPE_SZ = 1031
+
+
+class Tap:
+    """unix-socket source the test controls (like the bridge tap)."""
+    def __init__(self, path):
+        self.s = socket.socket(socket.AF_UNIX); self.s.bind(str(path)); self.s.listen(1); self.c = None
+        threading.Thread(target=self._acc, daemon=True).start()
+
+    def _acc(self):
+        self.c, _ = self.s.accept()
+
+    def send(self, b):
+        for _ in range(100):
+            if self.c:
+                break
+            time.sleep(0.02)
+        self.c.sendall(b)
+
+    def close(self):
+        if self.c:
+            self.c.close()
+        self.s.close()
+
+
+def _fifo(tmp_path):
+    f = tmp_path / "hidg0"; os.mkfifo(f)
+    rd = os.open(f, os.O_RDONLY | os.O_NONBLOCK)
+    fcntl.fcntl(rd, F_SETPIPE_SZ, 4096)
+    return f, rd
+
+
+def _read_all(rd):
+    out = b""
+    while True:
+        try:
+            c = os.read(rd, 65536)
+        except BlockingIOError:
+            return out
+        if not c:
+            return out
+        out += c
+
+
+def _fill(f):
+    w = os.open(f, os.O_WRONLY | os.O_NONBLOCK); n = 0
+    try:
+        while True:
+            try:
+                n += os.write(w, b"J" * 9)   # junk in 9-byte units so report alignment is kept
+            except BlockingIOError:
+                return n
+    finally:
+        os.close(w)
+
+
+def _wait(pred, t=5):
+    end = time.time() + t
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _start(router, tmp_path, hid):
+    tap = Tap(tmp_path / "tap.sock")
+    p = subprocess.Popen([str(router), "--src", f"unix:{tmp_path / 'tap.sock'}", "--hid", str(hid)],
+                         env={"PATH": os.environ["PATH"], "MK20_KEYTRACE": "1", "MK20_KEYTRACE_PATH": str(tmp_path / "k.log")},
+                         stderr=subprocess.PIPE, text=True)
+    return tap, p
+
+
+def test_failed_release_is_resent_when_writable(router, tmp_path):
+    """Release hits EAGAIN (host not polling): RAlt must not latch; the release is resent once the gadget drains."""
+    hid, rd = _fifo(tmp_path)
+    tap, p = _start(router, tmp_path, hid)
+    try:
+        tap.send(ksc(0, 3, True)); time.sleep(0.3)
+        reps = reports(_read_all(rd))
+        assert reps[-1] == bytes([1, 0x40] + [0] * 7)   # startup all-up + press
+        assert _fill(hid) > 0                          # gadget full: the release write gets EAGAIN
+        tap.send(ksc(0, 3, False, 2)); time.sleep(0.3)
+        assert p.poll() is None
+        data = b""; end = time.time() + 3              # drain: the router resends the current state (all up)
+        while not data.endswith(UP) and time.time() < end:
+            data += _read_all(rd); time.sleep(0.05)
+        assert data.endswith(UP) and data[:-9].strip(b"J") == b"", data[-27:]
+        assert "hid_resent" in (tmp_path / "k.log").read_text()
+    finally:
+        tap.close(); p.wait(5); os.close(rd)
+
+
+def test_sigterm_releases_held_ptt(router, tmp_path):
+    hid = tmp_path / "hidg0"; hid.write_bytes(b"")
+    tap, p = _start(router, tmp_path, hid)
+    try:
+        tap.send(ksc(0, 3, True))
+        assert _wait(lambda: hid.read_bytes().endswith(bytes([1, 0x40] + [0] * 7)))
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(3) == 0
+    finally:
+        tap.close()
+        if p.poll() is None:
+            p.kill(); p.wait()
+    assert hid.read_bytes().endswith(UP) and "stopped by signal" in p.stderr.read()
+
+
+def test_sigint_without_held_key_exits_cleanly(router, tmp_path):
+    hid = tmp_path / "hidg0"; hid.write_bytes(b"")
+    tap, p = _start(router, tmp_path, hid)
+    try:
+        assert _wait(lambda: hid.read_bytes() == UP)
+        p.send_signal(signal.SIGINT); assert p.wait(3) == 0
+    finally:
+        tap.close()
+    assert hid.read_bytes() == UP        # startup all-up only; nothing held -> no extra report
+
+
+def test_eof_with_undelivered_release_sends_up(router, tmp_path):
+    """Release failed (EAGAIN) and then the tap closes: the bounded EOF release still delivers all-up."""
+    hid, rd = _fifo(tmp_path)
+    tap, p = _start(router, tmp_path, hid)
+    try:
+        tap.send(ksc(0, 3, True)); time.sleep(0.2); _read_all(rd)
+        _fill(hid); tap.send(ksc(0, 3, False, 2)); time.sleep(0.2)
+        tap.close()
+        data = b""; end = time.time() + 2
+        while p.poll() is None and time.time() < end:
+            data += _read_all(rd); time.sleep(0.02)
+        data += _read_all(rd)
+        assert p.wait(3) == 0 and data.endswith(UP)
+    finally:
+        if p.poll() is None:
+            p.kill(); p.wait()
+        os.close(rd)

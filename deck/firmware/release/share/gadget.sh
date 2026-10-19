@@ -75,6 +75,27 @@ KDSVC=/etc/init.d/qt_app2   # procd service (CMD=/data/appLunch.sh). NOT qt_app1
 [ -x $KDSVC ] || KDSVC=""
 udc_now() { cat $G/UDC 2>/dev/null; }
 # KD start: via procd only when the service exists (a manual fallback raced procd -> TWO KD processes, 16:17).
+# 1.2.0 r2 (Opus r120 #1): the on-board router holds /dev/hidg0 open. On this kernel (pre-6.2 f_hid: cdev embedded in
+# f_hidg, freed on configfs unlink) removing hid.usb0 under an open fd is a use-after-free, so every path that touches
+# the UDC/configfs (cleanup = all rollbacks, setup_main = (re-)setup) first stops it: stop file (mk20d supervisor
+# will not relaunch), kill the validated supervisor loop, SIGTERM (router sends all-keys-up) for <= ~2 s, then SIGKILL.
+# Only pids whose cmdline really is `.../bin/mk20-router --src ...` are signalled.
+router_pids() { for p in $(pgrep -f 'bin/mk20-router --src' 2>/dev/null); do
+  case "$p" in ''|*[!0-9]*) continue;; esac
+  tr '\000' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'bin/mk20-router --src' && echo "$p"; done; }
+router_stop() {
+  touch /tmp/mk20-router-stop
+  rp=$(cat /tmp/mk20/router-loop.pid 2>/dev/null)
+  case "$rp" in ''|*[!0-9]*|0|1) ;; *) tr '\000' ' ' < "/proc/$rp/cmdline" 2>/dev/null | grep -q 'mk20d router' && kill "$rp" 2>/dev/null;; esac
+  ri=0; rps=$(router_pids)
+  while [ -n "$rps" ] && [ $ri -lt "${MK20_ROUTER_TERM_TICKS:-10}" ]; do
+    for rp in $rps; do kill "$rp" 2>/dev/null; done; sleep 0.2; ri=$((ri+1)); rps=$(router_pids); done
+  if [ -n "$rps" ]; then log "router did not exit on SIGTERM -> SIGKILL $rps"
+    for rp in $rps; do kill -9 "$rp" 2>/dev/null; done
+    ri=0; while [ -n "$(router_pids)" ] && [ $ri -lt 10 ]; do sleep 0.1; ri=$((ri+1)); done
+    [ -n "$(router_pids)" ] && log "WARN router still present after SIGKILL"; fi
+  return 0
+}
 # KD stop: procd may respawn appLunch.sh right after `stop`; killing that sh later orphaned its fresh KD
 # (PPid 1) -> TWO KD after rollback (16:17 and 16:20). Kill appLunch.sh first, then KD, until both stay gone.
 kd_stop() {
@@ -117,6 +138,7 @@ cleanup() {
   [ "$OK" = 1 ] && return
   mkdir -p /tmp/mk20; touch /tmp/mk20/gadget.busy
   log "FAILSAFE: undo composite"
+  router_stop   # before ANY UDC/configfs change (hidg0 fd vs f_hid free)
   touch /tmp/mk20-flapmon-stop
   killall adbd 2>/dev/null
   echo "" > $G/UDC 2>/dev/null
@@ -304,6 +326,7 @@ die() { log "FAIL $*"; exit 1; }
 kd_stop; killall adbd 2>/dev/null; sleep 1
 pgrep -f /data/KeyboardDevice >/dev/null && die "KD still running/respawned after stop"
 # ---- unbind + clean stale links ----
+router_stop   # 1.2.0: no open /dev/hidg0 across unbind/unlink (re-setup over a live composite)
 i=0; while [ -n "$(udc_now)" ] && [ $i -lt 10 ]; do echo "" > $G/UDC 2>/dev/null; sleep 0.3; i=$((i+1)); done
 [ -z "$(udc_now)" ] || die "cannot unbind"
 for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done

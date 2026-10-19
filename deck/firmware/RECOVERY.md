@@ -40,7 +40,7 @@ Symptoms and where to go:
 | `mk20-no-composite` | release runs in stock mode: ACM + KD (+adb), no ECM/HID/bridge. **Set automatically** (1.1.4+) when flapmon's rollback fails 3 times; flapmon then hard-resets. Delete it once the cause is fixed |
 | `mk20-gadget-nohid` | composite without HID (ECM + ADB + bridge). Not a fix for the ep3 kernel: 1.1.x releases don't run on it at all (see level 5) |
 | `mk20-no-adb` | no adb in any mode |
-| `mk20-no-router` | (1.2.0+) the on-board router (`mk20d router` → `bin/mk20-router`, PTT → HID) is not started; same as `FEATURE_ROUTER=0` in mk20.conf or env `MK20_ROUTER=0`. To stop it now without a reboot: `touch /tmp/mk20-router-stop; killall mk20-router`. The router never gates confirm |
+| `mk20-no-router` | (1.2.0+) the on-board router (`mk20d router` → `bin/mk20-router`, PTT → HID) is not started; same as `FEATURE_ROUTER=0` in mk20.conf or env `MK20_ROUTER=0`. To stop it now without a reboot: `touch /tmp/mk20-router-stop; killall mk20-router` (the stop file keeps the mk20d supervisor from restarting it; SIGTERM/SIGINT make the router send an all-keys-up report before it exits, so no modifier stays held; avoid `kill -9`). The router never gates confirm |
 | `mk20-no-release` | loader skips releases: legacy `boot-every/` jobs only (stock + adb keeper) |
 | `mk20-no-watch` | boot stub does nothing at all: pure vendor behaviour, no rescue watcher, no adb |
 

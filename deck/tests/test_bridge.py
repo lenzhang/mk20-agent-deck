@@ -158,11 +158,13 @@ def test_tap_slow_client_never_stalls(br, tmp_path):
         mac.setblocking(True)
         got += _drain(mac, total - len(got))
         assert got == sent
-        tg = _drain(t, 1 << 30, timeout=1.0)
-        assert len(tg) < total            # the stuck tap dropped data instead of blocking
+        tg = _drain(t, 1 << 30, timeout=3.0)   # returns at EOF: the bridge closed the stuck tap client
+        assert len(tg) < total and sent.startswith(tg)   # a gap-free prefix, then EOF (never a silent hole)
+        t.settimeout(1); assert t.recv(10) == b""
         assert p.poll() is None
     finally:
-        p.terminate(); p.wait(5)
+        p.terminate(); err = p.communicate(timeout=5)[1]
+    assert "tap client dropped" in err
 
 
 def test_tap_unavailable_continues(br, tmp_path):

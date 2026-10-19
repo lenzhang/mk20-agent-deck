@@ -112,20 +112,34 @@ static int json_int(const char *s, size_t n, const char *key, long *out) {
 static int hid_fd = -1;
 static int ptt_col = 1, ptt_row = 4; /* doc coords 1-based, PRD §6.2; fw base 0 assumed unless --fw-base */
 static int fw_base = 0;
-static uint8_t mods;
+static uint8_t mods;          /* desired modifier state */
+static uint8_t sent;          /* last state the gadget accepted */
+static int dirty = 1;         /* desired != delivered (or unknown: startup sends all-keys-up) */
+static unsigned hard_fail;    /* consecutive non-EAGAIN write errors (throttles the retry) */
+static volatile sig_atomic_t stop_sig;
 
-static int hid_write_kbd(uint8_t m) {
+static int hid_try(uint8_t m) { /* one non-blocking write; state changes only on success */
     uint8_t rep[9] = {1, m, 0, 0, 0, 0, 0, 0, 0}; /* report id 1: mods, reserved, 6 keys */
     if (hid_fd < 0) return -1;
-    /* hid_fd is O_NONBLOCK: a host that stops polling (suspend, unplug) must not wedge the router; wait <= ~500 ms */
+    ssize_t w;
+    do w = write(hid_fd, rep, sizeof rep); while (w < 0 && errno == EINTR && !stop_sig);
+    if (w == (ssize_t)sizeof rep) { sent = m; dirty = (sent != mods); hard_fail = 0; return 0; }
+    if (w >= 0) errno = EIO;
+    if (errno != EAGAIN) hard_fail++;
+    dirty = 1;
+    return -1;
+}
+
+/* bounded (<= ~500 ms) delivery of all-keys-up: used at EOF and on SIGTERM/SIGINT */
+static void hid_release_all(void) {
+    mods = 0;
+    if (!dirty && sent == 0) return;
     for (int tries = 0; tries < 10; tries++) {
-        ssize_t w = write(hid_fd, rep, sizeof rep);
-        if (w == (ssize_t)sizeof rep) return 0;
-        if (w >= 0 || (errno != EAGAIN && errno != EINTR)) return -1;
+        if (hid_try(0) == 0) return;
         struct pollfd pf = {hid_fd, POLLOUT, 0};
         poll(&pf, 1, 50);
     }
-    return -1;
+    fprintf(stderr, "mk20-router: all-keys-up not delivered: %s\n", strerror(errno));
 }
 
 static void on_key(long col, long row, long pressed) {
@@ -133,14 +147,14 @@ static void on_key(long col, long row, long pressed) {
     int dc = (int)col - fw_base + 1, dr = (int)row - fw_base + 1;
     trace("routed", (int)col, (int)row, (int)pressed);
     if (col < 100 && dc == ptt_col && dr == ptt_row) {
-        uint8_t nm = pressed ? (mods | MOD_RALT) : (mods & ~MOD_RALT);
-        if (nm != mods || !pressed) {
-            mods = nm;
-            if (hid_write_kbd(mods) == 0) {
+        mods = pressed ? (mods | MOD_RALT) : (mods & ~MOD_RALT);
+        if (mods != sent || !pressed) {
+            dirty = 1;
+            if (hid_try(mods) == 0) {
                 trace("hid_written", (int)col, (int)row, (int)pressed);
                 return;
             }
-            fprintf(stderr, "mk20-router: hid write failed: %s\n", strerror(errno));
+            if (errno != EAGAIN) fprintf(stderr, "mk20-router: hid write failed: %s (retrying)\n", strerror(errno));
         }
     }
     trace("local", (int)col, (int)row, (int)pressed);
@@ -201,6 +215,8 @@ static int open_src(const char *spec) {
     return -1;
 }
 
+static void on_stop(int sig) { (void)sig; stop_sig = 1; }
+
 static void usage(void) {
     fprintf(stderr, "usage: mk20-router --src unix:PATH|file:PATH|- --hid PATH [--ptt COL,ROW] [--fw-base 0|1]\n");
     exit(2);
@@ -221,6 +237,11 @@ int main(int argc, char **argv) {
     }
     if (!src || !hid) usage();
     signal(SIGPIPE, SIG_IGN);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_stop; /* no SA_RESTART: poll()/read() return EINTR */
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
     crc_init();
     trace_init();
     buf = malloc(bcap);
@@ -229,10 +250,28 @@ int main(int argc, char **argv) {
     int fd = open_src(src);
     if (fd < 0) { fprintf(stderr, "mk20-router: open src %s: %s\n", src, strerror(errno)); return 1; }
     uint8_t chunk[4096];
-    ssize_t r;
-    while ((r = read(fd, chunk, sizeof chunk)) > 0 || (r < 0 && errno == EINTR))
-        if (r > 0) feed(chunk, (size_t)r);
-    if (mods) { mods = 0; hid_write_kbd(0); } /* never leave a modifier stuck */
+    hid_try(0); /* startup all-keys-up: a crashed predecessor may have left RAlt held */
+    for (;;) {
+        if (stop_sig) break;
+        struct pollfd pf[2] = {{fd, POLLIN, 0}, {hid_fd, POLLOUT, 0}};
+        /* while a report is undelivered, also wait for the gadget to become writable; after hard errors
+         * (e.g. unbound) retry on a 100-ms tick instead so a permanently-writable error fd cannot spin */
+        int want_out = dirty && !hard_fail;
+        int to = dirty && hard_fail ? 100 : -1;
+        int pr = poll(pf, want_out ? 2 : 1, to);
+        if (pr < 0) { if (errno == EINTR) continue; break; }
+        if (dirty && (pr == 0 || (want_out && (pf[1].revents & (POLLOUT | POLLERR))))) {
+            uint8_t m = mods;
+            if (hid_try(m) == 0) trace("hid_resent", 0, 0, m ? 1 : 0);
+        }
+        if (pf[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+            ssize_t r = read(fd, chunk, sizeof chunk);
+            if (r > 0) feed(chunk, (size_t)r);
+            else if (r == 0 || (errno != EINTR && errno != EAGAIN)) break;
+        }
+    }
+    hid_release_all(); /* never leave a modifier stuck (EOF, error, SIGTERM/SIGINT) */
+    if (stop_sig) { fprintf(stderr, "mk20-router: stopped by signal\n"); return 0; }
     fprintf(stderr, "mk20-router: source closed (bad_crc=%lu)\n", bad_crc);
     return 0;
 }

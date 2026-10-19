@@ -7,7 +7,7 @@
 // replaces old). With no client, output from KD is discarded so KD never blocks.
 // v3 (firmware 1.2.0): --tap PATH serves a local unix socket (0600) that receives a copy of the KD->host bytes for
 // the on-board router (mk20-router). One tap client at a time (new replaces old); sends are MSG_DONTWAIT and a full
-// socket drops the chunk, so a slow or stuck tap client can never stall KD or the Mac link. Bytes from the tap
+// socket closes that tap client (r2: never a silent gap), so a slow or stuck tap client can never stall KD or the Mac link. Bytes from the tap
 // client are read and discarded (it cannot write to KD). A tap that cannot be created is logged and skipped.
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -48,6 +48,11 @@ static int wall(int fd, const char *b, ssize_t n) {  // blocking-style (to the P
 static int wsock(int fd, const char *b, ssize_t n) {  // non-blocking to the client: drop on EAGAIN so KD never stalls
   while (n > 0) { ssize_t w = send(fd, b, n, MSG_DONTWAIT | MSG_NOSIGNAL); if (w < 0) { if (errno == EINTR) continue; if (errno == EAGAIN || errno == EWOULDBLOCK) return 0; return -1; } b += w; n -= w; }
   return 0;
+}
+// tap (r120 GPT #1): an incomplete send (EAGAIN or partial) would silently lose a frame (e.g. a PTT release) on a
+// connection the router still trusts, so the tap client is closed instead: the router sees EOF and releases all keys.
+static int wtap(int fd, const char *b, ssize_t n) {
+  for (;;) { ssize_t w = send(fd, b, n, MSG_DONTWAIT | MSG_NOSIGNAL); if (w < 0 && errno == EINTR) continue; return w == n ? 0 : -1; }
 }
 #define MAXL 4
 static int parse(const char *s, struct sockaddr_in *a) {
@@ -120,7 +125,7 @@ int main(int argc, char **argv) {
     if (p[0].revents & (POLLIN | POLLHUP)) {
       ssize_t r = read(m, buf, sizeof buf);
       if (r > 0 && cl >= 0 && wsock(cl, buf, r)) { close(cl); cl = -1; }
-      if (r > 0 && tc >= 0 && wsock(tc, buf, r)) { close(tc); tc = -1; fprintf(stderr, "tap client dropped\n"); }
+      if (r > 0 && tc >= 0 && wtap(tc, buf, r)) { close(tc); tc = -1; fprintf(stderr, "tap client dropped\n"); }
       if (r <= 0) usleep(10000);
     }
     if (cl >= 0 && ci >= 0 && ci < np && (p[ci].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
