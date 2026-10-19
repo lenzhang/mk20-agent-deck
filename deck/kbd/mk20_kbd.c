@@ -44,10 +44,10 @@ static int monitor(const char *dev)
             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
             gd32_key_event ev;
             if (gd32_decode_key(p.buf, len, &ev) == 0)
-                printf("%ld.%06ld key col=%u row=%u pressed=%u keycode=0x%04x\n", (long)ts.tv_sec, ts.tv_nsec / 1000,
-                       ev.col, ev.row, ev.pressed, ev.keycode);
+                { printf("%ld.%06ld key col=%u row=%u pressed=%u keycode=0x%04x hex=", (long)ts.tv_sec, ts.tv_nsec / 1000,
+                       ev.col, ev.row, ev.pressed, ev.keycode); for (int k = 0; k < len; k++) printf("%02x", p.buf[k]); printf("\n"); }
             else {
-                printf("%ld.%06ld frame id=0x%02x len=%d\n", (long)ts.tv_sec, ts.tv_nsec / 1000, p.buf[0], len);
+                printf("%ld.%06ld frame id=0x%02x len=%d hex=", (long)ts.tv_sec, ts.tv_nsec / 1000, p.buf[0], len); for (int k = 0; k < len; k++) printf("%02x", p.buf[k]); printf("\n");
             }
             fflush(stdout);
         }
