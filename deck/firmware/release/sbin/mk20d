@@ -14,12 +14,14 @@
 #                   (1..30 s), ends on /tmp/mk20-router-stop, composite down, or FEATURE_ROUTER=0
 #                   (mk20.conf, FAT flag mk20-no-router, env MK20_ROUTER=0). Reported in selftest (INFO only, never
 #                   gates confirm) and health.json "router". Log: /tmp/mk20/router.log (tmpfs, trimmed by maint)
-#   mk20d kbd       (KD replacement, option D; opt-in FEATURE_KBD=1, kill switches /data/mk20/use-kd and FAT
-#                   mk20-use-kd) supervised bin/mk20-kbd started by boot instead of stock KD on a clean composite:
-#                   stops stock KD via procd (/etc/init.d/qt_app2 stop), runs mk20-kbd on ttyGS0 + hidg0, restarts
-#                   it after 1 s; 3 crashes within 300 s -> stock KD back (qt_app2 start) + per-version mark
-#                   state/kbd-fallback (this release then keeps stock KD). Ends on /tmp/mk20-kbd-stop (gadget.sh) or
-#                   composite down. Gates selftest/confirm (status file /run/mk20/kbd.status). Log /tmp/mk20/kbd.log
+#   mk20d kbd       (KD replacement, option D; opt-in FEATURE_KBD=1) supervised bin/mk20-kbd started by boot
+#                   instead of stock KD on a clean composite: stops stock KD via procd (/etc/init.d/qt_app2 stop,
+#                   retried; KD that will not stop -> mk20-kbd not started, "degraded"), runs mk20-kbd on ttyGS0 +
+#                   hidg0 and restarts it with backoff (1..30 s) - NEVER falls back to stock KD (OTA needs only the
+#                   composite + mk20d). Crash loop (3 exits in 300 s) on probation -> selftest FAIL -> loader A/B
+#                   rollback; after confirm -> WARN + health flags, restarts continue. Ends on /tmp/mk20-kbd-stop
+#                   (gadget.sh) or composite down. Status /run/mk20/kbd.status, log /tmp/mk20/kbd.log.
+#                   Debug/rescue-only manual overrides: /data/mk20/use-kd or FAT mk20-use-kd -> stock KD.
 #   mk20d version
 # Gate policy: kernel not in kernel/ALLOWLIST -> NO USB changes at all (KD's stock ACM stays); kernel without ecm or
 # vendor hash mismatch or config/flag -> stock ACM+KD+adb (adb with restore-to-serial on failure, like legacy adb.sh).
@@ -58,18 +60,25 @@ router_running() { pgrep -f 'bin/mk20-router --src' >/dev/null; }
 kbd_running() { pgrep -f 'bin/mk20-kbd --run' >/dev/null; }
 KDSVC=${MK20_KDSVC:-/etc/init.d/qt_app2}   # procd service: `stop` also stops the respawn (plain kill -> respawned)
 KST=$R/run/mk20/kbd.status
-kbd_marked() { [ -n "$V" ] && [ "$(head -n 1 "$MK20_HOME/state/kbd-fallback" 2>/dev/null)" = "$V" ]; }
-kbd_wanted() { [ "$FEATURE_KBD" = 1 ] && [ -x "$REL/bin/mk20-kbd" ] && ! kbd_marked; }
+kbd_wanted() { [ "$FEATURE_KBD" = 1 ] && [ -x "$REL/bin/mk20-kbd" ]; }
+probation() { [ -n "$V" ] && [ "$(cat "$MK20_HOME/state/pending" 2>/dev/null)" = "$V" ]; }
+kbd_recent() { # mk20-kbd exits within the crash window (uptimes in $TM/kbd-crash.times)
+  local now; now=$(cut -d. -f1 /proc/uptime)
+  awk -v n="$now" -v w="${MK20_KBD_CRASH_WINDOW:-300}" '$1 ~ /^[0-9]+$/ && n - $1 < w {c++} END{print c+0}' "$TM/kbd-crash.times" 2>/dev/null || echo 0; }
+kbd_total() { num "$(sed -n 's/^total=\([0-9]*\).*/\1/p' "$TM/kbd.crashes" 2>/dev/null)"; }
 jnum() { num "$(sed -n "s/.*\"$1\": *\([0-9]*\).*/\1/p" "$KST" 2>/dev/null | head -n 1)"; }
-kbd_status_check() { # PASS/FAIL lines for the mk20-kbd status file; rc 0 = healthy
+# mk20-kbd problems: FAIL on probation (no confirm -> loader rolls back to the previous release), WARN once confirmed
+# (a confirmed release keeps its composite/OTA path; a FAIL there would trigger the stock rollback-now)
+kbd_bad() { if probation; then echo "FAIL $1"; else echo "WARN $1"; fi; }
+kbd_status_check() { # PASS/FAIL|WARN lines for the mk20-kbd status file; rc 0 = healthy
   local age kn fr pw rc; rc=0
-  [ -f "$KST" ] || { echo "FAIL kbd status missing ($KST)"; return 1; }
+  [ -f "$KST" ] || { kbd_bad "kbd status missing ($KST)"; return 1; }
   age=$(( $(date +%s) - $(num "$(stat -c %Y "$KST" 2>/dev/null)") ))
-  [ $age -le "${MK20_KBD_STATUS_MAX_AGE:-10}" ] && echo "PASS kbd status fresh (${age}s)" || { echo "FAIL kbd status stale (${age}s)"; rc=1; }
+  [ $age -le "${MK20_KBD_STATUS_MAX_AGE:-10}" ] && echo "PASS kbd status fresh (${age}s)" || { kbd_bad "kbd status stale (${age}s)"; rc=1; }
   kn=$(jnum knob_ok); fr=$(( $(jnum key_events) + $(jnum knob_events) + $(jnum echo_frames) + $(jnum other_frames) ))
-  if [ "$kn" = 6 ] || [ $fr -gt 0 ]; then echo "PASS kbd gd32 knob_ok=$kn frames=$fr"; else echo "FAIL kbd gd32 silent (knob_ok=$kn frames=$fr)"; rc=1; fi
+  if [ "$kn" = 6 ] || [ $fr -gt 0 ]; then echo "PASS kbd gd32 knob_ok=$kn frames=$fr"; else kbd_bad "kbd gd32 silent (knob_ok=$kn frames=$fr)"; rc=1; fi
   pw=$(jnum panels_written)
-  [ "$pw" = 21 ] && echo "PASS kbd panels 21/21" || { echo "FAIL kbd panels $pw/21"; rc=1; }
+  [ "$pw" = 21 ] && echo "PASS kbd panels 21/21" || { kbd_bad "kbd panels $pw/21"; rc=1; }
   return $rc; }
 kd_svc() { if [ -x "$KDSVC" ]; then "$KDSVC" "$1" >>"$TM/kbd.log" 2>&1 5>&-; else log WARN kbd "no $KDSVC for $1"; return 1; fi; }
 wdt_armed() { ${MK20_UBUS:-ubus} call system watchdog 2>/dev/null | grep -q '"running"'; }
@@ -79,13 +88,15 @@ selftest() { # FAIL = host-independent breakage. Composite rollback to stock is 
   # mandatory (1.1.0): it is the subnet-independent path, so a release that loses it must not be confirmed.
   local f n; f=0
   if [ -f "$TM/kbd.mode" ]; then   # mk20-kbd replaces stock KD: KD must be gone, mk20-kbd alive and healthy
-    n=$(kd_count); [ "$n" = 0 ] && echo "PASS kd=0 (mk20-kbd mode)" || { echo "FAIL kd=$n beside mk20-kbd"; f=1; }
-    kbd_running && echo "PASS mk20-kbd running" || { echo "FAIL mk20-kbd not running"; f=1; }
-    kbd_status_check || f=1
+    local kr kt kl
+    n=$(kd_count); [ "$n" = 0 ] && echo "PASS kd=0 (mk20-kbd mode)" || { echo "FAIL kd=$n beside mk20-kbd"; f=1; }   # double writer: always FAIL
+    kl=$( { kbd_running && echo "PASS mk20-kbd running" || kbd_bad "mk20-kbd not running"; kbd_status_check
+      kr=$(kbd_recent); kt=$(kbd_total)
+      if [ "$kr" -ge "${MK20_KBD_CRASHES:-3}" ]; then kbd_bad "mk20-kbd crash loop: $kr exits in ${MK20_KBD_CRASH_WINDOW:-300}s ($kt total)"
+      elif [ "$kt" -gt 0 ]; then echo "INFO mk20-kbd restarted $kt times"; fi; } )
+    echo "$kl"; echo "$kl" | grep -q '^FAIL' && f=1
   else
-    if [ -f "$TM/kbd-fallback" ]; then   # fell back to stock KD this boot: a release failure while on probation
-      if [ "$(cat "$MK20_HOME/state/pending" 2>/dev/null)" = "$V" ]; then echo "FAIL mk20-kbd fell back to stock KD ($(head -n 1 "$TM/kbd-fallback")) during probation"; f=1
-      else echo "WARN mk20-kbd fell back to stock KD ($(head -n 1 "$TM/kbd-fallback"))"; fi; fi
+    [ -f "$TM/kbd-degraded" ] && echo "WARN mk20-kbd not active: $(head -n 1 "$TM/kbd-degraded")"
     n=$(kd_count); [ "$n" = 1 ] && echo "PASS kd=1" || { echo "FAIL kd=$n"; f=1; }
   fi
   [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && echo "PASS udc bound" || { echo "FAIL udc unbound"; f=1; }
@@ -130,9 +141,9 @@ health() {
       "$(jbool pgrep -f mk20-flapmon.sh)" "$(jbool lock_held "$TM/mk20d-maint.lock")" "$mounts"
     printf '"router":{"enabled":%s,"running":%s,"loop":%s,"tap":%s},' "$([ "${FEATURE_ROUTER:-1}" = 1 ] && echo true || echo false)" \
       "$(jbool router_running)" "$(jbool lock_held "$TM/router.lock")" "$(jbool test -S "$TM/kd-tap.sock")"
-    printf '"kbd":{"enabled":%s,"mode":%s,"running":%s,"fallback":%s,"marked":%s,"status":%s},' "$([ "${FEATURE_KBD:-0}" = 1 ] && echo true || echo false)" \
-      "$(jbool test -f "$TM/kbd.mode")" "$(jbool kbd_running)" "$(jstr "$(head -n 1 "$TM/kbd-fallback" 2>/dev/null)")" "$(jbool kbd_marked)" \
-      "$(jstr "$(head -c 600 "$KST" 2>/dev/null)")"
+    printf '"kbd":{"enabled":%s,"mode":%s,"running":%s,"restarts":%s,"recent_crashes":%s,"degraded":%s,"status":%s},' \
+      "$([ "${FEATURE_KBD:-0}" = 1 ] && echo true || echo false)" "$(jbool test -f "$TM/kbd.mode")" "$(jbool kbd_running)" \
+      "$(kbd_total)" "$(num "$(kbd_recent)")" "$(jstr "$(head -n 1 "$TM/kbd-degraded" 2>/dev/null)")" "$(jstr "$(head -c 700 "$KST" 2>/dev/null)")"
     printf '"watchdog":%s,"mem_avail_kb":%s,"fat_free_kb":%s,"data_free_kb":%s,' "$(jbool wdt_armed)" "$(num "$mem")" "$(num "$fat")" "$(num "$dat")"
     printf '"release":{"good":%s,"pending":%s,"last_rollback":%s},' "$(jstr "$(head -n 1 "$MK20_HOME/state/good" 2>/dev/null)")" \
       "$(jstr "$(head -n 1 "$MK20_HOME/state/pending" 2>/dev/null)")" "$(jstr "$(head -n 1 "$MK20_HOME/state/last-rollback" 2>/dev/null)")"
@@ -174,11 +185,11 @@ boot)
   kernel_has ecm || { MODE=stock; why="${why:+$why,}kernel '$(kernel_line | cut -d' ' -f2)' lacks ecm"; }
   vc=$(vendor_check) || { MODE=stock; why="${why:+$why,}vendor $vc"; }
   [ -n "$(kernel_line)" ] || { MODE=none; why="kernel $(p4sha) not in kernel/ALLOWLIST"; }
-  rm -f "$TM/gadget.env" "$TM/kbd.mode" "$TM/kbd-fallback"
+  rm -f "$TM/gadget.env" "$TM/kbd.mode" "$TM/kbd-degraded" "$TM/kbd.crashes" "$TM/kbd-crash.times"
   # mk20-kbd replaces stock KD only on a composite (it needs the bridge PTY as ttyGS0); decided before gadget so the
   # bridge is started without the KD tap (no KD output to copy, no standalone router)
   KBDM=0; [ $MODE = composite ] && kbd_wanted && KBDM=1
-  kbd_marked && log WARN kbd "release $V marked kbd-fallback -> stock KD"
+  [ "$FEATURE_KBD" = 1 ] && [ $KBDM = 0 ] && log WARN kbd "enabled but not used (mode=$MODE bin=$([ -x "$REL/bin/mk20-kbd" ] && echo y || echo n))"
   if [ $MODE = composite ]; then
     ( umask 077; printf 'MK20_ECM_IP=%s\nMK20_ECM_MASK=%s\nMK20_DEV_MAC=%s\nMK20_HOST_MAC=%s\nMK20_BRIDGE_PORT=%s\nMK20_FLAP_DROPS=%s\nMK20_FLAP_WINDOW=%s\nMK20_NOHID=%s\nMK20_NOADB=%s\n' \
       "$ECM_IP" "$ECM_MASK" "$ECM_DEV_MAC" "$ECM_HOST_MAC" "$BRIDGE_PORT" "$FLAP_DROPS" "$FLAP_WINDOW_S" "$NOHID" "$NOADB" > "$TM/gadget.env.tmp" ) \
@@ -196,7 +207,7 @@ boot)
     [ $SADB = 1 ] && stock_adb
   else log ERROR boot "$why -> no USB changes (stock ACM+KD only)"; fi
   if [ $KBDM = 1 ] && [ "${grc:-1}" = 0 ]; then
-    touch "$TM/kbd.mode"   # selftest now expects mk20-kbd (not KD); cleared by kbd_stop / fallback
+    touch "$TM/kbd.mode"   # selftest now expects mk20-kbd (not KD); cleared by gadget.sh kbd_stop or "KD did not stop"
     ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V MK20_NOHID=$NOHID exec sh "$REL/sbin/mk20d" kbd </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) &
     log INFO kbd "supervisor launched (nohid=$NOHID); router off"
   elif [ $KBDM = 1 ]; then log WARN kbd "composite rc=${grc:-} -> stock KD stays"; fi
@@ -281,20 +292,20 @@ router)
 kbd)
   exec 5>"$TM/kbd.lock"; flock -n 5 || exit 0
   KB=$REL/bin/mk20-kbd; HID=$R/dev/hidg0; KSTOP=$R/tmp/mk20-kbd-stop; HSTOP=$R/tmp/mk20-router-stop; KL=$TM/kbd.log
-  rm -f "$KSTOP" "$HSTOP"; echo $$ > "$TM/kbd-loop.pid"; why=""; crashes=""   # gadget.sh kbd_stop kills this loop first
+  rm -f "$KSTOP" "$HSTOP" "$TM/kbd-degraded"; echo $$ > "$TM/kbd-loop.pid"; why=""; total=0; d=1   # gadget.sh kbd_stop kills this loop first
   mkdir -p "$R/run/mk20"
   log INFO kbd "start pid=$$"
-  fallback() { # $1 = reason: stock KD back, per-version mark, selftest sees $TM/kbd-fallback
-    echo "$1" > "$TM/kbd-fallback"; rm -f "$TM/kbd.mode"
-    [ "${2:-}" = mark ] && echo "$V" > "$MK20_HOME/state/kbd-fallback"
-    kd_svc start; log ERROR kbd "fallback to stock KD: $1"; }
-  # stop stock KD (two writers on ttyS1/fb would fight); procd would respawn a plainly killed KD
-  kd_svc stop; i=0; while [ "$(kd_count)" != 0 ] && [ $i -lt "${MK20_KBD_KD_TICKS:-25}" ]; do sleep 0.2; i=$((i+1)); done
-  if [ "$(kd_count)" != 0 ]; then fallback "stock KD did not stop"; why="kd stop failed"
+  # stop stock KD (procd would respawn a plainly killed KD), retried; never run mk20-kbd beside a live KD (two writers
+  # on ttyS1/fb). KD that will not stop: mk20-kbd stays off, "degraded" (KD keeps the panels; nothing is restarted).
+  a=0; while [ "$(kd_count)" != 0 ] && [ $a -lt "${MK20_KBD_KD_TRIES:-3}" ]; do
+    a=$((a+1)); kd_svc stop; i=0; while [ "$(kd_count)" != 0 ] && [ $i -lt "${MK20_KBD_KD_TICKS:-25}" ]; do sleep 0.2; i=$((i+1)); done; done
+  if [ "$(kd_count)" != 0 ]; then
+    echo "stock KD did not stop ($a tries)" > "$TM/kbd-degraded"; rm -f "$TM/kbd.mode"; why="kd stop failed"
+    log WARN kbd "degraded: stock KD did not stop after $a tries; mk20-kbd not started"
   else
     while :; do
       [ -f "$KSTOP" ] && { why="stop file"; break; }
-      composite_up || { why="composite down"; fallback "composite down"; break; }
+      composite_up || { why="composite down"; break; }   # gadget.sh cleanup owns KD on that path
       HA="--hid $HID --hid-stop-file $HSTOP"; [ "${MK20_NOHID:-0}" = 1 ] && HA="--no-hid"
       t0=$(cut -d. -f1 /proc/uptime)
       [ -f "$KSTOP" ] && { why="stop file"; break; }   # re-check right before launch (transition in progress)
@@ -302,10 +313,12 @@ kbd)
       "$KB" --run --host "$R/dev/ttyGS0" $HA --status "$KST" </dev/null >>"$KL" 2>&1 5>&-; rc=$?
       t1=$(cut -d. -f1 /proc/uptime)
       [ -f "$KSTOP" ] && { why="stop file"; break; }   # stopped by gadget.sh: not a crash
-      echo "$(date '+%F %T') mk20-kbd exit rc=$rc after $((t1 - t0)) s" >> "$KL"
-      n=0; keep=""; for c in $crashes $t1; do [ $((t1 - c)) -lt "${MK20_KBD_CRASH_WINDOW:-300}" ] && { keep="$keep $c"; n=$((n+1)); }; done; crashes=$keep
-      [ $n -ge "${MK20_KBD_CRASHES:-3}" ] && { why="crash loop"; fallback "$n crashes in ${MK20_KBD_CRASH_WINDOW:-300}s (last rc=$rc)" mark; break; }
-      sleep "${MK20_KBD_RESTART_S:-1}" 5>&-
+      total=$((total + 1)); [ $((t1 - t0)) -ge 60 ] && d=1   # a long healthy run resets the backoff
+      { tail -n 19 "$TM/kbd-crash.times" 2>/dev/null; echo "$t1"; } > "$TM/kbd-crash.times.t" && mv -f "$TM/kbd-crash.times.t" "$TM/kbd-crash.times"
+      echo "total=$total last_rc=$rc last_up=$t1" > "$TM/kbd.crashes"
+      echo "$(date '+%F %T') mk20-kbd exit rc=$rc after $((t1 - t0)) s; restart #$total in ${d}s" >> "$KL"
+      [ "$total" = 1 ] || [ $((total % 10)) = 0 ] && log WARN kbd "mk20-kbd exit rc=$rc (restart #$total, backoff ${d}s)"
+      sleep "$d" 5>&-; d=$((d * 2)); [ $d -gt "${MK20_KBD_BACKOFF_MAX:-30}" ] && d=${MK20_KBD_BACKOFF_MAX:-30}
     done
   fi
   rm -f "$TM/kbd-loop.pid"; log INFO kbd "stop ($why)";;

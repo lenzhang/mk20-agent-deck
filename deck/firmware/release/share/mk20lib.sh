@@ -93,8 +93,9 @@ cfg_load() {
   [ -f "$S/mk20-gadget-nohid" ] && FEATURE_HID=0
   [ -f "$S/mk20-no-router" ] && FEATURE_ROUTER=0   # 1.2.0 on-board router (also MK20_ROUTER=0)
   [ "${MK20_ROUTER:-}" = 0 ] && FEATURE_ROUTER=0
-  # mk20-kbd (KD replacement, option D): opt-in (FEATURE_KBD=1 in mk20.conf or MK20_KBD=1). Kill switches keep stock
-  # KD: /data/mk20/use-kd (adb/ssh) or mk20-use-kd on the FAT (TF card / host).
+  # mk20-kbd (KD replacement, option D): opt-in (FEATURE_KBD=1 in mk20.conf or MK20_KBD=1). There is no automatic
+  # fallback to stock KD (OTA needs only the composite + mk20d; a bad release is rolled back A/B on probation).
+  # Manual debug/rescue-only overrides that keep stock KD: /data/mk20/use-kd (adb/ssh) or mk20-use-kd on the FAT.
   [ "${MK20_KBD:-}" = 1 ] && FEATURE_KBD=1
   [ "${MK20_KBD:-}" = 0 ] && FEATURE_KBD=0
   { [ -f "$MK20_HOME/use-kd" ] || [ -f "$S/mk20-use-kd" ]; } && FEATURE_KBD=0

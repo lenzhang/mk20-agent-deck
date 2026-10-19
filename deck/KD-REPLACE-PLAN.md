@@ -152,22 +152,53 @@
 - Router features beyond PTT that lived on the Mac/agent side (keymaps/actions, MCP agent hooks), keytrace (`MK20_KEYTRACE`) not yet ported.
 - Console e2e through the real TCP bridge plus the Mac console in the simulator.
 
-**K4 release integration (2026-10-19, box only, `tests/test_mk20d_kbd.py`, 35 tests):**
-- **Opt-in + kill switches** (`mk20lib.sh`): `FEATURE_KBD` (default 0; mk20.conf or env `MK20_KBD=1`). `/data/mk20/use-kd` or FAT `mk20-use-kd` force 0 (beat the env too). Per-version mark `state/kbd-fallback` (contents = version) keeps stock KD for that release only; a new release retries.
-- **Boot** (`mk20d boot`): decided before gadget, composite only. `MK20_KBD=1` goes to gadget-boot.sh, which then starts the bridge without `--tap`. On gadget rc 0: touch `/tmp/mk20/kbd.mode`, launch `mk20d kbd`, and do NOT start the standalone router. On rc != 0, stock KD stays.
+**K4 release integration (2026-10-19, box only, `tests/test_mk20d_kbd.py`). Revised on the user's decision: no stock-KD fallback while OTA works.**
+- **Principle:** OTA/update needs only the composite (ECM) + mk20d, not KD. So mk20-kbd problems never bring back stock KD automatically. Safety comes from A/B: on probation, a broken mk20-kbd fails selftest, so the release is not confirmed and the loader rolls back to the previous release.
+- **Opt-in + overrides** (`mk20lib.sh`):
+  - `FEATURE_KBD` (default 0; mk20.conf or env `MK20_KBD=1`).
+  - `/data/mk20/use-kd` or FAT `mk20-use-kd` force stock KD. These are **manual debug/rescue overrides only** (RECOVERY.md); nothing creates them automatically.
+  - No fallback mark (an old `state/kbd-fallback` file is ignored).
+- **Boot** (`mk20d boot`):
+  - Decided before gadget, composite only. `MK20_KBD=1` goes to gadget-boot.sh, which then starts the bridge without `--tap`.
+  - On gadget rc 0: touch `/tmp/mk20/kbd.mode`, launch `mk20d kbd`, and do NOT start the standalone router.
+  - On rc != 0: stock KD stays (that boot is a composite failure anyway).
+  - "enabled but not used" is logged when the binary is missing or the composite is off.
 - **Supervisor** (`mk20d kbd`, flock, `/tmp/mk20/kbd-loop.pid`):
-  - Stops stock KD with `/etc/init.d/qt_app2 stop` (procd; a plain kill gets respawned) and waits ≤5 s for KD to be gone. If KD is still there: `qt_app2 start`, no mk20-kbd (never two writers on ttyS1/fb).
-  - Runs `bin/mk20-kbd --run --host /dev/ttyGS0 --hid /dev/hidg0 --hid-stop-file /tmp/mk20-router-stop --status /run/mk20/kbd.status` (`--no-hid` when NOHID). Restarts it after 1 s.
-  - 3 exits within 300 s → `qt_app2 start`, mark, `/tmp/mk20/kbd-fallback`.
-  - Composite down → hand back to KD.
-  - `/tmp/mk20-kbd-stop` → exit (gadget.sh owns KD then).
-- **Selftest:**
-  - kbd mode: kd=0, mk20-kbd running, and status fresh ≤10 s with knob_ok=6 or any GD32 frame counted, plus panels_written=21. Each check FAILs, so no confirm and the loader rolls back.
-  - Fell back this boot: FAIL while `state/pending` = this version, WARN after confirm.
-  - health.json gains a `"kbd"` section.
+  - **Stopping KD:** `qt_app2 stop` (procd), retried up to 3× (≤5 s wait each).
+  - **KD that will not stop:** mk20-kbd is NOT started (never a ttyS1/fb double writer). It writes `/tmp/mk20/kbd-degraded`, removes kbd.mode, and selftest reports WARN "not active" while KD keeps the panels.
+  - **Running mk20-kbd:** `bin/mk20-kbd --run --host /dev/ttyGS0 --hid /dev/hidg0 --hid-stop-file /tmp/mk20-router-stop --status /run/mk20/kbd.status` (`--no-hid` when NOHID).
+  - **Exits:** every exit is restarted with backoff 1, 2, 4 … 30 s; a run ≥60 s resets the backoff. Exits are recorded in `/tmp/mk20/kbd.crashes` (total, last rc) and `/tmp/mk20/kbd-crash.times` (uptimes, last 20).
+  - **Never** `qt_app2 start`.
+  - **Ends on:** `/tmp/mk20-kbd-stop` (gadget.sh) or composite down (gadget.sh cleanup owns KD on that path).
+- **Selftest in kbd mode:**
+  - kd=0 is required; KD beside mk20-kbd is always FAIL.
+  - These checks FAIL on probation and are WARN once confirmed, so a confirmed release never gets the stock `--rollback-now` because of mk20-kbd:
+    - mk20-kbd running;
+    - status fresh ≤10 s;
+    - knob_ok=6 or any GD32 frame;
+    - panels_written=21;
+    - crash loop: ≥3 exits within 300 s.
+  - Fewer exits show as INFO "restarted N times".
+  - health.json `"kbd"`: enabled, mode, running, restarts, recent_crashes, degraded, status (the status file text).
 - **gadget.sh:**
-  - `router_stop` now ends with `kbd_hid_quiesce`: SIGUSR1 to validated `bin/mk20-kbd --run` pids (the stop file is already touched), then wait until no `/proc/<pid>/fd` points at `/dev/hidg0` (≤3 s). Otherwise SIGTERM (≤2 s), then SIGKILL: fail closed.
-  - `kbd_stop` (stop file, validated supervisor kill, TERM→KILL) runs right after `router_stop` in `cleanup()` and `setup_main`, before any UDC write and before `kd_start`.
-- **Not yet:** `mk20-kbd` is not in `firmware/release/bin` (the build script + binary-match test need extending), so `FEATURE_KBD=1` has no effect on a release built today (`kbd_wanted` needs the binary).
+  - `router_stop` ends with `kbd_hid_quiesce`: SIGUSR1 to validated `bin/mk20-kbd --run` pids, wait until no `/proc/<pid>/fd` points at `/dev/hidg0` (≤3 s), else SIGTERM, then SIGKILL.
+  - `kbd_stop` (stop file, validated supervisor kill, TERM→KILL) runs right after `router_stop` in `cleanup()` and `setup_main`, before any UDC write and before `kd_start`. Those paths (flap rollback, `--rollback-now`, gadget failure) end in stock ACM+KD by design.
+- **hidg0 replacement (fw 1.2.0 field finding):**
+  - The node is deleted and re-created about 13 s after gadget setup (link drop near uptime 74 s), so an early fd becomes "(deleted)" and new opens fail ENXIO until the link is up.
+  - `hid.c` checks the open node every ~1 s (fstat vs stat: dev/ino/rdev, nlink 0, path gone) and on ENXIO/ESHUTDOWN/ENODEV/EPIPE. On a hit it closes without writing to the dead node and reopens with back-off 100 ms → 1 s, then sends all-keys-up and re-sends held keys/mods.
+  - Status file: `hid_open`, `hid_reopens`, `hid_replaced`. Covered by unit tests and e2e (FIFO renamed away + new FIFO).
+- **Release binary:** `tools/mk20-build-bins.sh` builds `bin/mk20-kbd` (static armhf, stripped, 529,696 B) next to the bridge and router. `test_release_binaries_match_source` covers it. FEATURE_KBD stays off by default.
+
+**Plan to make FEATURE_KBD default-on:**
+1. On-device trial with `FEATURE_KBD=1` in mk20.conf on a release that carries the binary. Pass criteria:
+   - confirm passes;
+   - kbd.status shows 6/6 knobs and 21 panels;
+   - `hid_replaced`≥1 after the 74 s link drop, with PTT still working afterwards;
+   - console JPEG/backlight/getInfo OK;
+   - OTA install of the next release works from kbd mode;
+   - a forced crash loop on probation rolls back A/B.
+2. 24 h soak plus a few reboots and host replug/flap cycles with kbd on: no `restarts` growth, no stuck RAlt, no KD respawn.
+3. Feature parity left on the console side (keymaps/actions, keytrace) accepted or ported.
+4. Flip the default in `mk20lib.sh` (`FEATURE_KBD=1`) in a new release (version bump). The overrides `use-kd` / `mk20-use-kd` stay documented as debug/rescue. Then retire the standalone router and the bridge `--tap` path one release later.
 
 **On-device checks still needed (user at home):** knob init echo on the real GD32 and K2 events `16 .. 67/68/69`; JPEG frames from the Mac console shown correctly; brightness levels look right with the KD mapping; PTT RAlt from the on-board daemon and the hidg0 close on gadget teardown; host link reopen across a bridge restart; latency press→keyStateChanged and press→panel.
