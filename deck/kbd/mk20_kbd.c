@@ -94,7 +94,7 @@ static int open_host(const char *path)
 
 static void init_service(void *ctx) { kbd_t *k=ctx; kbd_service(k,mono_ms()); }
 
-struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop, *lock, *exit_file, *ctl; int ctl_allow, hid_scroll, k2_estop, k2_release, no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
+struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop, *lock, *exit_file, *ctl; int safe_mode, verbose, ctl_allow, hid_scroll, k2_estop, k2_release, no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
 
 static int run(const struct run_opts *o)
 {
@@ -113,19 +113,20 @@ static int run(const struct run_opts *o)
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL);
     sa.sa_handler = on_usr1; sigaction(SIGUSR1, &sa, NULL);
     kbd_t k;
-    if (kbd_init(&k, o->fb, o->bl, KBD_VERSION)) { fprintf(stderr, "mk20-kbd: init failed\n"); return 1; }
-    if (onboard_enable(&k)) { fprintf(stderr,"mk20-kbd: on-board UI init failed\n"); kbd_free(&k); return 1; }
+    if ((o->safe_mode ? kbd_init_safe : kbd_init)(&k, o->fb, o->bl, KBD_VERSION)) { fprintf(stderr, "mk20-kbd: init failed\n"); return 1; }
+    if (!o->safe_mode && onboard_enable(&k)) { fprintf(stderr,"mk20-kbd: on-board UI init failed\n"); kbd_free(&k); return 1; }
+    if (o->safe_mode) kbd_set_backlight(&k, 50);
     k.k2_estop = 1; k2_estop_init(&k.k2, o->k2_release);
     k.ptt_col = o->ptt_col; k.ptt_row = o->ptt_row;
     hid_init(&g_hid, o->hid, o->hid_stop);
     hid_set_scroll(&g_hid, o->hid_scroll);   /* MUST match gadget.sh MK20_HID_SCROLL */
     if (!o->no_hid) { k.hid = &g_hid; kbd_service(&k, mono_ms()); }   /* open + startup all-keys-up */
     static ctl_t ctl;
-    if (k.onboard || o->k2_estop || (o->ctl && o->ctl[0])) {   /* agent A1, opt-in: control socket or K2 safety */
+    if (o->safe_mode || k.onboard || o->k2_estop || (o->ctl && o->ctl[0])) {   /* agent A1, opt-in: control socket or K2 safety */
         ctl_init(&ctl, k.hid);
         ctl.safety_tick = kbd_ctl_safety; ctl.safety_ctx = &k;
-        if (k.onboard || o->k2_estop) k.ctl = &ctl;
-        if (!o->ctl || !o->ctl[0]) { /* K2 safety only, no listening socket */ }
+        if (o->safe_mode || k.onboard || o->k2_estop) k.ctl = &ctl;
+        if (o->safe_mode || !o->ctl || !o->ctl[0]) { /* K2 safety only, no listening socket */ }
         else if (ctl_listen(&ctl, o->ctl)) fprintf(stderr, "mk20-kbd: control socket %s failed: %s (agent input disabled)\n", o->ctl, strerror(errno));
         else { k.ctl = &ctl; if (o->ctl_allow) ctl_set_allowed(&ctl, 1); fprintf(stderr, "mk20-kbd: control socket %s%s\n", o->ctl, o->ctl_allow ? " (dev: allowed at start)" : ""); }
     }
@@ -146,7 +147,7 @@ static int run(const struct run_opts *o)
     gd32_parser gp; gd32_parser_init(&gp);
     /* host link first, so key events arriving during knob init (<= 18 s worst case if the
      * GD32 never echoes) are still forwarded */
-    if (!o->no_host && (k.host_fd = open_host(o->host)) >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
+    if (!o->safe_mode && !o->no_host && (k.host_fd = open_host(o->host)) >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
     int64_t next_host_try = mono_ms() + 1000;
     if (no_write) {
         k.knob.state = 4;
@@ -166,7 +167,7 @@ static int run(const struct run_opts *o)
     uint8_t buf[16384];
     while (!g_stop) {
         int64_t now = mono_ms();
-        if (!o->no_host && k.host_fd < 0 && now >= next_host_try) {
+        if (!o->safe_mode && !o->no_host && k.host_fd < 0 && now >= next_host_try) {
             k.host_fd = open_host(o->host);
             next_host_try = now + 1000;
             if (k.host_fd >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
@@ -212,7 +213,15 @@ static int run(const struct run_opts *o)
             else host_work = 0;
             kbd_service(&k, mono_ms());   /* host decode/render may have crossed a safety deadline */
         }
-        if (o->status && mono_ms() >= next_status) { kbd_write_status(&k, o->status); next_status = mono_ms() + 1000; }
+        if (mono_ms() >= next_status) {
+            if (o->status) kbd_write_status(&k, o->status);
+            /* Diagnostic counters only: never key/event payloads or configuration/secret contents. */
+            if (o->verbose) {
+                unsigned errors; screen_stats(&k.scr, NULL, &errors, NULL);
+                fprintf(stderr,"mk20-kbd: mode=%s write_errors=%u\n",o->safe_mode ? "safe" : "normal",errors);
+            }
+            next_status = mono_ms() + 1000;
+        }
         if (o->exit_file && o->exit_file[0] && access(o->exit_file, F_OK) == 0) {
             fprintf(stderr, "mk20-kbd: %s present: exiting\n", o->exit_file); break;
         }
@@ -229,7 +238,7 @@ static int run(const struct run_opts *o)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: mk20-kbd --run [--no-host] [--no-gd32-write] [--gd32 TTY] [--host TTY] [--fb DIR]\n"
+    fprintf(stderr, "usage: mk20-kbd --run [--safe-mode] [--verbose] [--no-host] [--no-gd32-write] [--gd32 TTY] [--host TTY] [--fb DIR]\n"
                     "                      [--bl DIR|''] [--status FILE] [--knob-timeout-ms N]\n"
                     "                      [--no-hid | --hid PATH] [--hid-stop-file PATH] [--ptt COL,ROW (1-based)]\n"
                     "                      [--lock FILE (default /tmp/mk20-kbd.lock; '' = none)] [--exit-file FILE]\n"
@@ -247,10 +256,12 @@ int main(int argc, char **argv)
     }
     if (argc >= 2 && !strcmp(argv[1], "--run")) {
         struct run_opts o = {"/dev/ttyS1", "/dev/ttyGS0", "/dev", "/sys/kernel/debug/dispdbg", "/run/mk20/kbd.status",
-                             HID_DEFAULT_PATH, HID_DEFAULT_STOP_FILE, "/tmp/mk20-kbd.lock", NULL, NULL, 0, 0, 0, 0, 0, 0, 1000, 0, 0, 3};
+                             HID_DEFAULT_PATH, HID_DEFAULT_STOP_FILE, "/tmp/mk20-kbd.lock", NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 1000, 0, 0, 3};
         for (int i = 2; i < argc; i++) {
             const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
-            if (!strcmp(a, "--no-host")) o.no_host = 1;
+            if (!strcmp(a, "--safe-mode")) o.safe_mode = 1;
+            else if (!strcmp(a, "--verbose")) o.verbose = 1;
+            else if (!strcmp(a, "--no-host")) o.no_host = 1;
             else if (!strcmp(a, "--no-gd32-write")) o.no_write = 1;
             else if (v && !strcmp(a, "--gd32")) { o.gd32 = v; i++; }
             else if (v && !strcmp(a, "--host")) { o.host = v; i++; }

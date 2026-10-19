@@ -87,6 +87,8 @@ def scope_gadget_fn(fn, t, *, process_helpers=True):
 
 @pytest.fixture
 def dev(tmp_path):
+    if not BB or not pathlib.Path("/proc/uptime").exists():
+        pytest.skip("Linux /proc + BusyBox required (set MK20_TEST_BUSYBOX on Linux)")
     yield Dev(tmp_path)
     _kill_strays(tmp_path)
 

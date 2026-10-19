@@ -5,6 +5,17 @@ watchdog hard reset, watcher/boot jobs) into a versioned, installable, recoverab
 the user's own unit. The layout must allow other units later. Stock rootfs stays untouched: everything lives on
 the TF card's FAT partition (/mnt/SDCARD) and /data, and is removable.
 
+## K4 release integration update (2026-10-20)
+
+1.3.0-rc1 supersedes the historical KD/fallback behavior below: FEATURE_KBD=1 by
+default, stop-only vendor service, no stock-KD start or selector. Crash loops enter
+mk20-kbd's own static safe mode; keys/K2 and ECM/adb remain available. Safe mode is
+WARN even on probation; other host-independent kbd/panel/GD32 FAILs withhold confirm
+for loader A/B rollback. The existing /data installer writes one inactive slot for
+1.2.x→1.3.0; no rootfs p5 or stock-binary writes. See KD-REPLACE-PLAN K4,
+firmware/{INSTALL,RECOVERY,RELEASE}.md and [MAINT-HOOKS.md](firmware/MAINT-HOOKS.md).
+The usb0 web implementation is separate U3 work; only its file hooks are in K4.
+
 ## 1. Current state (baseline being packaged)
 - Kernel: stock 5.4.61 #221, binary-patched (ep3 ISO->INT, ep5out INT-capable), p4 sha 7326d9e5…;
   stock p4 9ac68ed9… kept on the FAT partition, in /data, on the Mac and on the box. Recovery: TF pull plus

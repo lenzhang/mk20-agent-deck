@@ -106,7 +106,7 @@ implied here; K0–K5 numbering stays intact.
 
 1. A new release built as an A/B slot (loader unchanged): `mk20d` starts `mk20-kbd` instead of KD.
    - The stock KD binary and `appLunch.sh` stay on the rootfs/data **untouched but never started**; the previous release stays in the other A/B slot.
-2. ~~Kill switch `/data/mk20/use-kd`~~ **Removed (user decision 2026-10-19, see K4 below):** no file, FAT flag or key combo switches back to stock KD.
+2. No file, FAT flag or key combo switches back to stock KD. Legacy `use-kd`, FAT `mk20-use-kd` and `state/kbd-fallback` are ignored, with one notice per boot.
 3. **Probation selftest** (all must pass within 60 s, else no confirm, and the loader rolls the A/B slot back to the previous release — firmware rollback, not a start of stock KD):
    - **GD32 link alive (passive):** at least one valid GD32 frame was parsed since start. The status file is written on every event.
      - The GD32 is quiet when untouched, so the acceptance step asks for one keypress during the window, or the release falls back.
@@ -166,78 +166,70 @@ helper, never required (2026-10-19), replaces the earlier no-helper decision.
 - Router features beyond PTT that lived on the Mac/agent side (keymaps/actions, MCP agent hooks), keytrace (`MK20_KEYTRACE`) not yet ported.
 - Console e2e through the real TCP bridge plus the Mac console in the simulator.
 
-**K4 release integration (2026-10-19, box only, `tests/test_mk20d_kbd.py`). Revised on the user's decision: no stock-KD fallback. Struck-through lines below are the old overrides; they are to be removed, not the current plan.**
+**K4 release integration (2026-10-20, 1.3.0-rc1; source implemented, hardware acceptance pending).**
 
-**User decision (2026-10-19, late) — supersedes anything below that mentions stock-KD overrides:**
-- **Never fall back to stock KeyboardDevice.** Boot starts only mk20-kbd; there is no automatic or manual path back to KD (`qt_app2 start` is never issued).
-- **Crash loop → mk20-kbd's own minimal safe mode**, not KD: an error page on the panels, keys (HID) and e-stop keep working, the usb0 web service and adb stay reachable for remote rescue. The supervisor keeps restarting mk20-kbd (backoff as below); the crash-loop condition starts it with the safe-mode flag instead of giving up.
-- **No `use-kd` kill switch** (`/data/mk20/use-kd`, FAT `mk20-use-kd` are dropped and ignored) and **no hidden key combo on the keyboard** (avoids accidental triggers).
-- **Maintenance entry** (debug toggles, exit safe mode, view logs, restart mk20-kbd): primary in the device usb0 admin web page `http://172.30.250.2:8780` (ONBOARD-UI-PLAN U3; works with no Mac app, any USB host + browser); optional mirror in the Mac mk20deck config.
-- **Stock binaries stay on the rootfs** but never start. **Firmware A/B rollback stays** as the last safety net (probation selftest failure → loader rolls back the slot), independent of the stock UI.
-- **Principle:** OTA/update needs only the composite (ECM) + mk20d, not KD. So mk20-kbd problems never bring back stock KD automatically. Safety comes from A/B: on probation, a broken mk20-kbd fails selftest, so the release is not confirmed and the loader rolls back to the previous release.
-- **Opt-in + overrides** (`mk20lib.sh`):
-  - `FEATURE_KBD` (default 0; mk20.conf or env `MK20_KBD=1`).
-  - ~~`/data/mk20/use-kd` or FAT `mk20-use-kd` force stock KD~~ — **removed by the user decision above**; implementation must drop these overrides (files ignored).
-  - No fallback mark (an old `state/kbd-fallback` file is ignored).
-- **Boot** (`mk20d boot`):
-  - Decided before gadget, composite only. `MK20_KBD=1` goes to gadget-boot.sh, which then starts the bridge without `--tap`.
-  - On gadget rc 0: touch `/tmp/mk20/kbd.mode`, launch `mk20d kbd`, and do NOT start the standalone router.
-  - On rc != 0: ~~stock KD stays (that boot is a composite failure anyway)~~ — **to be removed (user decision 2026-10-19):** composite failure does not start stock KD. Boot still starts only mk20-kbd; a composite that will not come up is a gadget failure, rescued by safe mode (keys + e-stop, usb0 web, adb) and A/B rollback, never by `qt_app2 start`.
-  - "enabled but not used" is logged when the binary is missing or the composite is off. A missing binary does **not** start stock KD (same decision); the boot stays on mk20-kbd's safe-mode path.
-- **Supervisor** (`mk20d kbd`, flock, `/tmp/mk20/kbd-loop.pid`):
-  - **Stopping a leftover stock KD:** `qt_app2 stop` (procd), retried up to 3× (≤5 s wait each). Stop only — this is not a path that starts KD.
-  - **KD that will not stop:** mk20-kbd is NOT started (never a ttyS1/fb double writer). It writes `/tmp/mk20/kbd-degraded`, removes kbd.mode, and selftest reports WARN "not active". ~~while KD keeps the panels~~ — **to be removed (user decision 2026-10-19):** a leftover KD that refuses `qt_app2 stop` is not left as the UI and is never restarted; panels stay with the next mk20-kbd start (safe mode if it cannot take the devices). No `qt_app2 start`.
-  - **Running mk20-kbd:** `bin/mk20-kbd --run --host /dev/ttyGS0 --hid /dev/hidg0 --hid-stop-file /tmp/mk20-router-stop --status /run/mk20/kbd.status` (`--no-hid` when NOHID).
-  - **Exits:** every exit is restarted with backoff 1, 2, 4 … 30 s; a run ≥60 s resets the backoff. Exits are recorded in `/tmp/mk20/kbd.crashes` (total, last rc) and `/tmp/mk20/kbd-crash.times` (uptimes, last 20).
-  - **Never** `qt_app2 start`.
-  - **Ends on:** `/tmp/mk20-kbd-stop` (gadget.sh) or composite down. ~~gadget.sh cleanup owns KD on that path~~ — **to be removed (user decision 2026-10-19):** cleanup stops mk20-kbd and does not start stock KD.
-- **Selftest in kbd mode:**
-  - kd=0 is required; KD beside mk20-kbd is always FAIL.
-  - These checks FAIL on probation and are WARN once confirmed, so a confirmed release never gets `--rollback-now` because of mk20-kbd (firmware A/B only; ~~stock `--rollback-now`~~ never starts KD):
-    - mk20-kbd running;
-    - status fresh ≤10 s;
-    - knob_ok=6 or any GD32 frame;
-    - panels_written=21;
-    - ~~crash loop: ≥3 exits within 300 s.~~ — **to be removed as a KD fallback (user decision 2026-10-19):** a crash loop does not fail the release into stock KD and does not stop the supervisor. It starts mk20-kbd with the safe-mode flag (error page; keys + e-stop; usb0 web + adb). Selftest records it as WARN, including on probation; slot rollback stays the loader's call on the other selftest FAILs, not a start of KD.
-  - Fewer exits show as INFO "restarted N times".
-  - health.json `"kbd"`: enabled, mode, running, restarts, recent_crashes, degraded, status (the status file text).
-- **gadget.sh:**
-  - `router_stop` ends with `kbd_hid_quiesce`: SIGUSR1 to validated `bin/mk20-kbd --run` pids, wait until no `/proc/<pid>/fd` points at `/dev/hidg0` (≤3 s), else SIGTERM, then SIGKILL.
-  - `kbd_stop` (stop file, validated supervisor kill, TERM→KILL) runs right after `router_stop` in `cleanup()` and `setup_main`, before any UDC write. ~~and before `kd_start`. Those paths (flap rollback, `--rollback-now`, gadget failure) end in stock ACM+KD by design.~~ — **to be removed (user decision 2026-10-19):** `kd_start` / `qt_app2 start` is never issued. Flap rollback and `--rollback-now` stay firmware A/B rollback (previous release slot), not a start of the stock binary on this rootfs. Gadget failure does not start KD either.
-- **hidg0 replacement (fw 1.2.0 field finding):**
-  - The node is deleted and re-created about 13 s after gadget setup (link drop near uptime 74 s), so an early fd becomes "(deleted)" and new opens fail ENXIO until the link is up.
-  - `hid.c` checks the open node every ~1 s (fstat vs stat: dev/ino/rdev, nlink 0, path gone) and right after a fatal write error (ENXIO/ESHUTDOWN/ENODEV/EPIPE/EBADF).
-  - **A stale fd is PARKED, never closed.** Same rule as router 1.2.1: Tina's `hidg_bind()` re-runs `cdev_init()` on the same cdev, so closing the stale fd after a re-bind breaks every later open (codex r121 #1).
-  - The new node is opened by path with back-off 100 ms → 1 s (reset only after a delivered report), then all-keys-up and held keys/mods are re-sent.
-  - A fatal error on a node that is not stale closes and reopens nothing; retries stay on the 100 ms hard-error tick (no open/ESHUTDOWN spin, r121 #2).
-  - Teardown (stop file / SIGUSR1) closes the current and all parked fds. gadget.sh's holder check also matches `/dev/hidg0 (deleted)`.
-  - **Limitation:** if mk20-kbd dies while the gadget stays up with a parked fd, hidg0 stays unopenable until the next re-bind or reboot. mk20-kbd keeps retrying the open (≤1 s), and keys/panels keep working without HID.
-  - **Consequence for supervision:** a process that has been through a re-bind cannot be restarted without losing HID until reboot. So all HID recovery is in-process: mk20-kbd never exits for HID reasons (no exit path on hidg0 errors; SIGUSR1/stop-file teardown closes and later reopens inside the same process). The supervisor's restarts exist only for real crashes. After such a restart, selftest WARNs (never FAILs) "hidg0 not open after mk20-kbd restart"; a reboot clears it. Documented in RECOVERY.md.
-  - Status file: `hid_open`, `hid_reopens`, `hid_replaced`. Covered by unit tests and e2e.
-- **Release binary:** `tools/mk20-build-bins.sh` builds `bin/mk20-kbd` (static armhf, stripped, 529,696 B) next to the bridge and router. `test_release_binaries_match_source` covers it. FEATURE_KBD stays off by default.
+**User decision (2026-10-19, late), implemented:** boot starts only mk20-kbd;
+stock KeyboardDevice is never started by this release. Stock binaries/rootfs p5
+remain untouched. Firmware A/B rollback to the previous release remains independent
+(the previous 1.2.x release retains its own historical behavior).
 
-**codex review kdr-r1 (2026-10-19, NO-GO, 6 findings; reviews/kdr-codex-r1.md on the Mac worktree), fixes in the next commit:**
-- **#1 teardown fail-open:** `kbd_stop` and `kbd_hid_quiesce` now return 1 when a holder or mk20-kbd survives SIGKILL. `cleanup()` then aborts with UDC/configfs untouched and KD not started; `setup_main` dies.
-- **#2 late supervisor undoing teardown:** markers are cleared only by `mk20d boot`, under the gadget transition mutex and only with no `gadget.busy` and the composite up. The supervisor publishes its pid before the first marker check and does nothing (KD untouched) when the marker, busy flag or composite-down is seen. mk20-kbd also gets `--exit-file /tmp/mk20-kbd-stop`: it refuses to start, or exits, once the marker exists. kbd_stop rescans once for a late exec.
-- **#4 host write deadlock:** the host fd stays O_NONBLOCK. A reply waits at most 200 ms, then later replies fail fast until a write succeeds (`host_tx_timeouts`). e2e floods getInfo without reading and checks that the PTT release still reaches HID within 1.5 s and that replies resume.
-- **#5 KD between respawns:** `qt_app2 stop` is issued unconditionally, followed by a 1 s settle. ~~A KD that comes back mid-run stops further launches (degraded).~~ — **to be removed (user decision 2026-10-19):** a stock KD that reappears is stopped again (`qt_app2 stop` only, never `qt_app2 start`); it does not become the UI and does not replace mk20-kbd. Launches of mk20-kbd wait until the devices are free, then continue (safe mode if they cannot be taken).
-- **#6 single instance:** mk20-kbd takes a daemon-lifetime flock (`--lock`, supervisor passes `/tmp/mk20/kbd-daemon.lock`) before touching ttyS1/fb; a second instance exits 3.
-- **#3 (open, needs a decision):** a CRASH of mk20-kbd closes its parked hidg0 fds. After the ~74 s re-bind, HID then stays ENXIO until reboot, and a RAlt that was held at crash time stays held on the host until USB reset or reboot. The router 1.2.1 has the same property. The fix codex suggests is a separate HID guardian process (owns hidg0 + parked fds, releases modifiers on control-socket EOF), or fixing the kernel cdev lifetime. Mitigations today:
-  - HID errors never end the process;
-  - selftest WARNs about lost HID after a restart;
-  - RECOVERY.md says to reboot.
-- **#3 decision (2026-10-19): no separate HID guardian process for now.** The real fix is the kernel side: the hidfix module (branch `feature/hidfix`, codex GO after r3) fixes the f_hid cdev lifetime ("open fails after re-bind" and "crash on function unlink"). It is tested on the device LAST, after all other work has landed. Until then the mitigations above stay as they are: HID errors never exit the process, selftest shows WARN (not FAIL) for lost HID after a restart, and RECOVERY.md says to reboot. A HID guardian is the fallback only if hidfix fails on the device; then it is designed as its own milestone (sole owner of hidg0 + parked fds, modifiers released on control-socket EOF, mk20-kbd talks to it over a socket).
-
-**Plan to make FEATURE_KBD default-on:**
-1. On-device trial with `FEATURE_KBD=1` in mk20.conf on a release that carries the binary. Pass criteria:
-   - confirm passes;
-   - kbd.status shows 6/6 knobs and 21 panels;
-   - `hid_replaced`≥1 after the 74 s link drop, with PTT still working afterwards;
-   - console JPEG/backlight/getInfo OK;
-   - OTA install of the next release works from kbd mode;
-   - a forced crash loop on probation rolls back A/B.
-2. 24 h soak plus a few reboots and host replug/flap cycles with kbd on: no `restarts` growth, no stuck RAlt, no KD respawn.
-3. Feature parity left on the console side (keymaps/actions, keytrace) accepted or ported.
-4. Flip the default in `mk20lib.sh` (`FEATURE_KBD=1`) in a new release (version bump). No stock-KD override remains (user decision); rescue is safe mode + usb0 admin web + adb + A/B rollback. Then retire the standalone router and the bridge `--tap` path one release later.
+- `FEATURE_KBD=1` is the release default. `MK20_KBD=0` / config `FEATURE_KBD=0`
+  is developer-only, never a stock-KD selector; with no router/UI the panels remain
+  unpainted. `/data/mk20/use-kd`, FAT `mk20-use-kd` and `state/kbd-fallback` are inert,
+  with one ignored-overrides notice per boot. No hidden keyboard combo.
+- **Boot:** resolve kbd before gadget; normal composite bridge has no `--tap` and
+  no standalone router. Stop leftover KD via `qt_app2 stop` only. Launch kbd even if
+  gadget setup failed or the binary is missing (failed exec is supervised and
+  selftest detects it). A busy transition never clears its teardown markers.
+- **Supervisor:** one flock, validated pid/stop markers and the daemon lifetime lock.
+  Stop procd unconditionally before launch, retry while KD remains, stop it again
+  if it reappears; never permit two intentional UART/panel writers. Missing kbd or
+  KD that cannot stop does not select a vendor UI. The supervisor keeps retrying.
+- **Crash loop:** >=3 exits in 300 s latch persistent safe mode and add `--safe-mode`
+  on subsequent starts. Backoff stays 1,2,4…30 s, reset after a >=60-s run; supervisor
+  continues. Safe mode paints all 21 panels with static error/admin text, retains
+  GD32-owned typing, the existing local PTT HID mapping and K2 e-stop. It uses no
+  host JPEG, on-board navigation or agent socket, and reports `mode=safe` in status.
+  No new ttyS1 writes: only the existing six allow-listed encoder RAM slots, or none
+  when the read-only switch is set. ECM/usb0 and adb stay up during crashes/safe mode.
+- **Maintenance contract:** implemented in mk20d and specified in
+  [firmware/MAINT-HOOKS.md](firmware/MAINT-HOOKS.md). Persistent/runtime fixed-name
+  inboxes accept empty `exit-safe-mode` / `restart-kbd` and validated `debug`
+  (`verbose=0|1` only); atomically consume requests, never execute/source input.
+  Exit-safe clears recent crashes/latch and restarts normally; maintenance restarts
+  do not count as crashes. Atomic read-only runtime `state.json` publishes mode,
+  restarts, recent crashes, last rc, reason, version. The authenticated usb0 admin
+  web at `172.30.250.2:8780` consumes this contract in U3; agent/web implementation
+  is separate. Mac mirror is optional/out of scope; no keytrace/secret logging.
+- **Selftest:** kd=0 always required. Kbd missing/not running, stale status, no
+  GD32 proof (`knob_ok=6` or parsed frame), panels !=21 or panel errors are FAIL
+  on probation, WARN after confirm. Safe mode/crash-loop indication is WARN even
+  on probation; these indications alone never trigger rollback. Other probation
+  FAILs leave the release unconfirmed for loader A/B rollback. Health includes kbd
+  mode and counters. HID unavailable after restart remains WARN (reboot clears it).
+- **Gadget:** every mutating setup/cleanup first quiesces HID, stops kbd, and fails
+  closed on surviving processes/threads. No `kd_start` or `qt_app2 start` remains.
+  Setup failure restores ACM+adb without KD. Release flap/manual `--rollback-now`
+  requests watcher `cmd-rollback` (loader A/B), preserving USB until reset; stale
+  generations are ignored. Kbd crashes themselves never request gadget teardown.
+- **HID lifetime limitation remains:** Tina may recreate hidg0 after re-bind.
+  Stale descriptors remain parked; all normal HID recovery is in-process. A real
+  crash or requested restart can close parked fds, lose HID/leave a held modifier
+  until reboot. No guardian is added in K4. Kernel `feature/hidfix` acceptance is
+  separate; [firmware/RECOVERY.md](firmware/RECOVERY.md) retains the reboot advice.
+- **Install:** existing verified userland installer, one pending A/B switch from
+  1.2.x to 1.3.0, no additional partition/slot writes or rootfs p5 changes. Semver
+  is `1.3.0`; build id `rc1`; [firmware/RELEASE.md](firmware/RELEASE.md) records RC
+  status. Rebuild `bin/mk20-kbd` on Linux with `tools/mk20-build-bins.sh` before
+  packaging; binaries are never hand-edited.
+- **Tests:** `tests/test_mk20d_kbd.py` covers default/ignored flags, missing binary,
+  gadget failure, crashes/backoff/safe mode, both maintenance inboxes, validation,
+  graceful restart accounting, no KD starts, selftest and actual loader confirm/
+  rollback. `tests/test_install.py` covers 1.2.1→1.3.0 one-slot upgrade and untouched
+  p5/vendor sentinels. `kbd/tests/safe_mode.py` exercises real safe-mode rendering,
+  HID, both K2 paths and exact GD32 TX with fake devices. BusyBox/proc tests require
+  Linux; portable shell/daemon tests supplement them on macOS. Hardware acceptance
+  remains: cold boot, forced probation failure, safe WARN confirm, usb0 web/adb,
+  HID across rebind/restarts, resource measurements and 24 h soak.
 
 **On-device checks still needed (user at home):** knob init echo on the real GD32 and K2 events `16 .. 67/68/69`; JPEG frames from the Mac console shown correctly; brightness levels look right with the KD mapping; PTT RAlt from the on-board daemon and the hidg0 close on gadget teardown; host link reopen across a bridge restart; latency press→keyStateChanged and press→panel.

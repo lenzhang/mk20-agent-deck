@@ -4,6 +4,31 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
+## 1.3.0-rc1 (K4)
+
+`firmware/VERSION` is **1.3.0**; package with build id **rc1**:
+`sh tools/mk20-release-build.sh firmware out rc1`. Rebuild release binaries first
+on Linux with `sh tools/mk20-build-bins.sh` (`arm-linux-gnueabihf-gcc`); source-only
+changes are not ready to install until `bin/mk20-kbd` is rebuilt. Never hand-edit it.
+
+This release defaults `FEATURE_KBD=1` and starts only mk20-kbd. Stock binaries stay
+untouched on rootfs, p5 is never written, and no KD start remains in release scripts.
+`MK20_KBD=0` / config `FEATURE_KBD=0` is developer-only; it never starts KD. Legacy
+`use-kd`, FAT `mk20-use-kd` and `state/kbd-fallback` are ignored (one boot notice).
+
+>=3 exits in 300 s latch safe mode and keep supervised restarts/backoff. Safe mode
+renders static rescue text on all panels, retains GD32 typing/local PTT HID/K2
+e-stop, uses the unchanged GD32 TX allow-list, and needs no JPEG/host/agent service.
+ECM/usb0 and adb remain up. Selftest marks safe mode WARN even during probation;
+missing kbd/no GD32/incomplete panels/stale status/panel errors remain FAIL during
+probation and WARN after confirm. Loader A/B rollback is retained; no stock-KD
+selector or keyboard combo exists. Restarting after HID re-bind may require reboot.
+
+Rescue is safe mode + usb0 admin web + adb + A/B. K4 implements the validated
+file-based [maintenance contract](MAINT-HOOKS.md); the web service is separate U3
+work. The optional Mac mirror is out of scope. Hardware acceptance, forced-fail
+rollback and 24 h soak remain release gates; this worktree makes no device claims.
+
 ## What is a release
 
 A release lives in `/data/mk20/releases/<semver>/`:
@@ -12,10 +37,12 @@ A release lives in `/data/mk20/releases/<semver>/`:
 |---|---|
 | `sbin/mk20d` | entry point: gates, gadget launch, self-test, confirm, `health`, `selftest`, `config`, `maint`, `version` |
 | `share/mk20lib.sh` | whitelisted config loader (`/data/mk20/config/mk20.conf`, never sourced) + structured logs/rotation |
-| `share/gadget.sh` | ECM + HID + ADB composite, PTY↔TCP bridge, rollback to stock ACM+KD |
+| `share/gadget.sh` | ECM + HID + ADB, PTY↔TCP bridge; release rollback requests loader A/B, never starts KD |
 | `share/flapmon.sh` | flap monitor (1.1.2+): ≥5 link drops in 60 s → rollback; a long host USB suspend (Mac sleep) is not a flap |
 | `share/mk20-add-adb.sh` | stock-mode adb add (fallback) |
 | `share/vendor.sha256` | expected hashes of the 4 vendor files the KD shims depend on |
+| `bin/mk20-kbd` | Default UI/HID daemon; static safe-mode panels after crash loops, K2 e-stop retained |
+| `bin/mk20-router` | Legacy router for developer kbd opt-out only |
 | `bin/ttygs_tcp_bridge` | static ARM PTY↔TCP bridge (bound to `usb0`, explicit `--listen` only) |
 | `lib/usb_f_ecm.ko` | ECM function module for the #221 kernel |
 | `MANIFEST` | `name/version/build/kernels` header, `--`, then `sha256 mode path` for every file |
@@ -63,6 +90,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
+| 1.3.0 | 2026-10-20 | **1.3.0-rc1**, build id `rc1`: K4 default mk20-kbd, no stock-KD starts/overrides, crash-loop safe mode, maintenance file hooks, unchanged verified one-switch A/B installer; no rootfs writes. Web handlers/device acceptance separate. |
 | 1.0.0 | 2026-10-18 | M1: first release layout (A/B slots, MANIFEST, loader, rescue tier) |
 | 1.0.1 | 2026-10-18 | M1 review fixes (upgrade 1.0.0 → 1.0.1 on hardware at 17:35) |
 | 1.0.2 | 2026-10-18 | M2: mk20d (gates, health/self-test, logs, whitelisted config), bridge bound to usb0. **Bug:** an inline comment disabled bridge cleanup in gadget.sh rollback |

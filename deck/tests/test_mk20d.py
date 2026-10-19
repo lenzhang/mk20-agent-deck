@@ -25,7 +25,7 @@ def rel(dev, tmp_path):
     (dev.mock / "wdt").write_text("running")
     dev.mounts = dev.tmp / "mounts"; dev.mounts.write_text("")
     dev.env.update({"MK20_REL": str(d), "MK20_VERSION": "9.9.9", "MK20_MOUNTS": str(dev.mounts),
-                    "MK20_SETTLE": "0", "MK20_STABLE": "0", "MK20_SELFTEST_GAP": "0", "MK20_MAINT": "0", "MK20_ADB_KEEPALIVE": "0"})
+                    "MK20_SETTLE": "0", "MK20_STABLE": "0", "MK20_SELFTEST_GAP": "0", "MK20_MAINT": "0", "MK20_ADB_KEEPALIVE": "0", "MK20_KBD": "0"})
     return d
 
 
@@ -148,7 +148,7 @@ def g1(dev):
     g = dev.p("sys/kernel/config/usb_gadget/g1"); (g / "configs/c.1/acm.usb0").mkdir(parents=True)
     (g / "UDC").write_text("musb-hdrc.1.auto\n")
     dev.p("dev/ttyGS0").write_text("")
-    (dev.mock / "pgrep.out").write_text("123\n")
+    (dev.mock / "pgrep.out").write_text("")
     return g
 
 
@@ -170,7 +170,7 @@ def test_boot_vendor_mismatch_fails_closed(dev, rel, g1):
     r, log = run_boot(dev, rel)
     assert not dev.p("tmp/mk20/gadget.env").exists()
     assert dev.read("tmp/mk20/addadb.ran") == "addadb"
-    assert "vendor mismatch:/data/setusbconfig" in log and "stock ACM+KD+adb" in log
+    assert "vendor mismatch:/data/setusbconfig" in log and "ACM (KD stopped)+adb" in log
 
 
 def test_boot_vendor_bindmount_skipped(dev, rel, g1):
@@ -232,7 +232,7 @@ def test_boot_confirms_on_pass_not_on_fail(dev, rel, g1):
 def test_selftest_and_health_json(dev, rel, g1):
     r = dev.run(rel / "sbin/mk20d", "selftest")
     assert r.returncode == 0, r.stdout
-    assert "PASS kd=1" in r.stdout and "WARN composite down" in r.stdout
+    assert "PASS kd=0 (developer kbd opt-out)" in r.stdout and "WARN composite down" in r.stdout
     (dev.mock / "pgrep.out").write_text("1\n2\n")
     r = dev.run(rel / "sbin/mk20d", "selftest")
     assert r.returncode == 1 and "FAIL kd=2" in r.stdout
@@ -397,12 +397,12 @@ def test_selftest_failed_rollback_retries_once_then_escalates():
 def test_selftest_rollback_escalation_runs(dev, tmp_path):
     """Execute the escalation snippet under busybox with a rollback that always fails (rc 1)."""
     m = (REL / "sbin/mk20d").read_text()
-    a = m.index("    if [ -f \"$TM/gadget-boot.sh\" ] && composite_up; then")
+    a = m.index('    if [ "$FEATURE_KBD" != 1 ] && [ -f "$TM/gadget-boot.sh" ] && composite_up; then')
     b = m.index("    fi; fi", a)
     snip = m[a:b] + "    fi\n"
     tm = tmp_path / "tm"; tm.mkdir(); (tm / "gadget-boot.sh").write_text(f'echo x >> {tmp_path}/tries; exit 1\n')
     sh = tmp_path / "s.sh"
-    sh.write_text(f"TM={tm}; LOGDIR={tmp_path}; REL=/x\nlog() {{ echo \"$*\" >> {tmp_path}/log; }}\ncomposite_up() {{ return 0; }}\n" + snip)
+    sh.write_text(f"TM={tm}; LOGDIR={tmp_path}; REL=/x; FEATURE_KBD=0\nlog() {{ echo \"$*\" >> {tmp_path}/log; }}\ncomposite_up() {{ return 0; }}\n" + snip)
     env = dict(dev.env, MK20_RB_RETRY_S="0", MK20_FLAP_FLAG=str(tmp_path / "flag"), MK20_FLAP_REBOOT=str(tmp_path / "reboot"))
     import subprocess
     subprocess.run(["sh", str(sh)], env=env, timeout=30, check=True)

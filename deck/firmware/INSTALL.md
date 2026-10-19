@@ -11,7 +11,7 @@ House rules:
 - Never `killall adbd` in a foreground adb shell.
 - Never soft `reboot` (it hangs on this board). Reboots go through the watcher (`cmd-reboot`, which triggers a
   hardreset through the WDT).
-- Anything that changes USB runs detached, with a rollback that restores ACM+KD.
+- Anything that changes USB runs detached. Release rollback uses loader A/B; K4 never starts stock KD.
 
 ## 1. Prerequisites (once)
 
@@ -52,8 +52,11 @@ sh tools/mk20-install.sh ~/mk20-backup/releases/mk20-fw-<v>.tar --reboot --wait
   the tar listing, extracts into `.incoming-<v>`, compares the file set with the MANIFEST, and atomically renames
   to `releases/<v>`. Then `switch` marks the release **pending** and the loader prunes old releases.
 - `--reboot` drops `cmd-reboot` on the FAT; the watcher's hardreset reboots the board about 30 s later.
-- **Probation:** the loader boots the pending release, and mk20d runs a self-test (KD=1, UDC, ttyGS0, watchdog,
-  bridge on the ECM IP and 169.254.7.2, HID). A pass means `confirm`, so the release becomes good. Any of these
+- **Probation (1.3.0):** the loader boots the pending release; mk20d stops leftover KD and starts only
+  mk20-kbd. Selftest requires KD=0, mk20-kbd running, fresh status, GD32 liveness (6 knob echoes or a parsed
+  frame), all 21 panels without write errors, UDC, ttyGS0, watchdog, bridge on the ECM IP and 169.254.7.2,
+  and HID node. Safe mode is WARN even on probation, so it can confirm if these other checks pass. A pass
+  means `confirm`, so the release becomes good. Any of these
   roll back automatically to the previous good release, with no host needed:
   - the self-test fails;
   - the composite fails its own setup during probation (1.1.1+);
@@ -75,6 +78,31 @@ Logs: `/data/mk20/logs/{mk20d,gadget}.log` (rotated), `/mnt/SDCARD/mk20/logs/{lo
 Uninstall (back to stock ACM+KD+adb with the rescue watcher): **device** `sh /data/mk20/rescue/loader.sh
 uninstall`, then reboot through the watcher.
 
+### 1.2.x → 1.3.0-rc1
+
+Build the ARM binaries on Linux with `sh tools/mk20-build-bins.sh`, then package with
+`sh tools/mk20-release-build.sh firmware out rc1`. `firmware/VERSION` is `1.3.0`;
+the build id carries `rc1`. Install `out/mk20-fw-1.3.0.tar` using the normal command above.
+
+The existing installer verifies/stages under `/data/mk20`, writes **one inactive
+A/B pointer slot** and marks 1.3.0 pending; it does not flash any partition, update
+the rescue tier, change p5, or edit/delete stock binaries. The previous confirmed
+1.2.x release stays available. Reboot starts probation; healthy kbd confirms,
+other selftest FAILs withhold confirmation for loader rollback. No extra switch or
+migration write is introduced by K4. A rollback to 1.2.x runs that release's own
+historical UI behavior; K4 itself never starts stock KD.
+
+At >=3 exits in 300 s supervision latches `--safe-mode`: static error pages,
+GD32 typing/local PTT HID and K2 e-stop, with ECM/usb0 and adb preserved. Rescue is
+safe mode + usb0 admin web + adb + loader A/B. Web handlers are a separate U3
+implementation; the K4 hooks are available over adb now. See
+[MAINT-HOOKS.md](MAINT-HOOKS.md) for fixed-name `restart-kbd`, `exit-safe-mode`,
+validated `debug` and the read-only state snapshot. There is no stock-KD switch or
+hidden key combo; old `use-kd`, `mk20-use-kd`, `state/kbd-fallback` files are ignored.
+
+A restart after Tina's hidg0 re-bind can lose HID until reboot. If keys/modifiers
+stick or hidg0 stays ENXIO, use watcher `cmd-reboot`; see [RECOVERY.md](RECOVERY.md).
+
 ## 4. Configuration (optional)
 
 `/data/mk20/config/mk20.conf` is a whitelist of `KEY=VALUE` lines. It is never sourced, and invalid lines are
@@ -85,6 +113,9 @@ ignored with a warning (`mk20d config` shows the effective values).
 | `ECM_SUBNET` | `172.30.250.0/24` (1.1.0+) | a /24 network address; device .2, Mac .1 |
 | `ECM_DEV_MAC` / `ECM_HOST_MAC` | `02:11:22:33:44:55` / `02:11:22:33:44:56` | unicast MAC |
 | `FEATURE_COMPOSITE` `FEATURE_HID` `FEATURE_ADB` | 1 | 0/1 |
+| `FEATURE_KBD` | 1 (1.3.0) | 0/1; **developer-only opt-out** at 0, also env `MK20_KBD=0`; never starts KD, panels unpainted with no router/UI |
+| `FEATURE_ROUTER` | 1 | Legacy standalone router, only with developer kbd opt-out; does not paint panels |
+| `FEATURE_AGENT_CTL` `FEATURE_HID_SCROLL` `FEATURE_K2_ESTOP` `FEATURE_K2_RELEASE` | 0 | 0/1; optional agent socket/descriptor/release-capability knobs; K4 kbd always retains K2 e-stop |
 | `BRIDGE_PORT` | 17890 | 1024–65535 |
 | `FLAP_DROPS` / `FLAP_WINDOW_S` | 5 / 60 | 2–50 / 10–600 |
 | `LOG_MAX_KB` / `LOG_KEEP` | 256 / 3 | 16–4096 / 1–9 |

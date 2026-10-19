@@ -294,3 +294,41 @@ def test_uninstall_disables_legacy_composite(dev):
     assert dev.run(L, "uninstall").returncode == 0
     assert not (e / "composite.sh").exists() and (e / "adb.sh").exists()
     assert dev.p("mnt/SDCARD/mk20/boot-every.disabled/composite.sh").exists()
+
+
+def test_130_upgrade_from_12x_is_one_pending_slot_write_no_p5(dev):
+    """K4 changes userland only: existing install -> one inactive-slot generation, no raw partition writes."""
+    old = tarball(dev, "1.2.1")
+    assert inst(dev, old).returncode == 0
+    dev.run(L, "boot"); dev.run(L, "confirm", "1.2.1")
+    slots = dev.p("data/mk20/slots")
+    before = {p.name: p.read_bytes() for p in slots.iterdir() if p.name in ("A", "B")}
+    partition = dev.p("dev/mmcblk0p5"); partition.write_bytes(b"rootfs unchanged")
+    vendor = dev.p("data/KeyboardDevice"); vendor.write_bytes(b"vendor unchanged")
+    log = dev.p("mnt/SDCARD/mk20/logs/loader.log")
+    prior = log.read_text().count("slot ")
+    # Record actual pointer publication renames, beyond comparing final bytes/logs.
+    shim = dev.tmp / "slot-publish"; shim.mkdir()
+    mv = shim / "mv"
+    mv.write_text('''#!/bin/sh
+last=""; for arg in "$@"; do last=$arg; done
+case "$last" in "$MOCK_SLOT_DIR/A"|"$MOCK_SLOT_DIR/B") echo "$last" >> "$MOCK_SLOT_WRITES";; esac
+exec busybox mv "$@"
+''')
+    mv.chmod(0o755)
+    writes = dev.tmp / "slot-writes"
+    env = {"PATH": f"{shim}:{dev.env['PATH']}", "MOCK_SLOT_DIR": str(slots), "MOCK_SLOT_WRITES": str(writes)}
+    update = tarball(dev, "1.3.0")
+    assert inst(dev, update, env=env).returncode == 0
+    assert len(writes.read_text().splitlines()) == 1
+    after = {p.name: p.read_bytes() for p in slots.iterdir() if p.name in ("A", "B")}
+    assert sum(before.get(k) != v for k, v in after.items()) == 1
+    assert log.read_text().count("slot ") - prior == 1
+    assert st(dev, "pending") == "1.3.0" and st(dev, "good") == "1.2.1"
+    assert partition.read_bytes() == b"rootfs unchanged" and vendor.read_bytes() == b"vendor unchanged"
+    assert not dev.p("dev/by-name/rootfs").exists()
+    # Repeating an identical pending install never writes another slot.
+    committed = dict(after)
+    inst(dev, update, env=env)
+    assert len(writes.read_text().splitlines()) == 1
+    assert {p.name: p.read_bytes() for p in slots.iterdir() if p.name in ("A", "B")} == committed

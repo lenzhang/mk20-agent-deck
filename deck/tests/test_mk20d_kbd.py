@@ -1,10 +1,6 @@
-"""K4: mk20-kbd (KD replacement, option D) release integration. mk20d decides before gadget (opt-in FEATURE_KBD,
-debug/rescue-only overrides /data/mk20/use-kd + FAT mk20-use-kd), starts the `mk20d kbd` supervisor instead of the
-router (stock KD stopped via procd qt_app2, retried), restarts mk20-kbd with backoff and NEVER falls back to stock KD
-(crash loop on probation -> selftest FAIL -> A/B rollback; after confirm WARN + health flags), selftest gates confirm on
-/run/mk20/kbd.status; gadget.sh quiesces mk20-kbd's hidg0 before any UDC/configfs change (stop file +
-SIGUSR1, wait until /proc shows no hidg0 fd, fail closed TERM->KILL), stops it fully on every cleanup/setup path, and
-omits the bridge --tap in kbd mode."""
+"""K4 release: default mk20-kbd only, safe-mode supervision and bounded maintenance hooks.
+Linux behavioural shims use BusyBox; static/portable regressions run without it.
+"""
 import json, os, re, signal, subprocess, sys, time
 from pathlib import Path
 import pytest
@@ -51,6 +47,7 @@ def kb(dev, rel, g1):
     (dev.mock / "kbd.status.json").write_text(json.dumps(GOOD))
     (rel / "share/gadget.sh").write_text('[ "$1" = --boot ] && env | grep "^MK20_" | sort > "$MK20_ROOT/tmp/mk20/gadget.boot.env"\n'
                                          'echo "$*" >> "$MK20_ROOT/tmp/mk20/gadget.args"\n')
+    dev.env.pop("MK20_KBD", None)
     dev.env.update({"MK20_KDSVC": str(svc), "MK20_KBD_BACKOFF_MAX": "0", "MK20_KBD_KD_TICKS": "5",
                     "MK20_KBD_KD_SETTLE": "0"})
     return dev
@@ -65,9 +62,10 @@ def mlog(dev):
     return dev.p("data/mk20/logs/mk20d.log").read_text()
 
 
-@pytest.mark.parametrize("how,want", [("default", "0"), ("conf", "1"), ("env", "1"), ("use-kd", "0"), ("fat", "0"),
-                                      ("bad", "0")])
-def test_kbd_opt_in_and_kill_switches(dev, rel, how, want):
+@pytest.mark.parametrize("how,want", [("default", "1"), ("conf", "1"), ("env", "1"), ("use-kd", "1"), ("fat", "1"),
+                                      ("bad", "1"), ("dev-off", "0"), ("fallback", "1")])
+def test_kbd_default_and_ignored_legacy_switches(dev, rel, how, want):
+    dev.env.pop("MK20_KBD", None)
     env = {}
     if how in ("conf", "use-kd", "fat"):
         conf(dev, "FEATURE_KBD=1\n")
@@ -79,13 +77,19 @@ def test_kbd_opt_in_and_kill_switches(dev, rel, how, want):
         dev.p("mnt/SDCARD/mk20-use-kd").write_text("")
     elif how == "bad":
         conf(dev, "FEATURE_KBD=on\n")
+    if how == "dev-off":
+        env = {"MK20_KBD": "0"}
+    if how == "fallback":
+        dev.p("data/mk20/state").mkdir(exist_ok=True)
+        dev.p("data/mk20/state/kbd-fallback").touch()
     r = dev.run(rel / "sbin/mk20d", "config", env=env)
     c = dict(l.split("=", 1) for l in r.stdout.splitlines())
     assert c["FEATURE_KBD"] == want
     assert ("invalid FEATURE_KBD" in c.get("WARNINGS", "")) == (how == "bad")
     if how == "use-kd":   # the kill switch also beats the env opt-in
         r = dev.run(rel / "sbin/mk20d", "config", env={"MK20_KBD": "1"})
-        assert "FEATURE_KBD=0" in r.stdout
+        assert "FEATURE_KBD=1" in r.stdout
+        assert mlog(dev).count("legacy use-kd/mk20-use-kd/kbd-fallback ignored") == 1
 
 
 def test_supervisor_stops_kd_runs_kbd_and_ends_on_stop_file(kb, rel):
@@ -158,8 +162,12 @@ def test_crash_loop_keeps_restarting_never_stock_kd(kb, rel):
     c = dev.read("tmp/mk20/kbd.crashes")
     assert re.match(r"total=\d+ last_rc=7 last_up=\d+$", c) and int(c.split()[0][6:]) >= 5
     assert len(dev.read("tmp/mk20/kbd-crash.times").split()) >= 5
+    assert "--safe-mode" in (dev.mock / "kbd.args").read_text()
+    state = json.loads(dev.read("tmp/mk20/maint/state.json"))
+    assert state["mode"] == "safe" and state["reason"] == "crash-loop"
+    assert dev.p("sys/kernel/config/usb_gadget/g1/configs/c.1/ecm.usb0").exists()
     assert "mk20-kbd exit rc=7" in dev.read("tmp/mk20/kbd.log") and "restart #1" in dev.read("tmp/mk20/kbd.log")
-    assert "WARN mk20d kbd" in mlog(dev) and "fallback" not in mlog(dev)
+    assert "WARN mk20d kbd" in mlog(dev) and "qt_app2 start" not in mlog(dev)
 
 
 def test_restart_backoff_grows(kb, rel):
@@ -178,23 +186,25 @@ def test_restart_backoff_grows(kb, rel):
     assert "backoff 1s" in mlog(dev)
 
 
-def test_kd_that_will_not_stop_means_no_kbd_degraded(kb, rel):
+def test_kd_that_will_not_stop_keeps_retrying_without_double_writer(kb, rel):
     dev = kb
-    (dev.mock / "kd.stubborn").write_text(""); dev.p("tmp/mk20/kbd.mode").write_text("")
-    r = dev.run(rel / "sbin/mk20d", "kbd", timeout=30)
-    assert r.returncode == 0 and not (dev.mock / "kbd.args").exists()    # never two writers on ttyS1 / fb
-    assert svclog(dev) == ["stop", "stop", "stop"]                       # retried, never "start"
-    assert "did not stop (3 tries" in dev.read("tmp/mk20/kbd-degraded") and not dev.p("tmp/mk20/kbd.mode").exists()
-    assert "stop (kd stop failed)" in mlog(dev)
-    s = dev.run(rel / "sbin/mk20d", "selftest")
-    assert "WARN mk20-kbd not active: stock KD did not stop (3 tries" in s.stdout and "PASS kd=1" in s.stdout
+    (dev.mock / "kd.stubborn").touch(); dev.p("tmp/mk20/kbd.mode").touch()
+    def ready():
+        return len(svclog(dev)) >= 3
+    ok, alive = run_sup(dev, rel, ready)
+    assert ok and alive and nruns(dev) == 0
+    assert set(svclog(dev)) == {"stop"}
+    assert "waiting for stock KD" in dev.read("tmp/mk20/kbd-degraded")
+    dev.p("data/mk20/state/pending").write_text("9.9.9\n")
+    r, lines = st(dev, rel)
+    assert r.returncode == 1 and "FAIL mk20-kbd not running" in lines
 
 
-def test_composite_down_ends_without_touching_kd(kb, rel):
+def test_composite_down_still_runs_kbd_without_starting_kd(kb, rel):
     dev = kb
     os.rmdir(dev.p("sys/kernel/config/usb_gadget/g1/configs/c.1/ecm.usb0"))
-    r = dev.run(rel / "sbin/mk20d", "kbd", timeout=20)
-    assert r.returncode == 0 and svclog(dev) == [] and "stop (composite down/busy)" in mlog(dev)   # KD untouched
+    ok, alive = run_sup(dev, rel, lambda: nruns(dev) >= 1)
+    assert ok and alive and svclog(dev) == ["stop"]
 
 
 @pytest.mark.parametrize("why", ["stop-marker", "busy"])
@@ -215,20 +225,21 @@ def test_kd_absent_still_stops_procd_service(kb, rel):
     assert ok and svclog(dev)[0] == "stop"
 
 
-def test_kd_respawn_after_start_stops_kbd_launches(kb, rel):
+def test_kd_respawn_is_stopped_again_then_launches_resume(kb, rel):
     dev = kb
-    (dev.mock / "kbd.crash").write_text("")
+    (dev.mock / "kbd.crash").touch()
     def respawn():
-        if (dev.mock / "kbd.args").exists():
-            (dev.mock / "kd.stubborn").write_text(""); (dev.mock / "pgrep.kd").write_text("123\n"); return True
+        if nruns(dev) >= 1:
+            (dev.mock / "pgrep.kd").write_text("123\n"); return True
     p = subprocess.Popen([BB, "sh", str(rel / "sbin/mk20d"), "kbd"], env=dict(dev.env, MK20_KBD_BACKOFF_MAX="1"))
     try:
-        assert wait(respawn); p.wait(15)
+        assert wait(respawn)
+        assert wait(lambda: len(svclog(dev)) >= 2 and nruns(dev) >= 3)
+        assert p.poll() is None
     finally:
-        if p.poll() is None:
-            p.kill(); p.wait(5)
-    assert "stop (kd came back)" in mlog(dev) and "came back" in dev.read("tmp/mk20/kbd-degraded")
-    assert nruns(dev) <= 2 and "start" not in svclog(dev)
+        stop_sup(dev, rel)
+        p.wait(10)
+    assert set(svclog(dev)) == {"stop"}
 
 
 # ---------------- selftest / health ----------------
@@ -274,6 +285,7 @@ def test_selftest_kbd_mode_pass(kmode, rel):
 @pytest.mark.parametrize("bad,line", [
     ({"knob_ok": 3}, "FAIL kbd gd32 silent (knob_ok=3 frames=0)"),
     ({"panels_written": 20}, "FAIL kbd panels 20/21"),
+    ({"write_errors": 1}, "FAIL kbd panel write errors"),
     ({"age": 30}, "FAIL kbd status stale"),
     ({"missing": 1}, "FAIL kbd status missing"),
     ({"kd": 1}, "FAIL kd=1 beside mk20-kbd"),
@@ -311,7 +323,7 @@ def uptime():
     return int(float(open("/proc/uptime").read().split()[0]))
 
 
-def test_selftest_crash_loop_fails_probation_warns_after(kmode, rel):
+def test_selftest_crash_loop_warns_even_on_probation(kmode, rel):
     dev = kmode
     status(dev)
     now = uptime()
@@ -322,7 +334,7 @@ def test_selftest_crash_loop_fails_probation_warns_after(kmode, rel):
     dev.p("tmp/mk20/kbd-crash.times").write_text(f"{now - 30}\n{now - 20}\n{now - 10}\n")
     dev.p("data/mk20/state/pending").write_text("9.9.9\n")
     r, ls = st(dev, rel)
-    assert r.returncode != 0 and "FAIL mk20-kbd crash loop: 3 exits in 300s (3 total)" in ls
+    assert r.returncode == 0 and "WARN mk20-kbd crash loop: 3 exits in 300s (3 total)" in ls
     os.unlink(dev.p("data/mk20/state/pending"))
     r, ls = st(dev, rel)
     assert r.returncode == 0 and "WARN mk20-kbd crash loop: 3 exits in 300s (3 total)" in ls
@@ -330,16 +342,26 @@ def test_selftest_crash_loop_fails_probation_warns_after(kmode, rel):
     assert h["kbd"]["restarts"] == 3 and h["kbd"]["recent_crashes"] == 3 and h["status"] != "ok"
 
 
-def test_stock_selftest_unchanged_without_kbd(dev, rel, g1):
-    r = dev.run(rel / "sbin/mk20d", "selftest")
-    assert "PASS kd=1" in r.stdout and "kbd" not in r.stdout and r.returncode == 0
+@pytest.mark.parametrize("probation", [False, True])
+def test_safe_mode_selftest_is_warn_not_failure(kmode, rel, probation):
+    status(kmode, mode="safe")
+    if probation:
+        kmode.p("data/mk20/state/pending").write_text("9.9.9\n")
+    r, lines = st(kmode, rel)
+    assert r.returncode == 0 and any(l.startswith("WARN mk20-kbd safe mode") for l in lines)
+
+
+def test_developer_optout_requires_no_kd(kb, rel):
+    os.unlink(kb.mock / "pgrep.kd")
+    r = kb.run(rel / "sbin/mk20d", "selftest", env={"MK20_KBD": "0"})
+    assert "PASS kd=0 (developer kbd opt-out)" in r.stdout
 
 
 def test_health_kbd_section(kmode, rel):
     status(kmode)
     h = json.loads(kmode.run(rel / "sbin/mk20d", "health", env={"MK20_KBD": "1"}).stdout)
     k = h["kbd"]
-    assert k["enabled"] is True and k["mode"] is True and k["running"] is True and k["degraded"] == "" and k["restarts"] == 0
+    assert k["enabled"] is True and k["mode"] == "normal" and k["running"] is True and k["degraded"] == "" and k["restarts"] == 0
     assert json.loads(k["status"])["panels_written"] == 21
 
 
@@ -369,26 +391,34 @@ def test_boot_kbd_mode_replaces_router_and_tap(kb, rel):
         stop_sup(dev, rel)
 
 
-@pytest.mark.parametrize("why", ["off", "use-kd", "fat", "nobin"])
-def test_boot_kbd_gated(kb, rel, why):
+@pytest.mark.parametrize("why", ["use-kd", "fat", "nobin", "gadget-failure"])
+def test_boot_never_selects_stock_kd(kb, rel, why):
     dev = kb
-    if why != "off":
-        conf(dev, "FEATURE_KBD=1\n")
     if why == "use-kd":
-        dev.p("data/mk20/use-kd").write_text("")
+        dev.p("data/mk20/use-kd").touch()
     elif why == "fat":
-        dev.p("mnt/SDCARD/mk20-use-kd").write_text("")
+        dev.p("mnt/SDCARD/mk20-use-kd").touch()
     elif why == "nobin":
         os.unlink(rel / "bin/mk20-kbd")
+    elif why == "gadget-failure":
+        with (rel / "share/gadget.sh").open("a") as f:
+            f.write("exit 1\n")
     try:
         r, log = run_boot(dev, rel)
-        assert genv(dev)["MK20_KBD"] == "0" and "INFO mk20d kbd \"supervisor" not in log
-        assert "router off" not in log and not dev.p("tmp/mk20/kbd.mode").exists()
-        assert "router v=9.9.9 supervisor launched" in log                        # stock path: router as before
-        assert ("enabled but not used" in log) == (why == "nobin")
-        time.sleep(0.3); assert not (dev.mock / "kbd.args").exists()
+        assert genv(dev)["MK20_KBD"] == "1"
+        assert "supervisor launched" in log and dev.p("tmp/mk20/kbd.mode").exists()
+        assert set(svclog(dev)) == {"stop"}
+        assert "router v=9.9.9 supervisor launched" not in log
+        assert ("missing binary" in log) == (why == "nobin")
     finally:
-        subprocess.run(["pkill", "-f", f"{rel}/sbin/mk20d router"])
+        stop_sup(dev, rel)
+
+
+def test_boot_developer_optout_never_starts_kd(kb, rel):
+    conf(kb, "FEATURE_KBD=0\nFEATURE_ROUTER=0\n")
+    r, log = run_boot(kb, rel)
+    assert genv(kb)["MK20_KBD"] == "0" and nruns(kb) == 0
+    assert set(svclog(kb)) == {"stop"}
 
 
 def test_boot_ignores_legacy_fallback_mark(kb, rel):
@@ -414,10 +444,11 @@ def test_gadget_kbd_stop_on_every_path_and_before_udc():
         rs = body.index("router_stop"); ks = body.index("kbd_stop")
         assert rs < ks < body.index(udc)
     cl = G[G.index("cleanup() {"):]
-    assert cl.index("kbd_stop") < cl.index("kd_start")
-    assert "kbd_hid_quiesce\n  return 0\n}" in G[G.index("router_stop() {"):]
+    assert "kd_start" not in cl
+    assert "kbd_hid_quiesce || return 1\n  return 0\n}" in G[G.index("router_stop() {"):]
 
 
+@pytest.mark.skipif(not BB, reason="BusyBox unavailable")
 def test_gadget_tap_omitted_in_kbd_mode(tmp_path):
     line = [l for l in G.splitlines() if "--tap" in l and "BRIDGE_LISTEN=" in l]
     assert len(line) == 1
@@ -447,6 +478,8 @@ while True:
 
 @pytest.fixture
 def gh(tmp_path):
+    if not BB or sys.platform != "linux":
+        pytest.skip("Linux /proc + BusyBox required")
     (tmp_path / "mk20").mkdir(); (tmp_path / "bin").mkdir()
     body = scope_gadget_fn(FN, tmp_path)
     (tmp_path / "bin/mk20-kbd").write_text(HOLDER)
@@ -565,7 +598,7 @@ def test_gadget_fails_closed_when_kbd_survives(gh):
     setup_main refuse the UDC/configfs change and the KD start."""
     t, start, run, hid = gh
     cl = G[G.index("cleanup() {"):]
-    assert 'kbd_stop || { log "FAILSAFE ABORT' in cl and cl.index("kbd_stop ||") < cl.index("$G/UDC") < cl.index("kd_start")
+    assert 'kbd_stop || { log "FAILSAFE ABORT' in cl and cl.index("kbd_stop ||") < cl.index("$G/UDC") and "kd_start" not in cl
     sm = G[G.index("setup_main() {"):]
     assert 'kbd_stop || die "mk20-kbd not stopped' in sm
     # simulate a survivor: pgrep keeps reporting a validated mk20-kbd pid that cannot be killed (our own shell's
@@ -586,9 +619,10 @@ def test_failed_service_stop_means_no_kbd(kb, rel):
     """codex kdr-r2 #2: qt_app2 stop failing (procd still armed) -> retried, mk20-kbd not launched, degraded."""
     dev = kb
     (dev.mock / "svc.fail").write_text("")
-    r = dev.run(rel / "sbin/mk20d", "kbd", timeout=30)
-    assert r.returncode == 0 and not (dev.mock / "kbd.args").exists() and svclog(dev) == ["stop", "stop", "stop"]
-    assert "service stop ok=0" in dev.read("tmp/mk20/kbd-degraded")
+    ok, alive = run_sup(dev, rel, lambda: len(svclog(dev)) >= 3)
+    assert ok and alive and not (dev.mock / "kbd.args").exists()
+    assert set(svclog(dev)) == {"stop"}
+    assert "waiting for stock KD" in dev.read("tmp/mk20/kbd-degraded")
 
 
 def test_default_lock_is_the_supervised_lock():
@@ -597,6 +631,7 @@ def test_default_lock_is_the_supervised_lock():
     assert '"/tmp/mk20-kbd.lock"' in src and '--lock "$R/tmp/mk20-kbd.lock"' in m
 
 
+@pytest.mark.skipif(not BB or sys.platform != "linux", reason="Linux /proc + BusyBox required")
 def test_kbd_alive_thread_group(tmp_path):
     """codex kdr-r2 #1: a zombie leader counts as gone only when no thread is left; a live process is alive."""
     fn = FN[FN.index("kbd_st() {"):FN.index("kbd_hid_holders() {")]
@@ -647,3 +682,235 @@ def test_harness_scoped_to_own_fakes(gh, tmp_path_factory):
         assert not (Path("/tmp/mk20/kbd-pids.rec").exists() and str(p.pid) in Path("/tmp/mk20/kbd-pids.rec").read_text())
     finally:
         other.kill(); other.wait()
+
+
+# ---------------- maintenance contract and release invariants ----------------
+
+def test_no_stock_kd_start_in_release_or_rescue():
+    paths = [DECK / "firmware/release/sbin/mk20d", DECK / "firmware/release/share/gadget.sh"]
+    paths += list((DECK / "firmware/rescue").glob("*.sh"))
+    for path in paths:
+        src = path.read_text()
+        assert not re.search(r"qt_app2[\"']?\s+start|\$KDSVC[\"']?\s+start|\bkd_start\b|exec /data/appLunch", src), path
+        assert not re.search(r"(?:of=|>)\s*[^\n]*(?:mmcblk0p5|/dev/by-name/rootfs)", src), path
+
+
+@pytest.mark.parametrize("inbox", ["data/mk20/state/maint", "tmp/mk20/maint"])
+def test_maintenance_exit_safe_restart_debug_and_validation(kb, rel, inbox):
+    dev = kb
+    (dev.mock / "kbd.crash").touch()
+    p = subprocess.Popen([BB, "sh", str(rel / "sbin/mk20d"), "kbd"], env=dev.env)
+    statefile = dev.p("tmp/mk20/maint/state.json")
+    def state():
+        try:
+            return json.loads(statefile.read_text())
+        except (OSError, ValueError):
+            return {}
+    def submit(name, value=""):
+        target = dev.p(inbox) / name
+        temp = target.with_name(name + ".new")
+        temp.write_text(value); temp.replace(target)
+    try:
+        assert wait(lambda: state().get("mode") == "safe" and nruns(dev) >= 4)
+        os.unlink(dev.mock / "kbd.crash")
+        assert wait(lambda: dev.p("run/mk20/kbd.status").exists())
+        crashes = int(dev.read("tmp/mk20/kbd.crashes").split()[0][6:])
+        submit("debug", "verbose=1\n")
+        assert wait(lambda: dev.p("data/mk20/state/maint/debug.conf").exists())
+        before = nruns(dev)
+        submit("restart-kbd")
+        assert wait(lambda: nruns(dev) > before)
+        assert "--safe-mode" in (dev.mock / "kbd.args").read_text().splitlines()[-1]
+        assert "--verbose" in (dev.mock / "kbd.args").read_text().splitlines()[-1]
+        assert int(dev.read("tmp/mk20/kbd.crashes").split()[0][6:]) == crashes
+        before = nruns(dev)
+        submit("exit-safe-mode")
+        assert wait(lambda: nruns(dev) > before and state().get("mode") == "normal")
+        assert "--safe-mode" not in (dev.mock / "kbd.args").read_text().splitlines()[-1]
+        assert not dev.p("tmp/mk20/kbd-crash.times").exists()
+        assert set(state()) == {"mode", "restarts", "recent_crashes", "last_rc", "reason", "version"}
+        assert statefile.stat().st_mode & 0o222 == 0
+        # Literal hostile input, symlinks and oversize bodies are consumed without following/logging them.
+        secrets = dev.p("data/mk20/secrets"); secrets.mkdir()
+        secret = secrets / "sentinel"; secret.write_text("DO_NOT_LOG_SECRET")
+        submit("debug", "verbose=$(touch /tmp/should-never-run)\n")
+        assert wait(lambda: not dev.p(inbox + "/debug").exists())
+        dev.p(inbox + "/debug").symlink_to(secret)
+        assert wait(lambda: not dev.p(inbox + "/debug").is_symlink())
+        submit("debug", "v" * 129)
+        assert wait(lambda: not dev.p(inbox + "/debug").exists())
+        before = nruns(dev)
+        submit("restart-kbd", "not-empty")
+        assert wait(lambda: not dev.p(inbox + "/restart-kbd").exists())
+        time.sleep(.5)
+        assert nruns(dev) == before
+        assert dev.read("data/mk20/state/maint/debug.conf") == "verbose=1"
+        assert "DO_NOT_LOG_SECRET" not in mlog(dev) + statefile.read_text() + dev.read("tmp/mk20/kbd.log")
+        assert secret.read_text() == "DO_NOT_LOG_SECRET" and set(svclog(dev)) == {"stop"}
+    finally:
+        stop_sup(dev, rel); p.wait(10)
+
+
+def test_release_rollback_requests_ab_without_tearing_down_usb(tmp_path):
+    # Execute the actual early release rollback branch with recorder shims: no UDC/service/cleanup writes.
+    a = G.index('if [ "${1:-}" = --rollback-now ] && [ -n "${MK20_REL:-}" ]; then')
+    b = G.index('\nif [ "${1:-}" = --rollback-now ]; then', a)
+    block = G[a:b].replace('/mnt/SDCARD/cmd-rollback', str(tmp_path / 'cmd-rollback'))
+    script = tmp_path / 'rollback.sh'
+    script.write_text('gen_stale() { return 1; }; log() { :; }; sync() { :; }; cleanup() { exit 99; }\n' + block)
+    result = subprocess.run(['sh', str(script), '--rollback-now'], env={**os.environ, 'MK20_REL': '/release'}, capture_output=True)
+    assert result.returncode == 0 and (tmp_path / 'cmd-rollback').exists()
+
+
+def test_safe_mode_executable_portable():
+    # The host binary is built by make -C kbd test/safe-test; skip only when absent.
+    binary = DECK / 'kbd/mk20-kbd'
+    if not binary.exists():
+        pytest.skip('build host mk20-kbd first')
+    subprocess.run([sys.executable, str(DECK / 'kbd/tests/safe_mode.py')], check=True, timeout=30)
+
+
+@pytest.mark.parametrize("fault", ["not-running", "panels-zero", "safe"])
+def test_real_kbd_selftest_drives_loader_probation_and_confirm(kmode, rel, fault):
+    """Real selftest + real loader: FAIL leaves pending; next boot chooses 1.2.1. Safe WARN confirms 1.3.0."""
+    from conftest import FW, build_release, install_files
+    loader = FW / 'rescue/loader.sh'
+    dev = kmode
+    for version in ('1.2.1', '1.3.0'):
+        install_files(dev, build_release(dev.tmp, version), version)
+    assert dev.run(loader, 'switch', '1.2.1').returncode == 0
+    assert dev.run(loader, 'confirm', '1.2.1').returncode == 0
+    assert dev.run(loader, 'switch', '1.3.0').returncode == 0
+    assert dev.run(loader, 'boot').returncode == 0
+    (dev.mock / 'netstat.out').write_text('Proto Recv-Q Send-Q Local Address Foreign Address State\n'
+                                        'tcp 0 0 172.30.250.2:17890 0.0.0.0:* LISTEN\n'
+                                        'tcp 0 0 169.254.7.2:17890 0.0.0.0:* LISTEN\n')
+    status(dev, mode='safe' if fault == 'safe' else 'normal', panels_written=0 if fault == 'panels-zero' else 21)
+    if fault == 'not-running':
+        subprocess.run(['pkill', '-f', f'{rel}/bin/mk20-kbd --run'], check=False)
+        assert wait(lambda: dev.run(rel / 'sbin/mk20d', 'selftest', env={'MK20_VERSION': '1.3.0'}).returncode != 0)
+    result = dev.run(rel / 'sbin/mk20d', 'selftest', env={'MK20_VERSION': '1.3.0'})
+    if result.returncode == 0:
+        assert dev.run(loader, 'confirm', '1.3.0').returncode == 0
+    assert (result.returncode == 0) == (fault == 'safe'), result.stdout
+    assert dev.run(loader, 'boot').returncode == 0
+    assert dev.read('tmp/mk20/release-active') == ('1.3.0' if fault == 'safe' else '1.2.1')
+    assert dev.read('data/mk20/state/pending') is None
+    if fault == 'safe':
+        assert 'WARN mk20-kbd safe mode' in result.stdout
+        assert dev.read('data/mk20/state/good') == '1.3.0'
+        # Confirmed safe mode stays degraded, never triggers slot rollback on later boots.
+        assert dev.run(loader, 'boot').returncode == 0
+        assert dev.read('tmp/mk20/release-active') == '1.3.0'
+    else:
+        assert '1.3.0->1.2.1' in dev.read('data/mk20/state/last-rollback')
+
+
+def test_supervisor_and_hooks_portable_shell(tmp_path):
+    """Actual supervisor on macOS, replacing only Linux uptime, KD discovery and flock.
+
+    Supplements the BusyBox/proc lifetime and single-instance tests, which still run on Linux.
+    """
+    import shutil
+    root = tmp_path / 'root'; release = tmp_path / 'release'; mock = tmp_path / 'mock'
+    for d in ('tmp/mk20', 'data/mk20/state', 'run/mk20', 'dev'):
+        (root / d).mkdir(parents=True, exist_ok=True)
+    (release / 'share').mkdir(parents=True); (release / 'bin').mkdir(); mock.mkdir()
+    shutil.copy(DECK / 'firmware/release/share/mk20lib.sh', release / 'share/mk20lib.sh')
+    (mock / 'kbd.crash').touch(); (mock / 'kbd.status.json').write_text(json.dumps(GOOD))
+    binary = release / 'bin/mk20-kbd'; binary.write_text(FAKE_KBD); binary.chmod(0o755)
+    svc = tmp_path / 'qt_app2'; svc.write_text(FAKE_SVC); svc.chmod(0o755)
+    src = (DECK / 'firmware/release/sbin/mk20d').read_text()
+    prefix = src[:src.index('case "${1:-}" in\nboot)')]
+    block = src[src.index('\nkbd)\n'):src.index('\nselftest) cfg_load;')]
+    shims = '''
+cut() { case "$*" in *'/proc/uptime') date +%s;; *) command cut "$@";; esac; }
+flock() { return 0; }
+kd_count() { if [ -s "$MOCK_DIR/pgrep.kd" ]; then echo 1; else echo 0; fi; }
+'''
+    script = tmp_path / 'mk20d'; script.write_text(prefix + shims + '\ncase kbd in' + block + '\nesac\n')
+    env = dict(os.environ, MK20_ROOT=str(root), MK20_REL=str(release), MK20_VERSION='1.3.0',
+               MK20_KDSVC=str(svc), MOCK_DIR=str(mock), MK20_KBD_BACKOFF_MAX='0', MK20_KBD_KD_SETTLE='0')
+    p = subprocess.Popen(['sh', str(script)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    runtime = root / 'tmp/mk20/maint'; persistent = root / 'data/mk20/state/maint'
+    def state():
+        try: return json.loads((runtime / 'state.json').read_text())
+        except (OSError, ValueError): return {}
+    def submit(inbox, name, contents=''):
+        f = inbox / (name + '.new'); f.write_text(contents); f.replace(inbox / name)
+    def runs():
+        return (mock / 'kbd.args').read_text().count('--run') if (mock / 'kbd.args').exists() else 0
+    try:
+        assert wait(lambda: state().get('mode') == 'safe' and runs() >= 4)
+        (mock / 'kbd.crash').unlink()
+        assert wait(lambda: (root / 'run/mk20/kbd.status').exists())
+        count = state()['restarts']
+        for inbox in (runtime, persistent):
+            submit(inbox, 'debug', 'verbose=1\n')
+            assert wait(lambda: (persistent / 'debug.conf').exists() and not (inbox / 'debug').exists())
+            before = runs(); submit(inbox, 'restart-kbd')
+            assert wait(lambda: runs() > before)
+            assert state()['restarts'] == count
+            assert '--verbose' in (mock / 'kbd.args').read_text().splitlines()[-1]
+            before = runs(); submit(inbox, 'exit-safe-mode')
+            assert wait(lambda: runs() > before and state().get('mode') == 'normal')
+            assert '--safe-mode' not in (mock / 'kbd.args').read_text().splitlines()[-1]
+            assert not (root / 'tmp/mk20/kbd-crash.times').exists()
+            marker = tmp_path / 'must-not-exist'
+            submit(inbox, 'debug', f'verbose=$(touch {marker})')
+            assert wait(lambda: not (inbox / 'debug').exists())
+            submit(inbox, 'debug', 'x' * 129)
+            assert wait(lambda: not (inbox / 'debug').exists())
+            secret = tmp_path / 'secret'; secret.write_text('SECRET_SENTINEL')
+            (inbox / 'debug').symlink_to(secret)
+            assert wait(lambda: not (inbox / 'debug').is_symlink())
+            before = runs(); submit(inbox, 'restart-kbd', 'invalid')
+            assert wait(lambda: not (inbox / 'restart-kbd').exists())
+            time.sleep(.3)
+            assert runs() == before and not marker.exists()
+            assert (persistent / 'debug.conf').read_text() == 'verbose=1\n'
+            assert 'SECRET_SENTINEL' not in (runtime / 'state.json').read_text() + (root / 'tmp/mk20/kbd.log').read_text()
+        assert (runtime / 'state.json').stat().st_mode & 0o222 == 0
+        assert set((mock / 'qt_app2.log').read_text().split()) == {'stop'}
+    finally:
+        (root / 'tmp/mk20-kbd-stop').touch()
+        try: p.wait(8)
+        except subprocess.TimeoutExpired: p.kill(); p.wait(3)
+    assert p.returncode == 0
+
+
+def test_setup_cleanup_shims_never_start_kd(tmp_path):
+    """Run setup-failure cleanup on scoped files/recorders, with no real USB/process mutations."""
+    code = G[G.index('cleanup() {'):G.index('# rollback runs before any preflight')]
+    for src, dst in (('/tmp/', str(tmp_path) + '/tmp/'), ('/dev/', str(tmp_path) + '/dev/'),
+                     ('/data/', str(tmp_path) + '/data/'), ('/proc/mounts', str(tmp_path / 'mounts'))):
+        code = code.replace(src, dst)
+    for d in ('tmp/mk20', 'dev', 'data', 'g/functions/ecm.usb0', 'g/functions/hid.usb0', 'g/configs/c.1'):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'mounts').touch(); (tmp_path / 'dev/ttyGS0.real').touch()
+    (tmp_path / 'g/UDC').write_text('fake-udc')
+    serial = tmp_path / 'data/setusbconfig'
+    serial.write_text(f'#!/bin/sh\necho "serial:$*" >> "{tmp_path}/calls"\n'); serial.chmod(0o755)
+    script = tmp_path / 'cleanup.sh'
+    script.write_text(f'''
+G={tmp_path}/g; C=$G/configs/c.1; LOG={tmp_path}/log; OK=0
+record() {{ echo "$*" >> {tmp_path}/calls; }}
+log() {{ :; }}
+router_stop() {{ record router-stop; }}
+kbd_stop() {{ record kbd-stop; }}
+kd_stop() {{ record kd-stop; }}
+readd_adb() {{ record add-adb; }}
+killall() {{ record "killall:$*"; }}
+sleep() {{ :; }}
+udc_now() {{ cat "$G/UDC"; }}
+{code}
+cleanup
+cleanup
+''')
+    result = subprocess.run(['sh', str(script)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / 'calls').read_text().splitlines()
+    expected = ['router-stop', 'kbd-stop', 'killall:adbd', 'killall:ttygs_tcp_bridge', 'kd-stop', 'serial:serial', 'add-adb']
+    assert calls == expected * 2
+    assert (tmp_path / 'dev/ttyGS0').exists() and not (tmp_path / 'dev/ttyGS0.real').exists()
+    assert (tmp_path / 'g/UDC').read_text().strip() == ''

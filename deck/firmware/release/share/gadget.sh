@@ -13,15 +13,12 @@
 #  - adbd is started BEFORE the UDC is bound (FunctionFS needs descriptors first, else -ENODEV).
 #  - HID report_length 9 (report ID 1 keyboard = 1 ID + 8 bytes; pointer = 1 + 5).
 #  - EXIT trap: on ANY failure it unbinds, unlinks and removes our functions, restores stock serial
-#    (/data/setusbconfig serial) and restarts KeyboardDevice.
+#    (/data/setusbconfig serial) and adds adb, with KD stopped.
 #  - Stale links in g1/configs/c.1 are removed before reuse.
-#  - KD is stopped via its procd service (no respawn race) and restarted at the end. setusbconfig is
-#    shadowed by a tmpfs no-op bind mount (gone at reboot), so KD's restart does not wipe the composite.
-#  - KD gets a filtered `dmesg` (PATH shim via bind-mounted appLunch.sh) so its USB-reset hack does not fire on
-#    f_hid's harmless -EOPNOTSUPP for SET_IDLE/SET_REPORT (root cause of the 3 s flapping, 2026-10-18 15:53).
+#  - KD is stopped via its procd service; no path starts it.
 #  - v3.2 boot mode (--boot, run by boot-every/composite.sh in the watcher): no host confirmation; instead a
 #    detached flap monitor polls /sys/class/udc/<udc>/state and rolls back if the link drops >=5 times in 60 s.
-#    Any rollback (failure, flapping, --rollback) ends in stock ACM + KD + adb (mk20-add-adb.sh).
+#    Release rollback requests loader A/B; setup failure restores ACM + adb, never KD.
 #  - Addressing (1.1.0+): usb0 172.30.250.2/24 (Mac MK20 service manual 172.30.250.1/24) + alias 169.254.7.2/16;
 #    fixed MACs. mk20d passes the configured values; the defaults here only apply outside release mode.
 #  - It must NEVER run inside an adb shell (it kills adbd; adbd kills the session group). It queues itself to the watcher.
@@ -39,7 +36,7 @@ if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
       case "$k" in
       MK20_ECM_IP) MK20_ECM_IP=$v;; MK20_ECM_MASK) MK20_ECM_MASK=$v;; MK20_DEV_MAC) MK20_DEV_MAC=$v;; MK20_HOST_MAC) MK20_HOST_MAC=$v;;
       MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
-      MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;; MK20_HID_SCROLL) MK20_HID_SCROLL=$v;;
+      MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;; MK20_HID_SCROLL) MK20_HID_SCROLL=$v;; MK20_KBD) MK20_KBD=$v;;
     esac; done < "$GENV"
   else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) m="release mode: no $GENV (gates not passed at boot) -> refused"; echo "$m"
     echo "gadget $(cut -d' ' -f1 /proc/uptime): $m" >> "$LOG" 2>/dev/null; exit 1;; esac; fi   # r8 #1: detached jobs have no stdout
@@ -74,7 +71,7 @@ fi
 KDSVC=/etc/init.d/qt_app2   # procd service (CMD=/data/appLunch.sh). NOT qt_app1 (plain sh, kills adbd)
 [ -x $KDSVC ] || KDSVC=""
 udc_now() { cat $G/UDC 2>/dev/null; }
-# KD start: via procd only when the service exists (a manual fallback raced procd -> TWO KD processes, 16:17).
+# KD is stop-only. No release or developer-opt-out path starts the vendor UI.
 # 1.2.0 r2 (Opus r120 #1): the on-board router holds /dev/hidg0 open. On this kernel (pre-6.2 f_hid: cdev embedded in
 # f_hidg, freed on configfs unlink) removing hid.usb0 under an open fd is a use-after-free, so every path that touches
 # the UDC/configfs (cleanup = all rollbacks, setup_main = (re-)setup) first stops it: stop file (mk20d supervisor
@@ -94,7 +91,7 @@ router_stop() {
     for rp in $rps; do kill -9 "$rp" 2>/dev/null; done
     ri=0; while [ -n "$(router_pids)" ] && [ $ri -lt 10 ]; do sleep 0.1; ri=$((ri+1)); done
     [ -n "$(router_pids)" ] && log "WARN router still present after SIGKILL"; fi
-  kbd_hid_quiesce
+  kbd_hid_quiesce || return 1
   return 0
 }
 # mk20-kbd (KD replacement) also holds /dev/hidg0. Same UAF rule: before any UDC/configfs change it must have closed
@@ -138,8 +135,7 @@ kbd_hid_quiesce() {
   { [ -n "$(kbd_hid_holders)" ] || kbd_any_alive $kh >/dev/null; } && { log "FAIL mk20-kbd still holds hidg0 / threads alive after SIGKILL ($kh)"; return 1; }
   return 0
 }
-# Full stop (every cleanup/setup path, after router_stop): stock KD is restarted by these paths, so mk20-kbd must not
-# keep running beside it. Stop file (the mk20d kbd supervisor will not relaunch), validated supervisor kill, bounded
+# Full stop before every mutating cleanup/setup path. Stop file (the mk20d kbd supervisor will not relaunch), validated supervisor kill, bounded
 # SIGTERM (mk20-kbd sends all-keys-up), then SIGKILL. The next boot decides again.
 kbd_stop() {
   touch /tmp/mk20-kbd-stop
@@ -169,29 +165,14 @@ kd_stop() {
     i=$((i+1)); done
   killall -9 KeyboardDevice 2>/dev/null; log "WARN kd_stop: KD/appLunch still alive after 15 s (sent KILL)"
 }
-# reap any KD whose parent is not appLunch.sh (orphan from a respawn race)
-kd_reap_orphans() {
-  for p in $(pgrep -f /data/KeyboardDevice); do pp=$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null)
-    grep -q appLunch /proc/$pp/cmdline 2>/dev/null || { kill $p 2>/dev/null; log "reaped orphan KD $p (ppid $pp)"; }; done
-}
-kd_start() {
-  if [ -n "$KDSVC" ]; then
-    $KDSVC start >>"$LOG" 2>&1 7>&-; i=0
-    while ! pgrep -f /data/KeyboardDevice >/dev/null && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
-    pgrep -f /data/KeyboardDevice >/dev/null || log "WARN KD not up 20 s after procd start"
-  else
-    pgrep -f /data/KeyboardDevice >/dev/null || { [ -x /data/KeyboardDevice ] && ( ( trap '' HUP INT; exec /data/appLunch.sh </dev/null >/dev/null 2>&1 7>&- ) & ); }   # detached (r5 #4): reparented to init
-  fi
-  sleep 3; n=$(pgrep -f /data/KeyboardDevice | wc -l); [ "$n" -le 1 ] || { log "WARN $n KeyboardDevice processes"; kd_reap_orphans; }
-}
-# after a rollback: stock KD has re-run `setusbconfig serial` (ACM only) -> add adb back like boot-every/adb.sh
+# Setup failsafe restores serial ACM -> add adb, without any vendor UI.
 readd_adb() {
   [ "$NOADB" = 1 ] && return
   H=$ADDADB; [ -f "$H" ] || return
-  i=0; until [ -n "$(udc_now)" ] && [ -e $C/acm.usb0 ] && [ -e /dev/ttyGS0 ] && pgrep -f KeyboardDevice >/dev/null; do
+  i=0; until [ -n "$(udc_now)" ] && [ -e $C/acm.usb0 ] && [ -e /dev/ttyGS0 ]; do
     i=$((i+1)); [ $i -gt 60 ] && { log "readd_adb: g1 not ready"; return; }; sleep 1; done
   sleep 5; cp -f $H /tmp/mk20-add-adb.sh; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 7>&- && log "adb re-added" || log "adb re-add FAILED"
-  # KD's startup re-runs `setusbconfig serial` (drops ffs.adb) once or twice: keep re-adding for ~90 s
+  # Keep the serial rescue adb available during the settling window.
   n=0; while [ $n -lt 6 ]; do sleep 15; n=$((n+1)); [ -e $C/ffs.adb ] && continue
     log "adb gone again (KD reset) -> re-add #$n"; sh /tmp/mk20-add-adb.sh >>"$LOG" 2>&1 7>&-; done
 }
@@ -201,7 +182,7 @@ cleanup() {
   mkdir -p /tmp/mk20; touch /tmp/mk20/gadget.busy
   log "FAILSAFE: undo composite"
   router_stop   # before ANY UDC/configfs change (hidg0 fd vs f_hid free)
-  # mk20-kbd off too (these paths hand the panels back to stock KD); fail closed: a surviving mk20-kbd means no
+  # Fail closed: a surviving mk20-kbd means no
   # UDC/configfs change (hidg0 fd) and no KD start (two writers on ttyS1/fb)
   kbd_stop || { log "FAILSAFE ABORT: mk20-kbd not stopped -> UDC/configfs untouched, KD not started"; rm -f /tmp/mk20/gadget.busy; return 1; }
   touch /tmp/mk20-flapmon-stop
@@ -212,13 +193,12 @@ cleanup() {
   # stop the bridge loop + bridge, restore the real ttyGS0 (validated pid: BusyBox `kill ""` = own process group)
   touch /tmp/mk20-bridge-stop; bp=$(cat /tmp/mk20-bridge-loop.pid 2>/dev/null); case "$bp" in ''|*[!0-9]*|0|1) ;; *) kill "$bp" 2>/dev/null;; esac
   killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
-  # KD may hold the dead PTY: restart it cleanly on real ttyGS0
+  # Clear any leftover KD before restoring the serial rescue transport
   # unmount the shims only after KD + appLunch.sh have exited (a running sh keeps its script busy -> EBUSY)
   kd_stop
   for m in /data/setusbconfig /data/appLunch.sh; do i=0; while grep -q " $m " /proc/mounts && [ $i -lt 5 ]; do umount $m 2>/dev/null || sleep 1; i=$((i+1)); done
     grep -q " $m " /proc/mounts && log "WARN still mounted: $m"; done
   /data/setusbconfig serial >>"$LOG" 2>&1 7>&-
-  kd_start
   readd_adb
   log "FAILSAFE done UDC=$(udc_now) acm=$([ -e $C/acm.usb0 ] && echo y || echo n) kd=$(pgrep -f KeyboardDevice | head -1)"
   rm -f /tmp/mk20/gadget.busy
@@ -236,7 +216,7 @@ cleanup() {
 TL=/tmp/mk20/transition.lock
 stock_ok() { [ -e $C/acm.usb0 ] && [ ! -e $C/ecm.usb0 ] && [ ! -e $C/hid.usb0 ] && [ -n "$(udc_now)" ] &&
   [ -c /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && ! grep -qE ' /data/(setusbconfig|appLunch\.sh) ' /proc/mounts &&
-  pgrep -f '^/data/KeyboardDevice' >/dev/null; }
+  ! pgrep -f '^/data/KeyboardDevice' >/dev/null; }
 rb_status() { echo "$1" > /mnt/SDCARD/gadget-ecm-hid.status 2>/dev/null; }
 pstart() { awk '$3 != "Z" {print $22}' "/proc/$1/stat" 2>/dev/null; }   # empty if gone or a zombie
 # tl_lock <tries>: take the transition mutex on fd 7 (tries 0.25 s apart; BusyBox flock has no -w). 1 = not held.
@@ -260,7 +240,7 @@ uint_cap() {
   [ ${#v} -gt 6 ] && { echo "$4"; return; }
   [ "$v" -lt "$3" ] && v=$3; [ "$v" -gt "$4" ] && v=$4; echo "$v"
 }
-# r5 #5: cleanup worst case on a HEALTHY board = kd_stop<=32 + umount<=10 + kd_start<=23 + readd_adb (g1 wait<=60,
+# r5 #5: cleanup worst case on a HEALTHY board = kd_stop<=32 + umount<=10 + readd_adb (g1 wait<=60,
 # 5, add-adb ~4 x7, 6x15 re-add window) ~= 260 s -> 330 s so a healthy rollback incl. add-adb is never cut off.
 RBRETRY=$(uint_cap "${MK20_RB_RETRY_S:-}" 20 0 300)       # queued/manual rollback: pause before its one retry (s)
 RBT=$(uint_cap "${MK20_RB_TIMEOUT:-}" 330 1 900)          # rollback / post-timeout cleanup bound (s)
@@ -301,12 +281,18 @@ escalate() {
 # stuck <why> <status>: rc-3 exit (escalated; flapmon/confirm waiter do not retry). Clears gadget.busy like every
 # other exit under the mutex; rc 1 if the escalation itself could not be persisted.
 stuck() { rm -f /tmp/mk20/gadget.busy; escalate "$1" "$2" && exit 3; exit 1; }
-# Exit codes of --rollback-now: 0 stock verified | 1 not verified | 3 stuck+escalated | 4 refused (mutex busy: another
+# Exit codes of --rollback-now: 0 A/B queued (release) / ACM verified (standalone) | 1 not verified | 3 stuck+escalated | 4 refused (mutex busy: another
 # owner is mid-transition and owns gadget.busy) | 5 stale (r5 #7: MK20_GEN names an older composite than the current
 # generation in $GENF -> a queued rollback from a dead composite must not tear down a newer one; nothing touched).
 GENF=/tmp/mk20/composite.gen
 # stale only when a DIFFERENT current generation is published (GPT r7: a missing/empty token is not "stale")
 gen_stale() { gcur=$(cat "$GENF" 2>/dev/null); [ -n "${MK20_GEN:-}" ] && [ -n "$gcur" ] && [ "$gcur" != "$MK20_GEN" ]; }
+if [ "${1:-}" = --rollback-now ] && [ -n "${MK20_REL:-}" ]; then
+  gen_stale && { log "stale release rollback ignored"; exit 5; }
+  log "release rollback requested -> loader A/B (USB stays up until reset)"
+  touch /mnt/SDCARD/cmd-rollback && sync
+  exit $?
+fi
 if [ "${1:-}" = --rollback-now ]; then
   # GPT r7: a stale request that could not get the mutex is rc 5 (no-op), never rc 4 (callers would retry/escalate)
   tl_lock "$RBTRIES" || { gen_stale && { log "rollback: mutex busy and request stale ($MK20_GEN) -> ignored"; exit 5; }
@@ -392,7 +378,7 @@ kd_stop; killall adbd 2>/dev/null; sleep 1
 pgrep -f /data/KeyboardDevice >/dev/null && die "KD still running/respawned after stop"
 # ---- unbind + clean stale links ----
 router_stop   # 1.2.0: no open /dev/hidg0 across unbind/unlink (re-setup over a live composite)
-kbd_stop || die "mk20-kbd not stopped (no open /dev/hidg0 across unbind/unlink, no KD beside it)"   # stock KD restarted below; mk20d kbd retakes it after boot
+kbd_stop || die "mk20-kbd not stopped (no open /dev/hidg0 across unbind/unlink, no KD beside it)"   # mk20d boot clears markers after the transition
 i=0; while [ -n "$(udc_now)" ] && [ $i -lt 10 ]; do echo "" > $G/UDC 2>/dev/null; sleep 0.3; i=$((i+1)); done
 [ -z "$(udc_now)" ] || die "cannot unbind"
 for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
@@ -447,36 +433,23 @@ else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
 # mk20-kbd mode (MK20_KBD=1 from mk20d): no KD output to tap, mk20-kbd owns ttyGS0 and hidg0 itself
 [ -n "${MK20_REL:-}" ] && [ "${MK20_KBD:-0}" != 1 ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --tap /tmp/mk20/kd-tap.sock"
 rm -f /tmp/mk20-bridge-stop
-# ---- KD back up on a PTY bridge; shadow setusbconfig so KD's start does not reset USB ----
+# ---- PTY bridge for mk20-kbd; stock binaries/scripts remain untouched ----
 mkdir -p /tmp/mk20
 [ -e /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && mv /dev/ttyGS0 /dev/ttyGS0.real
 ( trap '' HUP INT; exec sh -c "echo \$\$ > /tmp/mk20-bridge-loop.pid; while [ ! -f /tmp/mk20-bridge-stop ]; do $BR $BRIDGE_LISTEN --link /dev/ttyGS0; sleep 1; done" </dev/null >>/tmp/mk20/bridge.log 2>&1 7>&- ) &   # supervised (tmpfs log: an open FAT file blocks hardreset's remount ro)
 i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 [ -e /dev/ttyGS0 ] || die "bridge did not create /dev/ttyGS0"
-printf '#!/bin/sh\necho "setusbconfig shadowed by mk20 composite: $*"\nexit 0\n' > /tmp/setusbconfig-noop; chmod 755 /tmp/setusbconfig-noop
-mount --bind /tmp/setusbconfig-noop /data/setusbconfig || die "shadow setusbconfig"
-# ROOT CAUSE of the 15:40 flapping (found 15:53): KD's UsbCDCStateThread runs `dmesg -c` every 3 s and, if the
-# output contains "ERR: Operation not supported", reads usbc0/usb_device = full USB rmmod/insmod. sunxi_udc prints
-# that line whenever a function's setup() returns -EOPNOTSUPP; f_hid (5.4) does that for SET_IDLE / SET_REPORT on
-# ep0, which macOS sends to a keyboard -> reset every ~3 s. Fix: give KD a PATH-first `dmesg` that drops that line.
-mkdir -p /tmp/mk20-shim
-printf '#!/bin/sh\n/bin/busybox dmesg "$@" | /bin/busybox grep -v "ERR: Operation not supported"\n' > /tmp/mk20-shim/dmesg; chmod 755 /tmp/mk20-shim/dmesg
-umount /data/appLunch.sh 2>/dev/null; sed 's#^source /data/qt_env.sh#source /data/qt_env.sh; export PATH=/tmp/mk20-shim:$PATH#' /data/appLunch.sh > /tmp/appLunch-shim.sh; chmod 755 /tmp/appLunch-shim.sh
-grep -q mk20-shim /tmp/appLunch-shim.sh || die "dmesg shim sed"
-mount --bind /tmp/appLunch-shim.sh /data/appLunch.sh || die "shadow appLunch"
-kd_start
-pgrep -f KeyboardDevice >/dev/null || die "KD not running"
-# test hook (one-shot): prove the failure rollback with everything set up (bridge, shims, KD on PTY)
+# test hook (one-shot): prove setup failsafe with the bridge ready and KD stopped
 if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
 rm -f /mnt/SDCARD/mk20-composite-ok
 OK=1
 log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_IP bridge=[$BRIDGE_LISTEN] kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
-# within 180 s, otherwise roll back to stock ACM+KD. Detached waiter (no setsid here).
+# within 180 s, otherwise request loader A/B rollback. Detached waiter (no setsid here).
 ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh.new && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh.new)" ] &&
   mv -f /tmp/mk20-gadget.sh.new /tmp/mk20-gadget.sh || { OK=0; die "cannot stage rollback copy"; }   # atomic: a running rollback keeps its file
 # flap monitor (both modes, share/flapmon.sh): >=5 configured->not-configured drops within 60 s -> rollback to
-# ACM+KD+adb. Host USB suspend (Mac sleep) is not a flap.
+# loader A/B via cmd-rollback. Host USB suspend (Mac sleep) is not a flap.
 rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready
 FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
 { [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh.new && mv -f /tmp/mk20-flapmon.sh.new /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }

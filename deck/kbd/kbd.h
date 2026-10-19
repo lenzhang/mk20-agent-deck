@@ -19,6 +19,7 @@ typedef struct kbd_s {
     size_t host_rx_barrier; /* unread bytes queued before the latest route boundary */
     int host_fd;          /* -1 = no host link (local mode) */
     int host_tx_stuck;    /* last reply timed out: next ones fail fast until a write succeeds */
+    int safe_mode;        /* static rescue panels; no host/UI/agent features */
     int local_ui;         /* 1 = draw key feedback locally (no-host mode) */
     screen_t scr;
     host_parser hp;
@@ -41,6 +42,7 @@ typedef struct kbd_s {
 
 int64_t kbd_now(kbd_t *k);
 int kbd_init(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version);
+int kbd_init_safe(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version);
 void kbd_free(kbd_t *k);
 /* Loop boundary: expire safety deadlines BEFORE any queued HID output. now_ms must be fresh. */
 void kbd_safety_tick(kbd_t *k, int64_t now_ms);

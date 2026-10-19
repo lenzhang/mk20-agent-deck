@@ -70,7 +70,7 @@ cfg_load() {
   CFG_WARN=""
   ECM_SUBNET=172.30.250.0/24; [ -n "${MK20_DEFAULT_SUBNET:-}" ] && cfg_set ECM_SUBNET "$MK20_DEFAULT_SUBNET"
   ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56
-  FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; FEATURE_ROUTER=1; FEATURE_KBD=0; FEATURE_AGENT_CTL=0; FEATURE_HID_SCROLL=0; FEATURE_K2_ESTOP=0; FEATURE_K2_RELEASE=0; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
+  FEATURE_COMPOSITE=1; FEATURE_HID=1; FEATURE_ADB=1; FEATURE_ROUTER=1; FEATURE_KBD=1; FEATURE_AGENT_CTL=0; FEATURE_HID_SCROLL=0; FEATURE_K2_ESTOP=0; FEATURE_K2_RELEASE=0; BRIDGE_PORT=17890; FLAP_DROPS=5; FLAP_WINDOW_S=60
   LOG_MAX_KB=256; LOG_KEEP=3; CFG_SRC=defaults
   if [ -L "$CONF" ] || { [ -e "$CONF" ] && [ ! -f "$CONF" ]; }; then cfg_warn "config is not a regular file, ignored"
   elif [ -f "$CONF" ]; then
@@ -94,9 +94,7 @@ cfg_load() {
   [ -f "$S/mk20-gadget-nohid" ] && FEATURE_HID=0
   [ -f "$S/mk20-no-router" ] && FEATURE_ROUTER=0   # 1.2.0 on-board router (also MK20_ROUTER=0)
   [ "${MK20_ROUTER:-}" = 0 ] && FEATURE_ROUTER=0
-  # mk20-kbd (KD replacement, option D): opt-in (FEATURE_KBD=1 in mk20.conf or MK20_KBD=1). There is no automatic
-  # fallback to stock KD (OTA needs only the composite + mk20d; a bad release is rolled back A/B on probation).
-  # Manual debug/rescue-only overrides that keep stock KD: /data/mk20/use-kd (adb/ssh) or mk20-use-kd on the FAT.
+  # K4 default-on; FEATURE_KBD=0 / MK20_KBD=0 is developer-only (never starts KD).
   [ "${MK20_KBD:-}" = 1 ] && FEATURE_KBD=1
   [ "${MK20_KBD:-}" = 0 ] && FEATURE_KBD=0
   case "${MK20_AGENT_CTL:-}" in 0|1) FEATURE_AGENT_CTL=$MK20_AGENT_CTL;; esac
@@ -105,7 +103,12 @@ cfg_load() {
   case "${MK20_K2_RELEASE:-}" in 0|1) FEATURE_K2_RELEASE=$MK20_K2_RELEASE;; esac
   # One resolved value for gadget descriptor and mk20-kbd pointer reports (also inherited by supervisors).
   MK20_HID_SCROLL=$FEATURE_HID_SCROLL; export MK20_HID_SCROLL
-  { [ -f "$MK20_HOME/use-kd" ] || [ -f "$S/mk20-use-kd" ]; } && FEATURE_KBD=0
+  # Legacy KD selectors are inert. One notice per boot, shared by every cfg_load caller.
+  if [ -e "$MK20_HOME/use-kd" ] || [ -e "$S/mk20-use-kd" ] || [ -e "$MK20_HOME/state/kbd-fallback" ]; then
+    if mkdir "$R/tmp/mk20/kd-overrides-ignored" 2>/dev/null; then
+      mk20log WARN mk20d config "legacy use-kd/mk20-use-kd/kbd-fallback ignored"
+    fi
+  fi
   [ "$ECM_DEV_MAC" = "$ECM_HOST_MAC" ] && { cfg_warn "dev/host MAC equal, defaults used"; ECM_DEV_MAC=02:11:22:33:44:55; ECM_HOST_MAC=02:11:22:33:44:56; }
   n=${ECM_SUBNET%/24}; ECM_PREFIX=${n%.0}; ECM_IP=$ECM_PREFIX.2; ECM_HOST_IP=$ECM_PREFIX.1; ECM_MASK=255.255.255.0
 }

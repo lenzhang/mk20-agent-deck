@@ -14,6 +14,7 @@ tsan: tests/test_kbd_tsan
 test: tests/test_kbd tests/test_kbd_tsan mk20-kbd
 	./tests/test_kbd
 	./tests/test_kbd_tsan
+	python3 tests/safe_mode.py
 	python3 tests/e2e_run.py
 clean:
 	rm -f mk20-kbd mk20-kbd.armhf tests/test_kbd tests/test_kbd_tsan tests/ui_test tests/ui_headless tests/uicfg_cli tests/ui_load tests/onboard_headless tests/onboard_test tests/onboard_test_tsan
@@ -64,3 +65,8 @@ test: onboard-test
 
 tests/onboard_test_tsan: tests/onboard_test.c tests/tests_onboard_r1.inc tests/tests_onboard_r2.inc tests/tests_onboard_r3.inc $(SRC) *.h
 	$(CC) $(CFLAGS) -fsanitize=thread -g -I. -o $@ tests/onboard_test.c $(SRC) -pthread
+
+# Portable K4 executable regression; no /proc, PIL, agent or live hardware required.
+safe-test: mk20-kbd
+	$(PYTHON) tests/safe_mode.py
+.PHONY: safe-test

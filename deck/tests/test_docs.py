@@ -66,3 +66,18 @@ def test_whole_card_restore_never_points_at_unsafe_images():
     assert "must never be `dd`'d" in DOCS["RECOVERY.md"] and "IMAGEWTY" in DOCS["RECOVERY.md"]
     tool = (FW.parent / "tools/tf-restore-boot.sh").read_text()
     assert "IMAGEWTY" in tool and "is a directory" in tool
+
+
+
+def test_k4_release_contract_and_default():
+    hooks = (FW / "MAINT-HOOKS.md").read_text()
+    assert (FW / "VERSION").read_text().strip() == "1.3.0"
+    for name in ("restart-kbd", "exit-safe-mode", "debug", "state.json", "recent_crashes", "last_rc"):
+        assert name in hooks
+    for doc in DOCS.values():
+        assert "MAINT-HOOKS.md" in doc and "1.3.0" in doc
+    assert "1.3.0-rc1" in DOCS["RELEASE.md"] and "rc1" in DOCS["RELEASE.md"]
+    assert "FEATURE_KBD=1;" in (FW / "release/share/mk20lib.sh").read_text()
+    plan = (D / "KD-REPLACE-PLAN.md").read_text()
+    k4 = plan[plan.index("**K4 release integration"):plan.index("**On-device checks still needed")]
+    assert "~~" not in k4 and "to be removed" not in k4 and "FEATURE_KBD=1" in k4

@@ -12,6 +12,41 @@ writes the rootfs (p5) and the overlay (p6); everything else leaves them alone.
 
 Never use `reboot`: the soft reboot hangs on this board.
 
+## K4 / 1.3.0-rc1 rescue
+
+Rescue is **mk20-kbd safe mode + usb0 admin web + adb + loader A/B rollback**.
+K4 never issues `qt_app2 start` or hands the panels back to stock KD. Vendor binaries
+and rootfs p5 stay untouched; the previous release remains in the other A/B slot.
+
+A crash loop (>=3 exits within 300 s) latches `--safe-mode` and supervision continues
+with backoff. All panels show `MK20 SAFE MODE` and `admin: 172.30.250.2:8780` (wrapped
+on small panels); GD32 typing, local PTT HID and K2 e-stop remain. USB/ECM and adb
+are kept up. Safe-mode WARN alone does not cause rollback, even on probation.
+A missing/dead binary, no GD32 proof, stale status, incomplete panels or panel write
+errors still fail probation; the loader rolls the unconfirmed slot back. Confirmed
+kbd failures are WARN and keep the admin/update path.
+
+Open `http://172.30.250.2:8780` from a USB host once U3's separate admin service is
+installed. Its maintenance handlers use [MAINT-HOOKS.md](MAINT-HOOKS.md). K4 implements
+the file contract only; if the web service is unavailable, use adb and A/B. To exit
+safe mode over adb, publish an **empty regular file** atomically:
+
+```sh
+$MK20_ADB shell 'umask 077; d=/data/mk20/state/maint; mkdir -p "$d"; : > "$d/exit-safe-mode.new"; mv "$d/exit-safe-mode.new" "$d/exit-safe-mode"'
+$MK20_ADB shell 'cat /tmp/mk20/maint/state.json /run/mk20/kbd.status'
+```
+
+`restart-kbd` similarly requests a graceful restart, never counted as a crash;
+`debug` accepts only `verbose=0|1` for the next start. No arbitrary commands or paths,
+no keytrace or secret readback. `use-kd`, FAT `mk20-use-kd` and `state/kbd-fallback`
+are ignored with one notice per boot. No hidden keyboard combo exists.
+
+**HID after restart:** Tina's re-bind recreates hidg0; kbd parks stale fds while alive.
+A crash or maintenance restart may close those fds, leave new opens at ENXIO and/or
+leave a host modifier held. Selftest WARNs, never FAILs merely for lost HID after a
+restart. Reboot via watcher `cmd-reboot` to clear it; do not repeatedly restart kbd.
+The kernel hidfix acceptance is separate; K4 does not add a HID guardian.
+
 ## 0. Look first (read-only)
 
 ```sh
@@ -28,8 +63,8 @@ Symptoms and where to go:
 | symptom | likely cause | go to |
 |---|---|---|
 | ping to 172.30.250.2 fails, adb works | Mac/device subnet mismatch (device rolled back to 1.0.x) | `mk20_host_net.py sync` |
-| black KD screens, USB present | KD lost ttyGS0 (composite half-down) | 1 (`mk20-no-composite`) |
-| USB keeps re-enumerating | flap; flapmon rolls back to stock after 5 drops in 60 s (Mac sleep/suspend is not counted, 1.1.2+) | 0, then 1 |
+| blank/error panels, USB present | kbd/status/panel failure or safe mode | K4 section above, then 0 / 2 |
+| USB keeps re-enumerating | flap; release flapmon requests loader A/B after 5 drops in 60 s (Mac sleep/suspend is not counted, 1.1.2+) | 0, then 1 |
 | `good=` empty / `stub: … mismatch` | release or rescue files corrupt | 2 / 3 |
 | nothing enumerates after a power cycle | boot image or kernel broken | 5 |
 
@@ -37,11 +72,10 @@ Symptoms and where to go:
 
 | flag | effect |
 |---|---|
-| `mk20-no-composite` | release runs in stock mode: ACM + KD (+adb), no ECM/HID/bridge. **Set automatically** (1.1.4+) when flapmon's rollback fails 3 times; flapmon then hard-resets. Delete it once the cause is fixed |
+| `mk20-no-composite` | composite disabled: ACM (+adb), no ECM/HID/bridge; mk20-kbd remains the only UI in K4. **Set automatically** (1.1.4+) when flapmon's rollback fails 3 times; flapmon then hard-resets. Delete it once the cause is fixed |
 | `mk20-gadget-nohid` | composite without HID (ECM + ADB + bridge). Not a fix for the ep3 kernel: 1.1.x releases don't run on it at all (see level 5) |
 | `mk20-no-adb` | no adb in any mode |
 | `mk20-no-router` | (1.2.0+) the on-board router (`mk20d router` → `bin/mk20-router`, PTT → HID) is not started; same as `FEATURE_ROUTER=0` in mk20.conf or env `MK20_ROUTER=0`. To stop it now without a reboot: `touch /tmp/mk20-router-stop; killall mk20-router` (the stop file keeps the mk20d supervisor from restarting it; SIGTERM/SIGINT make the router send an all-keys-up report before it exits, so no modifier stays held; avoid `kill -9`). The router never gates confirm |
-| `mk20-use-kd` | (KD replacement, only relevant with `FEATURE_KBD=1`) **debug/rescue-only manual override**: keep stock KeyboardDevice, do not start `mk20d kbd` / `bin/mk20-kbd`. Same as `/data/mk20/use-kd` (adb/ssh). There is no automatic fallback to stock KD: mk20-kbd is restarted with backoff, and a release whose mk20-kbd crash-loops on probation fails selftest and is rolled back A/B. Takes effect at the next boot (or now: `touch /tmp/mk20-kbd-stop; killall mk20-kbd; /etc/init.d/qt_app2 start`). Like the 1.2.1 router, mk20-kbd keeps its pre-re-bind `/dev/hidg0` fd open on purpose (kernel cdev quirk); killing or restarting it while the gadget stays up leaves `/dev/hidg0` unopenable (ENXIO) until the next re-bind or a reboot, so prefer a reboot (watcher `cmd-reboot`) to restart it |
 | `mk20-no-release` | loader skips releases: legacy `boot-every/` jobs only (stock + adb keeper) |
 | `mk20-no-watch` | boot stub does nothing at all: pure vendor behaviour, no rescue watcher, no adb |
 
@@ -66,11 +100,12 @@ Commands the watcher polls for every 2 s:
 - Afterwards, align the Mac: `python3 tools/mk20_host_net.py sync`. In a mismatch, the bound link-local path to
   169.254.7.2 still works.
 
-- **Rollback guard (1.1.3+, reworked in 1.1.4):** `gadget.sh --rollback-now` may be requested by flapmon, the
-  confirm waiter and mk20d. One owner runs it (`/tmp/mk20/rollback.once/pid`); the others wait. `done` is written
-  only after stock is verified (ACM linked, UDC bound, KD running), and every caller re-verifies, so exit 0 always
-  means stock is up. A dead owner is taken over automatically; an unverified rollback releases the guard and exits 1.
-  A new successful composite setup clears the guard.
+- **Release gadget rollback (K4):** flapmon or `gadget.sh --rollback-now` publishes
+  watcher `cmd-rollback`, leaving USB up until the A/B reset. A stale composite
+  generation is ignored. This is distinct from setup's bounded failsafe, which
+  quiesces HID/stops kbd before configfs changes and restores ACM+adb without KD.
+  Safe-mode entry and kbd maintenance requests never tear down the gadget.
+  Rolling back to a previous 1.2.x release runs that release's historical behavior.
 
 ## 3. Uninstall the firmware, or remove the stub
 

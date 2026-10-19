@@ -2,6 +2,7 @@
 #include "jpeg.h"
 #include "ctl.h"
 #include "onboard.h"
+#include "ui_font.h"
 #include <errno.h>
 #include <poll.h>
 #include <time.h>
@@ -18,16 +19,38 @@ int64_t kbd_now(kbd_t *k)
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
-int kbd_init(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version)
+static int init_core(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version, int safe)
 {
     memset(k, 0, sizeof *k);
+    k->safe_mode = safe;
     k->host_fd = -1; k->backlight = -1; k->ptt_col = 0; k->ptt_row = 3; k->version = version ? version : "mk20-kbd";
     snprintf(k->bl_dir, sizeof k->bl_dir, "%s", bl_dir ? bl_dir : "");
     if (screen_init(&k->scr, fbdir)) return -1;
-    if (host_parser_init(&k->hp, (1u << 20) + HOST_HDR + 4)) return -1;   /* full-canvas JPEG is << 1 MiB */
+    if (safe) {
+        /* One bounded scratch panel, embedded ASCII font. No host parser/canvas/decoder or on-board UI. */
+        uint16_t *px = calloc((size_t)428 * 142, 2);
+        if (!px) { screen_free(&k->scr); return -1; }
+        for (int i = 0; i < PANEL_COUNT; i++) {
+            int w = PANELS[i].w, h = PANELS[i].h;
+            memset(px, 0, (size_t)w * h * 2);
+            ui_font_draw(px,w,h,2,4,"MK20 SAFE MODE",0xffff,w-4);
+            ui_font_draw(px,w,h,2,25,"restart loop",0xffff,w-4);
+            ui_font_draw(px,w,h,2,50,"admin:",0xffff,w-4);
+            ui_font_draw(px,w,h,2,70,"172.30.250.2",0xffff,w-4);
+            ui_font_draw(px,w,h,2,90,":8780",0xffff,w-4);
+            screen_set_tile565(&k->scr,PANELS[i].fb,0,0,w,h,px);
+        }
+        free(px); return 0;
+    }
+    if (host_parser_init(&k->hp, (1u << 20) + HOST_HDR + 4)) { screen_free(&k->scr); return -1; }
     k->canvas = calloc((size_t)CANVAS_W * CANVAS_H, 2);
-    return k->canvas ? 0 : -1;
+    if (!k->canvas) { screen_free(&k->scr); host_parser_free(&k->hp); return -1; }
+    return 0;
 }
+int kbd_init(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version)
+{ return init_core(k,fbdir,bl_dir,version,0); }
+int kbd_init_safe(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version)
+{ return init_core(k,fbdir,bl_dir,version,1); }
 
 void kbd_free(kbd_t *k)
 {
@@ -197,6 +220,11 @@ void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len)
     if (k->ctl && ev.knob == 2 && k->k2_estop) {
         const char *reason = k2_estop_event(&k->k2, ev.row, ev.pressed, now);
         if (reason) ctl_estop(k->ctl, reason, now);
+    }
+    if (k->safe_mode) {
+        if (k->hid && !ev.knob && !ev.keycode && ev.col == k->ptt_col && ev.row == k->ptt_row)
+            hid_set_mod(k->hid, HID_MOD_RALT, ev.pressed);
+        return; /* preserve static error panels; no host, navigation, grants or agent input */
     }
     if (k->onboard) {
         if (k->ctl && !ev.knob && ev.pressed) ctl_human_input(k->ctl,now);
@@ -439,11 +467,11 @@ int kbd_write_status(kbd_t *k, const char *path)
     int panels_written = 0, dirty = 0; unsigned wr[PANEL_COUNT], werr;
     screen_stats(&k->scr, wr, &werr, &dirty);
     for (int i = 0; i < PANEL_COUNT; i++) panels_written += wr[i] > 0;
-    fprintf(f, "{\"version\":\"%s\",\"gd32_rw\":%d,\"knob_init\":\"%s\",\"knob_ok\":%d,\"knob_timeouts\":%d,"
+    fprintf(f, "{\"version\":\"%s\",\"mode\":\"%s\",\"estopped\":%d,\"gd32_rw\":%d,\"knob_init\":\"%s\",\"knob_ok\":%d,\"knob_timeouts\":%d,"
                "\"knob_tx_errors\":%d,\"panels_written\":%d,\"panels_dirty\":%d,\"write_errors\":%u,\"key_events\":%u,\"knob_events\":%u,"
                "\"echo_frames\":%u,\"other_frames\":%u,\"jpg_ok\":%u,\"jpg_bad\":%u,\"jpg_size\":%u,\"json_in\":%u,"
                "\"host\":%d,\"host_tx_errors\":%u,\"host_tx_timeouts\":%u,\"backlight\":%d,\"hid_open\":%d,\"hid_reopens\":%u,\"hid_replaced\":%u}\n",
-            k->version, k->gd32_rw, gd32_knob_state_name(ks->state), ks->ok_count, ks->timeouts, ks->tx_errors,
+            k->version, k->safe_mode ? "safe" : "normal", k->ctl ? k->ctl->estopped : 0, k->gd32_rw, gd32_knob_state_name(ks->state), ks->ok_count, ks->timeouts, ks->tx_errors,
             panels_written, dirty, werr, k->st.key_events, k->st.knob_events, k->st.echo_frames,
             k->st.other_frames, k->st.jpg_ok, k->st.jpg_bad, k->st.jpg_size, k->st.json_in, k->host_fd >= 0,
             k->st.host_tx_errors, k->st.host_tx_timeouts, k->backlight, k->hid ? k->hid->fd >= 0 : -1, k->hid ? k->hid->reopens : 0u,
