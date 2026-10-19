@@ -43,6 +43,7 @@ int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
 
 int kbd_flush(kbd_t *k)
 {
+    if (k->scr.threaded) return 0;   /* writer threads pick dirty panels up themselves */
     int a = screen_flush_bus(&k->scr, 0), b = screen_flush_bus(&k->scr, 1);
     if (a < 0 || b < 0) { k->st.flush_errors++; return -1; }
     k->st.panel_writes += (uint32_t)(a + b);
@@ -245,20 +246,21 @@ void kbd_on_host_frame(kbd_t *k, const host_frame *f)
     }
 }
 
-int kbd_write_status(const kbd_t *k, const char *path)
+int kbd_write_status(kbd_t *k, const char *path)
 {
     char tmp[256]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *f = fopen(tmp, "w");
     if (!f) return -1;
     const gd32_knob_status *ks = &k->knob;
-    int panels_written = 0;
-    for (int i = 0; i < PANEL_COUNT; i++) panels_written += k->scr.writes[i] > 0;
+    int panels_written = 0, dirty = 0; unsigned wr[PANEL_COUNT], werr;
+    screen_stats(&k->scr, wr, &werr, &dirty);
+    for (int i = 0; i < PANEL_COUNT; i++) panels_written += wr[i] > 0;
     fprintf(f, "{\"version\":\"%s\",\"gd32_rw\":%d,\"knob_init\":\"%s\",\"knob_ok\":%d,\"knob_timeouts\":%d,"
-               "\"knob_tx_errors\":%d,\"panels_written\":%d,\"write_errors\":%u,\"key_events\":%u,\"knob_events\":%u,"
+               "\"knob_tx_errors\":%d,\"panels_written\":%d,\"panels_dirty\":%d,\"write_errors\":%u,\"key_events\":%u,\"knob_events\":%u,"
                "\"echo_frames\":%u,\"other_frames\":%u,\"jpg_ok\":%u,\"jpg_bad\":%u,\"jpg_size\":%u,\"json_in\":%u,"
                "\"host\":%d,\"host_tx_errors\":%u,\"backlight\":%d}\n",
             k->version, k->gd32_rw, gd32_knob_state_name(ks->state), ks->ok_count, ks->timeouts, ks->tx_errors,
-            panels_written, k->scr.write_errors, k->st.key_events, k->st.knob_events, k->st.echo_frames,
+            panels_written, dirty, werr, k->st.key_events, k->st.knob_events, k->st.echo_frames,
             k->st.other_frames, k->st.jpg_ok, k->st.jpg_bad, k->st.jpg_size, k->st.json_in, k->host_fd >= 0,
             k->st.host_tx_errors, k->backlight);
     if (fclose(f)) { unlink(tmp); return -1; }

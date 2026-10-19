@@ -98,7 +98,10 @@ static int run(const struct run_opts *o)
     if (kbd_init(&k, o->fb, o->bl, KBD_VERSION)) { fprintf(stderr, "mk20-kbd: init failed\n"); return 1; }
     k.local_ui = o->no_host;
     kbd_draw_idle(&k);
-    if (kbd_flush(&k) < 0) fprintf(stderr, "mk20-kbd: initial panel write failed (errors=%u)\n", k.scr.write_errors);
+    if (screen_start_writers(&k.scr)) {   /* fall back to synchronous flushes */
+        fprintf(stderr, "mk20-kbd: writer threads failed, synchronous panel writes\n");
+        if (kbd_flush(&k) < 0) fprintf(stderr, "mk20-kbd: initial panel write failed (errors=%u)\n", k.scr.write_errors);
+    }
 
     /* kill file: the fixed path, or an extra one from MK20_KBD_NO_WRITE_FILE (tests, TF rescue);
      * either existing keeps the GD32 tty read-only. The env can only ADD a kill file. */
@@ -152,6 +155,7 @@ static int run(const struct run_opts *o)
         }
         if (o->status && mono_ms() >= next_status) { kbd_write_status(&k, o->status); next_status = mono_ms() + 1000; }
     }
+    screen_stop_writers(&k.scr, 1, 500);   /* bounded drain of the last frame */
     if (o->status) kbd_write_status(&k, o->status);
     if (k.host_fd >= 0) close(k.host_fd);
     close(gfd);

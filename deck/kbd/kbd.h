@@ -48,5 +48,5 @@ void kbd_draw_key(kbd_t *k, int row, int col, int pressed);
 /* JSON helpers (tiny, tolerant). */
 int kbd_json_str(const char *s, size_t n, const char *key, char *out, size_t cap);
 int kbd_json_int(const char *s, size_t n, const char *key, long *v);
-int kbd_write_status(const kbd_t *k, const char *path);
+int kbd_write_status(kbd_t *k, const char *path);
 #endif

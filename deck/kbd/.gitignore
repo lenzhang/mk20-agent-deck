@@ -1,3 +1,4 @@
 mk20-kbd
 mk20-kbd.armhf
 tests/test_kbd
+tests/test_kbd_tsan

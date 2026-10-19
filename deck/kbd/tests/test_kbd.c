@@ -259,7 +259,7 @@ int main(void)
 {
     test_gd32_roundtrip(); test_gd32_corrupt(); test_gd32_fuzz(); test_gd32_allowlist(); test_knob_frames();
     test_host(); test_screen();
-    test_knob_init(); test_jpeg(); test_kbd_core();
+    test_knob_init(); test_jpeg(); test_kbd_core(); test_writers();
     printf("%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }

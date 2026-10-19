@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <time.h>
 
 #ifndef TEST_DATA
 #define TEST_DATA "tests/data"
@@ -313,4 +314,116 @@ static void test_kbd_core(void)
     for (int i = 1; i <= 21; i++) { snprintf(path, sizeof path, "%s/fb%d", dir, i); unlink(path); }
     for (int i = 0; i < 4; i++) { snprintf(path, sizeof path, "%s/%s", bl, blf[i]); unlink(path); }
     rmdir(dir); rmdir(bl);
+}
+
+/* ---- per-bus writer threads ---- */
+static long t_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
+static uint16_t file_px(const char *dir, int fb, int idx)
+{
+    char p[256]; snprintf(p, sizeof p, "%s/fb%d", dir, fb);
+    FILE *f = fopen(p, "rb"); uint16_t v = 0xDEAD;
+    if (f) { fseek(f, idx * 2, SEEK_SET); if (fread(&v, 2, 1, f) != 1) v = 0xDEAD; fclose(f); }
+    return v;
+}
+static void fill_tile(screen_t *s, int fb, uint16_t v)
+{
+    static uint16_t buf[428 * 142];
+    const panel_t *p = &PANELS[fb - 1];
+    for (int i = 0; i < p->w * p->h; i++) buf[i] = v;
+    screen_set_tile565(s, fb, 0, 0, p->w, p->h, buf);
+}
+
+static void test_writers(void)
+{
+    char dir[] = "/tmp/mk20wrXXXXXX", path[256]; CHECK(mkdtemp(dir) != NULL);
+    for (int i = 1; i <= 21; i++) { snprintf(path, sizeof path, "%s/fb%d", dir, i); FILE *f = fopen(path, "w"); fclose(f); }
+    screen_t s; CHECK(screen_init(&s, dir) == 0);
+    screen_set_write_delay(&s, 20000); s.retry_ms = 20;
+    CHECK(screen_start_writers(&s) == 0 && s.threaded);
+    CHECK(screen_wait_idle(&s, 3000) == 0);
+    unsigned w[PANEL_COUNT], e; int d;
+    screen_stats(&s, w, &e, &d);
+    int all1 = 1; for (int i = 0; i < PANEL_COUNT; i++) all1 &= w[i] == 1;
+    CHECK(all1 && e == 0 && d == 0);
+
+    /* producers never wait on SPI: 200 ms per panel write, 40 updates must return fast */
+    screen_set_write_delay(&s, 200000);
+    long t0 = t_ms();
+    for (int r = 0; r < 40; r++) fill_tile(&s, 1 + r % 21, (uint16_t)(0x100 + r));
+    long dt = t_ms() - t0;
+    CHECK(dt < 60);
+    if (dt >= 60) fprintf(stderr, "  producer blocked %ld ms\n", dt);
+    screen_set_write_delay(&s, 20000);
+    CHECK(screen_wait_idle(&s, 8000) == 0);
+    /* latest frame wins per panel */
+    for (int fb = 1; fb <= 21; fb++) {
+        int last = -1; for (int r = 0; r < 40; r++) if (1 + r % 21 == fb) last = r;
+        CHECK(file_px(dir, fb, 5) == (uint16_t)(0x100 + last));
+    }
+
+    /* coalescing: 30 rapid updates of one panel -> few writes, final content */
+    screen_stats(&s, w, &e, &d); unsigned before = w[0];
+    screen_set_write_delay(&s, 50000);
+    for (int r = 0; r < 30; r++) { fill_tile(&s, 1, (uint16_t)(0x2000 + r)); usleep(1000); }
+    CHECK(screen_wait_idle(&s, 3000) == 0);
+    screen_stats(&s, w, &e, &d);
+    CHECK(w[0] - before <= 3 && w[0] - before >= 1 && file_px(dir, 1, 100) == 0x201D);
+
+    /* re-dirtied while being written -> written again with the newer content */
+    screen_set_write_delay(&s, 100000);
+    screen_stats(&s, w, &e, &d); before = w[2];
+    fill_tile(&s, 3, 0x3333); usleep(30000); fill_tile(&s, 3, 0x4444);
+    CHECK(screen_wait_idle(&s, 3000) == 0);
+    screen_stats(&s, w, &e, &d);
+    CHECK(w[2] - before == 2 && file_px(dir, 3, 0) == 0x4444);
+    /* back to the content being written -> no extra write */
+    screen_set_write_delay(&s, 100000);
+    screen_stats(&s, w, &e, &d); before = w[2];
+    fill_tile(&s, 3, 0x5555); usleep(30000); fill_tile(&s, 3, 0x4444); fill_tile(&s, 3, 0x5555);
+    CHECK(screen_wait_idle(&s, 3000) == 0);
+    screen_stats(&s, w, &e, &d);
+    CHECK(w[2] - before == 1 && file_px(dir, 3, 0) == 0x5555);
+
+    /* the two buses run in parallel: fb1 (bus0) + fb10 (bus1), 80 ms each */
+    screen_set_write_delay(&s, 80000);
+    t0 = t_ms(); fill_tile(&s, 1, 0x0A0A); fill_tile(&s, 10, 0x0B0B);
+    CHECK(screen_wait_idle(&s, 3000) == 0);
+    dt = t_ms() - t0;
+    CHECK(dt < 150);
+    if (dt >= 150) fprintf(stderr, "  buses not parallel: %ld ms\n", dt);
+
+    /* missing fb: retried with back-off, not idle; recovers when it reappears */
+    screen_set_write_delay(&s, 0);
+    snprintf(path, sizeof path, "%s/fb5", dir); unlink(path);
+    fill_tile(&s, 5, 0x5A5A);
+    CHECK(screen_wait_idle(&s, 150) == -1);
+    screen_stats(&s, w, &e, &d);
+    CHECK(e >= 2 && e < 40 && d == 1);   /* back-off: ~20 ms per retry, no spin */
+    FILE *f = fopen(path, "w"); fclose(f);
+    CHECK(screen_wait_idle(&s, 1000) == 0 && file_px(dir, 5, 0) == 0x5A5A);
+
+    /* shutdown with drain writes the last frame */
+    screen_set_write_delay(&s, 30000);
+    fill_tile(&s, 21, 0x7E7E); fill_tile(&s, 20, 0x7D7D);
+    screen_stop_writers(&s, 1, 2000);
+    CHECK(!s.threaded && file_px(dir, 21, 0) == 0x7E7E && file_px(dir, 20, 0) == 0x7D7D);
+    /* restart, then stop WITHOUT drain while slow + dirty: returns after at most one in-flight write */
+    CHECK(screen_start_writers(&s) == 0);
+    screen_set_write_delay(&s, 300000);
+    for (int fb = 1; fb <= 21; fb++) fill_tile(&s, fb, 0x0F0F);
+    usleep(20000);
+    t0 = t_ms(); screen_stop_writers(&s, 0, 0); dt = t_ms() - t0;
+    CHECK(dt < 450 && !s.threaded);
+    /* stop with a permanently failing fb + drain: bounded by the timeout */
+    CHECK(screen_start_writers(&s) == 0);
+    screen_set_write_delay(&s, 0);
+    snprintf(path, sizeof path, "%s/fb7", dir); unlink(path);
+    fill_tile(&s, 7, 0x1111);
+    t0 = t_ms(); screen_stop_writers(&s, 1, 200); dt = t_ms() - t0;
+    CHECK(dt < 600 && !s.threaded);
+    /* free while running stops the threads */
+    CHECK(screen_start_writers(&s) == 0);
+    screen_free(&s);
+    for (int i = 1; i <= 21; i++) { snprintf(path, sizeof path, "%s/fb%d", dir, i); unlink(path); }
+    rmdir(dir);
 }
