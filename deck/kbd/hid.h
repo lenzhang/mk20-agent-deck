@@ -28,7 +28,8 @@
 #define HID_DEFAULT_STOP_FILE "/tmp/mk20-router-stop"
 #define HID_MOD_RALT 0x40
 #define HID_KBD_LEN 9
-#define HID_PTR_LEN 6
+#define HID_PTR_LEN 6          /* report 2 without scroll (stock gadget.sh descriptor) */
+#define HID_PTR_LEN_SCROLL 8   /* report 2 with Wheel + AC Pan (gadget.sh MK20_HID_SCROLL=1): id btn x16 y16 wheel pan */
 #define HID_MAX_PARKED 64
 
 typedef struct {
@@ -37,7 +38,8 @@ typedef struct {
     uint8_t mods, keys[6];        /* desired keyboard state */
     uint8_t sent[HID_KBD_LEN];    /* last report the gadget accepted */
     int dirty, hard_fail;
-    uint8_t ptrq[16][HID_PTR_LEN]; int ptr_head, ptr_n;   /* pointer reports, FIFO (button edges never dropped) */
+    uint8_t ptrq[16][HID_PTR_LEN_SCROLL]; int ptr_head, ptr_n, ptr_len;   /* ptr_len: 6 or 8 (descriptor variant) */
+    uint8_t ptr_btn; uint16_t ptr_x, ptr_y;   /* last queued pointer state (for release) */   /* pointer reports, FIFO (button edges never dropped) */
     volatile int close_req;
     long next_open_ms, last_hard_ms;
     int parked[HID_MAX_PARKED]; unsigned nparked;   /* stale fds kept open (never closed while the gadget lives) */
@@ -55,6 +57,10 @@ int hid_attach_fd(hid_t *h, int fd);   /* tests: use an existing non-blocking fd
 void hid_set_mod(hid_t *h, uint8_t mod, int on);
 int hid_key(hid_t *h, uint8_t usage, int down);         /* -1 if 6 keys already down */
 int hid_pointer_abs(hid_t *h, uint8_t buttons, uint16_t x, uint16_t y);
+/* Descriptor variant: MUST match gadget.sh (MK20_HID_SCROLL=1 <-> --hid-scroll). Call right after hid_init. */
+void hid_set_scroll(hid_t *h, int on);
+int hid_scroll(hid_t *h, int wheel, int pan);   /* -1 without the scroll descriptor; values clamped to -127..127 */
+int hid_pointer_release(hid_t *h);              /* 1 if a buttons-up report was queued (some button was down) */
 /* Bounded all-keys-up (default ~1.5 s, under gadget.sh's SIGTERM->SIGKILL window). 0 = delivered. */
 int hid_release_all(hid_t *h, int timeout_ms);
 void hid_close(hid_t *h, int release);   /* closes the current fd only */

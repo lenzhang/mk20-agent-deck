@@ -39,7 +39,7 @@ if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
       case "$k" in
       MK20_ECM_IP) MK20_ECM_IP=$v;; MK20_ECM_MASK) MK20_ECM_MASK=$v;; MK20_DEV_MAC) MK20_DEV_MAC=$v;; MK20_HOST_MAC) MK20_HOST_MAC=$v;;
       MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
-      MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;;
+      MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;; MK20_HID_SCROLL) MK20_HID_SCROLL=$v;;
     esac; done < "$GENV"
   else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) m="release mode: no $GENV (gates not passed at boot) -> refused"; echo "$m"
     echo "gadget $(cut -d' ' -f1 /proc/uptime): $m" >> "$LOG" 2>/dev/null; exit 1;; esac; fi   # r8 #1: detached jobs have no stdout
@@ -387,7 +387,16 @@ if [ $NOHID = 0 ]; then
 mkdir -p $G/functions/hid.usb0 || die "mkdir hid"
 echo 1 > $G/functions/hid.usb0/protocol; echo 1 > $G/functions/hid.usb0/subclass
 echo 9 > $G/functions/hid.usb0/report_length || die "report_length"
+# agent A1 (opt-in, default off -> descriptor byte-identical to 1.2.x): MK20_HID_SCROLL=1 appends Wheel (0x38) and
+# AC Pan (0x0C/0x238) as signed bytes to pointer report 2 (1+7 = 8 B, still <= report_length 9). mk20-kbd MUST then
+# run with --hid-scroll (8-byte pointer reports); the marker below tells mk20d which variant is live.
+if [ "${MK20_HID_SCROLL:-0}" = 1 ]; then
+printf '\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0\x05\x01\x09\x02\xa1\x01\x85\x02\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x03\x05\x01\x09\x30\x09\x31\x16\x00\x00\x26\xff\x7f\x75\x10\x95\x02\x81\x02\x09\x38\x15\x81\x25\x7f\x75\x08\x95\x01\x81\x06\x05\x0c\x0a\x38\x02\x15\x81\x25\x7f\x75\x08\x95\x01\x81\x06\xc0\xc0' > /tmp/hid.desc
+echo 1 > /tmp/mk20-hid-scroll 2>/dev/null
+else
 printf '\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0\x05\x01\x09\x02\xa1\x01\x85\x02\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x03\x05\x01\x09\x30\x09\x31\x16\x00\x00\x26\xff\x7f\x75\x10\x95\x02\x81\x02\xc0\xc0' > /tmp/hid.desc
+rm -f /tmp/mk20-hid-scroll 2>/dev/null
+fi
 cat /tmp/hid.desc > $G/functions/hid.usb0/report_desc || die "report_desc"
 fi
 [ "$NOADB" = 1 ] || mkdir -p $G/functions/ffs.adb || die "mkdir ffs.adb"

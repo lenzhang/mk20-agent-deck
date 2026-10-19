@@ -18,7 +18,10 @@ void hid_init(hid_t *h, const char *path, const char *stop_file)
     snprintf(h->stop_file, sizeof h->stop_file, "%s", stop_file ? stop_file : "");
     h->dirty = 1;
     h->backoff_ms = 100;
+    h->ptr_len = HID_PTR_LEN;
 }
+
+void hid_set_scroll(hid_t *h, int on) { h->ptr_len = on ? HID_PTR_LEN_SCROLL : HID_PTR_LEN; }
 
 static int gone_errno(int e) { return e == ENXIO || e == ESHUTDOWN || e == ENODEV || e == EPIPE || e == EBADF; }
 
@@ -48,7 +51,7 @@ static void flush(hid_t *h)
         else return;   /* keep order: keyboard first */
     }
     while (h->ptr_n) {
-        if (wr(h, h->ptrq[h->ptr_head], HID_PTR_LEN)) return;
+        if (wr(h, h->ptrq[h->ptr_head], (size_t)h->ptr_len)) return;
         h->ptr_head = (h->ptr_head + 1) % 16; h->ptr_n--;
     }
 }
@@ -158,20 +161,44 @@ int hid_key(hid_t *h, uint8_t usage, int down)
     return 0;
 }
 
+static void ptr_queue(hid_t *h, const uint8_t *r)
+{
+    if (h->ptr_n == 16) {   /* full: coalesce into the newest move if buttons unchanged and no scroll, else drop the oldest */
+        uint8_t *last = h->ptrq[(h->ptr_head + 15) % 16];
+        if (last[1] == r[1] && !last[6] && !last[7] && !r[6] && !r[7]) { memcpy(last, r, HID_PTR_LEN_SCROLL); goto out; }
+        h->ptr_head = (h->ptr_head + 1) % 16; h->ptr_n--; h->ptr_dropped++;
+    }
+    memcpy(h->ptrq[(h->ptr_head + h->ptr_n) % 16], r, HID_PTR_LEN_SCROLL); h->ptr_n++;
+out:
+    if (h->fd >= 0 && !h->hard_fail) flush(h);
+}
+
 int hid_pointer_abs(hid_t *h, uint8_t buttons, uint16_t x, uint16_t y)
 {
     if (x > 32767) x = 32767;
     if (y > 32767) y = 32767;
-    uint8_t r[HID_PTR_LEN] = {2, (uint8_t)(buttons & 7), (uint8_t)x, (uint8_t)(x >> 8), (uint8_t)y, (uint8_t)(y >> 8)};
-    if (h->ptr_n == 16) {   /* full: coalesce into the newest move if buttons unchanged, else drop the oldest */
-        uint8_t *last = h->ptrq[(h->ptr_head + 15) % 16];
-        if (last[1] == r[1]) { memcpy(last, r, sizeof r); goto out; }
-        h->ptr_head = (h->ptr_head + 1) % 16; h->ptr_n--; h->ptr_dropped++;
-    }
-    memcpy(h->ptrq[(h->ptr_head + h->ptr_n) % 16], r, sizeof r); h->ptr_n++;
-out:
-    if (h->fd >= 0 && !h->hard_fail) flush(h);
+    uint8_t r[HID_PTR_LEN_SCROLL] = {2, (uint8_t)(buttons & 7), (uint8_t)x, (uint8_t)(x >> 8), (uint8_t)y, (uint8_t)(y >> 8), 0, 0};
+    h->ptr_btn = buttons & 7; h->ptr_x = x; h->ptr_y = y;
+    ptr_queue(h, r);
     return 0;
+}
+
+int hid_scroll(hid_t *h, int wheel, int pan)
+{
+    if (h->ptr_len != HID_PTR_LEN_SCROLL) return -1;
+    wheel = wheel < -127 ? -127 : wheel > 127 ? 127 : wheel;
+    pan = pan < -127 ? -127 : pan > 127 ? 127 : pan;
+    uint8_t r[HID_PTR_LEN_SCROLL] = {2, h->ptr_btn, (uint8_t)h->ptr_x, (uint8_t)(h->ptr_x >> 8), (uint8_t)h->ptr_y,
+                                     (uint8_t)(h->ptr_y >> 8), (uint8_t)(int8_t)wheel, (uint8_t)(int8_t)pan};
+    ptr_queue(h, r);
+    return 0;
+}
+
+int hid_pointer_release(hid_t *h)
+{
+    if (!h->ptr_btn) return 0;
+    hid_pointer_abs(h, 0, h->ptr_x, h->ptr_y);
+    return 1;
 }
 
 int hid_release_all(hid_t *h, int timeout_ms)
