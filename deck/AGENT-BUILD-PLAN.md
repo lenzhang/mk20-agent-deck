@@ -1,8 +1,8 @@
-# MK20 板载 Agent 能力：建设计划（AGENT-BUILD-PLAN v0.1，2026-10-19）
+# MK20 板载 Agent 能力：建设计划（AGENT-BUILD-PLAN v0.2，2026-10-19）
 
 > 依据：PRD v1.3 §14（2026-10-18 01:18 SGT 批准）+ 后续决定（网络双 profile、provider 可配置默认国内、
 > 密钥落 `/data/mk20/secrets/<provider>.key`、mk20-kbd 取代 KD、OTA 可用时不回原厂）。
-> 分支：`feature/agent`（自 `feature/kd-replace` @ 19a0057）。本文件只是计划，**没有代码变更，没有碰设备**。
+> 分支：`feature/agent`（自 `feature/kd-replace` @ 19a0057）。v0.1 只是计划；v0.2 写入用户 2026-10-19 的决定（§0.1），A0/A1 开始实现。没有碰设备。
 > 本文的约定：A0..A9 = 阶段；**[D]** = 需要真机；**[U]** = 需要用户在场或需要用户决定；**[M]** = 需要 Mac（只读或 Mac 侧小工具）。
 
 ---
@@ -17,6 +17,19 @@
   （不依赖 agent 存活、不依赖网络）。
 - **顺序**：A0 契约/仿真 → A1 kbd 控制口+急停 → A2 VNC 抓帧 → A3 HTTPS/代理 → A4 模型适配 → A5 agent loop+安全 →
   A6 MCP → A7 键面 UI + 密钥页 → A8 发布集成 → A9 真机验收与 soak。A0–A6 基本都能在 box 上用假 VNC/假模型完成。
+
+### 0.1 用户决定（2026-10-19，取代 §9 中对应的待决项）
+
+| # | 决定 | 对计划的影响 |
+|---|---|---|
+| D1 代理接入 | **Mac 上不需要任何“键盘驱动”。**板子直接连 Mac 的代理端口：若 mihomo `allow-lan` 在 USB 链路（172.30.250.1）上可达就直连该端口；否则在 Mac 上加一个极小的 launchd TCP 转发，**只绑 USB 接口 172.30.250.1**，转发到 `127.0.0.1:7890`。**代理配置永不修改。**设备侧连通性检查等用户回家再做 | §3.1、A3、§10 |
+| D2 出口 | **键盘程序里不做出口 IP 证明。**出口选择由网关/代理负责（mihomo 规则）。A3 删除出口证明，`/run/mk20/egress.json` 取消 | §3.1、A3、A8 health、§6.1 |
+| D3 模型 | **只做一个 OpenAI 兼容 `chat/completions` 适配器**（视觉用 `image_url` base64 data URI，支持 tool calls）。provider 只是配置（`base_url`、`model`、key 文件）：Qwen（默认）、GLM、Kimi、OpenAI | §3.5、A4 |
+| D4 急停 | agent 页固定急停键 + 任意页长按 K2 1 s（按原计划） | §3.4 |
+| D5 聊天/任务入口 | 新增 **HTTP API + 极简网页**（只在 usb0 上服务）：提交任务、查看进度/步骤/截图、暂停、停止。在键盘上打字太累，所以任务从网页/API 下达；**语音任务后续**经 PTT + 现有语音网关 ASR。agent 输入中文用**剪贴板粘贴（Cmd+V）**，剪贴板写入机制待定（见 §3.3） | §3.3、§3.8、A7 |
+| D6 MCP | MCP **可以提交任务，但不能启用 agent**；总开关只在键盘上 | §3.7 |
+| D7 密钥 | key 通过板载配置网页录入，存 `/data/mk20/secrets/<provider>.key`（root 0600） | §3.8 |
+| 7（截图提示/遮挡） | 同意默认副屏提示“正在上传画面”，遮挡区域可配置 | §3.2 |
 
 ---
 
@@ -48,7 +61,7 @@
                       ┌──────────── Mac ────────────┐
   cloud model ◀─HTTPS─┤ mihomo :7890 (只读，不改配置)  │   Screen Sharing :5900 (VNC)
                       │ mk20deck (Python): 设置页渲染、  │        ▲
-                      │  配置下发、egress 证明 (只读)    │        │ RFB over ECM
+                      │  配置下发、launchd 转发(可选)   │        │ RFB over ECM
                       └──────▲────────────▲───────────┘        │
                  HTTP CONNECT│            │HTTP(配置/密钥/MCP)   │
  ═════════ USB ECM 172.30.250.0/24 ═══════════════════════════════
@@ -91,14 +104,11 @@
 - **Profile `mac_proxy`（默认）**：所有模型流量都走 `HTTP CONNECT <host>:443` 到 `net.json.proxy.url`（`http://172.30.250.1:<port>`，
   回落顺序 10.20.0.1 → 169.254.7.1）。分流交给 Mac 上 mihomo 的规则：国内 provider 走 DIRECT 规则，国外 provider 走 AI 组。
   设备侧**绝不直连**：`net.json` 缺失或解析失败时一律不发请求（fail-closed）。
-- **国外 provider 的出口必须是 112 US（203.0.113.10）**。设备自己无法看到 mihomo 内部选了哪个节点，所以采用“出口证明”：
-  - Mac 侧 `mk20deck` 增加只读检查：GET mihomo external-controller `/proxies/AI`，当前节点必须是 `US-Exit-Hy2`，
-    再经代理测一次出口 IP，必须等于 203.0.113.10。结果签上时间戳，经配置通道推给设备，写入 `/run/mk20/egress.json`，有效期 10 min。
-  - 设备侧在每个国外请求前检查证明：过期或不匹配就拒绝请求，键面显示“出口未验证”。**任何情况下都不改代理配置。**
-  - 国内 provider 不需要证明，但同样只走代理端口，不直连。
-- **mihomo 是否在 172.30.250.1 上监听，待确认 [M][U]**：如果 mihomo 只听 127.0.0.1（`allow-lan: false`），设备连不上。
-  又因为规定不能改代理配置，备选方案是让 `mk20deck` 起一个**纯 TCP 转发**，只绑在 ECM 接口 IP 上，转发
-  `172.30.250.1:17891 → 127.0.0.1:7890`。它不改 mihomo，但会多一个 Mac 常驻监听口，需要用户点头（见 §9 决策 1）。
+- **出口选择归网关/代理（D2）**：设备侧不做出口 IP 证明、不读 mihomo API。国外 provider 走 112 US 出口这件事由 Mac 上
+  mihomo 的规则保证（AI 组），**任何情况下都不改代理配置**。设备只保证“所有模型流量只经代理端口，绝不直连”。
+- **代理接入（D1，已定）**：Mac 上不装驱动。若 mihomo `allow-lan` 且在 172.30.250.1 可达，`net.json.proxy.url` 直接指向该端口；
+  否则在 Mac 上加一个极小的 **launchd TCP 转发**（plist + 几十行的转发程序），**只绑 172.30.250.1**，转发
+  `172.30.250.1:17891 → 127.0.0.1:7890`。不改 mihomo 配置。哪种方式可行，等用户回家时在设备上实测 [D][M]。
 - **Profile `board_wifi`（后期）**：Wi-Fi dongle + 板载代理。国内直连，国外必须经板载代理，否则 `blocked`，与 agentcfg 的现有规则一致。
   放在 A10 之后，本计划不展开。
 - **时间同步（TLS 证书校验依赖正确时钟）**：T113 有没有可靠 RTC 待确认。方案：mk20d 或 agent 启动时，向 Mac 侧
@@ -137,7 +147,10 @@
 - **坐标映射**：截图坐标 → 主屏逻辑坐标 → HID 的 0..32767。macOS 把绝对指针映射到主显示器。A5 加一个
   `calibrate` 步骤：依次移到四角和中心，通过 VNC 光标伪编码或截图找光标，拟合仿射映射，存进 `/data/mk20/agent/calib.json`。
   验收误差 ≤2 逻辑像素（§14.5-3）。
-- **非 ASCII 文本**（中文）：HID 打不出来。一期直接拒绝并告诉模型改用别的方式；后续可选 VNC ClientCutText 或 Mac 剪贴板助手（§9 决策 5）。
+- **非 ASCII 文本**（中文，D5）：HID 打不出来，改用**剪贴板粘贴**：先把文本放进 Mac 剪贴板，再经 HID 发 `cmd+v`。
+  剪贴板写入机制**待定**，候选：(a) VNC `ClientCutText`（RFB 标准消息，macOS Screen Sharing 是否同步到系统剪贴板、是否只支持 Latin-1
+  需 A2 实测）；(b) 极小 Mac 剪贴板助手（与 D1 转发同一个 launchd 进程，只绑 172.30.250.1，`pbcopy`）。一期 `type` 仍只接受 ASCII，
+  非 ASCII 走新动作 `paste{text}`，剪贴板机制落地前返回 `unsupported`。粘贴前后不读回用户剪贴板内容（隐私），可选恢复原内容。
 - **单通道仲裁**：mk20-kbd 维护 `active_input ∈ {hid, vnc}`。VNC 输入由 agent 自己发，但必须先向 kbd 拿到 `input=vnc` 租约，
   kbd 也会对 HID 做 all-up。切换规则照 R-CU-2：连续 2 次失败 → 冻结 → all-up → 切到 VNC；连续 3 次健康 → 在空闲点切回。
   同一个动作只在一个通道发一次，**不会到另一个通道重试**。
@@ -158,11 +171,10 @@
 
 ### 3.5 模型客户端与 provider 适配
 
-- 只用 OpenAI 兼容的 `POST {base_url}/chat/completions`：带 `tools`（function calling）和 `image_url`（data URI）。
-  每个 provider 一个小适配器，负责：模型名、坐标约定（绝对像素，或 Qwen/GLM 常见的 0–1000 归一化）、图片大小上限、
-  是否支持 `tool_choice`、错误码语义。
-- 默认 provider 是 **Qwen（DashScope 兼容模式）**，GLM 和 Kimi 作为国内备选。国外默认先接**一家** OpenAI 兼容的
-  （OpenAI 或 Gemini OpenAI-compat，见 §9 决策 3）。Anthropic 原生 computer-use 协议不兼容 OpenAI，放到后期。
+- **只有一个适配器（D3）**：OpenAI 兼容的 `POST {base_url}/chat/completions`，带 `tools`（function calling）和
+  `image_url`（base64 data URI）。provider 只是配置：`base_url`、`model`、`api_key_file`，外加少量可选旋钮
+  （`coord_mode`: `pixel` | `norm1000`，`max_image_px`，`supports_tool_choice`），不写 per-provider 代码。
+- 预置 provider：**Qwen（DashScope 兼容模式，默认）**、GLM、Kimi、OpenAI。Anthropic 原生 computer-use 不做。
   **具体型号要等 A4 用真 key 实测后再定**（视觉 + tool call 都得可用），本文不写死。
 - 请求预算：每步只带**当前一张截图**，历史截图换成文字摘要（“上一步点击了…，结果…”）；system prompt 和 tool 定义每次都带上。
   连接超时 10 s，整个请求 60 s，响应体上限 256 KB。429/5xx 指数退避，最多 2 次；其余错误直接失败。
@@ -196,13 +208,15 @@
   Mac 侧通过 adb 或密钥页的配对流程取得 token（不打印到日志）。
 - 工具：`status`、`screenshot`（返回 JPEG image content 和缩放信息）、`click`、`double_click`、`move`、`drag`、`scroll`、`type_text`、
   `key`、`estop`、`run_task{goal}`、`task_status`、`cancel_task`。
+- **MCP 不能启用 agent（D6）**：没有任何 MCP 工具能打开“agent 允许”；总开关只在键盘上。MCP 可以 `run_task` 提交任务
+  （进入与网页相同的任务队列），在未允许时返回 `disabled`。
 - **MCP 的动作和板载 loop 走同一个租约、预算、风险规则和确认流程**。外部 Claude/Codex 通过 MCP 驱动时，T113 只负责执行和安全闸，
   不调用模型。急停对 MCP 同样生效；急停后 MCP 一律返回 `stopped`，直到在键面重新允许。
 
 ### 3.8 键面 UI 与配置/密钥通道（A7）
 
 - mk20-kbd 本地组件（cmd201 widget 或内置渲染）：副屏右半区显示 agent 状态行（状态、通道、最近动作、步数/预算）。
-  另有 **agent 页 L5**：允许/禁止、急停、确认/取消、当前任务、provider 和出口状态。
+  另有 **agent 页 L5**：允许/禁止、急停、确认/取消、当前任务、provider 和代理连通状态。
   Mac 端设置页（Python）新增“智能体”入口和状态镜像。
 - **配置下发**：设置页“应用”后，`AgentConfigApplier` 改成通过 HTTP `PUT http://172.30.250.2:8780/config/{net,provider}`
   （带 token）推给设备，由设备侧原子写 `/data/mk20/agent/*.json`（0700/0600）。设备侧做 schema 校验：拒绝未知字段，
@@ -214,6 +228,13 @@
   - 写入方式：`O_CREAT|O_EXCL` 临时文件 0600 → fsync → rename → fsync 目录。
   - 支持删除；同一个通道也用来设 `vnc.pass`。
   - SETTINGS.md 里的占位地址 `http://172.30.250.1:8780` 改为设备地址 `172.30.250.2:8780`。
+- **聊天/任务入口（D5）**：同一个 `--web` 服务（只绑 usb0 172.30.250.2:8780，配对后带 token/cookie）提供：
+  - API：`POST /api/tasks{goal}` → id；`GET /api/tasks/{id}`（状态、步骤列表、每步动作摘要）；`GET /api/tasks/{id}/steps/{n}/shot.jpg`
+    （最近 N 张缩略截图，只在 tmpfs 内存环形缓冲，上限 5 张，不落盘）；`POST /api/tasks/{id}/pause|resume|stop`；`GET /api/events`（SSE 进度）。
+  - 极简网页 `GET /chat`：一个输入框 + 进度列表 + 截图 + 暂停/停止按钮（~15 KB 静态 HTML/JS，无外部依赖）。
+  - 规则：agent 未在键盘上“允许”时，任务可排队但不执行（显示“等待键盘允许”）；网页的“停止”走与急停相同的 kbd 撤销路径；
+    网页/API 不能打开总开关。同一时刻只跑一个任务。
+  - 语音任务（后续）：PTT 录音 → 现有语音网关 ASR → 文本作为 `goal` 提交到同一 API。
 
 ---
 
@@ -263,18 +284,18 @@
 - **[D][M]**：真机对 Mac Screen Sharing 实测 P95 延迟、峰值 RSS、CPU，以及 Retina/多屏的 framebuffer 形态。只读操作，不需要用户在场，但 Mac 必须开着且已登录。
 - 验收：§14.5-2（P95 ≤800 ms、峰值 ≤16 MB），数据记录在 `NOTES-agent-a2.md`。
 
-### A3 网络：CONNECT 代理 + mbedTLS + 时间 + 出口证明（box + [M]）
+### A3 网络：CONNECT 代理 + mbedTLS + 时间（box + [M]）
 - `net.c`：TCP 连接（10 s 超时）→ `CONNECT` → mbedTLS 握手（SNI，用随包 CA 校验）→ HTTP/1.1。
   `net.json` fail-closed，**代码里根本没有直连路径**（禁止 `routes.*=direct` 用于 foreign；`mac_proxy` profile 两类都只走代理）。
 - 时间同步：从 Mac `GET /time` 或代理 `Date` 头取时间；时钟没校准就拒绝 TLS。
-- Mac 侧 `mk20deck`：egress 证明（只读 mihomo API + 出口 IP），推送到设备 `/run/mk20/egress.json`。
-  如果 mihomo 不监听 ECM 地址，就上 ECM 专用 TCP 转发（需用户批准，§9 决策 1）。
+- **不做出口证明（D2）**。如果 mihomo 不在 172.30.250.1 可达，就装 D1 的 launchd TCP 转发（只绑 USB 接口，不改代理配置）。
 - box：fake_proxy 加本地 TLS 测试服务器（自签 CA 注入测试 bundle）；证书错误、过期、域名不符都必须失败。
-- **[M]**：在 Mac 上只读确认 mihomo 的监听地址和 AI 组（与 codex 前置检查同一套脚本）。
-- 验收：设备经代理拿到 Qwen 的 `/models` 401 或 200；国外请求在证明缺失时被拒，证明有效时出口 = 203.0.113.10。
+- **[M][D]（用户回家时）**：只读确认 mihomo 是否在 172.30.250.1 可达；不可达则装转发。
+- 验收：设备经代理拿到 Qwen 的 `/models` 401 或 200；代理不可达时请求失败且无任何直连。
 
 ### A4 模型适配器（box + [U] 真 key）
-- `llm.c`：chat/completions、tools、image_url；适配 Qwen、GLM、Kimi 和一家国外 provider；统一坐标约定；做错误分类。
+- `llm.c`：单一 OpenAI 兼容适配器（chat/completions、tools、image_url base64）；provider 全是配置（Qwen 默认、GLM、Kimi、OpenAI）；
+  `coord_mode` 统一坐标约定；做错误分类。
 - box：fake_model 跑剧本，包括畸形 JSON、超长响应、缺 tool call、坐标越界（clamp 后拒绝）。
 - **[U]**：用户通过密钥页（A7 前可先用 adb 写入 0600 文件）提供 Qwen/GLM/Kimi key。在 box 或设备上跑一套固定的
   10 张截图基准，挑出视觉和 tool call 都合格的默认型号。
@@ -297,7 +318,7 @@
 ### A7 键面 UI、配置下发、密钥页（box + sim + [D]）
 - mk20-kbd：agent 状态组件和 L5 agent 页（仿真里先做，JSON cases 覆盖急停、确认、允许开关）。
 - mk20deck：设置页的应用改成推送到设备；连接测试改由设备侧执行；增加“智能体”状态镜像。
-- mk20-agent `--web`：配对码、写入式密钥页、`PUT /config`、`POST /test`。
+- mk20-agent `--web`：配对码、写入式密钥页、`PUT /config`、`POST /test`，以及 **D5 任务 API + `/chat` 极简网页**（提交/进度/截图/暂停/停止）。
 - 测试：sim cases、web 表单安全测试（无读出接口、配对码过期、CSRF、权限 0600、原子性），secrets 不进 backup（已排除，加测试固化）。
 - **[D]**：真机看页面效果，用户回家后核对一次。
 
@@ -308,7 +329,7 @@
   只有在 composite 正常、kbd.sock 存在时才启动；`oom_score_adj 500`，`nice 10`。
 - selftest：agent 一律 **INFO/WARN，永不 FAIL**，不影响 confirm 和 A/B 回滚，因为 agent 是可选能力。
   例外：二进制缺失或 MANIFEST 不符按常规 FAIL。
-- health.json 增加 `agent{enabled,allowed,state,provider,route,egress_ok,last_error_class}`，不含任何密钥或 token。
+- health.json 增加 `agent{enabled,allowed,state,provider,route,last_error_class}`，不含任何密钥或 token。
 - maint 负责轮转 agent.log；卸载或回滚时 `/data/mk20/agent` 配置保留，secrets 保留。
 - 版本：作为 fw **1.3.0** 的 opt-in 功能发布（假设 1.2.x 和 kbd 默认启用已先落地）。
 
@@ -335,7 +356,6 @@
 | `/data/mk20/agent/agent.json` | root 0600 | 预算、风险黑名单、遮挡区域、急停键位（新） |
 | `/data/mk20/agent/calib.json` | root 0600 | 坐标仿射参数（新） |
 | `/data/mk20/secrets/<provider>.key`、`vnc.pass`、`mcp.token` | root 0600 | 只写不读；不进备份、日志、git |
-| `/run/mk20/egress.json` | root 0600（tmpfs） | Mac 推送的出口证明（10 min 有效） |
 | `/run/mk20/kbd.sock` | root 0600 | kbd 控制口 |
 | `/run/mk20/agent.status` | root 0644 | 给 selftest/health 用的非敏感状态 |
 
@@ -364,7 +384,7 @@
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| mihomo 不监听 ECM 地址，又不能改配置 | 设备完全出不了网 | Mac 侧 ECM 专用 TCP 转发（用户批准）；或者推迟到 board_wifi |
+| mihomo 不监听 ECM 地址，又不能改配置 | 设备完全出不了网 | D1：Mac launchd TCP 转发，只绑 172.30.250.1（已批准） |
 | T113 时钟不准 | TLS 校验失败 | Mac 授时；未校准不发请求 |
 | macOS Screen Sharing 行为变化（认证、Retina、多屏、锁屏下 VNC） | 抓帧失败或坐标错 | A2 实测；只支持主屏；锁屏只走 HID 且不打字 |
 | 国产 VL 模型的 GUI 定位精度不足 | 点不准、任务失败 | A4 基准选型；截图带网格可选；校准；失败就停下请示，不盲点 |
@@ -374,17 +394,15 @@
 | 密钥泄露 | 账户被盗刷 | 0600、只写接口、脱敏、无 core dump、不进备份、不进 git；MCP 和 web 只绑 usb0 并加 token/配对码 |
 | 第三方库（mbedTLS/zlib）CVE | 远端攻击面 | 只作客户端连已知 provider；MCP/web 只在 USB 点对点链路上；版本记录在 RELEASE.md |
 
-## 9. 需要用户决定的事项
+## 9. 决策状态
 
-1. **代理接入方式**：mihomo 目前是否 `allow-lan` 并在 172.30.250.1 可达（我只读确认）？如果不可达，是否允许 mk20deck 在 Mac 上
-   起一个只绑 ECM 接口的 TCP 转发到 127.0.0.1:7890（不改 mihomo 配置）？
-2. **出口证明**：国外 provider 每次请求前要求 Mac 侧证明“AI 组 = US-Exit-Hy2 且出口 = 203.0.113.10”。我建议没有证明就拒绝请求，是否同意？
-3. **国外 provider 先接哪一家**：OpenAI 或 Gemini（OpenAI 兼容）？Anthropic 原生 computer-use 放后期，是否同意？
-4. **急停键位**：建议 agent 页（L5）固定一个键，外加“任意页长按 K2 1 秒”。K2 需要先在 GD32 改成串口上报，这件事已经排在新程序里。
-5. **中文输入**：一期只支持 ASCII 打字。中文以后用 VNC 剪贴板，还是用 Mac 剪贴板助手？
-6. **MCP 能否远程“允许” agent**：建议不能，只能在键面上手动允许，MCP 只能在已允许的状态下操作，并且永远可以急停。
-7. **截图上云提示与遮挡**：默认副屏提示“正在上传画面”。是否需要默认遮挡某些区域，比如菜单栏右侧通知区？
-8. **默认国内模型**：在 A4 基准之后由我推荐，用户确认。需要用户提供 Qwen/GLM/Kimi 的 key，通过密钥页录入，不在聊天里发。
+已决（2026-10-19，详见 §0.1）：1 代理接入 → D1；2 出口证明 → D2（不做）；3 provider → D3（单一 OpenAI 兼容适配器）；
+4 急停 → D4；5 中文/任务入口 → D5；6 MCP → D6（不能启用）；7 截图提示 → 同意默认提示 + 可配置遮挡；密钥录入 → D7。
+
+仍待定：
+- **剪贴板写入机制**（VNC ClientCutText vs Mac 剪贴板助手）：A2 实测 ClientCutText 后由我推荐。
+- **默认国内模型**：A4 基准之后推荐、用户确认；需要用户经板载密钥页录入 Qwen/GLM/Kimi key。
+- **D1 两种方式哪种可行**：用户回家时设备上实测。
 
 ## 10. 需要设备 / 用户的步骤汇总
 
@@ -393,11 +411,11 @@
 | A0 | — | — | — |
 | A1 | 装 kbd + 新描述符，验证滚轮（probation，可回滚） | 回家后按一下急停键、滚一下 | `ioreg` 只读 |
 | A2 | 抓帧实测（只读） | Mac 开机且已登录即可 | Screen Sharing 已开（已就绪） |
-| A3 | 设备经代理连通性 | 决策 1、2 | mihomo 只读检查；可能要新增转发 |
-| A4 | 可选 | 提供 key；决策 3、8 | — |
+| A3 | 设备经代理连通性（回家时） | — | mihomo 可达性只读检查；不可达则装 launchd 转发 |
+| A4 | 可选 | 经密钥页提供 key；确认默认模型 | — |
 | A5 | 校准、点击精度、急停实测 | **必须在场** | — |
 | A6 | — | 动作类调用要在场 | 注册 MCP |
-| A7 | 页面效果 | 核对一次 | — |
+| A7 | 页面效果 | 核对一次（含 /chat 任务页） | — |
 | A8 | — | — | — |
 | A9 | 全量验收和 soak | 在场跑 §14.5 | — |
 
