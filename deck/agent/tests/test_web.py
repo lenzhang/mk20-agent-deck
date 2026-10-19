@@ -255,6 +255,25 @@ def test_auth_csrf_origin_and_secrets_ipc(web_binary,kbd_build,tmp_path):
         if code in log.read_text(): raise AssertionError("pairing code reached logs")
 
 
+def test_glm_coding_provider_and_secret_ipc(web_binary,kbd_build,tmp_path):
+    with keyboard(kbd_build,tmp_path) as (kbd,_,_,_), server(web_binary,tmp_path,kbd) as (cs,fd,_,_,secrets,_,_):
+        c = cs[0]; c.pair(fd)
+        provider = dict(version=1,provider="glm-coding",model="glm-5.3",
+                        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                        domestic=True,route="domestic",api_key_file=str(secrets / "glm-coding.key"))
+        assert c.request("/config/provider","PUT",provider)[0] == 200
+        assert c.request("/config/provider")[2] == provider
+        for field,value in (("base_url","https://open.bigmodel.cn/api/paas/v4"),
+                            ("domestic",False),("route","foreign"),
+                            ("api_key_file",str(secrets / "glm.key"))):
+            assert c.request("/config/provider","PUT",dict(provider,**{field:value}))[0] == 400
+        assert c.request("/secret/glm-coding","POST",dict(value="web-synthetic-key"))[0] == 200
+        assert (secrets / "glm-coding.key").stat().st_mode & 0o7777 == 0o600
+        assert c.request("/secret/glm-coding")[2] == dict(set=True)
+        assert c.request("/secret/glm-coding","DELETE")[0] == 200
+        assert c.request("/secret/glm-coding")[2] == dict(set=False)
+
+
 def test_display_unavailable_ipc(web_binary,kbd_build,tmp_path):
     with keyboard(kbd_build,tmp_path) as (kbd,_,_,_), server(web_binary,tmp_path,kbd,display=False) as (cs,_,_,_,_,_,_):
         assert cs[0].request("/pair/start","POST",{})[2] == dict(error="display_unavailable")
@@ -316,17 +335,32 @@ def test_read_deadline_ipc(web_binary,kbd_build,tmp_path):
 
 
 def test_provider_proxy_schema_drift(web_binary):
-    # AST extraction reads literal tables only, without importing the concurrent
-    # mk20deck implementation or creating pycache files there.
+    # Read source data without importing mk20deck or executing its AST.
     module=ast.parse((AGENT.parent / "mk20deck/agentcfg.py").read_text()); values={}
     for node in module.body:
         if isinstance(node,ast.AnnAssign) and isinstance(node.target,ast.Name): values[node.target.id]=node.value
         elif isinstance(node,ast.Assign):
             for target in node.targets:
                 if isinstance(target,ast.Name): values[target.id]=node.value
+    package = AGENT.parent / "mk20deck"
+    catalogue_module = ast.parse((package / "catalogue.py").read_text())
+    catalogue_node = next(node.value for node in catalogue_module.body if isinstance(node,ast.Assign)
+                          and any(isinstance(t,ast.Name) and t.id == "CATALOGUE" for t in node.targets))
+    if isinstance(catalogue_node,(ast.List,ast.Tuple)):
+        catalogue = ast.literal_eval(catalogue_node)
+    else:
+        # The installed catalogue loads JSON: resolve its literal filename and
+        # table key via AST, then read the same data as catalogue.py.
+        assert isinstance(catalogue_node,ast.Subscript)
+        assert ast.unparse(catalogue_node.value.func) == "json.loads"
+        filenames = [n.args[0] for n in ast.walk(catalogue_node) if isinstance(n,ast.Call)
+                     and isinstance(n.func,ast.Attribute) and n.func.attr == "with_name"]
+        assert len(filenames) == 1
+        catalogue = json.loads((package / ast.literal_eval(filenames[0])).read_text())[ast.literal_eval(catalogue_node.slice)]
+    expected = {p["id"]: {"base_url": p["base_url"], "domestic": p["domestic"]} for p in catalogue}
     result=subprocess.run([str(web_binary),"--web","--web-schema-fd","1"],capture_output=True,check=True)
     schema=json.loads(result.stdout)
-    assert schema["providers"] == ast.literal_eval(values["PROVIDERS"])
+    assert schema["providers"] == expected
     assert schema["mac_hosts"] == list(ast.literal_eval(values["MAC_HOSTS"]))
     assert not result.stderr
 

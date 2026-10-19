@@ -219,6 +219,25 @@ static void configs(void)
     struct stat st; CHECK(!stat(f.web.config,&st) && (st.st_mode & 07777) == 0700);
     int dir = web_directory(f.web.config,0); CHECK(dir >= 0); CHECK(!fstatat(dir,"net.json",&st,0) && (st.st_mode & 07777) == 0600); close(dir); cleanup(&f);
 }
+static void glm_coding(void)
+{
+    fixture_t f; setup(&f); pair_browser(&f);
+    char file[64]; CHECK(!web_secret_name("glm-coding",file) && !strcmp(file,"glm-coding.key"));
+    char provider[8192]; snprintf(provider,sizeof provider,"{\"version\":1,\"provider\":\"glm-coding\",\"model\":\"glm-5.3\",\"base_url\":\"https://open.bigmodel.cn/api/coding/paas/v4\",\"domestic\":true,\"route\":\"domestic\",\"api_key_file\":\"%s/glm-coding.key\"}",f.web.secrets);
+    cJSON_Delete(request(&f,"PUT","/config/provider",provider)); CHECK(f.r.status == 200);
+    cJSON_Delete(request(&f,"GET","/config/provider",NULL)); CHECK(f.r.status == 200 && !strcmp(f.r.body,provider));
+    llm_provider_t p; CHECK(!llm_provider_parse(provider,strlen(provider),&p));
+    const char *board = "{\"version\":1,\"profile\":\"board_wifi\",\"proxy\":{\"url\":null,\"fallbacks\":[]},\"routes\":{\"domestic\":\"direct\",\"foreign\":\"blocked\"}}";
+    netcfg_t net = {0}; net_route_t route;
+    CHECK(!netcfg_parse(board,strlen(board),&net));
+    CHECK(!netcfg_route_for(&net,p.route,&route) && route == NET_DIRECT); netcfg_free(&net);
+    cJSON_Delete(request(&f,"POST","/secret/glm-coding","{\"value\":\"fixture-value\"}")); CHECK(f.r.status == 200);
+    int dir = web_directory(f.web.secrets,0); CHECK(dir >= 0); struct stat st;
+    CHECK(!fstatat(dir,file,&st,0) && (st.st_mode & 07777) == 0600); close(dir);
+    cJSON_Delete(request(&f,"GET","/secret/glm-coding",NULL)); CHECK(f.r.status == 200 && !strcmp(f.r.body,"{\"set\":true}"));
+    cJSON_Delete(request(&f,"DELETE","/secret/glm-coding",NULL)); CHECK(f.r.status == 200);
+    cleanup(&f);
+}
 static void tasks(void)
 {
     fixture_t f; setup(&f); pair_browser(&f);
@@ -368,4 +387,4 @@ static void slow_probe(void)
     CHECK(waitpid(pid,NULL,WNOHANG) == -1 && errno == ECHILD);
     cleanup(&f);
 }
-int main(void) { slow_probe(); secret_nul(); pairing(); auth(); secrets(); configs(); tasks(); events(); paused_budget(); queued_stop(); printf("A7 web: %u checks passed\n",checks); return 0; }
+int main(void) { slow_probe(); secret_nul(); pairing(); auth(); secrets(); configs(); glm_coding(); tasks(); events(); paused_budget(); queued_stop(); printf("A7 web: %u checks passed\n",checks); return 0; }

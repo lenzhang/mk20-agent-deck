@@ -1,0 +1,9 @@
+K4 rc2 fix4 (codex). Repo deck/, branch k4 at c31fb20. Box Linux `make -C deck test` has exactly 1 failure:
+agent/tests/test_web.py::test_provider_proxy_schema_drift -> ast.literal_eval(PROVIDERS) ValueError: deck/mk20deck/agentcfg.py PROVIDERS is now a dict comprehension over mk20deck/catalogue.py CATALOGUE (merged from feature/onboard-ui).
+It is ALSO a real drift: catalogue/agentcfg has provider "glm-coding" {base_url https://open.bigmodel.cn/api/coding/paas/v4, domestic true} but mk20-agent's provider registry (agent/src, `--web --web-schema-fd 1` schema "providers", web PUT /config/provider allowlist, secrets name list, web_pages.c <select> options, provider routing/key file name) lacks it. The on-board settings page can therefore save a provider the agent rejects.
+Do:
+1. Add glm-coding to the mk20-agent provider registry everywhere the other providers are enumerated (schema, validation/allowlist, secret names, web page selects, key file = <secrets>/glm-coding.key consistent with agentcfg.provider_config, domestic route). Keep catalogue.py/agentcfg.py as the source of truth; do NOT edit agentcfg.py or catalogue.py.
+2. Fix the drift test so it derives the expected providers from the literal CATALOGUE in catalogue.py via AST (no import of mk20deck), mirroring the comprehension (id -> {base_url, domestic}); keep it strict equality.
+3. Add/adjust agent tests for glm-coding (accepted by PUT /config/provider, secret name accepted). Run the agent C + python tests you can locally (`make -C deck agent-test` or equivalent).
+4. Do NOT rebuild or modify deck/firmware/release/bin/* (box rebuilds bins). No device access, no network calls, never print or read any *.key / secrets. No other changes.
+5. Commit on branch k4 with message starting "K4 fix4:". Output a short summary: files changed, tests run + results, commit sha.

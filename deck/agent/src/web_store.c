@@ -14,6 +14,7 @@ typedef struct { const char *name, *url; int domestic; } provider_entry_t;
 static const provider_entry_t providers[] = {
     {"qwen","https://dashscope.aliyuncs.com/compatible-mode/v1",1},
     {"glm","https://open.bigmodel.cn/api/paas/v4",1},
+    {"glm-coding","https://open.bigmodel.cn/api/coding/paas/v4",1},
     {"kimi","https://api.moonshot.cn/v1",1},
     {"deepseek","https://api.deepseek.com/v1",1},
     {"openai","https://api.openai.com/v1",0},
