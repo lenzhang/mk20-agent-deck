@@ -71,7 +71,8 @@ def test_router_loop_restarts_and_stops(dev, rel, svc):
     try:
         assert wait(lambda: len(conns) >= 2), "router not restarted after the tap closed"
         hid = dev.p("dev/hidg0").read_bytes()
-        assert hid[:18] == bytes([1, 0x40] + [0] * 7) + bytes([1] + [0] * 8)   # PTT press -> RAlt, release -> 0
+        up = bytes([1] + [0] * 8)   # startup all-keys-up, PTT press -> RAlt, release -> 0
+        assert hid[:27] == up + bytes([1, 0x40] + [0] * 7) + up
         r2 = dev.run(rel / "sbin/mk20d", "router", timeout=10)                 # single instance (flock)
         assert r2.returncode == 0
         dev.p("tmp/mk20-router-stop").write_text("")
