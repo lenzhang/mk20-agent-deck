@@ -11,12 +11,12 @@
 
 | KD duty | mk20-kbd |
 |---|---|
-| GD32 UART `/dev/ttyS1` | **keep** (module `gd32`), receive-only in phase 1 |
+| GD32 UART `/dev/ttyS1` | **keep** (module `gd32`/`gd32io`); the only TX is the knob-slot init (strict allow-list, §4) |
 | Panels: Qt → DE capture → G2D → 21× `/dev/fbN` write+fsync, every frame, ~14 fps, 11 MB/s SPI | **replace** with direct fbN writes, dirty panels only (module `screen`) |
 | Host protocol on ttyGS0 (A1A55A5E) | **keep a compatible subset** plus a new fast path (module `host`) |
 | Backlight (`/sys/kernel/debug/dispdbg` name=`lcd0`, command=`setbl`, param=level) | **keep** (module `backlight`) |
 | HID typing/mouse via GD32 cmds 0x17/0x18/0x1A | **drop**; we type via our own `/dev/hidg0` (router) |
-| Keymap/macro writes to GD32 (0x05/0x0D/0x0F/0x10) | **drop** (never reconfigure the GD32 without an explicit later step) |
+| Keymap/macro writes to GD32 (0x05/0x0D/0x0F/0x10) | **drop**, except `05 00 r r 00 00` for encoder RAM slots r=100..105 at start (K2 → serial; see `kbd/K2-KNOB-CONFIG.md`). Rows <100 (EEPROM) are refused in code |
 | atsha204a Check_Key | **drop** (anti-clone gate for KD only) |
 | ALSA audio, XiaoZhi, video player, themes, file upload, self-upgrade | **drop now**; audio later as its own module |
 | USB gadget (setusbconfig, UsbCDCStateThread) | **already ours** (`gadget.sh`); mk20-kbd only opens ttyGS0 |
@@ -27,12 +27,14 @@
 
 **Key/knob event `0x16`:** `16 P C R KH KL`.
 - P: pressed (≠0).
-- C/R: col/row. Knobs report col==row: 100 press, 101 ccw and 102 cw for K1; 103–105 for K2 (measured earlier).
+- Byte 2 = **row** (0..3), byte 3 = **col** (0..4), measured 2026-10-19 (K2-RESULTS.md). KD forwarded them to the host as `keyStateChanged{col,row}` 0-based, no transposition (NOTES-device-2026-10-17.md; KD `VideoPlayer::keyStateChanged(pressed,row,col)`). K0 had the names swapped; fixed in K3. Knobs report row==col: 100 press, 101 ccw and 102 cw for K1; 103–105 for K2 once its slots are 0.
 - KH:KL: the 16-bit QMK keycode the GD32 currently has at that position (KD strings `keyCodeH`/`keyCodeL`).
   - KD's `VideoPlayer::keyStateChanged` runs its local action only when both bytes are 0 (KC_NO). A non-zero keycode means the GD32 has already sent that key as USB HID itself.
   - mk20-kbd must apply the same rule, otherwise the Mac sees double input. This is high confidence from the decompile; still to be verified with `--monitor` on the device.
 
-**No GD32 init or keepalive.**
+**GD32 init (updated 2026-10-19, K2):** the only init is writing KC_NO to the six encoder RAM slots 100..105 (stock KD writes theme codes there on every start; K2 was left on media keys). Each frame is echoed identically by the GD32. No keepalive. The older analysis below holds for everything else.
+
+**No GD32 init or keepalive (K0 analysis, superseded for the knob slots).**
 - KD's `STM32CommunicationObject::started()` only opens the port and starts a 50 ms timer that drains a TX queue, and that queue is empty at boot.
 - Keymap writes (0x05) and `clearState` (`02 AA E2 78`) are only reached from host-triggered lambdas (keyBoardMatrixChange/MacroChange). `request_bootloader_jump` (0x19) is only reached from the legacy JSON handler.
 - **So host mode needs no init: mk20-kbd opens ttyS1 O_RDONLY.**
@@ -83,12 +85,12 @@
 
 ## 4. Safety
 
-- **GD32 outbound allow-list:**
-  - `GD32_OUT_ALLOW_LIST(X)` is empty in P1. Every listed id is checked by `_Static_assert` against 0x19 and 0x02 (compile time).
-  - At runtime, `gd32_out_allowed()` rejects anything unlisted, 0x19, and any payload containing `02 AA E2 78`.
-  - `gd32_encode()` re-checks the finished frame with `gd32_raw_is_forbidden()`.
-  - In P1 the tty is opened O_RDONLY, so no write path exists at all.
-  - Tests: all 256 ids are refused in P1; the 0x19 frame and the clearState bytes are detected anywhere in a buffer.
+- **GD32 outbound allow-list (K2/K3):**
+  - `gd32_out_allowed()` accepts exactly one shape: 6-byte payload `05 00 r r 00 00`, r in 100..105. Everything else is refused: other ids (0x19, 0x02, 0x0A, 0x0B, …), 0x05 with row <100 (EEPROM keymap), row >105, layer ≠0, col ≠ row, non-zero keycode, any other length, any buffer containing `02 AA E2 78`. `_Static_assert`s pin the id and slot range.
+  - `gd32_encode()` re-checks the finished frame with `gd32_raw_is_forbidden()`; `gd32_tx()` (gd32io.c) is the only function that writes to the tty and goes through `gd32_encode()`.
+  - **Read-only switch:** `--no-gd32-write`, or the kill file `/data/mk20/kbd-no-gd32-write` (or an extra path in `MK20_KBD_NO_WRITE_FILE`): the tty is opened O_RDONLY and knob init is skipped (status `disabled`).
+  - Knob init: per slot send, wait ≤1 s for the identical echo, ≤3 attempts, then log and continue (status `ok`/`partial`/`failed` in the status file; never fatal). Key frames arriving during init are dispatched; stale 0x05 echoes are dropped; 0x05 echoes in the main loop are counted, never treated as events.
+  - Tests: every id × every row; every single-byte mutation of the six valid payloads; all lengths; 400k random payloads vs a reference predicate; exact wire bytes vs K2-KNOB-CONFIG.md; fake-GD32 echo / silent (18 timeouts) / flaky (retry) / noisy (key events + stale echoes + junk) / closed fd; e2e checks the wire bytes and the O_RDONLY open via `/proc/<pid>/fdinfo`.
 - **Displays:** only fbN writes of exact panel size. No fb0, no /dev/disp, no G2D.
 - **Backlight:** clamp to 0–255. Never write 0 on boot; the minimum is a visible floor.
 
@@ -100,7 +102,7 @@
 3. **Probation selftest** (all must pass within 60 s, else no confirm, and the loader rolls back to the KD release):
    - **GD32 link alive (passive):** at least one valid GD32 frame was parsed since start. The status file is written on every event.
      - The GD32 is quiet when untouched, so the acceptance step asks for one keypress during the window, or the release falls back.
-     - **Open:** whether the GD32 emits anything unprompted, e.g. after a USB resume. If no allow-listed safe query exists, keep passive and require the keypress.
+     - **Resolved (K2/K3):** the GD32 sends nothing unprompted, but the knob init gives an active liveness proof: `knob_ok == 6` in the status file means six echoed frames, so the selftest can pass without a keypress. With the read-only switch set, fall back to the keypress rule.
    - **Screens written:** 21/21 panels written at least once with no write errors (boot splash pattern).
    - **Host link:** ttyGS0 open; getInfo answered if the Mac console is connected (optional).
    - **HID:** `/dev/hidg0` writable and the all-keys-up report sent.
@@ -110,10 +112,10 @@
 
 | M | Content | Tests | On-device acceptance |
 |---|---|---|---|
-| **K0** (this commit) | gd32 codec, allow-list, panel map, screen writer, host codec (getInfo/keyStateChanged), `--monitor`/`--pattern`/`--getinfo`, static armhf build | `make -C deck/kbd test` (ASan/UBSan, corrupt + fuzz frames, allow-list 256-id sweep, fake fb dir) | none yet |
-| **K1** | Read-only device verification | — | (a) with KD running, run `mk20-kbd --monitor` on a **copy** of the traffic. KD owns ttyS1, so first try a passive second reader (reads may steal bytes; check). If that isn't possible, do it in K2 with KD stopped. (b) Confirm bytes 4–5 and the knob codes |
-| **K2** | KD stopped manually (one-shot, SSH, reversible by reboot): `--pattern` to verify the fbN ↔ physical key map and bus timing; `--monitor` for GD32 frames | timing script | photo of the pattern; event log for all 20 keys and both knobs |
-| **K3** | Host subset plus JPEG decoder plus per-bus threads; router merged; backlight | codec tests, JPEG conformance vs libjpeg on the box, Mac console e2e in simulator | Mac console works against mk20-kbd; latency press→HID and press→panel |
+| **K0** (d2b966d, done) | gd32 codec, allow-list, panel map, screen writer, host codec (getInfo/keyStateChanged), `--monitor`/`--pattern`/`--getinfo`, static armhf build | `make -C deck/kbd test` (ASan/UBSan, corrupt + fuzz frames, allow-list 256-id sweep, fake fb dir) | none yet |
+| **K1** (folded into K2) | Read-only device verification | — | (a) with KD running, run `mk20-kbd --monitor` on a **copy** of the traffic. KD owns ttyS1, so first try a passive second reader (reads may steal bytes; check). If that isn't possible, do it in K2 with KD stopped. (b) Confirm bytes 4–5 and the knob codes |
+| **K2** (done 2026-10-19, K2-RESULTS.md / K2-KNOB-CONFIG.md) | KD stopped manually (one-shot, SSH, reversible by reboot): `--pattern` to verify the fbN ↔ physical key map and bus timing; `--monitor` for GD32 frames | timing script | photo of the pattern; event log for all 20 keys and both knobs |
+| **K3** (in progress, see §8) | Host subset plus JPEG decoder plus per-bus threads; router merged; backlight | codec tests, JPEG conformance vs libjpeg on the box, Mac console e2e in simulator | Mac console works against mk20-kbd; latency press→HID and press→panel |
 | **K4** | Release integration (mk20d, kill switch, selftest, watchdog fallback) | mk20d tests with a fake mk20-kbd | install via the A/B loader, forced-fail rollback test, kill-switch test, 24 h soak |
 | **K5** | Fast path cmd 200/201, on-board renderer hooks; audio module | — | — |
 
@@ -127,3 +129,24 @@
 - **Losing KD's DE/G2D pipeline:** fb0 stays blank. Fine, nothing is attached to it.
 - **Parser re-scan** returns only the last frame if one replay contains two frames (rare; noted for K3).
 - **atsha:** dropping KD removes the only user, so there is no impact.
+
+## 8. Status (2026-10-19)
+
+**K2 done.** fb map, orientation, key/K1 event bytes verified on device; K2 root cause found (stock KD writes media keycodes into GD32 encoder RAM slots 103–105). The user chose to apply the slot reset inside the new daemon, not as a one-off command.
+
+**K3 done so far (box only, no device):**
+- `mk20-kbd --run`: single-threaded poll loop over ttyS1 and the host tty (`/dev/ttyGS0`, which the PTY↔TCP bridge symlinks; reopened after EIO/EOF). `--no-host` = local mode: pressed key panel turns white, released redraws idle.
+- Knob init + strict TX allow-list + read-only switch (§4).
+- Host subset: A1A55A5E codec; `getInfo` (version `mk20-kbd-0.3`); `keyStateChanged` (id 0xFFFFFFFF, col/row as KD); cmd 100 JPEG → vendored stb_image v2.30 (JPEG only, baseline + progressive, 4:4:4/4:2:2/4:2:0) → RGB565 canvas → only changed panels written → empty cmd-100 ack with the same id (also on bad frames, so the host never stalls); `setBacklight`/`setDeviceBl` 0..100 → dispdbg `lcd0`/`setbl`/param/start; cmd 200 tile; everything else → `success:false, "unsupported"`.
+- Status file `/run/mk20/kbd.status` (1 Hz, atomic): knob_init, panels_written, event and error counters.
+- Inbound GD32 LEN capped at 64 (a false header can no longer swallow 255 bytes).
+- Tests: `make -C deck/kbd test` = ASan/UBSan unit tests + `tests/e2e_run.py` (real binary on two ptys, the console's own `mk20deck.protocol` codec). Wired into `deck/Makefile` `test`.
+
+**K3 remaining:**
+- Per-bus writer threads (both SPI buses in parallel; today flushes are serial in the main loop, so a full-canvas update blocks key handling for ~70 ms).
+- Router merge (HID via `/dev/hidg0`, keymap/actions, PTT, all-keys-up on start/EOF/signal), so mk20-kbd replaces the bridge tap path.
+- Backlight param scale: **assumed** 0..100 → 0..255 (floor 8). KD's exact conversion is not decoded yet; verify on the device.
+- getInfo field parity with KD beyond what the console reads (KD sends more keys; the console only needs the rects and size).
+- Console e2e through the real TCP bridge and the Mac console in the simulator.
+
+**On-device checks still needed (user at home):** knob init echo on the real GD32 and K2 events `16 .. 67/68/69`; JPEG frames from the Mac console shown correctly; setBacklight brightness scale; host link reopen across a bridge restart; latency press→keyStateChanged and press→panel.

@@ -1,4 +1,4 @@
-test: sim-test
+test: sim-test kbd-test
 	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh tools/mk20-build-bins.sh
 	shellcheck -s bash -S warning tools/tf-identify.sh tools/tf-restore-boot.sh
 	python3 -m py_compile tools/mk20_key_latency.py tools/mk20_accept.py tools/mk20_soak.py tools/mk20_host_net.py tools/tcp_transport.py tools/tf_gpt_check.py
@@ -11,10 +11,13 @@ bins:   # static armhf bridge + router from source into firmware/release/bin (ne
 release:
 	sh tools/mk20-release-build.sh firmware out $$(git rev-parse --short HEAD 2>/dev/null || echo dev)
 
+kbd-test:   # mk20-kbd (KD replacement): ASan/UBSan unit tests + e2e of the real binary on ptys
+	$(MAKE) -C kbd test
+
 sim-test:
 	uv run --with pytest python -m pytest -q tests_sim
 
 sim:
 	uv run python -m mk20sim --port 8766
 
-.PHONY: test bins release sim-test sim
+.PHONY: test bins release sim-test sim kbd-test
