@@ -15,3 +15,7 @@ deck/kbd/tests/uicfg_cli
 deck/kbd/tests/ui_load
 
 *.dSYM/
+
+deck/kbd/tests/onboard_test
+deck/kbd/tests/onboard_headless
+deck/kbd/tests/onboard_test_tsan

@@ -1,0 +1,408 @@
+[
+ {
+  "name": "home_without_mac",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "Offline C compositor and HOME/LS renderer",
+  "steps": [
+   {
+    "expect": {
+     "page": "HOME",
+     "host_health": "offline",
+     "ctl_page": 0
+    }
+   },
+   {
+    "press": "5,1"
+   },
+   {
+    "expect": {
+     "page": "LS",
+     "settings.active": true
+    }
+   },
+   {
+    "press": "5,1"
+   },
+   {
+    "expect": {
+     "settings.tab": 4
+    }
+   },
+   {
+    "wait": 150
+   },
+   {
+    "expect": {
+     "key_image_size": [
+      128,
+      128
+     ],
+     "sub_image_size": [
+      428,
+      142
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "name": "glm_model",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "Offline C compositor and HOME/LS renderer",
+  "steps": [
+   {
+    "press": "5,1"
+   },
+   {
+    "press": "2,1"
+   },
+   {
+    "press": "2,2"
+   },
+   {
+    "expect": {
+     "settings.provider": "glm-coding",
+     "settings.model": "glm-5.3"
+    }
+   },
+   {
+    "press": "3,1"
+   },
+   {
+    "press": "2,2"
+   },
+   {
+    "expect": {
+     "settings.model": "glm-5.3-flash"
+    }
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "expect": {
+     "settings.pending": 0
+    }
+   }
+  ]
+ },
+ {
+  "name": "network_double_apply",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "Offline C compositor and HOME/LS renderer",
+  "steps": [
+   {
+    "press": "5,1"
+   },
+   {
+    "press": "2,2"
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "expect": {
+     "settings.confirm_net": 1,
+     "settings.pending": 1
+    }
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "expect": {
+     "settings.confirm_net": 0,
+     "settings.pending": 0,
+     "settings.profile": "board_wifi"
+    }
+   }
+  ]
+ },
+ {
+  "name": "discard_and_knobs",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "Offline C compositor and HOME/LS renderer",
+  "steps": [
+   {
+    "press": "5,1"
+   },
+   {
+    "press": "2,2"
+   },
+   {
+    "press": "1,4"
+   },
+   {
+    "expect": {
+     "page": "LS",
+     "settings.confirm_back": 1
+    }
+   },
+   {
+    "knob": "K2",
+    "action": "cw"
+   },
+   {
+    "expect": {
+     "settings.confirm_back": 0
+    }
+   },
+   {
+    "press": "1,4"
+   },
+   {
+    "press": "1,4"
+   },
+   {
+    "expect": {
+     "page": "HOME",
+     "settings.pending": 0
+    }
+   }
+  ]
+ },
+ {
+  "name": "host_editor",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "Offline C compositor and HOME/LS renderer",
+  "steps": [
+   {
+    "press": "5,1"
+   },
+   {
+    "press": "3,2"
+   },
+   {
+    "expect": {
+     "settings.editor": 1
+    }
+   },
+   {
+    "knob": "K2",
+    "action": "cw"
+   },
+   {
+    "knob": "K1",
+    "action": "ccw"
+   },
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "expect": {
+     "settings.editor": 0,
+     "settings.pending": 1
+    }
+   },
+   {
+    "press": "3,4"
+   },
+   {
+    "expect": {
+     "settings.pending": 0
+    }
+   }
+  ]
+ },
+ {
+  "name": "k2_hold_no_toggle",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "Offline C compositor and HOME/LS renderer",
+  "steps": [
+   {
+    "press": "3,2"
+   },
+   {
+    "expect": {
+     "page": "L4",
+     "host_health": "offline",
+     "ctl_page": 2
+    }
+   },
+   {
+    "knob": "K2",
+    "action": "down"
+   },
+   {
+    "wait": 999
+   },
+   {
+    "expect": {
+     "stopped": false
+    }
+   },
+   {
+    "wait": 1
+   },
+   {
+    "expect": {
+     "stopped": true,
+     "page": "HOME"
+    }
+   },
+   {
+    "knob": "K2",
+    "action": "up"
+   },
+   {
+    "expect": {
+     "stopped": true,
+     "page": "HOME"
+    }
+   }
+  ]
+ },
+ {
+  "name": "host_hysteresis_no_navigation",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "Offline C compositor and HOME/LS renderer",
+  "steps": [
+   {
+    "press": "5,1"
+   },
+   {
+    "press": "2,2"
+   },
+   {
+    "host": {
+     "method": "ui.hello",
+     "version": 1
+    }
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "wait": 1000
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "expect": {
+     "host_health": "probing",
+     "page": "LS"
+    }
+   },
+   {
+    "wait": 1000
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "expect": {
+     "host_health": "online",
+     "page": "LS",
+     "settings.pending": 1
+    }
+   },
+   {
+    "wait": 3000
+   },
+   {
+    "expect": {
+     "host_health": "suspect"
+    }
+   },
+   {
+    "wait": 2000
+   },
+   {
+    "expect": {
+     "host_health": "offline",
+     "page": "LS",
+     "settings.pending": 1
+    }
+   }
+  ]
+ },
+ {
+  "name": "missing_key_fake_auth",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "Offline C compositor and HOME/LS renderer",
+  "steps": [
+   {
+    "press": "5,1"
+   },
+   {
+    "press": "4,1"
+   },
+   {
+    "press": "1,2"
+   },
+   {
+    "expect": {
+     "toast_contains": "Key"
+    }
+   },
+   {
+    "test_result": 4,
+    "key_present": true
+   },
+   {
+    "press": "1,2"
+   },
+   {
+    "expect": {
+     "settings.test_result": 4
+    }
+   },
+   {
+    "wait": 150
+   },
+   {
+    "expect": {
+     "sub_image_size": [
+      428,
+      142
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "name": "config_fault_retains_draft",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "Injected fake Apply failure leaves draft and displays error",
+  "steps": [
+   {
+    "press": "5,1"
+   },
+   {
+    "press": "2,2"
+   },
+   {
+    "config_fault": true
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "press": "2,4"
+   },
+   {
+    "expect": {
+     "settings.pending": 1,
+     "toast_contains": "失败"
+    }
+   }
+  ]
+ }
+]

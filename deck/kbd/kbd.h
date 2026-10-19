@@ -12,7 +12,11 @@
 
 #define KBD_EVENT_ID 0xFFFFFFFFu   /* KD: device-originated events use id 0xFFFFFFFF */
 
-typedef struct {
+typedef struct kbd_s {
+    struct onboard_s *onboard;
+    int64_t (*clock_ms)(void *); void *clock_ctx;
+    uint8_t host_out[16384]; size_t host_out_len, host_out_off;
+    size_t host_rx_barrier; /* unread bytes queued before the latest route boundary */
     int host_fd;          /* -1 = no host link (local mode) */
     int host_tx_stuck;    /* last reply timed out: next ones fail fast until a write succeeds */
     int local_ui;         /* 1 = draw key feedback locally (no-host mode) */
@@ -35,6 +39,7 @@ typedef struct {
     } st;
 } kbd_t;
 
+int64_t kbd_now(kbd_t *k);
 int kbd_init(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version);
 void kbd_free(kbd_t *k);
 /* Loop boundary: expire safety deadlines BEFORE any queued HID output. now_ms must be fresh. */
@@ -45,8 +50,10 @@ void kbd_service(kbd_t *k, int64_t now_ms);
 void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len);
 void kbd_gd32_cb(void *ctx, const uint8_t *pl, int len);   /* adapter for gd32_knob_init */
 /* Raw bytes from the host link. */
+void kbd_host_push(kbd_t *k, const uint8_t *d, size_t n);
 void kbd_host_feed(kbd_t *k, const uint8_t *d, size_t n);
 void kbd_on_host_frame(kbd_t *k, const host_frame *f);
+void kbd_host_drain(kbd_t *k);
 int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n);
 /* Backlight 0..100 via dispdbg (name=lcd0, command=setbl, param, start). */
 int kbd_set_backlight(kbd_t *k, int level);

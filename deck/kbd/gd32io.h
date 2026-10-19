@@ -32,5 +32,7 @@ const char *gd32_knob_state_name(int state);
  * waiting for the identical echo. Frames that are not the awaited echo are
  * passed to cb (key events during init are NOT lost); stale 0x05 echoes are
  * dropped. Never fails hard: returns st->ok_count. */
+/* Same allow-listed initialization, with a main-loop service callback during echo waits. */
+int gd32_knob_init_service(int fd, gd32_parser *p, const gd32_knob_opts *o, gd32_knob_status *st, gd32_frame_cb cb, void *ctx, void (*service)(void *));
 int gd32_knob_init(int fd, gd32_parser *p, const gd32_knob_opts *o, gd32_knob_status *st, gd32_frame_cb cb, void *ctx);
 #endif

@@ -40,7 +40,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .harness import Latency, Sim
+from .harness import Latency, Sim, CSim
 
 CASES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cases")
 
@@ -54,6 +54,7 @@ class Case:
     path: str = ""
     draft: bool = False
     latency: dict | None = None
+    backend: str = "python"
 
     @property
     def id(self) -> str:
@@ -106,7 +107,7 @@ def load_cases(directory: str = CASES_DIR, include_drafts: bool = False) -> list
                 d = json.load(f)
             for c in (d if isinstance(d, list) else [d]):
                 out.append(Case(c["name"], c.get("group", "drafts" if draft else "misc"), c.get("desc", ""),
-                                c["steps"], p, draft or bool(c.get("draft")), c.get("latency")))
+                                c["steps"], p, draft or bool(c.get("draft")), c.get("latency"), c.get("backend", "python")))
     out.sort(key=lambda c: (c.draft, c.group, c.path, c.name))
     return out
 
@@ -163,9 +164,11 @@ def _check(sim: Sim, exp: dict, mark: dict, idx: int, src: dict) -> None:
             need(k, f">= {v}", sim.frames, sim.frames >= v)
         elif k == "key":
             pass
+        elif k in ("host_health", "stopped", "ctl_page"):
+            need(k, v, st[k])
         elif k.startswith("settings."):
             f = k.split(".", 1)[1]
-            sv = sim.settings.state()
+            sv = st["settings"] if isinstance(sim, CSim) else sim.settings.state()
             cur = sv.get(f) if f in sv else sim.settings.cfg(f)
             need(k, v, cur)
         elif k == "agent_file":  # {"provider.json": {"provider": "kimi"}} – subset match on written config
@@ -195,6 +198,14 @@ def _do(sim: Sim, s: dict, mark: dict) -> None:
         sim.wait(s["wait"])
     elif "knob" in s:
         sim.knob(s["knob"], s.get("action", "press"), s.get("n", 1))
+    elif "host" in s:
+        sim.inject_host(s["host"])
+    elif "config_fault" in s:
+        if s["config_fault"] is not True:
+            raise ValueError("config_fault must be true")
+        sim.inject_config_fault()
+    elif "test_result" in s:
+        sim.inject_test(s["test_result"], s.get("key_present", False))
     elif "raw" in s:
         sim.raw(*s["raw"])
     elif "mark" in s:
@@ -207,7 +218,10 @@ def _do(sim: Sim, s: dict, mark: dict) -> None:
 
 def run_case(case: Case, observer: Callable[[Sim, float], None] | None = None,
              on_step: Callable[[int, dict, Sim], None] | None = None, sim: Sim | None = None) -> CaseResult:
-    sim = sim or Sim(latency=Latency.from_dict(case.latency))
+    owned = sim is None
+    if case.backend not in ("python", "c"):
+        raise ValueError(f"unknown backend {case.backend!r}")
+    sim = sim or (CSim if case.backend == "c" else Sim)(latency=Latency.from_dict(case.latency))
     sim.observer = observer
     w0, s0 = time.perf_counter(), sim.now()
     mark: dict = {"t": s0}
@@ -232,6 +246,8 @@ def run_case(case: Case, observer: Callable[[Sim, float], None] | None = None,
         buf = io.BytesIO()
         sim.canvas().save(buf, "PNG")
         res.screen_png_b64 = base64.b64encode(buf.getvalue()).decode()
+    if owned and isinstance(sim, CSim):
+        sim.close()
     return res
 
 

@@ -18,6 +18,7 @@ agent-test:   # host fakes + adapter C/CLI tests (pytest skips C if cc is missin
 	uv run --with pytest python -m pytest -q agent/tests
 
 sim-test:
+	$(MAKE) -C kbd tests/onboard_headless
 	uv run --with pytest python -m pytest -q tests_sim
 
 sim:
@@ -25,7 +26,8 @@ sim:
 
 .PHONY: test bins release sim-test sim kbd-test agent-test
 
-onboard-ui-test:   # U1: offline C buffers/files only; no device or network access
+onboard-ui-test:   # U1/U2: offline C buffers/files plus C-backed simulator cases
 	$(MAKE) -C kbd ui-test
+	UV_OFFLINE=1 uv run --with pytest python -m pytest -q tests_sim -k onboard
 
 .PHONY: onboard-ui-test

@@ -25,12 +25,12 @@ int host_parser_init(host_parser *p, size_t cap)
 void host_parser_free(host_parser *p) { free(p->buf); p->buf = NULL; }
 
 static void drop(host_parser *p, size_t n)
-{ if (n > p->len) n = p->len; memmove(p->buf, p->buf + n, p->len - n); p->len -= n; }
+{ if (n > p->len) n = p->len; memmove(p->buf, p->buf + n, p->len - n); p->len -= n; p->barrier = p->barrier > n ? p->barrier - n : 0; }
 
 int host_push(host_parser *p, const uint8_t *d, size_t n)
 {
     if (n > p->cap - p->len) { /* overflow: keep newest data, resync later */
-        p->dropped_bytes += p->len; p->len = 0;
+        p->dropped_bytes += p->len; p->len = p->barrier = p->consumed = 0;
         if (n > p->cap) { p->dropped_bytes += n - p->cap; d += n - p->cap; n = p->cap; }
     }
     memcpy(p->buf + p->len, d, n); p->len += n; return 0;
@@ -51,6 +51,7 @@ int host_next(host_parser *p, host_frame *f)
         if (size > HOST_MAX_PAYLOAD || size + HOST_HDR + 4 > p->cap) { p->oversize++; drop(p, 1); continue; }
         if (p->len < HOST_HDR + size + 4) return 0;
         if (get32(p->buf + HOST_HDR + size) != host_crc32(p->buf + HOST_HDR, size)) { p->bad_data_crc++; drop(p, 1); continue; }
+        p->frame_stale = p->barrier != 0;
         f->id = get32(p->buf + 4); f->cmd = get32(p->buf + 8); f->size = size; f->data = p->buf + HOST_HDR;
         p->consumed = HOST_HDR + size + 4; p->frames_ok++;
         return 1;

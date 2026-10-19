@@ -48,16 +48,17 @@ static int64_t now_ms(void)
 }
 
 /* wait for the echo of want[] for up to timeout_ms; 1 = got it, 0 = timeout, -1 = read error */
-static int wait_echo(int fd, gd32_parser *p, const uint8_t *want, int timeout_ms, gd32_knob_status *st, gd32_frame_cb cb, void *ctx)
+static int wait_echo(int fd, gd32_parser *p, const uint8_t *want, int timeout_ms, gd32_knob_status *st, gd32_frame_cb cb, void *ctx, void (*service)(void *))
 {
     int64_t deadline = now_ms() + timeout_ms;
     for (;;) {
+        if (service) service(ctx);
         int64_t left = deadline - now_ms();
         if (left <= 0) return 0;
         struct pollfd pf = {fd, POLLIN, 0};
-        int r = poll(&pf, 1, (int)left);
+        int r = poll(&pf, 1, service && left > 10 ? 10 : (int)left);
         if (r < 0) { if (errno == EINTR) continue; return -1; }
-        if (r == 0) return 0;
+        if (r == 0) continue;
         uint8_t buf[256];
         ssize_t n = read(fd, buf, sizeof buf);
         if (n < 0) { if (errno == EINTR || errno == EAGAIN) continue; return -1; }
@@ -75,7 +76,7 @@ static int wait_echo(int fd, gd32_parser *p, const uint8_t *want, int timeout_ms
     }
 }
 
-int gd32_knob_init(int fd, gd32_parser *p, const gd32_knob_opts *o, gd32_knob_status *st, gd32_frame_cb cb, void *ctx)
+int gd32_knob_init_service(int fd, gd32_parser *p, const gd32_knob_opts *o, gd32_knob_status *st, gd32_frame_cb cb, void *ctx, void (*service)(void *))
 {
     int to = (o && o->timeout_ms > 0) ? o->timeout_ms : 1000;
     int att = (o && o->attempts > 0) ? o->attempts : 3;
@@ -86,7 +87,7 @@ int gd32_knob_init(int fd, gd32_parser *p, const gd32_knob_opts *o, gd32_knob_st
         for (int a = 0; a < att && !st->slot_ok[i]; a++) {
             st->slot_attempts[i]++;
             if (gd32_tx(fd, pl, sizeof pl)) { st->tx_errors++; continue; }
-            int r = wait_echo(fd, p, pl, to, st, cb, ctx);
+            int r = wait_echo(fd, p, pl, to, st, cb, ctx, service);
             if (r == 1) st->slot_ok[i] = 1;
             else if (r == 0) st->timeouts++;
             else st->tx_errors++;
@@ -96,3 +97,6 @@ int gd32_knob_init(int fd, gd32_parser *p, const gd32_knob_opts *o, gd32_knob_st
     st->state = st->ok_count == 6 ? 1 : st->ok_count ? 2 : 3;
     return st->ok_count;
 }
+
+int gd32_knob_init(int fd, gd32_parser *p, const gd32_knob_opts *o, gd32_knob_status *st, gd32_frame_cb cb, void *ctx)
+{ return gd32_knob_init_service(fd,p,o,st,cb,ctx,NULL); }

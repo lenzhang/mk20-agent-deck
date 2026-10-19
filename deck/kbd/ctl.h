@@ -1,5 +1,5 @@
 /* mk20-kbd local control socket /run/mk20/kbd.sock (agent A1; protocol: CTL-PROTOCOL.md).
- * Opt-in (--ctl PATH); without it mk20-kbd behaves exactly as before.
+ * Socket opt-in (--ctl PATH); U2 local UI/safety also run without a listener.
  * mk20-kbd stays the ONLY holder of /dev/hidg0: mk20-agent sends input over this socket under an input lease.
  * Safety rules handled here, in-process, independent of the agent:
  *  - lease TTL (default 3 s, 200..10000 ms): not renewed in time -> revoked + all-keys-up + pointer buttons up;

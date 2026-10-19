@@ -37,6 +37,7 @@ int screen_set_tile565(screen_t *s, int fb, int x, int y, int w, int h, const ui
 int screen_flush_bus(screen_t *s, int bus);
 /* Force every panel dirty (e.g. after start). */
 void screen_invalidate(screen_t *s);
+void screen_discard(screen_t *s); /* replace prior-route pending content, including in-flight retry */
 int screen_start_writers(screen_t *s);
 /* drain=1: write everything still dirty first (bounded by the caller's patience: gives up after timeout_ms). */
 void screen_stop_writers(screen_t *s, int drain, int timeout_ms);

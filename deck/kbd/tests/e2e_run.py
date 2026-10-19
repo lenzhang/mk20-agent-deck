@@ -11,6 +11,8 @@ from PIL import Image  # noqa: E402
 
 BIN = os.path.join(HERE, "..", "mk20-kbd")
 fails = 0
+heartbeat_fd = None
+heartbeat_at = 0.0
 def check(cond, what):
     global fails
     if not cond:
@@ -28,6 +30,10 @@ def mkpty():
 def read_for(fd, secs):
     out = b""; end = time.time() + secs
     while time.time() < end:
+        global heartbeat_at
+        if heartbeat_fd is not None and time.monotonic() >= heartbeat_at:
+            os.write(heartbeat_fd, P.encode_frame(P.CMD_JSON, b'{"method":"ui.heartbeat"}', 0xFFFFFFFE))
+            heartbeat_at = time.monotonic() + 1
         r, _, _ = select.select([fd], [], [], max(0, end - time.time()))
         if not r: break
         try: out += os.read(fd, 65536)
@@ -135,6 +141,7 @@ def stalled_host_safety(tmp):
             for fd in (hr, gm, hm, *keep): os.close(fd)
 
 def main():
+    global heartbeat_fd, heartbeat_at
     with tempfile.TemporaryDirectory() as tmp:
         hidp = os.path.join(tmp, "hidg0"); os.mkfifo(hidp)
         hr = os.open(hidp, os.O_RDONLY | os.O_NONBLOCK)
@@ -167,12 +174,25 @@ def main():
             from mk20deck.layout import DeviceLayout
             lay = DeviceLayout.from_get_info(gi[0].json()["result"])
             check(len(lay.keys) == 20, "console layout parses getInfo")
+        # U2: boot is HOME, attach cannot navigate. Enter host L1 physically,
+        # negotiate three heartbeats spanning two seconds, then provide a fresh frame.
+        os.write(gm, gd32_frame([0x16, 1, 1, 1, 0, 0]) + gd32_frame([0x16, 0, 1, 1, 0, 0]))
+        os.write(hm, P.encode_frame(P.CMD_JSON, b'{"method":"ui.hello","version":1}', 6))
+        par.feed(read_for(hm, 0.05))
+        for _ in range(3):
+            os.write(hm, P.encode_frame(P.CMD_JSON, b'{"method":"ui.heartbeat"}', 7))
+            par.feed(read_for(hm, 1.02))
+        heartbeat_fd, heartbeat_at = hm, time.monotonic()
+        boot = io.BytesIO(); Image.new("RGB", (640, 656)).save(boot, "JPEG")
+        os.write(hm, P.encode_frame(P.CMD_SHOW_JPG, boot.getvalue(), 8))
+        par.feed(read_for(hm, 0.5))
+        reserved_before = open(os.path.join(fb, "fb20"), "rb").read()
         # key + K2 events
-        os.write(gm, gd32_frame([0x16, 1, 3, 4, 0, 0]) + gd32_frame([0x16, 1, 0x69, 0x69, 0, 0]) + gd32_frame([5, 0, 0x67, 0x67, 0, 0]))
-        evs = [P.classify_json(f.json()) for f in par.feed(read_for(hm, 0.5)) if f.cmd == P.CMD_JSON]
+        os.write(gm, gd32_frame([0x16, 1, 0, 0, 0, 0]) + gd32_frame([0x16, 1, 0x69, 0x69, 0, 0]) + gd32_frame([5, 0, 0x67, 0x67, 0, 0]))
+        evs = [P.classify_json(f.json()) for f in par.feed(read_for(hm, 0.5)) if f.cmd == P.CMD_JSON and f.json().get("method") == "keyStateChanged"]
         check(len(evs) == 2 and all(isinstance(e, P.KeyEvent) for e in evs), f"two events (echo swallowed): {evs}")
         if len(evs) == 2:
-            check((evs[0].col, evs[0].row, evs[0].pressed) == (4, 3, True), f"key coords {evs[0]}")
+            check((evs[0].col, evs[0].row, evs[0].pressed) == (0, 0, True), f"key coords {evs[0]}")
             check((evs[1].col, evs[1].row) == (105, 105), f"K2 cw coords {evs[1]}")
         # JPEG canvas
         im = Image.new("RGB", (640, 656), (0, 0, 0))
@@ -183,15 +203,15 @@ def main():
         check(len(acks) == 1 and acks[0].frame_id == 9 and acks[0].data == b"", "jpeg ack")
         px = open(os.path.join(fb, "fb20"), "rb").read()
         v = px[2 * (64 * 128 + 64)] | px[2 * (64 * 128 + 64) + 1] << 8
-        check(len(px) == 32768 and (v >> 11) >= 29 and ((v >> 5) & 63) < 6, f"fb20 red {v:#06x}")
+        check(len(px) == 32768 and px == reserved_before, f"fb20 reserved face survives poisoned JPEG {v:#06x}")
         # setBacklight (bl disabled -> success, no files)
         os.write(hm, P.encode_frame(P.CMD_JSON, json.dumps(P.set_backlight(80)).encode(), 11))
-        a = [f.json() for f in par.feed(read_for(hm, 0.5)) if f.cmd == P.CMD_JSON]
+        a = [f.json() for f in par.feed(read_for(hm, 0.5)) if f.cmd == P.CMD_JSON and f.json().get("ack_method") == "setBacklight"]
         check(a and a[0].get("ack_method") == "setBacklight" and a[0].get("success") is True and a[0].get("result") == 80, f"backlight {a}")
         time.sleep(1.2)
         s = json.load(open(st))
         check(s["knob_init"] == "ok" and s["knob_ok"] == 6 and s["panels_written"] == 21 and s["echo_frames"] == 1
-              and s["key_events"] == 1 and s["knob_events"] == 1 and s["host"] == 1, f"status {s}")
+              and s["key_events"] == 3 and s["knob_events"] == 1 and s["host"] == 1, f"status {s}")
         # HID: startup all-up, PTT (doc 1,4 = fw col 0,row 3) holds RAlt
         def hid_reports():
             b = read_for(hr, 0.3)
@@ -262,6 +282,7 @@ def main():
                              "--lock", os.path.join(tmp, "kbd.lock")], capture_output=True, timeout=10)
         check(p2.returncode == 3, f"second instance refused rc={p2.returncode} {p2.stderr[-200:]}")
         os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0])); hid_reports()
+        heartbeat_fd = None
         p.send_signal(signal.SIGTERM); p.wait(3)
         check(p.returncode == 0, "clean exit")
         r4 = hid_reports()

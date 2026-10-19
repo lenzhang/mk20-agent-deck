@@ -38,6 +38,17 @@ void screen_free(screen_t *s)
 static void lock_all(screen_t *s) { pthread_mutex_lock(&s->mu[0]); pthread_mutex_lock(&s->mu[1]); }
 static void unlock_all(screen_t *s) { pthread_mutex_unlock(&s->mu[1]); pthread_mutex_unlock(&s->mu[0]); }
 
+void screen_discard(screen_t *s)
+{
+    lock_all(s);
+    for (int i = 0; i < PANEL_COUNT; i++) {
+        memset(s->pending[i], 0, px_count(i) * 2);
+        s->dirty[i] = 1;
+    }
+    pthread_cond_signal(&s->cv[0]); pthread_cond_signal(&s->cv[1]);
+    unlock_all(s);
+}
+
 void screen_invalidate(screen_t *s)
 {
     lock_all(s);
@@ -58,7 +69,7 @@ int screen_set_canvas565(screen_t *s, const uint16_t *cv)
             uint16_t *dst = s->pending[i] + (size_t)y * p->w;
             if (memcmp(dst, src, (size_t)p->w * 2)) { memcpy(dst, src, (size_t)p->w * 2); changed = 1; }
         }
-        if (changed && memcmp(s->pending[i], s->shadow[i], px_count(i) * 2)) { s->dirty[i] = 1; sig[p->bus] = 1; }
+        if (changed) { s->dirty[i] = 1; sig[p->bus] = 1; }
         n += s->dirty[i];
     }
     for (int b = 0; b < 2; b++) if (sig[b]) pthread_cond_signal(&s->cv[b]);
@@ -77,7 +88,7 @@ int screen_set_tile565(screen_t *s, int fb, int x, int y, int w, int h, const ui
         uint16_t *dst = s->pending[i] + (size_t)(y + r) * p->w + x;
         if (memcmp(dst, px + (size_t)r * w, (size_t)w * 2)) { memcpy(dst, px + (size_t)r * w, (size_t)w * 2); changed = 1; }
     }
-    if (changed && memcmp(s->pending[i], s->shadow[i], px_count(i) * 2)) {
+    if (changed) {
         s->dirty[i] = 1; ret = 1; pthread_cond_signal(&s->cv[p->bus]);
     }
     pthread_mutex_unlock(&s->mu[p->bus]);
@@ -94,10 +105,10 @@ static int write_buf(screen_t *s, int i, const uint16_t *buf)
     size_t left = px_count(i) * 2;
     while (left) {
         ssize_t w = write(fd, b, left);
-        if (w < 0) { if (errno == EINTR) continue; close(fd); return -1; }
+        if (w <= 0) { if (w < 0 && errno == EINTR) continue; close(fd); return -1; }
         b += w; left -= (size_t)w;
     }
-    fsync(fd); /* fbtft: forces the deferred-io flush now (KD does the same) */
+    if (fsync(fd)) { close(fd); return -1; } /* fbtft: forces the deferred-io flush now (KD does the same) */
     close(fd);
     unsigned d = __atomic_load_n(&s->write_delay_us, __ATOMIC_RELAXED);
     if (d) usleep(d);
@@ -109,7 +120,7 @@ int screen_flush_bus(screen_t *s, int bus)
     int n = 0;
     for (int i = 0; i < PANEL_COUNT; i++) {
         if (PANELS[i].bus != bus || !s->dirty[i]) continue;
-        if (write_buf(s, i, s->pending[i])) { s->write_errors++; return -1; }
+        if (write_buf(s, i, s->pending[i])) { __atomic_fetch_add(&s->write_errors, 1, __ATOMIC_RELAXED); return -1; }
         memcpy(s->shadow[i], s->pending[i], px_count(i) * 2);
         s->dirty[i] = 0; s->writes[i]++; n++;
     }
@@ -149,7 +160,7 @@ static void *writer(void *arg)
             /* re-dirtied meanwhile but back to what we just wrote? then it is clean */
             if (s->dirty[i] && !memcmp(s->pending[i], s->shadow[i], px_count(i) * 2)) s->dirty[i] = 0;
         } else {
-            s->write_errors++;
+            __atomic_fetch_add(&s->write_errors, 1, __ATOMIC_RELAXED);
             s->dirty[i] = 1;   /* retry later, with back-off so a missing fb cannot spin */
             if (s->stop[bus]) break;
             struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
@@ -229,7 +240,7 @@ void screen_stats(screen_t *s, unsigned writes[PANEL_COUNT], unsigned *errors, i
 {
     lock_all(s);
     if (writes) memcpy(writes, s->writes, sizeof s->writes);
-    if (errors) *errors = s->write_errors;
+    if (errors) *errors = __atomic_load_n(&s->write_errors, __ATOMIC_RELAXED);
     if (dirty_count) { int d = 0; for (int i = 0; i < PANEL_COUNT; i++) d += s->dirty[i]; *dirty_count = d; }
     unlock_all(s);
 }

@@ -342,3 +342,104 @@ class Sim:
             "keys": [{"col": k.col, "row": k.row, "role": k.role.value, "label": k.label, "selected": k.selected,
                       "disabled": k.disabled} for k in v.keys],
         }
+
+
+class CSim(Sim):
+    """Offline C HOME/LS + U2 route compositor; no Python controller or JPEG rasterizer."""
+
+    def __post_init__(self) -> None:
+        import pathlib
+        import subprocess
+        binary = pathlib.Path(__file__).resolve().parents[1] / "kbd/tests/onboard_headless"
+        if not getattr(CSim, "_binary_checked", False):
+            subprocess.run(["make", "-C", str(binary.parent.parent), "tests/onboard_headless"], check=True)
+            CSim._binary_checked = True
+        self.process = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.lock = threading.RLock()
+        self.fake = FakeClock()
+        self.clock = self.fake
+        self.t0 = self.clock()
+        self._rng = random.Random(self.latency.seed)
+        self._inq, self._frameq = [], []
+        self.frames, self.frame_lag_ms = 0, 0.0
+        self.observer, self.highlight = None, set()
+        self._state = self._command("state")
+
+    def close(self) -> None:
+        if getattr(self, "process", None):
+            self.process.stdin.close()
+            self.process.wait(timeout=5)
+            self.process.stdout.close()
+            self.process = None
+
+    def __del__(self):
+        self.close()
+
+    def _command(self, line: str) -> dict:
+        import json
+        self.process.stdin.write((line + "\n").encode())
+        self.process.stdin.flush()
+        data = self.process.stdout.readline()
+        if not data:
+            raise RuntimeError(f"C backend exited: {self.process.poll()}")
+        self.frames += 1
+        self._state = json.loads(data)
+        return self._state
+
+    def _deliver(self, col: int, row: int, pressed: bool) -> None:
+        self._command(f"key {row} {col} {int(pressed)}")
+
+    def step(self, force: bool = False) -> None:
+        with self.lock:
+            self._pump_queues()
+            self._command(f"time {round(self.now() * 1000)}")
+
+    @property
+    def settings(self):
+        return self
+
+    def cfg(self, field):
+        return self._state["settings"].get(field)
+
+    @property
+    def page(self) -> str:
+        return self._state["page"]
+
+    @property
+    def mode(self) -> str:
+        return "c-onboard"
+
+    def state(self) -> dict:
+        return {**self._state, "t": round(self.now(), 3), "mode": self.mode,
+                "ptt": False, "scroll": 0, "selected": None, "frames": self.frames,
+                "frame_lag_ms": 0, "queued_inputs": len(self._inq), "keys": []}
+
+    def canvas(self) -> Image.Image:
+        self.step(force=True)
+        self.process.stdin.write(b"canvas\n")
+        self.process.stdin.flush()
+        header = b"".join(self.process.stdout.readline() for _ in range(3))
+        size = 640 * 656 * 3
+        data = self.process.stdout.read(size)
+        if len(data) != size:
+            raise RuntimeError("short C canvas")
+        return Image.open(io.BytesIO(header + data)).convert("RGB")
+
+    @property
+    def frame(self) -> bytes:
+        # JPEG is only the existing browser transport; every pixel originates in C.
+        if not hasattr(self, "_frame_cache") or self.now() - self._frame_at >= 0.125:
+            out = io.BytesIO()
+            self.canvas().save(out, "JPEG", quality=90)
+            self._frame_cache, self._frame_at = out.getvalue(), self.now()
+        return self._frame_cache
+
+    def inject_host(self, request: dict | None) -> None:
+        import json
+        self._command("loss" if request is None else "host " + json.dumps(request, separators=(",", ":")))
+
+    def inject_config_fault(self) -> None:
+        self._command("fault")
+
+    def inject_test(self, result: int, key_present: bool) -> None:
+        self._command(f"test {result} {int(key_present)}")

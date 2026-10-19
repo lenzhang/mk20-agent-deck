@@ -33,7 +33,7 @@ void ctl_key_event(ctl_t *c, int row, int col, int pressed, int64_t now)
     if (row < 0 || row >= 4 || col < 0 || col >= 5) return;
     ctl_page_t *p = page(c, c->screen.current);
     if (!p) return;
-    if (pressed && row == CTL_SCREEN_ESTOP_ROW && col == CTL_SCREEN_ESTOP_COL && (p->id == CTL_SCREEN_CONTROL || p->id >= 3)) { ctl_estop(c, "page_key", now); return; }
+    if (pressed && row == CTL_SCREEN_ESTOP_ROW && col == CTL_SCREEN_ESTOP_COL) { ctl_estop(c, "page_key", now); return; }
     if (!c->allowed || c->estopped || p->id < 3 || p->client < 0 || !(p->bound & (1u << (row * 5 + col)))) return;
     char ev[128]; snprintf(ev, sizeof ev, "{\"ev\":\"key\",\"page\":%d,\"row\":%d,\"col\":%d,\"down\":%s}", p->id, row, col, pressed ? "true" : "false");
     ctl_notify(c, p->client, ev);
@@ -93,7 +93,7 @@ int ctl_screen_handle(ctl_t *c, int ci, const char *op, const char *s, size_t n,
         if (pid != CTL_SCREEN_CONTROL && (pid < 3 || p->client != ci)) FAIL("forbidden");
         c->screen.current = (int)pid;
     } else {
-        if (pid == CTL_SCREEN_CONTROL) FAIL("reserved");
+        if (pid == CTL_SCREEN_CONTROL || pid == CTL_SCREEN_SYSTEM) FAIL("reserved");
         if ((pid >= 3 && p->client != ci) || (pid < 3 && now >= c->screen.grant_until)) FAIL("forbidden");
         if (!strcmp(op, "screen.page.delete")) {
             if (pid < 3) FAIL("forbidden"); /* builtin pages never removed, even with a grant */
@@ -102,19 +102,21 @@ int ctl_screen_handle(ctl_t *c, int ci, const char *op, const char *s, size_t n,
             long row, col; char action[481];
             if (ctl_json_int(s, n, "row", &row) || ctl_json_int(s, n, "col", &col) || row < 0 || row > 3 || col < 0 || col > 4 ||
                 ctl_json_str(s, n, "action", action, sizeof action) <= 0 || !ctl_text_ok(action, 120)) FAIL("bad_args");
-            if (row == CTL_SCREEN_ESTOP_ROW && col == CTL_SCREEN_ESTOP_COL) FAIL("reserved");
+            if (row == 3 && (col == 4 || (pid >= 3 && col == 0))) FAIL("reserved");
             int key = (int)(row * 5 + col); p->bound |= 1u << key; strcpy(p->action[key], action);
         } else {
             long fb;
             if (ctl_json_int(s, n, "fb", &fb) || fb < 1 || fb > 21) FAIL("bad_args");
-            if (fb == CTL_SCREEN_ESTOP_ROW * 5 + CTL_SCREEN_ESTOP_COL + 1) FAIL("reserved");
+            if (fb == 20 || (pid >= 3 && fb == 16)) FAIL("reserved");
             if (!strcmp(op, "screen.draw")) {
                 long x, y, w, h, bytes; char fmt[8]; int fw = fb == 21 ? 428 : 128, fh = fb == 21 ? 142 : 128;
                 if (ctl_json_int(s, n, "x", &x) || ctl_json_int(s, n, "y", &y) || ctl_json_int(s, n, "w", &w) || ctl_json_int(s, n, "h", &h) ||
                     x < 0 || y < 0 || w < 1 || h < 1 || w > fw || h > fh || x > fw - w || y > fh - h ||
                     ctl_json_str(s, n, "fmt", fmt, sizeof fmt) < 0 || (strcmp(fmt, "rgb565") && strcmp(fmt, "jpeg")) ||
                     ctl_json_int(s, n, "bytes", &bytes) || bytes < 1 || bytes > CTL_SCREEN_BYTES_MAX || (!strcmp(fmt, "rgb565") && bytes != w * h * 2)) FAIL("bad_args");
+                if (fb == 21 && y + h > 112) FAIL("reserved");
             } else {
+                /* fb21 text addresses the body viewport only; pixels remain unimplemented. */
                 long size, fg, bg; char text[481];
                 if (ctl_json_str(s, n, "text", text, sizeof text) < 0 || !ctl_text_ok(text, 120) || ctl_json_int(s, n, "size", &size) || size < 1 || size > 128 ||
                     ctl_json_int(s, n, "fg", &fg) || fg < 0 || fg > 65535 || ctl_json_int(s, n, "bg", &bg) || bg < 0 || bg > 65535) FAIL("bad_args");

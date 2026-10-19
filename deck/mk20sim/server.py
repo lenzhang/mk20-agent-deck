@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from .cases import load_cases, run_case, save_draft
-from .harness import KEY_NAMES, Sim
+from .harness import KEY_NAMES, Sim, CSim
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PHOTO = os.path.normpath(os.path.join(HERE, "..", "..", "sim", "assets", "photos", "mk20-b-top-unlit.jpg"))
@@ -190,10 +190,14 @@ class Runner:
                 with self.lock:
                     self.current, self.nsteps, self.step = c.id, len(c.steps), 0
                 from .harness import Latency
-                sim_c = Sim(latency=Latency.from_dict(c.latency))
+                sim_c = (CSim if c.backend == "c" else Sim)(latency=Latency.from_dict(c.latency))
                 with self.lock:
                     self.sim = sim_c
-                r = run_case(c, observer=observer, on_step=on_step, sim=sim_c).to_json()
+                try:
+                    r = run_case(c, observer=observer, on_step=on_step, sim=sim_c).to_json()
+                finally:
+                    if isinstance(sim_c, CSim):
+                        sim_c.close()
                 if r["error"] and "Stopped" in r["error"]:
                     break
                 with self.lock:

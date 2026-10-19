@@ -307,9 +307,9 @@ static void test_ctl_screen(void)
     screen_text(&c, 0, 20, "reserved");
     screen_req(&c, 0, 0, "{\"op\":\"screen.page.show\",\"page_id\":0}", "forbidden");
     screen_req(&c, 0, 0, "{\"op\":\"screen.page.show\",\"page_id\":4}", "forbidden");
-    screen_req(&c, 0, 0, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":1,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "forbidden");
+    screen_req(&c, 0, 0, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":1,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "reserved");
     ctl_screen_grant(&c, 1000, 100);
-    screen_req(&c, 0, 1099, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":1,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "rendered\":false");
+    screen_req(&c, 0, 1099, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":1,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "reserved");
     screen_req(&c, 0, 1100, "{\"op\":\"screen.text\",\"page_id\":2,\"fb\":1,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "forbidden");
     CHECK(!c.screen.grant_until); /* request processing ticks expiration */
     const char *bad[] = {
@@ -326,7 +326,7 @@ static void test_ctl_screen(void)
     for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
         snprintf(q, sizeof q, "{\"op\":\"screen.draw\",\"page_id\":3,\"fb\":1,%s}", bad[i]); screen_req(&c, 0, 2000, q, "bad_args");
     }
-    screen_req(&c, 0, 2000, "{\"op\":\"screen.draw\",\"page_id\":3,\"fb\":21,\"x\":427,\"y\":141,\"w\":1,\"h\":1,\"fmt\":\"jpeg\",\"bytes\":65536}", "rendered\":false");
+    screen_req(&c, 0, 2000, "{\"op\":\"screen.draw\",\"page_id\":3,\"fb\":21,\"x\":427,\"y\":111,\"w\":1,\"h\":1,\"fmt\":\"jpeg\",\"bytes\":65536}", "rendered\":false");
     screen_req(&c, 0, 2000, "{\"op\":\"screen.text\",\"page_id\":3,\"fb\":1,\"text\":\"x\",\"size\":129,\"fg\":0,\"bg\":0}", "bad_args");
     screen_req(&c, 0, 2000, "{\"op\":\"screen.text\",\"page_id\":3,\"fb\":1,\"text\":\"x\",\"size\":1,\"fg\":65536,\"bg\":0}", "bad_args");
     for (int i = 0; i < 10; i++) screen_text(&c, 3000 + i, 1, "rendered\":false");
@@ -410,7 +410,7 @@ static void test_ctl_edges(void)
     CHECK(ctl_handle_line(&c, 0, layout_req, strlen(layout_req), 0, r, CTL_LINE_MAX) > 0);
     ctl_screen_grant(&c, 1000, 0);
     screen_req(&c, 0, 0, "{\"op\":\"screen.draw\",\"page_id\":0,\"fb\":20,\"x\":0,\"y\":0,\"w\":1,\"h\":1,\"fmt\":\"rgb565\",\"bytes\":2}", "reserved");
-    screen_req(&c, 0, 0, "{\"op\":\"screen.page.delete\",\"page_id\":0}", "forbidden");
+    screen_req(&c, 0, 0, "{\"op\":\"screen.page.delete\",\"page_id\":0}", "reserved");
     screen_req(&c, 0, 0, "{\"op\":\"screen.page.create\",\"name\":\"\"}", "bad_args");
     screen_req(&c, 0, 0, "{\"op\":\"screen.page.show\",\"page_id\":1}", "\"ok\":true");
     ctl_key_event(&c, 3, 4, 0, 0); CHECK(!c.estopped);
@@ -637,7 +637,7 @@ static void test_ctl_dispatch_deadlines(void)
     CHECK(t.wait_reads == 2 && !c.screen.grant_until && c.confirm.pending && c.confirm.cid == 2 && c.confirm.deadline_ms == 2020);
     dispatch_recv(sv[1], r, sizeof r);
     CHECK(has(r, "\"cid\":1,\"ok\":false,\"reason\":\"timeout\""));
-    CHECK(has(r, "\"ok\":false,\"id\":9,\"err\":\"forbidden\"") && has(r, "\"ok\":true,\"id\":10"));
+    CHECK(has(r, "\"ok\":false,\"id\":9,\"err\":\"reserved\"") && has(r, "\"ok\":true,\"id\":10"));
     ctl_close(&c); close(sv[1]); close(p[0]); close(p[1]);
 }
 
@@ -765,8 +765,8 @@ static void test_ctl_long_uptime(void)
     for (int i = 0; i < 10; i++) screen_text(&c, base, 1, "rendered\":false");
     screen_text(&c, base + 999, 1, "rate_limited"); screen_text(&c, base + 1000, 1, "rendered\":false");
     ctl_screen_grant(&c, 1000, base); CHECK(c.screen.grant_until == base + 1000);
-    screen_req(&c, 0, base + 999, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":2,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "rendered\":false");
-    screen_req(&c, 0, base + 1000, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":2,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "forbidden");
+    screen_req(&c, 0, base + 999, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":2,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "reserved");
+    screen_req(&c, 0, base + 1000, "{\"op\":\"screen.text\",\"page_id\":0,\"fb\":2,\"text\":\"x\",\"size\":1,\"fg\":0,\"bg\":0}", "reserved");
     CHECK(!c.screen.grant_until);
     for (int fb = 1; fb <= 3; fb++) for (int i = 0; i < 10; i++) screen_text(&c, base + 5000, fb, "rendered\":false");
     screen_text(&c, base + 5999, 4, "rate_limited"); screen_text(&c, base + 6000, 4, "rendered\":false");

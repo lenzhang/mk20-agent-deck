@@ -1,7 +1,7 @@
 /* mk20-kbd: KD replacement daemon (option D).
  *   --run       daemon: GD32 knob init (allow-listed 0x05 slots 100..105 only), host link
  *               (A1A55A5E subset: getInfo, keyStateChanged, cmd100 JPEG, setBacklight, cmd200 tile),
- *               direct dirty-panel fb writes. --no-host = local mode with on-panel key feedback.
+ *               composited dirty-panel fb writes. HOME boots locally, including --no-host.
  *   --monitor   read /dev/ttyS1 RECEIVE-ONLY (O_RDONLY), log frames
  *   --pattern   write an id test pattern to <fbdir>/fb1..fb21 (needs KD stopped)
  *   --getinfo   print the getInfo JSON we answer with
@@ -13,6 +13,7 @@
 #include "kbd.h"
 #include "ctl.h"
 #include "screen.h"
+#include "onboard.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -91,6 +92,8 @@ static int open_host(const char *path)
     return fd;   /* stays O_NONBLOCK: replies are written with a bounded wait (kbd_host_send), never block the loop */
 }
 
+static void init_service(void *ctx) { kbd_t *k=ctx; kbd_service(k,mono_ms()); }
+
 struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop, *lock, *exit_file, *ctl; int ctl_allow, hid_scroll, k2_estop, k2_release, no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
 
 static int run(const struct run_opts *o)
@@ -111,16 +114,25 @@ static int run(const struct run_opts *o)
     sa.sa_handler = on_usr1; sigaction(SIGUSR1, &sa, NULL);
     kbd_t k;
     if (kbd_init(&k, o->fb, o->bl, KBD_VERSION)) { fprintf(stderr, "mk20-kbd: init failed\n"); return 1; }
-    k.k2_estop = o->k2_estop; k2_estop_init(&k.k2, o->k2_release);
+    if (onboard_enable(&k)) { fprintf(stderr,"mk20-kbd: on-board UI init failed\n"); kbd_free(&k); return 1; }
+    k.k2_estop = 1; k2_estop_init(&k.k2, o->k2_release);
     k.ptt_col = o->ptt_col; k.ptt_row = o->ptt_row;
     hid_init(&g_hid, o->hid, o->hid_stop);
     hid_set_scroll(&g_hid, o->hid_scroll);   /* MUST match gadget.sh MK20_HID_SCROLL */
     if (!o->no_hid) { k.hid = &g_hid; kbd_service(&k, mono_ms()); }   /* open + startup all-keys-up */
-    k.local_ui = o->no_host;
-    kbd_draw_idle(&k);
-    if (screen_start_writers(&k.scr)) {   /* fall back to synchronous flushes */
-        fprintf(stderr, "mk20-kbd: writer threads failed, synchronous panel writes\n");
-        if (kbd_flush(&k) < 0) fprintf(stderr, "mk20-kbd: initial panel write failed (errors=%u)\n", k.scr.write_errors);
+    static ctl_t ctl;
+    if (k.onboard || o->k2_estop || (o->ctl && o->ctl[0])) {   /* agent A1, opt-in: control socket or K2 safety */
+        ctl_init(&ctl, k.hid);
+        ctl.safety_tick = kbd_ctl_safety; ctl.safety_ctx = &k;
+        if (k.onboard || o->k2_estop) k.ctl = &ctl;
+        if (!o->ctl || !o->ctl[0]) { /* K2 safety only, no listening socket */ }
+        else if (ctl_listen(&ctl, o->ctl)) fprintf(stderr, "mk20-kbd: control socket %s failed: %s (agent input disabled)\n", o->ctl, strerror(errno));
+        else { k.ctl = &ctl; if (o->ctl_allow) ctl_set_allowed(&ctl, 1); fprintf(stderr, "mk20-kbd: control socket %s%s\n", o->ctl, o->ctl_allow ? " (dev: allowed at start)" : ""); }
+    }
+    kbd_service(&k,mono_ms());
+    if (screen_start_writers(&k.scr)) {
+        fprintf(stderr, "mk20-kbd: writer threads failed; refusing blocking UI fallback\n");
+        kbd_free(&k); return 1;
     }
 
     /* kill file: the fixed path, or an extra one from MK20_KBD_NO_WRITE_FILE (tests, TF rescue);
@@ -141,23 +153,14 @@ static int run(const struct run_opts *o)
                 o->no_write ? "--no-gd32-write" : "kill file");
     } else {
         gd32_knob_opts ko = {o->timeout_ms, 3};
-        gd32_knob_init(gfd, &gp, &ko, &k.knob, kbd_gd32_cb, &k);
+        gd32_knob_init_service(gfd, &gp, &ko, &k.knob, kbd_gd32_cb, &k, init_service);
         fprintf(stderr, "mk20-kbd: knob init %s (%d/6 slots, timeouts=%d tx_errors=%d)\n",
                 gd32_knob_state_name(k.knob.state), k.knob.ok_count, k.knob.timeouts, k.knob.tx_errors);
-    }
-    static ctl_t ctl;
-    if (o->k2_estop || (o->ctl && o->ctl[0])) {   /* agent A1, opt-in: control socket or K2 safety */
-        ctl_init(&ctl, k.hid);
-        ctl.safety_tick = kbd_ctl_safety; ctl.safety_ctx = &k;
-        if (o->k2_estop) k.ctl = &ctl;
-        if (!o->ctl || !o->ctl[0]) { /* K2 safety only, no listening socket */ }
-        else if (ctl_listen(&ctl, o->ctl)) fprintf(stderr, "mk20-kbd: control socket %s failed: %s (agent input disabled)\n", o->ctl, strerror(errno));
-        else { k.ctl = &ctl; if (o->ctl_allow) ctl_set_allowed(&ctl, 1); fprintf(stderr, "mk20-kbd: control socket %s%s\n", o->ctl, o->ctl_allow ? " (dev: allowed at start)" : ""); }
     }
     if (o->status) kbd_write_status(&k, o->status);
 
     int64_t next_status = mono_ms() + 1000;
-    const int safety = o->k2_estop || (o->ctl && o->ctl[0]);
+    const int safety = 1;
     int host_work = 0;
     uint8_t buf[16384];
     while (!g_stop) {
@@ -170,12 +173,14 @@ static int run(const struct run_opts *o)
         kbd_service(&k, mono_ms());
         now = mono_ms();
         struct pollfd pf[3 + 1 + CTL_MAX_CLIENTS] = {{gfd, POLLIN, 0}, {k.host_fd, POLLIN, 0}, {k.hid ? k.hid->fd : -1, POLLOUT, 0}};
+        if (k.host_out_len > k.host_out_off) pf[1].events |= POLLOUT;
         int nctl = k.ctl ? ctl_pollfds(k.ctl, pf + 3, 1 + CTL_MAX_CLIENTS) : 0;
         if (!(k.hid && hid_wants_pollout(k.hid))) pf[2].fd = -1;
         /* 100 ms tick while /dev/hidg0 is open: a stop file must close it well inside gadget.sh's window */
         int to = (k.hid && k.hid->fd >= 0) ? 100 : 250;
         if (k.ctl) to = ctl_timeout_ms(k.ctl, now, to);
         if (k.k2_estop) to = k2_estop_timeout(&k.k2, now, to);
+        to = onboard_timeout(&k,now,to);
         if (host_work) to = 0;   /* one buffered host frame per safety/control poll */
         int r = poll(pf, (nfds_t)(3 + nctl), to);
         if (r < 0 && errno != EINTR) { perror("poll"); break; }
@@ -188,14 +193,15 @@ static int run(const struct run_opts *o)
         /* Physical safety and control requests precede host work, including buffered host frames. */
         if (r > 0 && nctl) ctl_on_poll(k.ctl, pf + 3, nctl);
         if (r > 0 && pf[2].fd >= 0 && (pf[2].revents & (POLLOUT | POLLERR))) kbd_service(&k, mono_ms());
+        if (r > 0 && (pf[1].revents & POLLOUT)) kbd_host_drain(&k);
         if (r > 0 && k.host_fd >= 0 && pf[1].fd >= 0 && (pf[1].revents & (POLLIN | POLLERR | POLLHUP))) {
             ssize_t n = read(k.host_fd, buf, sizeof buf);
             if (n > 0) {
-                if (safety) { host_push(&k.hp, buf, (size_t)n); host_work = 1; }
+                if (safety) { kbd_host_push(&k, buf, (size_t)n); host_work = 1; }
                 else kbd_host_feed(&k, buf, (size_t)n);
             }
             else if (n == 0 || (errno != EINTR && errno != EAGAIN)) {   /* pty master gone (bridge restart): EIO */
-                close(k.host_fd); k.host_fd = -1; next_host_try = mono_ms() + 500;
+                close(k.host_fd); k.host_fd = -1; k.host_out_len = k.host_out_off = 0; onboard_loss(&k); next_host_try = mono_ms() + 500;
                 fprintf(stderr, "mk20-kbd: host link closed, retrying\n");
             }
         }

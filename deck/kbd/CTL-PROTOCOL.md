@@ -1,7 +1,7 @@
 # mk20-kbd local control protocol (v1)
 
-Opt in with `mk20-kbd --run --ctl /run/mk20/kbd.sock`. No socket, new HID report format,
-or K2 safety behavior is enabled by default. mk20-kbd remains the sole HID writer.
+Opt in with `mk20-kbd --run --ctl /run/mk20/kbd.sock`. The socket and scroll report format remain opt-in. U2 replacement `--run` boots
+on-board HOME with allowed=0 and enables fb20/K2 safety locally by default. mk20-kbd remains the sole HID writer.
 mk20d creates `/run/mk20`; for manual runs, create the socket directory first.
 
 ## Transport
@@ -60,18 +60,19 @@ already zero but reports were queued or last delivered buttons were down. E-stop
 50 ms write budget, latches stopped, and sets allowed=0. It cancels confirmation,
 clears the screen grant/binds, and returns to the system page. Only a keyboard-side
 explicit allow clears the latch; reconnecting or acquiring cannot clear it.
-With `--ctl` or `--k2-estop`, physical safety is processed before host forwarding.
-Host writes never wait for ttyGS0: backpressure drops the unsent frame/remainder,
-counted in `kbd.status` as `host_tx_errors` and `host_tx_timeouts`. Host framing
-resynchronizes at the next magic header. The loop polls control and safety deadlines
-between host frames and checks fresh deadlines before servicing queued HID output,
-including after poll and host decode/render. Every socket request gets a fresh monotonic
-timestamp and both the K2 hold tick and lease/confirmation/grant tick before validation,
-including concatenated requests in one read and requests from different clients. Safety
-is checked again after dispatch (including bounded all-up waits); if a safety tick itself
-waits across a deadline, time is refreshed and safety rechecked before validation.
-The no-safety-flags host path retains
-its existing 200 ms timeout. With writable HID, stop/preemption must release within 100 ms.
+U2 replacement `--run` processes physical safety before host forwarding, including
+without a control socket. Host writes never wait for ttyGS0: a bounded 16 KiB buffer
+retains partial output, with space reserved for 64 empty cmd100 acks. Overflow drops
+ordinary replies, counted as host_tx_errors; EAGAIN is counted as host_tx_timeouts.
+Ack means handled, not displayed. The loop checks fresh safety deadlines between
+host frames, after poll, before queued HID, and after each render slice. JPEG decode
+runs in a worker and cannot block the control poll loop. Existing knob initialization
+services safety while waiting for echoes, without changing any outbound GD32 bytes.
+Every socket request retains its fresh pre/post-dispatch deadline checks, including
+concatenated requests, multiple clients, and bounded all-up waits. The legacy
+non-compositor C test path retains its 200 ms host timeout; it is not the shipped
+`--run` default. See UI.md for host handshake, liveness and route-generation rules.
+With writable HID, stop/preemption must release within 100 ms.
 Events: `{"ev":"lease_revoked","reason":"expired"}` (holder only; other reasons:
 `released`, `human`, `disabled`, `client_gone`, `estop`) and
 `{"ev":"estop","reason":"socket"}` (broadcast; other sources `page_key`, `k2_hold`, `k2_triple`).
@@ -101,7 +102,8 @@ Status `confirm`: `pending`/`shown` booleans, `cid`, `deadline_ms` (monotonic), 
 `input:"hid"|"vnc"`, `summary` (0..120 Unicode characters), integer `progress` 0..100.
 Needs allowed (therefore also no latched e-stop), no lease. Errors `disabled`, `stopped`,
 `bad_args`. Cached `ui` is returned by status; default idle/hid/empty/0. Changed values
-set a dirty bit consumed/cleared by keyboard-only `ctl_ui_dirty(c)`. No rendering yet.
+set a dirty bit consumed/cleared by keyboard-only `ctl_ui_dirty(c)`. U2 renders the
+L5 scaffold; pause/voice protocol extensions remain U4/U6.
 
 ## Screens (D8 rule engine; A7 renders)
 
@@ -134,14 +136,22 @@ cannot carry a 64 KiB image. Text/draw validation and rate accounting succeed wi
 rendering or queueing. Invalid fields/geometry/fmt/size return `bad_args`, missing page
 `not_found`, other-client pages `forbidden`.
 
-The entire control page and the fixed e-stop key (row 3,col 4 / fb20) are reserved.
-Draw/text/bind on reserved targets, or deleting the control page, returns `reserved`,
-even with a grant. Pressing that key on a control/agent page invokes e-stop. A7 must
-render its fixed visual. System/user writes/binds require keyboard-only
-`ctl_screen_grant(c, ttl_ms, now)` (1..120000 ms); no socket grant operation. Grants expire
-at the exact deadline and clear on disable/e-stop/restart. Agent pages survive disable/
-e-stop but all binds are removed and current page becomes system. Builtin page show/
-delete restrictions still apply during a grant.
+The entire system/control pages (0/1), fixed e-stop face/bind (row3,col4 / fb20)
+on all pages, and PTT face/bind (row3,col0 / fb16) on agent pages are reserved.
+Draw/text/bind on reserved targets returns `reserved`, even with a temporary grant.
+fb21 draw rectangles intersecting y112..141 are reserved. fb21 text implicitly
+addresses only the y0..111 body viewport; future rendering must clip there. Permitted
+text/draw validation currently returns rendered:false without pixel mutation. Pressing fb20 invokes e-stop on every page. System/control visuals and the
+footer are composed locally; agent `screen.draw`/`screen.text` still return
+`rendered:false` and never supply safety visuals.
+
+User-page (2) writes/binds require keyboard-only `ctl_screen_grant(c, ttl_ms, now)`
+(1..120000 ms); no socket grant operation. Grants cannot override HOME/LS/L5 or the
+reserved faces/footer. Grants expire at the exact deadline and clear on disable/
+e-stop/restart. Agent pages survive disable/e-stop but all binds are removed and
+current page becomes system. Builtin show/delete restrictions still apply during a
+grant. `screen.layout` numbering/array fields are unchanged: UI routes are distinct
+from ctl page ids (HOME/LS/offline=0, L5=1, host L1/L4=2, agent>=3).
 
 Accepted draw and text share a sliding 1000 ms window: at most 10 writes per framebuffer
 and 30 globally across clients/pages. Entries exactly 1000 ms old expire. Rejected writes
@@ -154,7 +164,9 @@ system/user/control pages and inactive-page bindings emit no key events.
 
 ## Flags, release switches, and keyboard-only work
 
-`--ctl PATH`, development-only `--ctl-allow`, `--hid-scroll`, `--k2-estop`, `--k2-release` are opt-in.
+`--ctl PATH`, development-only `--ctl-allow`, `--hid-scroll`, and `--k2-release` are opt-in.
+U2 makes local safety intrinsic to replacement --run; `--k2-estop` remains accepted
+for compatibility. This does not change FEATURE_KBD selection or stock-KD coexistence.
 Release config switches `FEATURE_AGENT_CTL`, `FEATURE_HID_SCROLL`, `FEATURE_K2_ESTOP`, `FEATURE_K2_RELEASE`
 default to 0; 0/1 environment overrides `MK20_AGENT_CTL`, `MK20_HID_SCROLL`, `MK20_K2_ESTOP`, `MK20_K2_RELEASE`
 apply after config. `FEATURE_KBD`/`MK20_KBD` still select the replacement daemon.
@@ -167,14 +179,14 @@ these values even if mk20.conf changes after boot. Default descriptor
 bytes and launch arguments are unchanged. Reconfigure the gadget and daemon together
 when changing the scroll switch.
 
-K2 slot 103 only, with `--k2-estop`: `--k2-release` means firmware is known to report
+K2 slot 103 only in replacement --run: `--k2-release` means firmware is known to report
 releases, so the first held press >=1000 ms triggers `k2_hold` from the poll timer
 while still down. Without `--k2-release`, start in press-only mode until the first
 observed release; three presses in a sliding <=1500 ms interval trigger `k2_triple`
 instead. Initial hold on unmeasured firmware cannot be inferred from a single press.
-The release-capability flag alone does not enable K2 e-stop. Rotation slots
+The release-capability flag selects hold detection; K2 safety is intrinsic to U2. Rotation slots
 104/105 never contribute. The pure state machine never writes to GD32.
 
 Allow/disallow, confirm shown/key, screen grant and rendering are keyboard-side only.
-A7 still supplies the allow/confirm UI and pixel renderer; there is no socket allow,
+U2 supplies physical allow/confirm presentation; U4 adds full pause/voice behavior; there is no socket allow,
 grant or confirm-result injection. No `hid.health` event is implemented yet; use status.

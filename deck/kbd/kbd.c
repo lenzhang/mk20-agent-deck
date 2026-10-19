@@ -1,6 +1,7 @@
 #include "kbd.h"
 #include "jpeg.h"
 #include "ctl.h"
+#include "onboard.h"
 #include <errno.h>
 #include <poll.h>
 #include <time.h>
@@ -10,27 +11,36 @@
 #include <string.h>
 #include <unistd.h>
 
+int64_t kbd_now(kbd_t *k)
+{
+    if (k->clock_ms) return k->clock_ms(k->clock_ctx);
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
 int kbd_init(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version)
 {
     memset(k, 0, sizeof *k);
     k->host_fd = -1; k->backlight = -1; k->ptt_col = 0; k->ptt_row = 3; k->version = version ? version : "mk20-kbd";
     snprintf(k->bl_dir, sizeof k->bl_dir, "%s", bl_dir ? bl_dir : "");
     if (screen_init(&k->scr, fbdir)) return -1;
-    if (host_parser_init(&k->hp, 2u << 20)) return -1;   /* full-canvas JPEG is << 1 MiB */
+    if (host_parser_init(&k->hp, (1u << 20) + HOST_HDR + 4)) return -1;   /* full-canvas JPEG is << 1 MiB */
     k->canvas = calloc((size_t)CANVAS_W * CANVAS_H, 2);
     return k->canvas ? 0 : -1;
 }
 
 void kbd_free(kbd_t *k)
 {
+    onboard_free(k);
     screen_free(&k->scr); host_parser_free(&k->hp); free(k->canvas); k->canvas = NULL;
 }
 
 void kbd_safety_tick(kbd_t *k, int64_t now)
 {
-    if (!k->ctl) return;
+    if (!k->ctl) { onboard_tick(k,now); return; }
     if (k->k2_estop) { const char *reason = k2_estop_tick(&k->k2, now); if (reason) ctl_estop(k->ctl, reason, now); }
     ctl_tick(k->ctl, now);
+    onboard_tick(k,now);
 }
 
 void kbd_ctl_safety(void *ctx, int64_t now) { kbd_safety_tick((kbd_t *)ctx, now); }
@@ -39,11 +49,41 @@ void kbd_service(kbd_t *k, int64_t now)
 {
     kbd_safety_tick(k, now);
     if (k->hid) hid_service(k->hid, now);
+    if (k->onboard) kbd_host_drain(k);
+    onboard_service(k,now);
+    if (k->onboard) kbd_safety_tick(k,kbd_now(k));
+}
+
+void kbd_host_drain(kbd_t *k)
+{
+    if (k->host_fd < 0 || k->host_out_off == k->host_out_len) return;
+    ssize_t n = write(k->host_fd,k->host_out+k->host_out_off,k->host_out_len-k->host_out_off);
+    if (n > 0) {
+        k->host_out_off += (size_t)n;
+        if (k->host_out_off == k->host_out_len) k->host_out_len = k->host_out_off = 0;
+    } else if (n < 0 && errno != EINTR) {
+        k->st.host_tx_errors++;
+        if (errno == EAGAIN) k->st.host_tx_timeouts++;
+    }
 }
 
 int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
 {
     if (k->host_fd < 0) return -1;
+    if (k->onboard) {
+        kbd_host_drain(k);
+        size_t len = k->host_out_len-k->host_out_off;
+        /* Keep room for 64 empty JPEG acks even during a getInfo flood.
+         * Compliant JPEG hosts are stop-and-wait (one outstanding frame). */
+        size_t limit = sizeof k->host_out - (cmd == HOST_CMD_JPG ? 0 : 64*(HOST_HDR+4));
+        if (len+n+HOST_HDR+4 > limit) { k->st.host_tx_errors++; return -1; }
+        memmove(k->host_out,k->host_out+k->host_out_off,len);
+        k->host_out_off=0; k->host_out_len=len;
+        int count=host_encode(id,cmd,pl,n,k->host_out+len,sizeof k->host_out-len);
+        if (count < 0) return -1;
+        k->host_out_len += (size_t)count; k->st.host_tx++;
+        kbd_host_drain(k); return 0;
+    }
     size_t cap = n + HOST_HDR + 4;
     uint8_t stackbuf[4096], *out = cap <= sizeof stackbuf ? stackbuf : malloc(cap);
     if (!out) return -1;
@@ -58,7 +98,7 @@ int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
         if (w > 0) { off += (int)w; continue; }
         if (w < 0 && errno == EINTR) continue;
         if (w < 0 && errno == EAGAIN) {
-            if (k->ctl || k->k2_estop) { rc = -1; k->st.host_tx_timeouts++; k->host_tx_stuck = 1; break; }
+            if (k->onboard || k->ctl || k->k2_estop) { rc = -1; k->st.host_tx_timeouts++; k->host_tx_stuck = 1; break; }
             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
             int64_t now = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
             if (!deadline) deadline = now + (k->host_tx_stuck ? 0 : KBD_HOST_TX_MS);   /* stuck: fail fast */
@@ -121,12 +161,22 @@ void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len)
     else if (ev.row > 3 || ev.col > 4) { k->st.other_frames++; return; }
     else k->st.key_events++;
     if (ev.keycode) k->st.keycode_nonzero++;   /* GD32 already sent HID itself; still report the state */
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); int64_t now = (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+    struct timespec t; int64_t now = kbd_now(k);
     kbd_safety_tick(k, now);
     /* agent A1: a physical key press takes input back from the agent (lease revoked + all-up) BEFORE the PTT edge */
     if (k->ctl && ev.knob == 2 && k->k2_estop) {
         const char *reason = k2_estop_event(&k->k2, ev.row, ev.pressed, now);
         if (reason) ctl_estop(k->ctl, reason, now);
+    }
+    if (k->onboard) {
+        if (k->ctl && !ev.knob && ev.pressed) ctl_human_input(k->ctl,now);
+        now=kbd_now(k); kbd_safety_tick(k,now);
+        int consumed = onboard_input(k,ev.row,ev.col,ev.knob,ev.pressed,ev.keycode,now);
+        if (!consumed && k->host_fd >= 0) {
+            char j[160]; int n = host_json_key_state(j,sizeof j,ev.col,ev.row,ev.pressed);
+            if (n > 0) kbd_host_send(k,KBD_EVENT_ID,HOST_CMD_JSON,j,(size_t)n);
+        }
+        return;
     }
     if (k->ctl && !ev.knob) {
         if (ev.pressed) ctl_human_input(k->ctl, now);
@@ -144,9 +194,20 @@ void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len)
     if (k->local_ui && !ev.knob) { kbd_draw_key(k, ev.row, ev.col, ev.pressed); kbd_flush(k); }
 }
 
+void kbd_host_push(kbd_t *k, const uint8_t *d, size_t n)
+{
+    if (n > k->hp.cap) { kbd_host_push(k,d,n/2); kbd_host_push(k,d+n/2,n-n/2); return; }
+    size_t old = n < k->host_rx_barrier ? n : k->host_rx_barrier;
+    host_push(&k->hp,d,n);
+    if (old) {
+        size_t barrier = k->hp.len - n + old; /* loop reads are bounded below parser capacity */
+        if (barrier > k->hp.barrier) k->hp.barrier = barrier;
+        k->host_rx_barrier -= old;
+    }
+}
 void kbd_host_feed(kbd_t *k, const uint8_t *d, size_t n)
 {
-    host_push(&k->hp, d, n);
+    kbd_host_push(k, d, n);
     host_frame f;
     while (host_next(&k->hp, &f)) kbd_on_host_frame(k, &f);
 }
@@ -251,6 +312,17 @@ static void on_json(kbd_t *k, const host_frame *f)
     char m[64];
     k->st.json_in++;
     if (kbd_json_str(s, n, "method", m, sizeof m) < 0) { k->st.json_bad++; return; }
+    if (k->onboard) {
+        if (f->data == k->hp.buf + HOST_HDR && k->hp.frame_stale && !strncmp(m,"ui.",3)) {
+            ack_json(k,f->id,m,0,"stale UI request"); return;
+        }
+        char result[256]; int handled = onboard_json(k,m,s,n,result,sizeof result);
+        if (handled) {
+            if (handled > 0) ack_json_result(k,f->id,m,result);
+            else ack_json(k,f->id,m,0,"unavailable or invalid UI request");
+            return;
+        }
+    }
     if (!strcmp(m, "getInfo")) {
         char j[8192]; int l = host_json_getinfo_ack(j, sizeof j, k->version);
         if (l > 0) kbd_host_send(k, f->id, HOST_CMD_JSON, j, (size_t)l);
@@ -278,7 +350,9 @@ static void on_tile(kbd_t *k, const host_frame *f)
     int ok = 0;
     if (f->size >= 9) {
         int fb = f->data[0], x = rd16(f->data + 1), y = rd16(f->data + 3), w = rd16(f->data + 5), h = rd16(f->data + 7);
-        if (w > 0 && h > 0 && (size_t)w * h * 2 + 9 == f->size) {
+        if (w > 0 && h > 0 && (size_t)w * h * 2 + 9 == f->size &&
+            fb >= 1 && fb <= PANEL_COUNT && x <= PANELS[fb-1].w-w && y <= PANELS[fb-1].h-h &&
+            (!k->onboard || onboard_tile_allowed(k,fb,y,h))) {
             uint16_t *px = malloc((size_t)w * h * 2);
             if (px) {
                 memcpy(px, f->data + 9, (size_t)w * h * 2);   /* alignment */
@@ -287,14 +361,27 @@ static void on_tile(kbd_t *k, const host_frame *f)
             }
         }
     }
-    if (ok) { k->st.tiles++; kbd_flush(k); }
+    if (ok) { k->st.tiles++; if (k->onboard) onboard_valid_frame(k,kbd_now(k)); else kbd_flush(k); }
     kbd_host_send(k, f->id, HOST_CMD_TILE565, ok ? "" : "E", ok ? 0 : 1);
 }
 
 void kbd_on_host_frame(kbd_t *k, const host_frame *f)
 {
+    if (k->onboard) {
+        kbd_safety_tick(k,kbd_now(k));
+        if (f->data == k->hp.buf + HOST_HDR && k->hp.frame_stale) {
+            if (f->cmd == HOST_CMD_JPG) kbd_host_send(k,f->id,f->cmd,"",0);
+            else if (f->cmd == HOST_CMD_TILE565) kbd_host_send(k,f->id,f->cmd,"E",1);
+            if (f->cmd == HOST_CMD_JPG || f->cmd == HOST_CMD_TILE565) return;
+        }
+    }
     switch (f->cmd) {
     case HOST_CMD_JPG: {
+        if (k->onboard) {
+            onboard_jpeg(k,f->data,f->size);
+            kbd_host_send(k,f->id,HOST_CMD_JPG,"",0);
+            break;
+        }
         int r = jpeg_decode565(f->data, f->size, k->canvas, CANVAS_W, CANVAS_H);
         if (r == 0) { k->st.jpg_ok++; screen_set_canvas565(&k->scr, k->canvas); kbd_flush(k); }
         else if (r == -2) k->st.jpg_size++;

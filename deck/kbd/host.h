@@ -1,7 +1,7 @@
 /* mk20-kbd host link (/dev/ttyGS0), KD-compatible subset.
  * Frame: A1 A5 5A 5E | id u32 | cmd u32 | size u32 | crc32(size LE) | payload | crc32(payload)
  * all little-endian; crc32 = zlib CRC-32. cmd 100 = whole-canvas JPEG, 101 = JSON.
- * New fast path (ours, not in KD): cmd 200 = raw RGB565 tile, 201 = widget/state JSON. */
+ * New fast path (ours, not in KD): cmd 200 = raw RGB565 tile, 201 = reserved/unimplemented widget/state JSON. */
 #ifndef MK20_HOST_H
 #define MK20_HOST_H
 #include <stddef.h>
@@ -18,7 +18,8 @@ uint32_t host_crc32(const uint8_t *p, size_t n);
 
 typedef struct {
     uint8_t *buf; size_t len, cap;
-    size_t consumed;
+    size_t consumed, barrier; /* bytes received before a route/loss boundary */
+    int frame_stale;
     uint32_t frames_ok, bad_size_crc, bad_data_crc, dropped_bytes, oversize;
 } host_parser;
 
