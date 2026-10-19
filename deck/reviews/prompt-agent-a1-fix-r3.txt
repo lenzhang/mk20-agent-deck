@@ -1,0 +1,23 @@
+# Task: fix round 3 for MK20 agent A1 (this worktree, under deck/)
+
+Read deck/reviews/agent-a1-codex-accept-r3.md (R3-F1, R3-G1, R3-D1). Same HARD RULES as ../mk20-a1-task.md (no device/
+serial/adb/network, no git commit/push, do not touch deck/firmware/release/bin/* or review files, no new GD32 writes,
+defaults OFF and unchanged without agent flags, C11 -Wall -Wextra -Werror Linux glibc + static armhf, scoped tests only).
+
+FIX:
+1. R3-F1 (major): socket request dispatch must re-check safety with a FRESH monotonic timestamp before EVERY request
+   (within one read batch and across clients) and after any bounded wait (e.g. act allup's up-to-50 ms HID write): run
+   ctl_tick (lease expiry, confirm timeout, grant expiry) AND the K2 hold tick before each request is validated, so no
+   act/renew can be validated against a stale time or flush HID after a deadline passed. Preferred: a pre-dispatch safety
+   callback (ctl_t gets a function pointer + ctx set by mk20_kbd/kbd so ctl.c stays testable), or dispatch one buffered
+   line per loop iteration with the existing kbd_service safety step in between (keep latency low; a line buffer per
+   client already exists). Clock source must be injectable for unit tests.
+2. R3-G1: Linux regression that goes through read_client/ctl_on_poll with concatenated requests ("act allup" + a key act)
+   in one write, agent key held, HID backpressure released after lease expiry -> no non-neutral report after expiry; same
+   for an elapsed K2 hold deadline; and dispatch across two clients. Use an injectable fake clock.
+3. R3-D1: update the A1 status in deck/AGENT-BUILD-PLAN.md (~line 326): full Linux suite green on b46c562 (24 sim, 3829x2
+   kbd checks ASan/TSan, e2e incl. stalled-host e-stop, 45 agent, 58 tools, 546 pytest); device validation and release
+   artifact prerequisites still pending. Note kimi r3 nits (gd32io.c 32-bit ms during knob init, K2 e2e window cannot
+   isolate the timeout bound) as follow-ups; fix the gd32io.c clock to int64_t if trivial.
+
+FINISH with a summary: per fix the files changed + tests added, what ran and results, what could not run on macOS.
