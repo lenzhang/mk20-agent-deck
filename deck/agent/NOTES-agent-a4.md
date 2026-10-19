@@ -44,6 +44,8 @@ Use a fresh response per request and `llm_response_free` on both success and fai
 
 `llm_error_name` returns only stable literals; `reason` is also a fixed literal. Peer error messages/types/codes and raw error bodies are discarded, including bodies that echo Authorization. No key/path contents or headers are included in diagnostics. No retries occur inside llm.c: A5 chooses delay/budget.
 
+retryable set = rate, server, timeout, network, dns, connect, io; unknown net class → network, not retryable
+
 | class | Meaning | retryable |
 |---|---|---|
 | ok | parsed text or validated calls | false |

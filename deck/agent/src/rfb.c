@@ -16,6 +16,7 @@
 #define TEXT_MAX (1024u * 1024u)
 #define SKIP_MAX (16u * 1024u * 1024u)
 struct rfb {
+    int (*service)(void *); void *service_ctx;
     int fd, timeout, zinit; int64_t deadline; const char *error;
     mem_t mem; rfb_info_t info; scale_t scale; z_stream z;
     unsigned char input[8192], tile[64 * 64 * 3], row[8192 * 4];
@@ -27,7 +28,8 @@ int64_t rfb_now_ms(void)
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 static int fail(rfb_t *c, const char *s) { c->error = s; return -1; }
-int rfb_check_deadline(rfb_t *c) { return rfb_now_ms() >= c->deadline ? fail(c, "timeout") : 0; }
+void rfb_set_service(rfb_t *c, int (*fn)(void *), void *ctx) { c->service = fn; c->service_ctx = ctx; }
+int rfb_check_deadline(rfb_t *c) { if (c->service && c->service(c->service_ctx)) return fail(c,"cancelled"); return rfb_now_ms() >= c->deadline ? fail(c, "timeout") : 0; }
 static unsigned u16(const unsigned char *p) { return (unsigned)p[0] * 256 + p[1]; }
 static uint32_t u32(const unsigned char *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static void p16(unsigned char *p, unsigned n) { p[0] = (unsigned char)(n >> 8); p[1] = (unsigned char)n; }
@@ -35,10 +37,11 @@ static void p32(unsigned char *p, uint32_t n) { for (int i = 3; i >= 0; i--) { p
 static int ready(rfb_t *c, short events)
 {
     for (;;) {
+        if (rfb_check_deadline(c)) return -1;
         int64_t left = c->deadline - rfb_now_ms(); if (left <= 0) return fail(c, "timeout");
-        struct pollfd p = {c->fd, events, 0}; int r = poll(&p, 1, (int)left);
+        struct pollfd p = {c->fd, events, 0}; int r = poll(&p, 1, c->service && left > 25 ? 25 : (int)left);
         if (r > 0) return 0;
-        if (!r) return fail(c, "timeout");
+        if (!r) continue;
         if (errno != EINTR) return fail(c, "io");
     }
 }

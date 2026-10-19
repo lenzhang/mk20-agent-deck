@@ -130,6 +130,7 @@ def test_image_request(llm_bins, certs, tmp_path):
     ({"status": 400}, None, "bad_request", False, "http_status"),
     ({"status": 404}, None, "bad_request", False, "http_status"),
     ({"status": 422}, None, "bad_request", False, "http_status"),
+    ({"status": 302}, None, "bad_response", False, "http_status"),
 ])
 def test_rejections(llm_bins, certs, tmp_path, step, tools, kind, retry, error):
     with model(certs, step) as server, proxy_for(server) as proxy:
@@ -253,3 +254,10 @@ def test_image_cap_never_connects(llm_bins, certs, tmp_path):
     with model(certs, {"content": "must not be reached"}) as server, proxy_for(server) as proxy:
         r = call(llm_bins, certs, tmp_path, proxy, options=["--image", path])
         assert r["class"] == "too_large" and not proxy.connects and server.connections == 0
+
+
+def test_malformed_tools_zero_connects(llm_bins, certs, tmp_path):
+    path = tmp_path / "broken-tools.json"; path.write_text("[{broken")
+    with model(certs, {"content": "unreachable"}) as server, proxy_for(server) as proxy:
+        r = call(llm_bins, certs, tmp_path, proxy, options=["--tools", path])
+        assert r["class"] == "config" and not proxy.connects and server.connections == 0

@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utime.h>
+#include <time.h>
 
 static unsigned checks, sockets;
 #define CHECK(x) do { checks++; if (!(x)) { fprintf(stderr, "line %d: %s\n", __LINE__, #x); abort(); } } while (0)
@@ -217,6 +218,27 @@ static int request_driver(char **argv)
     for (unsigned i = 0; i < attempt_count; i++) printf("%s%u", i ? "," : "", attempts[i]);
     puts("]}"); net_response_free(&r); netcfg_free(&c); return rc ? 1 : 0;
 }
+static int cancel_fd, cancel_started, cancel_calls;
+static int64_t cancel_start;
+static int64_t test_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (int64_t)t.tv_sec*1000+t.tv_nsec/1000000; }
+static int cancel_factory(int a,int b,int c) { (void)a;(void)b;(void)c;cancel_started=1;cancel_start=test_now();return dup(cancel_fd); }
+static int cancel_connect(int fd,const struct sockaddr *a,socklen_t n) { (void)fd;(void)a;(void)n;return 0; }
+static int safety_service(void *ctx) { (void)ctx;cancel_calls++;return cancel_started && test_now()-cancel_start>=40 ? -1 : 0; }
+static void cancellation(void)
+{
+    netcfg_t c; const char *s="{\"version\":1,\"profile\":\"mac_proxy\",\"routes\":{\"domestic\":\"proxy\",\"foreign\":\"proxy\"},\"proxy\":{\"url\":\"http://127.0.0.1:7890\"}}";
+    CHECK(!netcfg_parse(s,strlen(s),&c));
+    int cancelled_flag=1;
+    net_options_t o={.url="https://localhost/",.config=&c,.clock={.trust_clock=1},.cancelled=&cancelled_flag,.socket_fn=count_socket};
+#ifdef MK20_NET_TEST
+    o.connected_fd=-1;
+#endif
+    net_response_t r;CHECK(net_request(&o,&r));CHECK(!strcmp(r.class_name,"cancelled")&&sockets==0);net_response_free(&r);
+    cancelled_flag=0;int pair[2];CHECK(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));cancel_fd=pair[0];
+    o.socket_fn=cancel_factory;o.connect_fn=cancel_connect;o.service=safety_service;o.timeout_ms=5000;
+    int64_t start=test_now();CHECK(net_request(&o,&r));CHECK(!strcmp(r.class_name,"cancelled"));
+    CHECK(test_now()-start<500&&cancel_calls>=3);net_response_free(&r);close(pair[0]);close(pair[1]);netcfg_free(&c);
+}
 int main(int argc, char **argv)
 {
     if (argc == 5) return request_driver(argv);
@@ -227,6 +249,6 @@ int main(int argc, char **argv)
         CHECK(strstr(name, "GCM") || strstr(name, "CHACHA20-POLY1305")); suite_count++;
     }
     CHECK(suite_count == 9);
-    configs(); urls(); connect_replies(); http(); clock_keys(); config_files();
+    configs(); urls(); connect_replies(); http(); clock_keys(); config_files(); cancellation();
     printf("net/clock: %u checks passed, invalid-config socket calls: %u\n", checks, sockets); return 0;
 }

@@ -362,6 +362,7 @@
 - 验收：每个 provider 至少通过 8/10 定位基准；请求日志 grep 不到 key。
 
 ### A5 Agent loop + 安全闸 + 校准（box + [D][U]）
+- **A5 host 状态（2026-10-19，本 worktree）**：policy/loop/kbdc/calib、真实 RFB/LLM ports、--loop-test 与 sanitizer/socketpair 主机测试已实现；真实 Unix/TCP 监听验收受沙箱限制，kbd v1 的 VNC 租约/health 与 [D][U] 校准、检测、急停/任务实测待验收，详见 `agent/NOTES-agent-a5.md`、`reviews/agent-a5-codex-summary.md`。
 - `loop.c`、`policy.c`：状态机、预算、无进展检测、风险规则、永不做清单、确认流程、VNC 备用仲裁、锁屏检测、`calibrate`。
 - box e2e：fake_vnc + fake_model + 真 mk20-kbd（FIFO hidg0）跑完整任务；覆盖急停（各状态下）、确认拒绝/超时/早按、预算耗尽、
   HID 故障注入切到 VNC 再切回、锁屏拒绝 `type`。

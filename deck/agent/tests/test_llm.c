@@ -21,6 +21,18 @@ static llm_provider_t config(void)
 {
     llm_provider_t c; CHECK(!llm_provider_parse(provider, strlen(provider), &c)); return c;
 }
+static char *grow_path;
+static ssize_t growing_read(int fd, void *buf, size_t n)
+{
+    int writer = open(grow_path, O_WRONLY); CHECK(writer >= 0);
+    CHECK(!ftruncate(writer, LLM_PROVIDER_MAX + 1));
+    CHECK(lseek(writer,(off_t)strlen(provider),SEEK_SET) == (off_t)strlen(provider));
+    char spaces[1024]; memset(spaces,' ',sizeof spaces);
+    size_t left = LLM_PROVIDER_MAX + 1 - strlen(provider);
+    while (left) { size_t part = left < sizeof spaces ? left : sizeof spaces; CHECK(write(writer,spaces,part) == (ssize_t)part); left -= part; }
+    close(writer);
+    return read(fd, buf, n);
+}
 static void configs(void)
 {
     llm_provider_t c = config(); CHECK(c.max_tokens == 512 && c.timeout_ms == 60000 && !c.pixel_coords && c.vision && c.supports_tool_choice);
@@ -68,6 +80,8 @@ static void configs(void)
     char path[] = "/tmp/agent-a4-provider-XXXXXX"; int fd = mkstemp(path); CHECK(fd >= 0);
     CHECK(write(fd, provider, strlen(provider)) == (ssize_t)strlen(provider)); close(fd);
     CHECK(!llm_provider_load(path, &c));
+    grow_path = path;
+    CHECK(llm_provider_load_reader(path, &c, growing_read) && !c.valid);
     fd = open(path, O_WRONLY); CHECK(fd >= 0); CHECK(!ftruncate(fd, 0)); close(fd);
     CHECK(llm_provider_load(path, &c) && !c.valid);
     fd = open(path, O_WRONLY); CHECK(fd >= 0); CHECK(!ftruncate(fd, LLM_PROVIDER_MAX + 1)); close(fd);
@@ -88,6 +102,17 @@ static int decode(llm_provider_t *c, llm_request_t *q, const char *args, llm_res
 static void responses(void)
 {
     llm_provider_t c = config(); llm_request_t q = {.user = "go", .tools_json = tools, .image_w = 201, .image_h = 101}; llm_response_t r;
+    const char *bad_tools[] = {"{bad", "{}", "null"};
+    for (size_t i = 0; i < 3; i++) {
+        q.tools_json = bad_tools[i]; CHECK(decode(&c, &q, "{\"x\":0,\"y\":0}", &r));
+        CHECK(r.error == LLM_CONFIG && !strcmp(r.reason, "request")); llm_response_free(&r);
+    }
+    q.tools_json = tools;
+    const char *unknown[] = {NULL, "permanent_future", "NETWORK", ""};
+    for (size_t i = 0; i < 4; i++) {
+        net_response_t n = {.class_name = unknown[i]}; CHECK(llm_decode(&c, &q, &n, &r));
+        CHECK(r.error == LLM_NETWORK && !r.retryable); llm_response_free(&r);
+    }
     const struct { const char *args; int pixel; llm_error_t error; int x, y; } cases[] = {
         {"{\"x\":500,\"y\":1000}",0,LLM_OK,100,100}, {"{\"x\":-20,\"y\":1020}",0,LLM_OK,0,100},
         {"{\"x\":-21,\"y\":0}",0,LLM_COORD_RANGE,0,0}, {"{\"x\":1021,\"y\":0}",0,LLM_COORD_RANGE,0,0},

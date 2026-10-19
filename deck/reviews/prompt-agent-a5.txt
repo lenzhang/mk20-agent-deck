@@ -1,0 +1,74 @@
+# MK20 agent phase A5 — agent loop + safety gate + calibrate (host build only)
+Repo root = cwd. Work only under deck/agent/ (plus deck/reviews/agent-a5-* notes, the A5 status line in deck/AGENT-BUILD-PLAN.md,
+.gitignore). Read first: deck/AGENT-BUILD-PLAN.md (§0.1 decisions, §3.3 input/arbitration/lock screen/calibrate, §3.4 kbd.sock,
+§3.4b, §3.5, §3.6 loop + safety rules, "A5" section), deck/agent/NOTES-agent-a2.md, -a3.md, -a4.md, deck/reviews/agent-a4-kimi-r1.md,
+deck/kbd/CTL-PROTOCOL.md + deck/kbd/ctl.c/.h (READ ONLY), deck/kbd/tests/e2e_run.py (FIFO hidg0 harness), deck/agent/Makefile,
+src/llm.c/.h, src/oai.c/.h, src/rfb.h, src/agent_cli.c.
+
+HARD RULES: no git commit/push; no network (sandbox); no device/adb/serial; do NOT modify deck/kbd/**, firmware, kernel, vendor/,
+deck/mk20deck/** (agentcfg.py and settings are owned by another branch — if A5 needs a new config field, define it in an
+agent-side JSON file read by agent code with safe defaults and record the dependency in NOTES). C11 -Wall -Wextra -Werror, ASan/UBSan
+test builds like the existing Makefile; never print/log API keys, Authorization, key/vnc.pass contents; keep A2–A4 behaviour and
+tests green; no new warning suppressions.
+
+## Part 0 — Kimi A4 minors (do these first)
+1. llm.c llm_net_error: an unrecognized net class maps to LLM_NETWORK but retryable=0 (fail-closed). Whitelist known literals.
+2. Make dns/connect/io/network/timeout/rate/server retryable EXPLICITLY (table in code + NOTES-agent-a4.md error table note
+   "retryable set = rate, server, timeout, network, dns, connect, io; unknown net class → network, not retryable").
+3. llm_decode: if tools_json non-NULL and re-parse is NULL or not an array → fail(LLM_CONFIG,"request").
+4. Tests: (a) provider.json growing past 16 KiB between fstat and read (use a test hook/injectable read or a FIFO-free approach that is
+   deterministic); (b) pytest: malformed --tools file → class config, zero connects; (c) an unlisted HTTP status (302) over the TLS fake →
+   bad_response.
+
+## Part 1 — policy.c/.h (pure, fully unit-tested)
+- Action schema (one struct): click/double_click/move/drag(x1,y1,x2,y2)/scroll/type{text}/paste{text}/key{combo}/wait/done/ask_user,
+  plus model-reported risk ("low"|"high") and target description string. Validation: type ASCII only (non-ASCII → must use paste);
+  paste returns unsupported for now (§3.3); text ≤256 chars; key combo parsed into modifiers+key, unknown key name → reject.
+- Risk rules (§3.6), union of local rules and model risk: configurable dangerous-key blacklist (default list from §3.6), type content
+  with newline+terminal keywords or sudo/rm/curl|sh etc., target text matching 删除/发送/付款/购买/提交/确认支付/Delete/Send/Pay/Submit
+  (case-insensitive, UTF-8 safe), first action of a task, app switch (window title/app change) when enabled.
+- Never-do (reject, no confirm channel): password fields/typing into secure input, lock screen/login window, security/privacy settings,
+  Screen Sharing / mihomo / proxy settings (window-title blacklist, configurable). Lock screen detected → only HID allowed and every
+  type/paste rejected.
+- Budgets: max_steps default 30 (cap 100), wall 10 min, model calls 40, per-action exec timeout 2 s; no-progress = 3 consecutive
+  identical screenshot hashes → pause + ask user. Model retry: only llm retryable classes, exponential backoff, max 2 retries,
+  counted against model-call budget. Non-retryable → task error.
+- Config: agent-side /data/mk20/agent/policy.json (path overridable for tests), strict JSON, unknown fields ignored, missing → defaults,
+  values clamped to caps; invalid file → defaults + warning (never more permissive than defaults... i.e. a broken file must not
+  disable confirmations).
+
+## Part 2 — loop.c/.h state machine with injectable ports
+- States exactly: disabled (power-on default) → idle → observing → planning → acting ↔ awaiting_confirm → done | stopped | error.
+- Ports (vtable, so tests inject fakes): observe (frame via rfb capture → jpeg, hash, window title/lock hint), model (llm_chat), kbd
+  (kbd.sock client: lease.acquire/renew/release, act, ui.agent, confirm.request/confirm.result, events estop/hid.health), clock.
+- Implement a real kbd.sock client (kbdc.c) per CTL-PROTOCOL.md (line JSON ≤1024 B, renew before TTL, handle async events).
+- Loop: enabled only by kbd "allow" (no API can enable — no such entry point exists in agent code); per step: observe → model (current
+  screenshot only + text summary of history, bounded) → policy → (confirm if needed: confirm.request, accept only confirm.result ok;
+  cancel/timeout → reject and stop task with stopped/confirm_denied) → act via lease → record step.
+- E-stop in ANY state (event from kbd or local stop): cancel in-flight model request (net deadline/cancel flag), release nothing further,
+  state=stopped, no further act sent; re-enable only by explicit allow. Lease loss → stop.
+- HID/VNC arbitration (§3.3) as a pure sub-state machine: 2 consecutive HID failures → freeze → all-up → switch to VNC input (only
+  with an input=vnc lease); 3 consecutive healthy probes → switch back at idle point; never retry the same action on the other channel.
+  VNC input sending itself may be a stub port returning unsupported if rfb has no pointer/key event writer yet — say so in NOTES.
+- Log line per step to an injectable sink: step no, action type, coords, model id, latency, token usage; type text only length+hash;
+  run every log line through a redaction function (Authorization, sk-…, Bearer, secrets contents) — test with grep-style assertions.
+
+## Part 3 — calibrate
+- calib.c: given measured (commanded HID abs 0..32767 → observed screenshot pixel) pairs for 4 corners + center, least-squares affine
+  fit, residual check (accept if max error ≤2 logical px, §14.5-3), invert to map screenshot px → HID abs; persist
+  /data/mk20/agent/calib.json atomically (tmp O_EXCL 0600 → fsync → rename → fsync dir; path overridable); load fail-closed.
+  Cursor finding from frames may be a port (fake in tests); real cursor detection is device work [D].
+
+## Part 4 — CLI + e2e
+- mk20-agent --loop-test: runs one task with fake ports from a JSON script (for pytest), prints one JSON summary line.
+- Box/host e2e (pytest): fake model script + fake observe + the REAL deck/kbd mk20-kbd binary with FIFO hidg0 and its ctl socket if the
+  kbd e2e harness can be reused without modifying deck/kbd (build it via its Makefile into a temp dir). Cover: full harmless task to done;
+  e-stop in observing/planning/acting/awaiting_confirm; confirm reject / timeout / early press (kbd enforces ≥300 ms); budget exhaustion
+  (steps, model calls, wall via fake clock); no-progress pause; HID fault injection → VNC → back; lock screen rejects type; never-do
+  rejection; non-retryable model error → error; retryable → backoff then success. If unix-socket bind is denied in the sandbox, use
+  socketpair fallbacks AND keep the real-socket tests (they will run on Linux box) — do not xfail/skip-silence them; list them in NOTES.
+
+## Acceptance (codex first pass)
+make -C deck/agent test green (sanitized), pytest results recorded honestly, git diff --check clean. Write deck/agent/NOTES-agent-a5.md
+(scope, design, test counts, open items [D]/[U], dependency on onboard-ui agentcfg glm-coding provider if any) and
+deck/reviews/agent-a5-codex-summary.md (self-acceptance verdict PASS/FAIL with evidence). Update the A5 status line in the plan.

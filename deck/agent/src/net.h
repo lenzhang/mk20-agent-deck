@@ -17,6 +17,9 @@ typedef struct {
     const unsigned char *body;
     size_t body_len, body_cap;
     int timeout_ms;
+    /* Single-threaded cooperative safety service, bounded waits <=25 ms. */
+    int (*service)(void *ctx); void *service_ctx;
+    const volatile int *cancelled;
     agent_clock_options_t clock;
     /* Optional socket factory, for accounting/fault injection. NULL = socket(). */
     int (*socket_fn)(int domain, int type, int protocol);
