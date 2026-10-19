@@ -115,7 +115,7 @@ static int run(const struct run_opts *o)
     k.ptt_col = o->ptt_col; k.ptt_row = o->ptt_row;
     hid_init(&g_hid, o->hid, o->hid_stop);
     hid_set_scroll(&g_hid, o->hid_scroll);   /* MUST match gadget.sh MK20_HID_SCROLL */
-    if (!o->no_hid) { k.hid = &g_hid; hid_service(&g_hid, mono_ms()); }   /* open + startup all-keys-up */
+    if (!o->no_hid) { k.hid = &g_hid; kbd_service(&k, mono_ms()); }   /* open + startup all-keys-up */
     k.local_ui = o->no_host;
     kbd_draw_idle(&k);
     if (screen_start_writers(&k.scr)) {   /* fall back to synchronous flushes */
@@ -156,6 +156,8 @@ static int run(const struct run_opts *o)
     if (o->status) kbd_write_status(&k, o->status);
 
     int64_t next_status = mono_ms() + 1000;
+    const int safety = o->k2_estop || (o->ctl && o->ctl[0]);
+    int host_work = 0;
     uint8_t buf[16384];
     while (!g_stop) {
         int64_t now = mono_ms();
@@ -164,35 +166,44 @@ static int run(const struct run_opts *o)
             next_host_try = now + 1000;
             if (k.host_fd >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
         }
-        if (k.hid) hid_service(k.hid, now);
-        if (k.ctl) ctl_tick(k.ctl, now);
-        if (k.ctl && k.k2_estop) { const char *reason = k2_estop_tick(&k.k2, now); if (reason) ctl_estop(k.ctl, reason, now); }
+        kbd_service(&k, mono_ms());
+        now = mono_ms();
         struct pollfd pf[3 + 1 + CTL_MAX_CLIENTS] = {{gfd, POLLIN, 0}, {k.host_fd, POLLIN, 0}, {k.hid ? k.hid->fd : -1, POLLOUT, 0}};
         int nctl = k.ctl ? ctl_pollfds(k.ctl, pf + 3, 1 + CTL_MAX_CLIENTS) : 0;
-        int np = k.host_fd >= 0 ? 2 : 1;
         if (!(k.hid && hid_wants_pollout(k.hid))) pf[2].fd = -1;
         /* 100 ms tick while /dev/hidg0 is open: a stop file must close it well inside gadget.sh's window */
         int to = (k.hid && k.hid->fd >= 0) ? 100 : 250;
         if (k.ctl) to = ctl_timeout_ms(k.ctl, now, to);
         if (k.k2_estop) to = k2_estop_timeout(&k.k2, now, to);
+        if (host_work) to = 0;   /* one buffered host frame per safety/control poll */
         int r = poll(pf, (nfds_t)(3 + nctl), to);
-        (void)np;
         if (r < 0 && errno != EINTR) { perror("poll"); break; }
+        kbd_safety_tick(&k, mono_ms());
         if (r > 0 && (pf[0].revents & (POLLIN | POLLERR | POLLHUP))) {
-            ssize_t n = read(gfd, buf, sizeof buf);
+            ssize_t n = read(gfd, buf, safety ? 256 : sizeof buf);
             if (n <= 0 && errno != EINTR) { perror("gd32 read"); break; }
             for (ssize_t i = 0; i < n; i++) { int l = gd32_feed(&gp, buf[i]); if (l > 0) kbd_on_gd32(&k, gp.buf, l); }
         }
-        if (r > 0 && pf[2].fd >= 0 && (pf[2].revents & (POLLOUT | POLLERR))) hid_service(k.hid, mono_ms());
+        /* Physical safety and control requests precede host work, including buffered host frames. */
+        if (r > 0 && nctl) { kbd_safety_tick(&k, mono_ms()); ctl_on_poll(k.ctl, pf + 3, nctl, mono_ms()); }
+        if (r > 0 && pf[2].fd >= 0 && (pf[2].revents & (POLLOUT | POLLERR))) kbd_service(&k, mono_ms());
         if (r > 0 && k.host_fd >= 0 && pf[1].fd >= 0 && (pf[1].revents & (POLLIN | POLLERR | POLLHUP))) {
             ssize_t n = read(k.host_fd, buf, sizeof buf);
-            if (n > 0) kbd_host_feed(&k, buf, (size_t)n);
+            if (n > 0) {
+                if (safety) { host_push(&k.hp, buf, (size_t)n); host_work = 1; }
+                else kbd_host_feed(&k, buf, (size_t)n);
+            }
             else if (n == 0 || (errno != EINTR && errno != EAGAIN)) {   /* pty master gone (bridge restart): EIO */
                 close(k.host_fd); k.host_fd = -1; next_host_try = mono_ms() + 500;
                 fprintf(stderr, "mk20-kbd: host link closed, retrying\n");
             }
         }
-        if (r > 0 && nctl) ctl_on_poll(k.ctl, pf + 3, nctl, mono_ms());
+        if (host_work) {
+            host_frame f;
+            if (host_next(&k.hp, &f)) kbd_on_host_frame(&k, &f);
+            else host_work = 0;
+            kbd_service(&k, mono_ms());   /* host decode/render may have crossed a safety deadline */
+        }
         if (o->status && mono_ms() >= next_status) { kbd_write_status(&k, o->status); next_status = mono_ms() + 1000; }
         if (o->exit_file && o->exit_file[0] && access(o->exit_file, F_OK) == 0) {
             fprintf(stderr, "mk20-kbd: %s present: exiting\n", o->exit_file); break;

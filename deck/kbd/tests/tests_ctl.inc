@@ -475,6 +475,61 @@ static void test_ctl_backpressure(void)
     close(p[0]); close(p[1]);
 }
 
+/* Production loop entry / post-poll / post-host boundary: become writable AFTER the deadline,
+ * without a preparatory ctl_tick. The same kbd_service used by run() must cancel before flushing. */
+static void test_kbd_safety_backpressure(void)
+{
+    for (int k2 = 0; k2 < 2; k2++) {
+        int p[2]; CHECK(nb_pipe(p) == 0);
+        hid_t h; hid_init(&h, "/nonexistent", NULL); hid_set_scroll(&h, 1); hid_attach_fd(&h, p[1]);
+        uint8_t rep[64][9]; rd_reports_n(p[0], rep, 64, 8);
+        ctl_t c; ctl_init(&c, &h); ctl_set_allowed(&c, 1); char r[CTL_LINE_MAX];
+        CHECK(H(&c, 0, 0, k2 ? "{\"op\":\"lease.acquire\",\"ttl_ms\":10000}" : "{\"op\":\"lease.acquire\",\"ttl_ms\":1000}", r) > 0);
+        kbd_t k; memset(&k, 0, sizeof k); k.hid = &h; k.ctl = &c; k.k2_estop = k2;
+        k2_estop_init(&k.k2, 1);
+        if (k2) CHECK(!k2_estop_event(&k.k2, 103, 1, 0));
+        hid_key(&h, 4, 1); hid_pointer_abs(&h, 1, 30, 40); rd_reports_n(p[0], rep, 64, 8);
+        char filler[256]; memset(filler, 0x7f, sizeof filler);
+        while (write(p[1], filler, sizeof filler) > 0) {}
+        while (write(p[1], filler, 1) > 0) {}
+        CHECK(errno == EAGAIN);
+        hid_key(&h, 5, 1); hid_pointer_abs(&h, 1, 1000, 2000); hid_scroll(&h, 3, -2);
+        kbd_service(&k, 999); CHECK(c.token && !c.estopped && h.ptr_n == 2 && h.dirty);
+        while (read(p[0], filler, sizeof filler) > 0) {}
+        kbd_service(&k, 1001);   /* writable revents / loop entry with overdue lease or K2 hold */
+        CHECK(!c.token && c.estopped == k2);
+        CHECK(k2 ? !strcmp(c.stop_reason, "k2_hold") : c.st.expiries == 1);
+        int n = rd_reports_n(p[0], rep, 64, 8);
+        CHECK(n == 2 && rep[0][0] == 1 && !memcmp(rep[0] + 1, (uint8_t[8]){0}, 8));
+        CHECK(rep[1][0] == 2 && !rep[1][1] && rep[1][2] == 30 && rep[1][4] == 40 && !rep[1][6] && !rep[1][7]);
+        CHECK(!h.ptr_n && !h.dirty);
+        close(p[0]); close(p[1]);
+    }
+}
+
+/* Newly stalled host, not the fail-fast-after-an-earlier-timeout case. Both opt-ins must
+ * return immediately, count the dropped frame, and leave the legacy timeout setting alone. */
+static int64_t safety_test_ms(void)
+{
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+static void test_kbd_safety_host(void)
+{
+    for (int mode = 0; mode < 2; mode++) {
+        int p[2]; CHECK(nb_pipe(p) == 0);
+        char filler[256]; memset(filler, 0x7f, sizeof filler);
+        while (write(p[1], filler, sizeof filler) > 0) {}
+        while (write(p[1], filler, 1) > 0) {}
+        ctl_t c; ctl_init(&c, NULL);
+        kbd_t k; memset(&k, 0, sizeof k); k.host_fd = p[1]; k.ctl = mode ? NULL : &c; k.k2_estop = mode;
+        int64_t before = safety_test_ms();
+        CHECK(kbd_host_send(&k, 1, HOST_CMD_JSON, "{}", 2) < 0);
+        CHECK(safety_test_ms() - before <= 20);
+        CHECK(k.st.host_tx_errors == 1 && k.st.host_tx_timeouts == 1 && !k.st.host_tx);
+        close(p[0]); close(p[1]);
+    }
+}
+
 static void test_ctl_screen_disconnect(void)
 {
     ctl_t c; ctl_init(&c, NULL); ctl_set_allowed(&c, 1); int p[2];
@@ -522,6 +577,39 @@ static void test_ctl_json_edges(void)
         strcat(q, "}");
         CHECK(H(&c, 0, 0, q, r) > 0 && has(r, i == 22 ? "\"ok\":true" : "bad_request"));
         q[strlen(q) - 1] = 0;
+    }
+    /* Defensive status quoting failure (keyboard-side state corruption / future callers). */
+    strcpy(c.ui.summary, "bad\001summary");
+    CHECK(H(&c, 0, 0, "{\"op\":\"status\",\"id\":7}", r) > 0 && has(r, "\"ok\":false") && has(r, "bad_args") && has(r, "\"id\":7"));
+}
+
+static uint32_t ctl_random(uint32_t *seed)
+{
+    uint32_t x = *seed; x ^= x << 13; x ^= x >> 17; x ^= x << 5; return *seed = x;
+}
+
+static void test_ctl_malformed_seeded(void)
+{
+    uint32_t seed = 0xa1200202u;
+    const char *corpus[] = {"{\"op\":\"status\"}", "{\"op\":\"act\",\"token\":1,\"seq\":1,\"kind\":\"key\",\"usage\":4,\"down\":1}",
+        "{\"op\":\"ui.agent\",\"summary\":\"\\uD83D\\uDE00\"}", "{\"op\":\"screen.page.create\",\"name\":\"x\"}",
+        "{\"op\":\"confirm.request\",\"cid\":1,\"summary\":\"x\",\"risk\":\"low\"}"};
+    for (int i = 0; i < 512; i++) {
+        ctl_t c; ctl_init(&c, NULL);
+        char line[CTL_LINE_MAX + 2], rep[CTL_LINE_MAX + 1]; size_t n;
+        if (i & 1) {
+            const char *s = corpus[ctl_random(&seed) % (sizeof corpus / sizeof *corpus)]; n = strlen(s); memcpy(line, s, n);
+            size_t at = ctl_random(&seed) % n; line[at] = (char)ctl_random(&seed);
+        } else {
+            n = ctl_random(&seed) % (CTL_LINE_MAX + 1);
+            for (size_t j = 0; j < n; j++) line[j] = (char)ctl_random(&seed);
+        }
+        line[n++] = 1;   /* always malformed, even if mutation happened to preserve JSON */
+        size_t cap = 16 + ctl_random(&seed) % (CTL_LINE_MAX - 15); memset(rep, 0x55, sizeof rep);
+        int len = ctl_handle_line(&c, 0, line, n, i, rep, cap);
+        CHECK(len >= 0 && (size_t)len < cap && rep[cap] == 0x55);
+        CHECK(!len || (has(rep, "\"ok\":false") && has(rep, "bad_request")));
+        CHECK(!c.token && !c.allowed && !c.estopped && !c.confirm.pending);
     }
 }
 

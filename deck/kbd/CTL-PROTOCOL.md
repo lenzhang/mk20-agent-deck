@@ -60,6 +60,13 @@ already zero but reports were queued or last delivered buttons were down. E-stop
 50 ms write budget, latches stopped, and sets allowed=0. It cancels confirmation,
 clears the screen grant/binds, and returns to the system page. Only a keyboard-side
 explicit allow clears the latch; reconnecting or acquiring cannot clear it.
+With `--ctl` or `--k2-estop`, physical safety is processed before host forwarding.
+Host writes never wait for ttyGS0: backpressure drops the unsent frame/remainder,
+counted in `kbd.status` as `host_tx_errors` and `host_tx_timeouts`. Host framing
+resynchronizes at the next magic header. The loop polls control and safety deadlines
+between host frames and checks fresh deadlines before servicing queued HID output,
+including after poll and host decode/render. The no-safety-flags host path retains
+its existing 200 ms timeout. With writable HID, stop/preemption must release within 100 ms.
 Events: `{"ev":"lease_revoked","reason":"expired"}` (holder only; other reasons:
 `released`, `human`, `disabled`, `client_gone`, `estop`) and
 `{"ev":"estop","reason":"socket"}` (broadcast; other sources `page_key`, `k2_hold`, `k2_triple`).

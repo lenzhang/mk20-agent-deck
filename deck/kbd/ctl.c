@@ -286,7 +286,8 @@ int ctl_handle_line(ctl_t *c, int ci, const char *s, size_t n, int64_t now, char
     if (ctl_json_has(s, n, "id") && (ctl_json_int(s, n, "id", &id) || id < 0)) { c->st.bad++; return err(r, cap, -1, "bad_request"); }
     if (ctl_json_str(s, n, "op", op, sizeof op) < 0) { c->st.bad++; return err(r, cap, id, "bad_request"); }
     if (!strcmp(op, "hello") || !strcmp(op, "status")) {
-        char ui_summary[CTL_SUMMARY_CAP * 2 + 3]; ctl_json_quote(ui_summary, sizeof ui_summary, c->ui.summary);
+        char ui_summary[CTL_SUMMARY_CAP * 2 + 3];
+        if (ctl_json_quote(ui_summary, sizeof ui_summary, c->ui.summary) < 0) return err(r, cap, id, "bad_args");
         len = snprintf(r, cap, "{\"ok\":true,\"id\":%ld,\"v\":1,\"state\":\"%s\",\"allowed\":%d,\"estopped\":%d,\"leased\":%d,"
                        "\"scroll\":%d,\"hid_open\":%d,\"ttl_left_ms\":%" PRId64 ",\"confirm\":{\"pending\":%s,\"cid\":%ld,\"shown\":%s,\"deadline_ms\":%" PRId64 ",\"ignored\":%u,\"risk\":\"%s\"},\"ui\":{\"state\":\"%s\",\"input\":\"%s\",\"summary\":%s,\"progress\":%d}}", id, state(c), c->allowed, c->estopped, c->token != 0,
                        c->hid && c->hid->ptr_len == HID_PTR_LEN_SCROLL, c->hid && c->hid->fd >= 0, c->token ? c->expiry_ms - now : INT64_C(0), c->confirm.pending ? "true" : "false", c->confirm.cid,

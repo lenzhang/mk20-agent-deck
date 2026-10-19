@@ -37,6 +37,9 @@ typedef struct {
 
 int kbd_init(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version);
 void kbd_free(kbd_t *k);
+/* Loop boundary: expire safety deadlines BEFORE any queued HID output. now_ms must be fresh. */
+void kbd_safety_tick(kbd_t *k, int64_t now_ms);
+void kbd_service(kbd_t *k, int64_t now_ms);
 /* One parsed GD32 payload (key event, echo, other). */
 void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len);
 void kbd_gd32_cb(void *ctx, const uint8_t *pl, int len);   /* adapter for gd32_knob_init */
@@ -55,6 +58,6 @@ void kbd_draw_key(kbd_t *k, int row, int col, int pressed);
 /* JSON helpers (tiny, tolerant). */
 int kbd_json_str(const char *s, size_t n, const char *key, char *out, size_t cap);
 int kbd_json_int(const char *s, size_t n, const char *key, long *v);
-#define KBD_HOST_TX_MS 200   /* max wait for one reply when the host side is not reading */
+#define KBD_HOST_TX_MS 200   /* legacy wait; with ctl/K2 safety, host sends never wait */
 int kbd_write_status(kbd_t *k, const char *path);
 #endif

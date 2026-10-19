@@ -1,5 +1,6 @@
 #include "oai.h"
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,4 +89,39 @@ static void coordinate_test(void)
     CHECK(oai_pixel_to_norm(10, 10) == -1 && oai_pixel_to_norm(-1, 10) == -1 && oai_pixel_to_norm(0, 0) == -1);
     for (int n = 0; n <= 1000; n++) CHECK(oai_pixel_to_norm(oai_norm_to_pixel(n, 1920), 1920) == n);
 }
-int main(void) { request_test(); response_test(); strict_json_test(); coordinate_test(); printf("%d checks, %d failures\n", checks, fails); return fails ? 1 : 0; }
+static uint32_t random_byte(uint32_t *seed)
+{
+    uint32_t x = *seed; x ^= x << 13; x ^= x >> 17; x ^= x << 5; return *seed = x;
+}
+static void malformed_seeded_test(void)
+{
+    uint32_t seed = 0xa1200202u;
+    const char *valid = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]}";
+    for (int i = 0; i < 512; i++) {
+        char body[4096], args[513]; size_t n;
+        if (i & 1) {
+            n = strlen(valid); memcpy(body, valid, n); size_t at = random_byte(&seed) % n; body[at] = (char)random_byte(&seed);
+        } else {
+            n = random_byte(&seed) % 1024;
+            for (size_t j = 0; j < n; j++) body[j] = (char)random_byte(&seed);
+        }
+        body[n++] = 1;   /* guaranteed malformed, including after otherwise valid JSON */
+        oai_response_t r;
+        CHECK(oai_parse_response(body, n, 200, &r) && r.error.kind == OAI_BAD_RESPONSE);
+        oai_response_free(&r);
+        /* Exercise argument validation inside a valid completion too, with escaped random controls. */
+        n = random_byte(&seed) % (sizeof args - 2);
+        for (size_t j = 0; j < n; j++) args[j] = (char)(1 + random_byte(&seed) % 127);
+        args[n++] = 1; args[n] = 0;
+        cJSON *str = cJSON_CreateString(args); char *quoted = cJSON_PrintUnformatted(str); cJSON_Delete(str);
+        CHECK(quoted != NULL);
+        if (!quoted) continue;
+        int len = snprintf(body, sizeof body, "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"tool_calls\":[{\"id\":\"1\",\"type\":\"function\",\"function\":{\"name\":\"click\",\"arguments\":%s}}]}}]}", quoted);
+        cJSON_free(quoted);
+        CHECK(len > 0 && (size_t)len < sizeof body);
+        if (len <= 0 || (size_t)len >= sizeof body) continue;
+        CHECK(!oai_parse_response(body, (size_t)len, 200, &r) && r.ncalls == 1 && !r.calls[0].arguments && !strcmp(r.calls[0].error, "invalid_arguments"));
+        oai_response_free(&r);
+    }
+}
+int main(void) { request_test(); response_test(); strict_json_test(); coordinate_test(); malformed_seeded_test(); printf("%d checks, %d failures\n", checks, fails); return fails ? 1 : 0; }

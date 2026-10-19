@@ -34,11 +34,23 @@ def read_for(fd, secs):
         except OSError: break
     return out
 
-def start(tmp, extra, env=None, hid=None):
+def start(tmp, extra, env=None, hid=None, stalled_host=False):
     fb = os.path.join(tmp, "fb"); os.makedirs(fb, exist_ok=True)
     for i in range(1, 22): open(os.path.join(fb, f"fb{i}"), "wb").close()
     gm, gpath, gs = mkpty()
     hm, hpath, hs = mkpty()
+    if stalled_host:
+        # Fill the daemon->host direction BEFORE launching: its first send must hit backpressure,
+        # without an earlier daemon timeout having enabled the legacy fail-fast path. Never read hm.
+        os.set_blocking(hs, False)
+        for _ in range(3):
+            while True:
+                try: os.write(hs, b"x" * 4096)
+                except BlockingIOError: break
+            while True:
+                try: os.write(hs, b"x")
+                except BlockingIOError: break
+            time.sleep(0.01)
     st = os.path.join(tmp, "kbd.status")
     p = subprocess.Popen([BIN, "--run", "--gd32", gpath, "--host", hpath, "--fb", fb, "--bl", "", "--status", st,
                           "--knob-timeout-ms", "200", "--lock", os.path.join(tmp, "kbd.lock")] + (["--hid", hid, "--hid-stop-file", hid + ".stop"] if hid else ["--no-hid"]) + extra,
@@ -53,6 +65,74 @@ def fd_mode(pid, path):
                 return flags & 3
         except OSError: pass
     return None
+
+def stalled_host_safety(tmp):
+    import socket
+    for stop in ("socket", "reserved_key", "human", "k2_triple", "k2_hold"):
+        case = os.path.join(tmp, stop); os.mkdir(case)
+        hidp = os.path.join(case, "hid"); os.mkfifo(hidp)
+        hr = os.open(hidp, os.O_RDONLY | os.O_NONBLOCK)
+        sockp = os.path.join(case, "kbd.sock")
+        flags = ["--no-gd32-write", "--ctl", sockp, "--ctl-allow"]
+        if stop.startswith("k2_"): flags += ["--k2-estop"]
+        if stop == "k2_hold": flags += ["--k2-release"]
+        p, gm, hm, fb, st, keep = start(case, flags, hid=hidp, stalled_host=True)
+        cs = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); cs.settimeout(2)
+        try:
+            end = time.monotonic() + 3
+            while not os.path.exists(sockp) and time.monotonic() < end: time.sleep(0.01)
+            cs.connect(sockp)
+            with cs.makefile("rwb", buffering=0) as cf:
+                def rq(obj):
+                    cf.write((json.dumps(obj) + "\n").encode())
+                    while True:
+                        j = json.loads(cf.readline())
+                        if "ev" not in j: return j
+                def reports(n, timeout):
+                    got = b""; end = time.monotonic() + timeout
+                    while len(got) < n:
+                        r, _, _ = select.select([hr], [], [], max(0, end - time.monotonic()))
+                        if not r: break
+                        got += os.read(hr, 4096)
+                    return got
+                check(reports(9, 1) == b"\x01" + bytes(8), f"{stop}: startup all-up")
+                if stop == "reserved_key": check(rq({"op": "screen.page.show", "page_id": 1})["ok"], "show reserved page")
+                tok = rq({"op": "lease.acquire", "ttl_ms": 5000})["token"]
+                check(rq({"op": "act", "token": tok, "seq": 1, "kind": "key", "usage": 4, "down": 1})["ok"], f"{stop}: hold key")
+                check(reports(9, 1) == bytes([1, 0, 0, 4, 0, 0, 0, 0, 0]), f"{stop}: agent key down")
+                check(json.load(open(st))["host_tx_timeouts"] == 0, f"{stop}: no prior daemon host timeout")
+                # Queue competing work while stopped so readiness is deterministic on resume.
+                # Old production order waits 200 ms in the first host send before reaching the stop.
+                p.send_signal(signal.SIGSTOP); os.waitpid(p.pid, os.WUNTRACED)
+                while True:   # top off any tty buffering that settled during startup; still never read hm
+                    try: os.write(keep[1], b"x")
+                    except BlockingIOError: break
+                if stop == "socket":
+                    os.write(hm, P.encode_frame(P.CMD_JSON, b'{"method":"getInfo"}', 1))
+                    cf.write(b'{"op":"estop"}\n')
+                else:
+                    frames = gd32_frame([0x16, 1, 104, 104, 0, 0])  # harmless rotation before stop
+                    if stop.startswith("k2_"): frames += gd32_frame([0x16, 1, 103, 103, 0, 0]) * (3 if stop == "k2_triple" else 1)
+                    else: frames += gd32_frame([0x16, 1, 3 if stop == "reserved_key" else 0, 4 if stop == "reserved_key" else 2, 0, 0])
+                    os.write(gm, frames)
+                t0 = time.monotonic(); p.send_signal(signal.SIGCONT)
+                hold_ms = 1000 if stop == "k2_hold" else 0
+                got = reports(9, (hold_ms + 100) / 1000); dt = (time.monotonic() - t0) * 1000
+                check(got == b"\x01" + bytes(8) and hold_ms - 50 <= dt <= hold_ms + 100,
+                      f"stalled host {stop}: all-up {got.hex()} in {dt:.1f} ms (hold {hold_ms} ms)")
+                if stop == "human":
+                    check(not rq({"op": "status"})["leased"], "stalled host: human revoked lease")
+                else:
+                    reason = {"socket": "socket", "reserved_key": "page_key", "k2_triple": "k2_triple", "k2_hold": "k2_hold"}[stop]
+                    while True:
+                        ev = json.loads(cf.readline())
+                        if ev.get("ev") == "estop": break
+                    check(ev.get("reason") == reason, f"stalled host {stop}: event {ev}")
+                print(f"e2e: initially stalled host {stop} -> all-up in {dt:.1f} ms")
+        finally:
+            p.send_signal(signal.SIGCONT); p.send_signal(signal.SIGTERM); p.wait(3)
+            cs.close()
+            for fd in (hr, gm, hm, *keep): os.close(fd)
 
 def main():
     with tempfile.TemporaryDirectory() as tmp:
@@ -264,17 +344,24 @@ def main():
         os.write(gm, gd32_frame([0x16, 1, 104, 104, 0, 0]) + gd32_frame([0x16, 1, 105, 105, 0, 0]))
         check(not rq({"op": "status"})["estopped"], "K2 rotation does not stop")
         t0 = time.monotonic(); os.write(gm, gd32_frame([0x16, 1, 103, 103, 0, 0]))
-        time.sleep(0.65); check(not rq({"op": "status"})["estopped"], "cold K2 hold guard")
-        stopped = False
-        while time.monotonic() - t0 < 1.6:
-            stopped = rq({"op": "status"})["estopped"]
-            if stopped: break
-            time.sleep(0.01)
-        check(stopped and time.monotonic() - t0 >= 0.95, "cold K2 hold fires while still down with --k2-release")
-        check(drain() == b"\x01" + bytes(8), "cold K2 hold -> all-up")
+        # No requests or further GD32 events after down: only the poll deadline can wake the loop.
+        ready, _, _ = select.select([hrc, cs], [], [], 0.65)
+        check(not ready, "cold K2 hold guard (no traffic)")
+        stopped = False; up = b""; event_at = up_at = None
+        while time.monotonic() - t0 < 1.1 and (not stopped or len(up) < 9):
+            ready, _, _ = select.select([hrc, cs], [], [], max(0, t0 + 1.1 - time.monotonic()))
+            if hrc in ready:
+                up += os.read(hrc, 4096); up_at = time.monotonic() - t0
+            if cs in ready:
+                ev = json.loads(cf.readline())
+                if ev.get("ev") == "estop":
+                    stopped = ev.get("reason") == "k2_hold"; event_at = time.monotonic() - t0
+        check(stopped and event_at is not None and 0.95 <= event_at <= 1.1, f"timer-only cold K2 hold event at {event_at}")
+        check(up == b"\x01" + bytes(8) and up_at is not None and 0.95 <= up_at <= 1.1, f"timer-only cold K2 all-up at {up_at}")
         check(rq({"op": "lease.acquire"}).get("err") == "stopped", "cold K2 hold latches stop")
         cf.close(); cs.close(); p.send_signal(signal.SIGTERM); p.wait(3)
         os.close(hrc)
+        stalled_host_safety(tmp)
 
         # read-only modes: flag and kill file
         kill = os.path.join(tmp, "nowrite")

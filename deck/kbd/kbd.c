@@ -26,6 +26,19 @@ void kbd_free(kbd_t *k)
     screen_free(&k->scr); host_parser_free(&k->hp); free(k->canvas); k->canvas = NULL;
 }
 
+void kbd_safety_tick(kbd_t *k, int64_t now)
+{
+    if (!k->ctl) return;
+    if (k->k2_estop) { const char *reason = k2_estop_tick(&k->k2, now); if (reason) ctl_estop(k->ctl, reason, now); }
+    ctl_tick(k->ctl, now);
+}
+
+void kbd_service(kbd_t *k, int64_t now)
+{
+    kbd_safety_tick(k, now);
+    if (k->hid) hid_service(k->hid, now);
+}
+
 int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
 {
     if (k->host_fd < 0) return -1;
@@ -34,15 +47,16 @@ int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
     if (!out) return -1;
     int len = host_encode(id, cmd, pl, n, out, cap), rc = 0;
     if (len < 0) rc = -1;
-    /* non-blocking fd, bounded wait (KBD_HOST_TX_MS): a host/bridge that stops reading must never stall the GD32 /
-     * HID / teardown loop (the bridge may itself be blocked writing requests to us). A frame cut short is counted
-     * as an error; the host parser resyncs on the next A1A55A5E magic. */
+    /* Safety opt-in: never wait for the host. Drop the unwritten remainder on backpressure (counted in
+     * host_tx_errors/timeouts); the host parser resyncs on the next A1A55A5E magic. No retry queue.
+     * Without safety flags retain the legacy bounded wait and fail-fast-after-timeout behaviour. */
     int64_t deadline = 0;
     for (int off = 0; rc == 0 && off < len;) {
         ssize_t w = write(k->host_fd, out + off, (size_t)(len - off));
         if (w > 0) { off += (int)w; continue; }
         if (w < 0 && errno == EINTR) continue;
         if (w < 0 && errno == EAGAIN) {
+            if (k->ctl || k->k2_estop) { rc = -1; k->st.host_tx_timeouts++; k->host_tx_stuck = 1; break; }
             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
             int64_t now = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
             if (!deadline) deadline = now + (k->host_tx_stuck ? 0 : KBD_HOST_TX_MS);   /* stuck: fail fast */
@@ -105,22 +119,26 @@ void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len)
     else if (ev.row > 3 || ev.col > 4) { k->st.other_frames++; return; }
     else k->st.key_events++;
     if (ev.keycode) k->st.keycode_nonzero++;   /* GD32 already sent HID itself; still report the state */
-    char j[160];
-    int n = host_json_key_state(j, sizeof j, ev.col, ev.row, ev.pressed);
-    if (n > 0 && k->host_fd >= 0) kbd_host_send(k, KBD_EVENT_ID, HOST_CMD_JSON, j, (size_t)n);
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); int64_t now = (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+    kbd_safety_tick(k, now);
     /* agent A1: a physical key press takes input back from the agent (lease revoked + all-up) BEFORE the PTT edge */
     if (k->ctl && ev.knob == 2 && k->k2_estop) {
-        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); int64_t now = (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
         const char *reason = k2_estop_event(&k->k2, ev.row, ev.pressed, now);
         if (reason) ctl_estop(k->ctl, reason, now);
     }
     if (k->ctl && !ev.knob) {
-        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); int64_t now = (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
         if (ev.pressed) ctl_human_input(k->ctl, now);
         ctl_key_event(k->ctl, ev.row, ev.col, ev.pressed, now);
     }
+    char j[160];
+    int n = host_json_key_state(j, sizeof j, ev.col, ev.row, ev.pressed);
+    if (n > 0 && k->host_fd >= 0) kbd_host_send(k, KBD_EVENT_ID, HOST_CMD_JSON, j, (size_t)n);
     /* router (r120): PTT key holds Right Alt/Option while pressed; every other key and the knobs are local */
-    if (k->hid && !ev.knob && ev.col == k->ptt_col && ev.row == k->ptt_row) hid_set_mod(k->hid, HID_MOD_RALT, ev.pressed);
+    if (k->hid && !ev.knob && ev.col == k->ptt_col && ev.row == k->ptt_row) {
+        clock_gettime(CLOCK_MONOTONIC, &t); now = (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+        kbd_safety_tick(k, now);   /* forwarding may have crossed a deadline before this implicit HID flush */
+        hid_set_mod(k->hid, HID_MOD_RALT, ev.pressed);
+    }
     if (k->local_ui && !ev.knob) { kbd_draw_key(k, ev.row, ev.col, ev.pressed); kbd_flush(k); }
 }
 
