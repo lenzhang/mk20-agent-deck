@@ -24,6 +24,7 @@ while :; do [ -n "$st" ] && [ -f "$MOCK_DIR/kbd.status.json" ] && cp "$MOCK_DIR/
 FAKE_SVC = r'''#!/bin/sh
 # fake procd qt_app2: stop/start stock KD (pgrep.kd); $MOCK_DIR/kd.stubborn = KD survives stop
 echo "$1" >> "$MOCK_DIR/qt_app2.log"
+[ "$1" = stop ] && [ -f "$MOCK_DIR/svc.fail" ] && { rm -f "$MOCK_DIR/pgrep.kd"; exit 1; }   # KD gone, procd still armed
 case "$1" in stop) [ -f "$MOCK_DIR/kd.stubborn" ] || rm -f "$MOCK_DIR/pgrep.kd";; start) echo 123 > "$MOCK_DIR/pgrep.kd";; esac
 '''
 
@@ -96,7 +97,7 @@ def test_supervisor_stops_kd_runs_kbd_and_ends_on_stop_file(kb, rel):
         R = str(dev.root)
         assert args[:3] == ["--run", "--host", f"{R}/dev/ttyGS0"]
         assert " ".join(args[3:]) == (f"--hid {R}/dev/hidg0 --hid-stop-file {R}/tmp/mk20-router-stop --status {R}/run/mk20/kbd.status"
-                                      f" --lock {R}/tmp/mk20/kbd-daemon.lock --exit-file {R}/tmp/mk20-kbd-stop")
+                                      f" --lock {R}/tmp/mk20-kbd.lock --exit-file {R}/tmp/mk20-kbd-stop")
         assert wait(lambda: dev.p("run/mk20/kbd.status").exists())
         assert dev.read("tmp/mk20/kbd-loop.pid") == str(p.pid)
         assert dev.run(rel / "sbin/mk20d", "kbd", timeout=10).returncode == 0   # single instance (flock)
@@ -182,10 +183,10 @@ def test_kd_that_will_not_stop_means_no_kbd_degraded(kb, rel):
     r = dev.run(rel / "sbin/mk20d", "kbd", timeout=30)
     assert r.returncode == 0 and not (dev.mock / "kbd.args").exists()    # never two writers on ttyS1 / fb
     assert svclog(dev) == ["stop", "stop", "stop"]                       # retried, never "start"
-    assert "did not stop (3 tries)" in dev.read("tmp/mk20/kbd-degraded") and not dev.p("tmp/mk20/kbd.mode").exists()
+    assert "did not stop (3 tries" in dev.read("tmp/mk20/kbd-degraded") and not dev.p("tmp/mk20/kbd.mode").exists()
     assert "stop (kd stop failed)" in mlog(dev)
     s = dev.run(rel / "sbin/mk20d", "selftest")
-    assert "WARN mk20-kbd not active: stock KD did not stop (3 tries)" in s.stdout and "PASS kd=1" in s.stdout
+    assert "WARN mk20-kbd not active: stock KD did not stop (3 tries" in s.stdout and "PASS kd=1" in s.stdout
 
 
 def test_composite_down_ends_without_touching_kd(kb, rel):
@@ -578,3 +579,32 @@ def test_gadget_fails_closed_when_kbd_survives(gh):
                        env=dict(os.environ, MK20_HIDG=str(hid), MK20_KBD_TERM_TICKS="2", MK20_KBD_HID_TICKS="2"))
     assert "rc=1" in r.stdout and "rq=1" in r.stdout and "FAIL" in (t / "log").read_text()
     assert p.poll() is None
+
+
+
+def test_failed_service_stop_means_no_kbd(kb, rel):
+    """codex kdr-r2 #2: qt_app2 stop failing (procd still armed) -> retried, mk20-kbd not launched, degraded."""
+    dev = kb
+    (dev.mock / "svc.fail").write_text("")
+    r = dev.run(rel / "sbin/mk20d", "kbd", timeout=30)
+    assert r.returncode == 0 and not (dev.mock / "kbd.args").exists() and svclog(dev) == ["stop", "stop", "stop"]
+    assert "service stop ok=0" in dev.read("tmp/mk20/kbd-degraded")
+
+
+def test_default_lock_is_the_supervised_lock():
+    """codex kdr-r2 #3: a manual `mk20-kbd --run` and the supervised one contend for the same lock."""
+    src = (DECK / "kbd/mk20_kbd.c").read_text(); m = (DECK / "firmware/release/sbin/mk20d").read_text()
+    assert '"/tmp/mk20-kbd.lock"' in src and '--lock "$R/tmp/mk20-kbd.lock"' in m
+
+
+def test_kbd_alive_thread_group(tmp_path):
+    """codex kdr-r2 #1: a zombie leader counts as gone only when no thread is left; a live process is alive."""
+    fn = FN[FN.index("kbd_alive() {"):FN.index("kbd_hid_holders() {")]
+    s = tmp_path / "a.sh"; s.write_text(fn + '\nfor p in "$@"; do kbd_alive "$p" && echo "$p alive" || echo "$p gone"; done\n')
+    live = subprocess.Popen([sys.executable, "-c", "import threading,time; threading.Thread(target=time.sleep, args=(30,)).start(); time.sleep(30)"])
+    z = subprocess.Popen(["sleep", "30"]); z.kill(); time.sleep(0.3)        # killed, not reaped: zombie, 1 task
+    try:
+        out = subprocess.run([BB, "sh", str(s), str(live.pid), str(z.pid), "999999"], capture_output=True, text=True).stdout
+        assert f"{live.pid} alive" in out and f"{z.pid} gone" in out and "999999 gone" in out
+    finally:
+        live.kill(); live.wait(); z.wait()
