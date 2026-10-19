@@ -1,5 +1,5 @@
 CFLAGS ?= -Wall -Wextra -Werror -O2 -std=c11 -D_DEFAULT_SOURCE
-SRC = gd32.c gd32io.c host.c panels.c screen.c jpeg.c kbd.c hid.c
+SRC = gd32.c gd32io.c host.c panels.c screen.c jpeg.c kbd.c hid.c ctl.c
 host: mk20-kbd
 mk20-kbd: mk20_kbd.c $(SRC) *.h vendor/stb_image.h
 	$(CC) $(CFLAGS) -o $@ mk20_kbd.c $(SRC) -pthread
