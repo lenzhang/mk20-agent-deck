@@ -258,12 +258,16 @@ static void test_screen(void)
 #include "tests_k3.inc"
 #include "tests_ctl.inc"
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--ctl-unit")) {
+        test_ctl_lease(); test_ctl_scroll_act(); test_ctl_confirm(); test_ctl_ui(); test_ctl_screen(); test_k2_estop(); test_ctl_edges();
+        printf("%d checks, %d failures\n", checks, fails); return fails ? 1 : 0;
+    }
     test_gd32_roundtrip(); test_gd32_corrupt(); test_gd32_fuzz(); test_gd32_allowlist(); test_knob_frames();
     test_host(); test_screen();
     test_knob_init(); test_jpeg(); test_kbd_core(); test_writers(); test_hid(); test_hid_replace();
-    test_hid_scroll(); test_ctl_lease(); test_ctl_scroll_act(); test_ctl_socket();
+    test_hid_scroll(); test_ctl_lease(); test_ctl_scroll_act(); test_ctl_socket(); test_ctl_confirm(); test_ctl_ui(); test_ctl_screen(); test_k2_estop(); test_ctl_edges();
     printf("%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }

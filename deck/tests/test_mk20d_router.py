@@ -142,7 +142,7 @@ def test_release_binaries_match_source(tmp_path):
     """firmware/release/bin/{ttygs_tcp_bridge,mk20-router,mk20-kbd} are the static armhf builds of the current sources."""
     rel = DECK / "firmware/release/bin"
     kbd = ["-std=c11", "-D_DEFAULT_SOURCE"] + [str(DECK / "kbd" / f) for f in (
-        "mk20_kbd.c", "gd32.c", "gd32io.c", "host.c", "panels.c", "screen.c", "jpeg.c", "kbd.c", "hid.c", "ctl.c")] + ["-pthread"]
+        "mk20_kbd.c", "gd32.c", "gd32io.c", "host.c", "panels.c", "screen.c", "jpeg.c", "kbd.c", "hid.c", "ctl.c", "ctlscr.c", "k2estop.c")] + ["-pthread"]
     for name, src in (("ttygs_tcp_bridge", [str(DECK / "m2-scripts/bridge/ttygs_tcp_bridge.c")]),
                       ("mk20-router", [str(DECK / "router/mk20_router.c")]), ("mk20-kbd", kbd)):
         out = tmp_path / name

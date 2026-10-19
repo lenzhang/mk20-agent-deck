@@ -156,9 +156,8 @@
   `calibrate` 步骤：依次移到四角和中心，通过 VNC 光标伪编码或截图找光标，拟合仿射映射，存进 `/data/mk20/agent/calib.json`。
   验收误差 ≤2 逻辑像素（§14.5-3）。
 - **非 ASCII 文本**（中文，D5）：HID 打不出来，改用**剪贴板粘贴**：先把文本放进 Mac 剪贴板，再经 HID 发 `cmd+v`。
-  剪贴板写入机制**待定**，候选：(a) VNC `ClientCutText`（RFB 标准消息，macOS Screen Sharing 是否同步到系统剪贴板、是否只支持 Latin-1
-  需 A2 实测）；(b) 极小 Mac 剪贴板助手（与 D1 转发同一个 launchd 进程，只绑 172.30.250.1，`pbcopy`）。一期 `type` 仍只接受 ASCII，
-  非 ASCII 走新动作 `paste{text}`，剪贴板机制落地前返回 `unsupported`。粘贴前后不读回用户剪贴板内容（隐私），可选恢复原内容。
+  只规划 VNC 剪贴板路线（见 A2），不加 Mac helper。经典 ClientCutText 仅 Latin-1；中文需测 Extended Clipboard。
+  一期 `type` 仍只接受 ASCII，非 ASCII 走新动作 `paste{text}`，协议支持未确认时返回 `unsupported`；不读回用户剪贴板。
 - **单通道仲裁**：mk20-kbd 维护 `active_input ∈ {hid, vnc}`。VNC 输入由 agent 自己发，但必须先向 kbd 拿到 `input=vnc` 租约，
   kbd 也会对 HID 做 all-up。切换规则照 R-CU-2：连续 2 次失败 → 冻结 → all-up → 切到 VNC；连续 3 次健康 → 在空闲点切回。
   同一个动作只在一个通道发一次，**不会到另一个通道重试**。
@@ -166,9 +165,9 @@
 
 ### 3.4 mk20-kbd 控制口 `/run/mk20/kbd.sock`（A1）
 
-- unix stream，0600 root。消息用长度前缀加 JSON，或者固定 TLV。同时最多 2 个客户端：agent，和一个只读的 status 客户端。
+- unix stream，0600，同 uid / root 校验。当前协议为每行一个 JSON（含换行 ≤1024 B；像素二进制 framing 留给 A7）。同时最多 2 个客户端：agent，和一个只读的 status 客户端。
 - 请求：`lease.acquire{owner,ttl_ms}` → token；`lease.renew`；`lease.release`；`act{token,seq,op,...}`；
-  `ui.agent{state,input,summary,progress}`；`confirm.request{id,summary,risk}` → 异步返回 `confirm.result{id,ok}`。
+  `ui.agent{state,input,summary,progress}`；`confirm.request{id,cid,summary,risk,timeout_ms}` → 异步返回 `confirm.result{cid,ok,reason}`。
 - 事件推送：`estop`、`confirm.result`、`hid.health`、`key{...}`（只在 agent 页激活时推送）。
 - **租约规则**：TTL 默认 3 s，必须续约，超时就 all-up 并撤销租约。急停、按键进入 agent 关闭状态、主机 PTT 按下时也会撤销
   （人手优先，用户一碰键盘 agent 就让开）。
@@ -182,7 +181,7 @@
 在 kbd.sock 上增加 `screen.*`（同一 uid 检查与 2 客户端上限；**不需要输入租约，但需要 agent 已被键盘“允许”**）：
 - `screen.layout` → 21 块屏的编号、尺寸（键屏 128×128，副屏 428×142）、总线、当前页 id、每页属主（`system` / `agent` / `user`）。
 - `screen.page.create{name}` → `page_id`（属主 agent，上限 8 页）；`screen.page.delete`、`screen.page.show{page_id}`（只能切到 agent 自有页或 agent 控制页）。
-- `screen.draw{page_id, fb, x, y, w, h, fmt: rgb565|jpeg, data(base64)}`、`screen.text{page_id, fb, text, size, fg, bg}`（文字由 kbd 内置字体渲染）。
+- `screen.draw{page_id, fb, x, y, w, h, fmt: rgb565|jpeg, bytes}`（当前只校验元数据并返回 rendered:false，像素 binary framing / 渲染在 A7）、`screen.text{page_id, fb, text, size, fg, bg}`（文字由 kbd 内置字体渲染）。
 - `screen.bind{page_id, key(row,col), action}`：agent 页上的按键按下时，kbd 推送事件 `{"ev":"key","page":..,"key":..}` 给 agent（只在该页显示时）。
 - **保留、不可覆盖**：急停键位（agent 页固定键）和 agent 控制页（允许/禁止、急停、确认/取消）。对它们的 draw/bind/delete 一律 `reserved`。
   K2 长按急停在任何页面都生效。
@@ -320,16 +319,24 @@
 - **[D]**：装到真机（kbd 本来就要真机验证），在 Mac 上 `ioreg` 看描述符，并验证滚轮。这一步属于 **gadget 变更**，按惯例走 probation，自检不过就回滚。
 - 验收：box 测试全过；真机能滚动；kbd 原有验收不退化。
 
-- **A1 状态（2026-10-19）**：已实现并测试 kbd.sock 租约/续约/释放、act（key/mod/ptr/scroll/allup）、急停（e2e 实测 1.1 ms all-up）、
-  人手抢占、HID 滚轮描述符变体（`MK20_HID_SCROLL=1` + `--hid-scroll`，默认关）。未做：K2 长按急停（要先真机确认 K2 press/release
-  上报）、`confirm.request`、`ui.agent`、`screen.*`（D8）、mk20d/mk20lib 把 `--ctl`/`--hid-scroll` 接到发布开关上。
-- **A1b 屏幕 API 协议（D8）**：在 kbd.sock 上定义并单测 `screen.*` 的权限/限速/保留页规则（渲染在 A7）。
+- **A1 状态（2026-10-19，本 worktree）**：租约/act/急停/人手抢占已实现；补齐 confirm（shown 后 ≥300 ms、超时/断连/禁用取消）、ui.agent 缓存/dirty、D8 screen 权限/保留键/滑动限速/页属主事件。
+  发布开关 FEATURE_AGENT_CTL / FEATURE_HID_SCROLL / FEATURE_K2_ESTOP（均默认 0）已接入，release 不传 --ctl-allow；scroll 描述符与 kbd 取同一解析值。
+  K2 纯状态机先用 1500 ms 内三击，观察到 release 后启用 1 s hold（poll 定时触发）；真机 press/release 尚待测。
+  macOS 可运行 ASan/UBSan 控制规则单测和 host 编译；完整 Linux kbd suite / 静态 armhf / 真机验收仍待 Linux 和设备。详见 kbd/CTL-PROTOCOL.md。
+- **A1b 屏幕 API（D8）**：协议/规则引擎已实现，draw/text 返回 rendered:false；A7 实现字体/像素 binary framing 和渲染、固定急停键视觉、物理允许/确认 UI。
 
 ### A2 VNC 抓帧（box + [D] 测量）
 - `rfb.c`（ZRLE/Hextile/Raw + Cursor/DesktopSize）、`scale.c`（流式按行累加）、`img.c`（JPEG 编码）；先做 CLI `mk20-agent --snap out.jpg`。
 - box：对 fake_vnc 做逐像素比对（容差内），并加 RSS 上限测试（`/usr/bin/time -v`，或 qemu-arm 跑 armhf 二进制）。
 - **[D][M]**：真机对 Mac Screen Sharing 实测 P95 延迟、峰值 RSS、CPU，以及 Retina/多屏的 framebuffer 形态。只读操作，不需要用户在场，但 Mac 必须开着且已登录。
 - 验收：§14.5-2（P95 ≤800 ms、峰值 ≤16 MB），数据记录在 `NOTES-agent-a2.md`。
+
+#### A2 中文剪贴板路线（仅计划，不写代码）
+- 经典 RFB `ClientCutText` 只携带 Latin-1，不能据此承诺中文；Extended Clipboard pseudo-encoding `0xC0A1E5CE` 提供 UTF-8。
+  macOS Screen Sharing 是否协商/支持 Extended Clipboard、是否把文本同步到系统剪贴板目前未知，必须在 A2 真机测量并记录结果；box 上不推断支持。
+- 规划流程：`paste{text}` → 经 VNC 设置剪贴板 → 在有效输入租约下经 HID 发 `Cmd+V` → 可选恢复（仅恢复 agent 自己先前已知的内容，或协议提供的不读取内容的恢复机制；否则不恢复）。
+  写入/粘贴前检查 allowed、e-stop 和租约；中途失效立即停止。
+- 永不读回用户剪贴板；不加 Mac helper。UTF-8 扩展未确认或不可用时，中文 paste 返回 `unsupported`，不降级成乱码。
 
 ### A3 网络：CONNECT 代理 + mbedTLS + 时间（box + [M]）
 - `net.c`：TCP 连接（10 s 超时）→ `CONNECT` → mbedTLS 握手（SNI，用随包 CA 校验）→ HTTP/1.1。
@@ -341,6 +348,7 @@
 - 验收：设备经代理拿到 Qwen 的 `/models` 401 或 200；代理不可达时请求失败且无任何直连。
 
 ### A4 模型适配器（box + [U] 真 key）
+- **box skeleton 已有**：agent/src/oai.c/.h、oai_cli.c（vendored cJSON 1.7.18），离线请求/响应/错误/坐标映射，ASan/UBSan 单测及 FakeModel HTTP pytest；不含传输/代理/TLS。真 provider 仍待 A3/A4。
 - `llm.c`：单一 OpenAI 兼容适配器（chat/completions、tools、image_url base64）；provider 全是配置（Qwen 默认、GLM、Kimi、OpenAI）；
   `coord_mode` 统一坐标约定；做错误分类。
 - box：fake_model 跑剧本，包括畸形 JSON、超长响应、缺 tool call、坐标越界（clamp 后拒绝）。
@@ -449,7 +457,7 @@
 4 急停 → D4；5 中文/任务入口 → D5；6 MCP → D6（不能启用）；7 截图提示 → 同意默认提示 + 可配置遮挡；密钥录入 → D7。
 
 仍待定：
-- **剪贴板写入机制**（VNC ClientCutText vs Mac 剪贴板助手）：A2 实测 ClientCutText 后由我推荐。
+- **剪贴板写入机制**：仅 VNC；A2 实测 macOS Screen Sharing 的 Extended Clipboard UTF-8 支持；不做 Mac helper、不读回用户剪贴板。
 - **默认国内模型**：A4 基准之后推荐、用户确认；需要用户经板载密钥页录入 Qwen/GLM/Kimi key。
 - **D5′(a) USB 麦克风**：UDC 缺 ISO IN 端点（见 §3.9），需要在“再打内核补丁”与“Mac 侧助手”之间取舍。
 - 麦克风硬件形态（模拟 MIC 进片内 codec 还是 PDM）：真机 `arecord -l` 确认。

@@ -1,0 +1,91 @@
+# Task: MK20 agent A1 remainder + OpenAI-compatible adapter skeleton (repo: this worktree, work under deck/)
+
+Read first: deck/AGENT-BUILD-PLAN.md §3.4, §3.4b, §3.5, §A1; deck/kbd/ctl.h, deck/kbd/ctl.c, deck/kbd/kbd.c,
+deck/kbd/mk20_kbd.c, deck/kbd/tests/tests_ctl.inc, deck/kbd/tests/e2e_run.py, deck/firmware/release/sbin/mk20d,
+deck/firmware/release/share/mk20lib.sh, deck/firmware/release/share/gadget.sh (MK20_HID_SCROLL), deck/tests/conftest.py
+(scope_gadget_fn), deck/agent/tests/fakes/fake_model.py.
+
+HARD RULES
+- Box-only code work. Do NOT access any device, serial port, adb, network, or /dev. Do NOT run git commit/push; leave changes
+  uncommitted in the worktree. Do not touch deck/firmware/release/bin/* (binaries are rebuilt elsewhere).
+- Never add any GD32 serial write other than the existing allow-listed knob payload; never add 0x19 or "02 AA E2 78".
+- C: C11, must compile with -Wall -Wextra -Werror on Linux (glibc + static armhf). This Mac may not run the Linux-only
+  kbd tests (SO_PEERCRED, ptys): if `make -C deck/kbd test` cannot run here, still make code portable-correct and say so.
+  Python tests: `cd deck && uv run --with pytest python -m pytest -q agent/tests` and the specific tests you touch.
+- Every default stays OFF: with no new flags the mk20-kbd behaviour, the HID descriptor and mk20d launch line are unchanged.
+- Keep diffs tight; match existing style (dense C, small helpers). Add tests for every rule.
+
+ITEMS (do in order; finish each fully before the next)
+
+1. Release wiring (shell). In mk20lib.sh add release switches FEATURE_AGENT_CTL (bool, default 0) and FEATURE_HID_SCROLL
+   (bool, default 0), validated/loaded/exported like FEATURE_KBD (incl. the conf key list and env overrides MK20_AGENT_CTL /
+   MK20_HID_SCROLL = 0|1). mk20d's kbd launch adds `--ctl /run/mk20/kbd.sock` only when FEATURE_AGENT_CTL=1 and
+   `--hid-scroll` only when FEATURE_HID_SCROLL=1; gadget.sh must build the scroll descriptor from the SAME resolved value
+   (export MK20_HID_SCROLL from FEATURE_HID_SCROLL so the descriptor and mk20-kbd can never disagree). Never pass --ctl-allow
+   from the release. Add pytest tests in deck/tests (follow test_mk20d_kbd.py patterns; any gadget helper cut-out MUST go
+   through conftest.scope_gadget_fn; no unscoped /tmp paths, never pgrep/kill outside the test's tmp dir) proving: default
+   launch line unchanged; flags appear when enabled; descriptor scroll variant iff FEATURE_HID_SCROLL=1; mismatch impossible.
+   shellcheck -s sh -S warning must stay clean.
+
+2. confirm.request (deck/kbd/ctl.c/.h). Op `confirm.request{id,cid,summary(<=120 chars),risk:"low"|"high",timeout_ms
+   (default 30000, 1000..120000)}`: requires allowed && !estopped (no lease needed); one pending confirm at a time
+   (second -> "busy"). Reply ok immediately. The keyboard side calls new `ctl_confirm_shown(c, now)` when the confirm page
+   is drawn and `ctl_confirm_key(c, ok, now)`; an OK key earlier than 300 ms after shown (or before shown) is IGNORED
+   (counted, not a reject); cancel key at any time -> rejected; ctl_tick past timeout -> rejected with reason "timeout";
+   estop / disallow / requesting client gone -> pending confirm cancelled with reason. Result is pushed to the requesting
+   client as `{"ev":"confirm.result","cid":..,"ok":true|false,"reason":".."}`. Expose pending state in `status`.
+   Bound ctl_timeout_ms by the confirm deadline too. Unit tests in tests_ctl.inc for every case incl. 299/300 ms boundary.
+
+3. ui.agent. Op `ui.agent{state, input:"hid"|"vnc", summary(<=120), progress 0..100}` (no lease needed, requires allowed):
+   validated, cached in ctl_t (state ∈ idle|observing|planning|acting|awaiting_confirm|done|stopped|error), reported in
+   `status`, and a dirty flag `ctl_ui_dirty(c)` the renderer (A7) will consume. Reject bad values with "bad_args". Tests.
+
+4. D8 screen API rules (protocol + rule engine only, no rendering; new deck/kbd/ctlscr.c/.h, add to kbd/Makefile SRC and
+   to deck/tools/mk20-build-bins.sh source list the same way ctl.c is). Implement on kbd.sock: screen.layout (21 screens:
+   fb1..fb20 128x128 keys row-major 4x5, fb21 428x142 sub-screen; bus0 = fb1..9+fb21, bus1 = fb10..20; current page id;
+   page owners system|agent|user), screen.page.create{name} (owner agent, max 8, returns page_id), screen.page.delete,
+   screen.page.show (only agent-owned or the agent control page), screen.draw{page_id,fb,x,y,w,h,fmt:rgb565|jpeg,bytes}
+   and screen.text{page_id,fb,text,size,fg,bg} — validate geometry/fmt/size (bytes <= 65536) and return
+   {"ok":true,"rendered":false} (pixel transport is A7; document that a later binary framing will carry data because
+   CTL_LINE_MAX=1024), screen.bind{page_id,row,col,action}. Rules: all screen.* need allowed && !estopped (no lease);
+   reserved = agent control page and its e-stop key: draw/bind/delete on them -> "reserved"; writes to system/user pages ->
+   "forbidden" unless a keyboard-side grant `ctl_screen_grant(c, ttl_ms, now)` is active (expires; cleared on estop/
+   disallow/reboot); rate limits per fb <= 10 writes/s and global <= 30 writes/s (sliding 1 s window) -> "rate_limited",
+   no queueing; on estop/disallow: agent pages kept, current page switches to system, all agent binds dropped. Key events:
+   `ctl_key_event(c,row,col,pressed,now)` pushes {"ev":"key","page":..,"row":..,"col":..,"down":..} to the agent client ONLY
+   if the shown page is agent-owned and that key is bound. Unit tests for: reserved refusal, rate limits (per-fb and global,
+   window rollover), grant expiry, refusal when not allowed, key events only to owner page after page switches.
+
+5. K2 long-press e-stop behind a flag. mk20-kbd option `--k2-estop` (default off; also release switch FEATURE_K2_ESTOP
+   default 0 wired like item 1). K2 press = knob event with slot 103 (see gd32.h). Device behaviour of K2 press/release on
+   ttyS1 is NOT yet confirmed, so implement a small pure state machine (unit-tested): if release events are reported,
+   e-stop after the press is held >= 1000 ms (checked in the poll loop via a timer, so it fires while still held); if the
+   firmware reports press only, N=3 K2 presses within 1500 ms triggers e-stop instead. Calls ctl_estop(c,"k2_hold"|"k2_triple").
+   Never writes to the GD32. Tests for both modes and for no false trigger from K2 rotation slots 104/105.
+
+6. deck/kbd/CTL-PROTOCOL.md: the full kbd.sock protocol as implemented (framing: one JSON object per line, <=1024 bytes;
+   peer uid check; 2 clients; every op with fields, replies, error codes; events; lease/e-stop/confirm/ui/screen rules;
+   timing constants; what is keyboard-only; flags and release switches). Update deck/agent/README.md and the A1 status
+   lines in AGENT-BUILD-PLAN.md.
+
+7. (if time) OpenAI-compatible adapter skeleton in C: deck/agent/src/oai.c/.h using the vendored cJSON
+   (deck/agent/vendor/cjson, v1.7.18, already present). Functions: build the POST {base_url}/chat/completions JSON body from
+   (model, system prompt, user text, optional JPEG as data:image/jpeg;base64 image_url, tool schema list, max_tokens,
+   temperature, supports_tool_choice) — the API key must NEVER appear in the body (it is only for the Authorization
+   header, built by a separate function); parse a response into {finish_reason, content text, tool_calls[] (id, name,
+   arguments parsed as JSON object; invalid arguments JSON -> per-call error, not crash)}; parse error bodies
+   ({"error":{"message","type","code"}}) + HTTP status into a typed error (auth 401/403, rate 429, server 5xx, bad_response).
+   Coordinate helper: norm1000 <-> pixel. Bounded sizes, no unbounded allocation from input. Build a tiny CLI
+   deck/agent/src/oai_cli.c (reads a request spec / response file, prints JSON) and a Makefile (deck/agent/Makefile,
+   host build with -fsanitize=address,undefined). Tests: C unit tests (deck/agent/tests/test_oai.c) plus a pytest
+   (deck/agent/tests/test_oai.py) that builds the CLI, generates a request body, POSTs it with Python urllib to
+   fake_model.FakeModel (scripted tool_calls, content, 429, raw malformed body) and feeds the responses back to the CLI
+   parser. Hook into `make agent-test` in deck/Makefile. Skip the C build step in pytest with a clear skip if cc is missing.
+
+8. Clipboard for Chinese input — PLAN ONLY (no code): add a short section to AGENT-BUILD-PLAN.md (A2) for the VNC
+   clipboard route: ClientCutText (Latin-1 only in classic RFB) vs the Extended Clipboard pseudo-encoding (UTF-8,
+   0xC0A1E5CE) support in macOS Screen Sharing (unknown, must be measured on the device in A2), flow paste{text} ->
+   set clipboard via VNC -> Cmd+V via HID under the lease -> optional restore; never read back user clipboard. No Mac helper.
+
+FINISH with a summary listing: files changed per item, what tests you ran and their results, anything you could not run on
+macOS, and any item not completed.

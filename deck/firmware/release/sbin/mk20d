@@ -196,8 +196,8 @@ boot)
   KBDM=0; [ $MODE = composite ] && kbd_wanted && KBDM=1
   [ "$FEATURE_KBD" = 1 ] && [ $KBDM = 0 ] && log WARN kbd "enabled but not used (mode=$MODE bin=$([ -x "$REL/bin/mk20-kbd" ] && echo y || echo n))"
   if [ $MODE = composite ]; then
-    ( umask 077; printf 'MK20_ECM_IP=%s\nMK20_ECM_MASK=%s\nMK20_DEV_MAC=%s\nMK20_HOST_MAC=%s\nMK20_BRIDGE_PORT=%s\nMK20_FLAP_DROPS=%s\nMK20_FLAP_WINDOW=%s\nMK20_NOHID=%s\nMK20_NOADB=%s\n' \
-      "$ECM_IP" "$ECM_MASK" "$ECM_DEV_MAC" "$ECM_HOST_MAC" "$BRIDGE_PORT" "$FLAP_DROPS" "$FLAP_WINDOW_S" "$NOHID" "$NOADB" > "$TM/gadget.env.tmp" ) \
+    ( umask 077; printf 'MK20_ECM_IP=%s\nMK20_ECM_MASK=%s\nMK20_DEV_MAC=%s\nMK20_HOST_MAC=%s\nMK20_BRIDGE_PORT=%s\nMK20_FLAP_DROPS=%s\nMK20_FLAP_WINDOW=%s\nMK20_NOHID=%s\nMK20_NOADB=%s\nMK20_HID_SCROLL=%s\n' \
+      "$ECM_IP" "$ECM_MASK" "$ECM_DEV_MAC" "$ECM_HOST_MAC" "$BRIDGE_PORT" "$FLAP_DROPS" "$FLAP_WINDOW_S" "$NOHID" "$NOADB" "$FEATURE_HID_SCROLL" > "$TM/gadget.env.tmp" ) \
       && mv -f "$TM/gadget.env.tmp" "$TM/gadget.env"
     cp -f "$REL/share/gadget.sh" "$TM/gadget-boot.sh"
     MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log MK20_ECM_IP=$ECM_IP MK20_ECM_MASK=$ECM_MASK \
@@ -329,12 +329,17 @@ kbd)
       composite_up || { why="composite down"; break; }   # gadget.sh cleanup owns KD on that path
       [ "$(kd_count)" != 0 ] && { kd_svc stop; sleep 1 5>&-; [ "$(kd_count)" != 0 ] && { why="kd came back"; echo "stock KD came back" > "$TM/kbd-degraded"; rm -f "$TM/kbd.mode"; break; }; }
       HA="--hid $HID --hid-stop-file $HSTOP"; [ "${MK20_NOHID:-0}" = 1 ] && HA="--no-hid"
+      # Agent release flags: all default off; --ctl-allow is intentionally never passed.
+      set --
+      [ "$FEATURE_AGENT_CTL" = 1 ] && set -- "$@" --ctl "$R/run/mk20/kbd.sock"
+      [ "$FEATURE_HID_SCROLL" = 1 ] && set -- "$@" --hid-scroll
+      [ "$FEATURE_K2_ESTOP" = 1 ] && set -- "$@" --k2-estop
       t0=$(cut -d. -f1 /proc/uptime)
       # --exit-file: the daemon itself refuses to start / exits when teardown's marker appears (closes the window
       # between this check and the exec); --lock: daemon-lifetime single-writer lock, the SAME path as the binary's
       # default (/tmp/mk20-kbd.lock), so a manual `mk20-kbd --run` cannot run beside it (a surviving orphan wins, rc 3)
       # shellcheck disable=SC2086
-      "$KB" --run --host "$R/dev/ttyGS0" $HA --status "$KST" --lock "$R/tmp/mk20-kbd.lock" --exit-file "$KSTOP" </dev/null >>"$KL" 2>&1 5>&-; rc=$?
+      "$KB" --run --host "$R/dev/ttyGS0" $HA --status "$KST" --lock "$R/tmp/mk20-kbd.lock" --exit-file "$KSTOP" "$@" </dev/null >>"$KL" 2>&1 5>&-; rc=$?
       t1=$(cut -d. -f1 /proc/uptime)
       [ -f "$KSTOP" ] && { why="stop file"; break; }   # stopped by gadget.sh: not a crash
       total=$((total + 1)); [ $((t1 - t0)) -ge 60 ] && d=1   # a long healthy run resets the backoff

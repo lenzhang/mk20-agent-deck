@@ -2,6 +2,7 @@
  * Pure functions over fds so tests can drive it with socketpairs/temp dirs. */
 #ifndef MK20_KBD_H
 #define MK20_KBD_H
+#include "k2estop.h"
 #include "gd32.h"
 #include "gd32io.h"
 #include "hid.h"
@@ -24,6 +25,7 @@ typedef struct {
     gd32_knob_status knob;
     int gd32_rw;
     hid_t *hid;           /* NULL = no HID output */
+    int k2_estop; k2_estop_t k2;
     struct ctl_s *ctl;    /* NULL = no kbd.sock control (default) */
     int ptt_col, ptt_row; /* firmware coords (0-based) of the push-to-talk key; default doc (1,4) */          /* 1 if the tty was opened for writing (knob init allowed) */
     struct {

@@ -14,7 +14,7 @@ release:
 kbd-test:   # mk20-kbd (KD replacement): ASan/UBSan unit tests + e2e of the real binary on ptys
 	$(MAKE) -C kbd test
 
-agent-test:   # on-device agent: host fakes (VNC / OpenAI-compatible model / CONNECT proxy) + their tests
+agent-test:   # host fakes + adapter C/CLI tests (pytest skips C if cc is missing)
 	uv run --with pytest python -m pytest -q agent/tests
 
 sim-test:

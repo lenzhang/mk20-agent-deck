@@ -109,7 +109,16 @@ void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len)
     int n = host_json_key_state(j, sizeof j, ev.col, ev.row, ev.pressed);
     if (n > 0 && k->host_fd >= 0) kbd_host_send(k, KBD_EVENT_ID, HOST_CMD_JSON, j, (size_t)n);
     /* agent A1: a physical key press takes input back from the agent (lease revoked + all-up) BEFORE the PTT edge */
-    if (k->ctl && !ev.knob && ev.pressed) ctl_human_input(k->ctl, 0);
+    if (k->ctl && ev.knob == 2 && k->k2_estop) {
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); long now = t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+        const char *reason = k2_estop_event(&k->k2, ev.row, ev.pressed, now);
+        if (reason) ctl_estop(k->ctl, reason, now);
+    }
+    if (k->ctl && !ev.knob) {
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); long now = t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+        if (ev.pressed) ctl_human_input(k->ctl, now);
+        ctl_key_event(k->ctl, ev.row, ev.col, ev.pressed, now);
+    }
     /* router (r120): PTT key holds Right Alt/Option while pressed; every other key and the knobs are local */
     if (k->hid && !ev.knob && ev.col == k->ptt_col && ev.row == k->ptt_row) hid_set_mod(k->hid, HID_MOD_RALT, ev.pressed);
     if (k->local_ui && !ev.knob) { kbd_draw_key(k, ev.row, ev.col, ev.pressed); kbd_flush(k); }
