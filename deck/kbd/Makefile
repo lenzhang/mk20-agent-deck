@@ -7,8 +7,9 @@ armhf: mk20_kbd.c $(SRC) *.h vendor/stb_image.h
 	arm-linux-gnueabihf-gcc $(CFLAGS) -static -o mk20-kbd.armhf mk20_kbd.c $(SRC)
 tests/test_kbd: tests/test_kbd.c tests/tests_k3.inc $(SRC) *.h vendor/stb_image.h
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined -g -I. -o $@ tests/test_kbd.c $(SRC)
-test: tests/test_kbd
+test: tests/test_kbd mk20-kbd
 	./tests/test_kbd
+	python3 tests/e2e_run.py
 clean:
 	rm -f mk20-kbd mk20-kbd.armhf tests/test_kbd
 .PHONY: host armhf test clean

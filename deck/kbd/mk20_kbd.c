@@ -100,15 +100,22 @@ static int run(const struct run_opts *o)
     kbd_draw_idle(&k);
     if (kbd_flush(&k) < 0) fprintf(stderr, "mk20-kbd: initial panel write failed (errors=%u)\n", k.scr.write_errors);
 
-    int no_write = o->no_write || access(GD32_NO_WRITE_FILE, F_OK) == 0;
+    /* kill file: the fixed path, or an extra one from MK20_KBD_NO_WRITE_FILE (tests, TF rescue);
+     * either existing keeps the GD32 tty read-only. The env can only ADD a kill file. */
+    const char *extra = getenv("MK20_KBD_NO_WRITE_FILE");
+    int no_write = o->no_write || access(GD32_NO_WRITE_FILE, F_OK) == 0 || (extra && *extra && access(extra, F_OK) == 0);
     int gfd = gd32_open(o->gd32, !no_write);
     if (gfd < 0) { perror(o->gd32); kbd_free(&k); return 1; }
     k.gd32_rw = !no_write;
     gd32_parser gp; gd32_parser_init(&gp);
+    /* host link first, so key events arriving during knob init (<= 18 s worst case if the
+     * GD32 never echoes) are still forwarded */
+    if (!o->no_host && (k.host_fd = open_host(o->host)) >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
+    long next_host_try = mono_ms() + 1000;
     if (no_write) {
         k.knob.state = 4;
         fprintf(stderr, "mk20-kbd: GD32 write disabled (%s); knob K2 stays as configured in the GD32\n",
-                o->no_write ? "--no-gd32-write" : GD32_NO_WRITE_FILE);
+                o->no_write ? "--no-gd32-write" : "kill file");
     } else {
         gd32_knob_opts ko = {o->timeout_ms, 3};
         gd32_knob_init(gfd, &gp, &ko, &k.knob, kbd_gd32_cb, &k);
@@ -117,7 +124,7 @@ static int run(const struct run_opts *o)
     }
     if (o->status) kbd_write_status(&k, o->status);
 
-    long next_host_try = 0, next_status = mono_ms() + 1000;
+    long next_status = mono_ms() + 1000;
     uint8_t buf[16384];
     while (!g_stop) {
         long now = mono_ms();
