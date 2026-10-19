@@ -11,6 +11,9 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include "dns.h"
 #include <unistd.h>
 static const cJSON *get(const cJSON *j, const char *k) { return cJSON_GetObjectItemCaseSensitive(j,k); }
 static int load_configs(web_t *, llm_provider_t *, netcfg_t *);
@@ -39,6 +42,9 @@ static void expire(web_t *w)
     if (w->pairing && expired(w->pair_at,t,WEB_PAIR_MS)) { w->pairing = 0; mem_wipe(w->code,sizeof w->code); }
     for (int i = 0; i < WEB_SESSIONS; i++) {
         web_session_t *s = &w->sessions[i];
+        int watching = 0;
+        for (int k = 0; k < 2; k++) if (w->events[k].tag && !strcmp(w->events[k].owner,s->cookie)) watching = 1;
+        if (watching && t >= s->activity) s->activity = t;
         if (*s->cookie && (expired(s->created,t,WEB_ABSOLUTE_MS) || expired(s->activity,t,WEB_IDLE_MS))) {
             if (w->mcp->task.live && !strcmp(w->mcp->task.owner,s->cookie)) (void)mcp_task_cancel(w->mcp,w->mcp->task.id);
             mem_wipe(s,sizeof *s);
@@ -52,12 +58,14 @@ void web_init(web_t *w, mcp_t *m, runtime_t *r, const char *host, const char *se
     /* Prefer validated persisted device configuration when it exists. */
     if (r) reload_configs(w);
 }
-void web_free(web_t *w) { netcfg_free(&w->net); mem_wipe(w->sessions,sizeof w->sessions); mem_wipe(w->code,sizeof w->code); }
+static void probe_close(web_t *);
+void web_free(web_t *w) { probe_close(w); netcfg_free(&w->net); mem_wipe(w->sessions,sizeof w->sessions); mem_wipe(w->code,sizeof w->code); }
 void web_tick(void *v) { web_t *w = v; expire(w); mcp_tick(w->mcp); }
 void web_attach_pump(void *v, void (*p)(void *), void *ctx) { mcp_attach_pump(((web_t *)v)->mcp,p,ctx); }
 void web_disconnect(void *v, uint64_t tag)
 {
-    web_t *w = v; for (int i = 0; i < 2; i++) if (w->events[i].tag == tag) memset(&w->events[i],0,sizeof w->events[i]);
+    web_t *w = v; if (w->probe_tag == tag) probe_close(w);
+    for (int i = 0; i < 2; i++) if (w->events[i].tag == tag) memset(&w->events[i],0,sizeof w->events[i]);
 }
 static web_session_t *session(web_t *w, const http_request_t *q)
 {
@@ -122,6 +130,8 @@ static void secret(web_t *w, const char *name, const http_request_t *q, const cJ
     if (!write && !remove && strcmp(q->method,"GET")) { response(r,405,"{}"); return; }
     const cJSON *value = get(j,"value"); size_t n = 0;
     if (write) {
+        /* agent_json_parse rejects decoded U+0000 before cJSON allocation;
+         * unmodified cJSON has no decoded-length member to compare to strlen. */
         if (!web_only(j,"value") || !cJSON_IsString(value) || !(n = strlen(value->valuestring)) || n > 4096 || strpbrk(value->valuestring,"\r\n")) { response(r,400,"{}"); return; }
     }
     int dir = web_directory(w->secrets,write);
@@ -169,8 +179,16 @@ static void reload_configs(web_t *w)
     if (load_configs(w,&w->provider,&w->net)) { netcfg_free(&w->net); memset(&w->provider,0,sizeof w->provider); }
     if (w->runtime) { w->runtime->provider = &w->provider; w->runtime->net = &w->net; }
 }
-static int test_guard(void *v) { web_t *w = v; (void)loop_service(w->mcp->loop); return 0; }
-static void connection_test(web_t *w, http_response_t *r)
+#ifdef MK20_WEB_TEST
+/* Reserve a synthetic model stream in the parent before fork so subsequent
+ * task requests consume the next fixture, exactly as production sockets do. */
+static int probe_test_fd = -1;
+static int probe_test_socket(int domain, int type, int protocol)
+{
+    (void)domain; (void)type; (void)protocol; return dup(probe_test_fd);
+}
+#endif
+static void probe_run(web_t *w, http_response_t *r)
 {
     /* The synchronous reachability probe must not occupy the HTTP pump while
      * another task/direct call needs that pump for cancellation. */
@@ -183,14 +201,74 @@ static void connection_test(web_t *w, http_response_t *r)
         else {
             net_options_t options = w->runtime ? w->runtime->transport : (net_options_t){0};
             options.url = p.base_url; options.method = "GET"; options.key_file = p.api_key_file;
-            options.config = &n; options.provider_route = p.route; options.timeout_ms = 4000; options.body_cap = 16384;
-            options.service = test_guard; options.service_ctx = w;
+            options.config = &n; options.provider_route = p.route; options.timeout_ms = 1500; options.body_cap = 16384;
+#ifdef MK20_WEB_TEST
+            if (probe_test_fd >= 0) options.socket_fn = probe_test_socket;
+#endif
+            options.service = NULL; options.service_ctx = NULL; options.cancelled = NULL;
             net_response_t out = {0}; (void)net_request(&options,&out);
             ok = out.http_status > 0; error = ok ? "none" : out.class_name ? out.class_name : "network"; net_response_free(&out);
         }
     }
     cJSON *out = cJSON_CreateObject(); cJSON_AddBoolToObject(out,"ok",ok); cJSON_AddNumberToObject(out,"latency_ms",(double)(now(w)-start)); cJSON_AddStringToObject(out,"error_class",ok ? "none" : error);
     netcfg_free(&n); json_response(r,200,out);
+}
+/* One bounded probe child. Parent never waits for network or a full pipe;
+ * disconnect/shutdown/deadline always kill and reap it. Child emits JSON only. */
+static void probe_close(web_t *w)
+{
+    if (!w->probe_tag) return;
+    close(w->probe_fd); kill(w->probe_pid,SIGKILL);
+    while (waitpid(w->probe_pid,NULL,0) < 0 && errno == EINTR) {}
+    w->probe_tag = 0; w->probe_used = 0;
+}
+static int connection_test(web_t *w, const http_request_t *q, http_response_t *r)
+{
+    if (w->probe_tag && w->probe_tag != q->tag) { response(r,409,"{\"error\":\"busy\"}"); return 0; }
+    if (!w->probe_tag) {
+        if (w->mcp->task.live || w->mcp->pending) { response(r,409,"{\"error\":\"busy\"}"); return 0; }
+        int fds[2]; if (pipe(fds)) { response(r,500,"{}"); return 0; }
+        if (fcntl(fds[0],F_SETFL,O_NONBLOCK)) { close(fds[0]); close(fds[1]); response(r,500,"{}"); return 0; }
+        int keep = -1;
+#ifdef MK20_WEB_TEST
+        if (!w->connection_test && w->runtime && w->runtime->transport.socket_fn) keep = w->runtime->transport.socket_fn(AF_INET,SOCK_STREAM,0);
+#endif
+        pid_t pid = fork();
+        if (pid < 0) { if (keep >= 0) close(keep); close(fds[0]); close(fds[1]); response(r,500,"{}"); return 0; }
+        if (!pid) {
+            close(fds[0]);
+            /* Do not retain listener/client descriptors while probing. */
+            long maxfd = sysconf(_SC_OPEN_MAX); if (maxfd < 0) maxfd = 1024;
+            for (int fd = 3; fd < maxfd; fd++) if (fd != fds[1] && fd != keep) close(fd);
+#ifdef MK20_WEB_TEST
+            probe_test_fd = keep;
+#endif
+            http_response_t out = {0}; probe_run(w,&out);
+            if (out.body && out.len < sizeof w->probe_data) {
+                size_t sent = 0;
+                while (sent < out.len) { ssize_t k = write(fds[1],out.body+sent,out.len-sent); if (k < 0 && errno == EINTR) continue; if (k <= 0) break; sent += (size_t)k; }
+            }
+            free(out.body); close(fds[1]); _exit(0);
+        }
+        if (keep >= 0) close(keep);
+        close(fds[1]); w->probe_fd = fds[0]; w->probe_pid = pid; w->probe_tag = q->tag;
+        w->probe_deadline = dns_now_ms()+1500; w->probe_used = 0; return 1;
+    }
+    ssize_t n = read(w->probe_fd,w->probe_data+w->probe_used,sizeof w->probe_data-1-w->probe_used);
+    if (n > 0) w->probe_used += (size_t)n;
+    if (!n) {
+        w->probe_data[w->probe_used] = 0;
+        cJSON *j = agent_json_parse(w->probe_data,w->probe_used,sizeof w->probe_data);
+        if (j) json_response(r,200,j); else response(r,500,"{}");
+        probe_close(w); return 0;
+    }
+    if (dns_now_ms() >= w->probe_deadline) {
+        probe_close(w); response(r,200,"{\"ok\":false,\"latency_ms\":1500,\"error_class\":\"timeout\"}"); return 0;
+    }
+    if ((n < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) || w->probe_used == sizeof w->probe_data-1) {
+        probe_close(w); response(r,500,"{}"); return 0;
+    }
+    return 1;
 }
 static cJSON *task_status(web_t *w)
 {
@@ -241,7 +319,7 @@ static void tasks(web_t *w, const http_request_t *q, const cJSON *j, web_session
         response(r,404,"{}"); return;
     }
     if (!strcmp(q->method,"POST")) {
-        if (!strcmp(path,"/stop")) { loop_stop(m->loop); if (m->task.live) (void)mcp_task_cancel(m,m->task.id); else strcpy(m->task.state,"stopped"); json_response(r,200,task_status(w)); return; }
+        if (!strcmp(path,"/stop")) { loop_stop(m->loop); if (m->task.live) (void)mcp_task_cancel(m,m->task.id); json_response(r,200,task_status(w)); return; }
         if (m->task.live && (!strcmp(path,"/pause") || !strcmp(path,"/resume"))) {
             m->loop->paused = !strcmp(path,"/pause");
             if (m->loop->paused) strcpy(m->task.state,"paused");
@@ -269,7 +347,7 @@ static int events(web_t *w, const http_request_t *q, web_session_t *s, http_resp
     int size = snprintf(r->body,n+32,"event: task\ndata: %s\n\n",data); free(data);
     r->len = (size_t)size; r->status = 200; r->stream = 1; r->content_type = "text/event-stream"; e->sent = now(w); return 2;
 }
-int web_handle(void *v, const http_request_t *q, http_response_t *r)
+static int handle(void *v, const http_request_t *q, http_response_t *r)
 {
     web_t *w = v; expire(w);
     const char *path = q->path; int read = !strcmp(q->method,"GET");
@@ -278,6 +356,7 @@ int web_handle(void *v, const http_request_t *q, http_response_t *r)
     web_session_t *s = session(w,q);
     if (!public_page && !start && !pairing && !s) {
         for (int i = 0; i < 2; i++) if (w->events[i].tag == q->tag) return 3;
+        if (w->probe_tag == q->tag) probe_close(w);
         response(r,401,"{\"error\":\"unauthorized\"}"); return 0;
     }
     if (strcmp(q->host,w->host) || (q->has_origin && strcmp(q->origin,"http://172.30.250.2:8780"))) { response(r,403,"{\"error\":\"forbidden\"}"); return 0; }
@@ -301,11 +380,18 @@ int web_handle(void *v, const http_request_t *q, http_response_t *r)
     if (pairing) pair(w,j,r);
     else if (!strncmp(path,"/secret/",8)) secret(w,path+8,q,j,r);
     else if (!strncmp(path,"/config/",8)) config(w,path+8,q,r);
-    else if (!strcmp(path,"/test") && !strcmp(q->method,"POST")) connection_test(w,r);
+    else if (!strcmp(path,"/test") && !strcmp(q->method,"POST")) rc = connection_test(w,q,r);
     else if (!strncmp(path,"/api/tasks",10) && (!path[10] || path[10] == '/')) tasks(w,q,j,s,r);
     else if (!strcmp(path,"/api/events") && read) rc = events(w,q,s,r);
     else response(r,404,"{}");
     /* Secret input strings are wiped before freeing the JSON allocation. */
     if (!strncmp(path,"/secret/",8)) { const cJSON *value = get(j,"value"); if (cJSON_IsString(value)) mem_wipe(value->valuestring,strlen(value->valuestring)); }
     cJSON_Delete(j); return rc;
+}
+
+int web_handle(void *v, const http_request_t *q, http_response_t *r)
+{
+    int rc = handle(v,q,r);
+    if (!strncmp(q->path,"/secret/",8) && q->body && q->body_len) mem_wipe((void *)q->body,q->body_len);
+    return rc;
 }

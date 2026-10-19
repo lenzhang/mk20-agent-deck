@@ -6,7 +6,7 @@
 typedef struct rfb rfb_t;
 typedef struct {
     const char *host; unsigned port; const unsigned char *password; size_t password_len;
-    int timeout_ms; /* 0: 5000; numeric IPv4/IPv6 or localhost (no unbounded DNS lookup) */
+    int timeout_ms; /* 0: 5000; numeric IPv4/IPv6, localhost or bounded built-in DNS */
 } rfb_options_t;
 typedef struct { double connect_ms, auth_ms, fb_ms, finish_ms; unsigned w, h; int extended_clipboard; } rfb_info_t;
 int64_t rfb_now_ms(void);

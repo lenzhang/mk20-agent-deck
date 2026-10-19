@@ -1,3 +1,7 @@
+# Pin the UTC source date, including clock.c's trusted-clock lower bound.
+# Update SOURCE_DATE_EPOCH with releases; callers may explicitly override it.
+export TZ := UTC
+export SOURCE_DATE_EPOCH ?= $(shell cat SOURCE_DATE_EPOCH)
 CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -O1 -g
 CPPFLAGS += -Ivendor/cjson -Isrc -DCJSON_NESTING_LIMIT=32
@@ -19,8 +23,8 @@ A6_SRC = src/mcp.c src/httpd.c src/mcp_cli.c src/web.c src/web_store.c src/web_p
 A6_HDR = src/mcp.h src/httpd.h src/web.h src/web_store.h
 A5_SRC = src/policy.c src/loop.c src/calib.c src/kbdc.c src/loop_test.c
 A5_HDR = src/policy.h src/loop.h src/calib.h src/kbdc.h src/loop_test.h src/runtime.h
-NET_SRC = src/net.c src/netcfg.c src/clock.c src/json_util.c
-NET_HDR = src/net.h src/netcfg.h src/clock.h src/json_util.h src/mk20_mbedtls_config.h src/psa_config.h
+NET_SRC = src/dns.c src/net.c src/netcfg.c src/clock.c src/json_util.c
+NET_HDR = SOURCE_DATE_EPOCH src/dns.h src/net.h src/netcfg.h src/clock.h src/json_util.h src/mk20_mbedtls_config.h src/psa_config.h
 CPPFLAGS += -Ivendor/mbedtls/include -DMBEDTLS_CONFIG_FILE='"mk20_mbedtls_config.h"'
 $(LLM_OBJ): $(BUILD)/%.o: src/%.c $(LLM_HDR) $(NET_HDR) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -c -o $@ $<
@@ -67,15 +71,17 @@ $(BUILD)/mk20-agent: $(A6_SRC) $(A6_HDR) $(A5_SRC) $(A5_HDR) src/runtime.c src/a
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ $(A6_SRC) $(A5_SRC) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(LLM_OBJ) $(TLS_OBJ) $(BUILD)/cJSON.o -lm
 $(BUILD)/mk20-agent-nosan: $(A6_SRC) $(A6_HDR) $(A5_SRC) $(A5_HDR) src/runtime.c src/agent_cli.c src/img.c src/img.h src/oai.h $(RFB_SRC) $(RFB_HDR) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_NS) $(BUILD)/ns-cJSON.o $(LLM_NS) $(LLM_HDR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(A6_SRC) $(A5_SRC) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(LLM_NS) $(TLS_NS) $(BUILD)/ns-cJSON.o -lm
-$(BUILD)/test_rfb: tests/test_rfb.c $(RFB_SRC) $(RFB_HDR) src/img.c src/img.h $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_rfb.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o -lm
+$(BUILD)/test_rfb: src/dns.c src/dns.h tests/test_rfb.c $(RFB_SRC) $(RFB_HDR) src/img.c src/img.h $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_rfb.c src/dns.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o -lm
 $(BUILD)/test_net: tests/test_net.c $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_net.c $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
 $(BUILD)/test_cli: $(A6_SRC) $(A6_HDR) src/runtime.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o src/img.c $(A5_SRC) $(A5_HDR) tests/test_cli.c src/agent_cli.c $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o $(LLM_OBJ) $(LLM_HDR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ $(A6_SRC) src/runtime.c $(filter-out src/mem.c,$(RFB_SRC)) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o src/img.c $(A5_SRC) tests/test_cli.c $(NET_SRC) $(LLM_OBJ) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
 $(BUILD)/test_llm: tests/test_llm.c $(LLM_OBJ) $(LLM_HDR) $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_llm.c $(LLM_OBJ) $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
-test: $(BUILD)/test_web $(BUILD)/mk20-agent-web-test $(BUILD)/test_mcp $(BUILD)/mk20-agent-mcp-test $(BUILD)/test_a5 $(BUILD)/test_llm $(BUILD)/test_oai $(BUILD)/oai_cli $(BUILD)/mk20-agent $(BUILD)/test_rfb $(BUILD)/test_net $(BUILD)/test_cli
+test: $(BUILD)/test_dns $(BUILD)/test_httpd $(BUILD)/test_web $(BUILD)/mk20-agent-web-test $(BUILD)/test_mcp $(BUILD)/mk20-agent-mcp-test $(BUILD)/test_a5 $(BUILD)/test_llm $(BUILD)/test_oai $(BUILD)/oai_cli $(BUILD)/mk20-agent $(BUILD)/test_rfb $(BUILD)/test_net $(BUILD)/test_cli
+	$(BUILD)/test_dns
+	$(BUILD)/test_httpd
 	$(BUILD)/test_web
 	$(BUILD)/test_mcp
 	$(BUILD)/test_a5
@@ -84,13 +90,14 @@ test: $(BUILD)/test_web $(BUILD)/mk20-agent-web-test $(BUILD)/test_mcp $(BUILD)/
 	$(BUILD)/test_rfb
 	$(BUILD)/test_net
 	$(BUILD)/test_cli
+	$(BUILD)/test_dns --udp
 clean:
 	rm -rf $(BUILD)
 .PHONY: all test clean
 
 armhf:
 	@if command -v arm-linux-gnueabihf-gcc >/dev/null 2>&1; then \
-	  $(MAKE) BUILD=build-armhf CC=arm-linux-gnueabihf-gcc SAN= LDFLAGS=-static build-armhf/mk20-agent-nosan; \
+	  $(MAKE) BUILD=build-armhf CC=arm-linux-gnueabihf-gcc CFLAGS="-std=c11 -Wall -Wextra -Werror -O2" SAN= LDFLAGS=-static build-armhf/mk20-agent-nosan; \
 	else echo "armhf toolchain unavailable; static cross-build not run"; fi
 .PHONY: armhf
 
@@ -103,8 +110,8 @@ $(BUILD)/mk20-agent-mcp-test: $(A6_SRC) $(A6_HDR) $(A5_SRC) $(A5_HDR) src/runtim
 $(BUILD)/test_mcp: tests/test_mcp.c src/mcp.c src/httpd.c $(A6_HDR) $(A5_SRC) $(A5_HDR) $(LLM_OBJ) $(NET_SRC) $(NET_HDR) $(TLS_OBJ) $(BUILD)/cJSON.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_mcp.c src/mcp.c src/httpd.c $(A5_SRC) $(LLM_OBJ) $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
 
-$(BUILD)/mcp-bind-probe: tests/mcp_bind_probe.c src/httpd.c src/httpd.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/mcp_bind_probe.c src/httpd.c
+$(BUILD)/mcp-bind-probe: tests/mcp_bind_probe.c src/httpd.c src/httpd.h src/mem.c src/mem.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/mcp_bind_probe.c src/httpd.c src/mem.c
 
 $(BUILD)/mk20-agent-web-test: $(A6_SRC) $(A6_HDR) $(A5_SRC) $(A5_HDR) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(RFB_HDR) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_OBJ) $(BUILD)/cJSON.o $(LLM_OBJ)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -DMK20_WEB_TEST -DWEB_EVENT_INTERVAL_MS=10 $(LDFLAGS) -o $@ $(A6_SRC) $(A5_SRC) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(LLM_OBJ) $(TLS_OBJ) $(BUILD)/cJSON.o -lm
@@ -112,5 +119,15 @@ $(BUILD)/mk20-agent-web-test: $(A6_SRC) $(A6_HDR) $(A5_SRC) $(A5_HDR) src/runtim
 $(BUILD)/test_web: tests/test_web.c src/web.c src/web_store.c src/web_pages.c src/mcp.c src/httpd.c $(A6_HDR) $(A5_SRC) $(A5_HDR) $(LLM_OBJ) $(NET_SRC) $(NET_HDR) $(TLS_OBJ) $(BUILD)/cJSON.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_web.c src/web.c src/web_store.c src/web_pages.c src/mcp.c src/httpd.c $(A5_SRC) $(LLM_OBJ) $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
 
-$(BUILD)/web-bind-probe: tests/web_bind_probe.c src/httpd.c src/httpd.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/web_bind_probe.c src/httpd.c
+$(BUILD)/web-bind-probe: tests/web_bind_probe.c src/httpd.c src/httpd.h src/mem.c src/mem.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/web_bind_probe.c src/httpd.c src/mem.c
+
+$(BUILD)/test_dns: tests/test_dns.c src/dns.c src/dns.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -o $@ tests/test_dns.c src/dns.c
+
+test-dns-udp: $(BUILD)/test_dns
+	$(BUILD)/test_dns --udp
+.PHONY: test-dns-udp
+
+$(BUILD)/test_httpd: tests/test_httpd.c src/httpd.c src/httpd.h src/mem.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -o $@ tests/test_httpd.c src/mem.c

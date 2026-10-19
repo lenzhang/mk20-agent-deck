@@ -96,6 +96,7 @@ static void sessions_expire(mcp_t *m, int64_t now)
 {
     for (int i = 0; i < MCP_SESSIONS; i++) {
         mcp_session_t *s = &m->sessions[i];
+        if (*s->id && session_busy(m,s)) { s->last_activity = now; continue; }
         if (*s->id && (now < s->last_activity || now-s->last_activity > MCP_SESSION_IDLE_MS)) session_remove(m,s);
     }
 }

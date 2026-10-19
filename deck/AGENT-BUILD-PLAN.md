@@ -259,6 +259,13 @@
 
 ---
 
+### 3.8b usb0 管理页唯一性
+
+`mk20-agent --web`（仅 usb0 `172.30.250.2:8780`）是 **唯一的 usb0 管理 Web 服务**。
+按用户 K4 决定，维护入口也由这个服务承载：调试开关、退出安全模式、查看日志、重启 `mk20-kbd`；
+这些维护操作仍待后续实现，Mac 侧 `mk20deck` 配置页镜像同一入口。
+`ONBOARD-UI-PLAN` U3 必须复用此服务，不能再启动第二个占用 8780 的服务器。
+
 ### 3.9 语音（D5′）与 UAC 可行性（box 上只读调研，2026-10-19，未碰设备）
 
 **(b) 键盘 agent 本地录音 → 配置的 ASR 模型**：可行性高。
@@ -389,6 +396,7 @@
 - **[D]**：真机看页面效果，用户回家后核对一次。
 
 ### A8 发布集成（box）
+- **A8 part 1 host 状态（2026-10-20，本 worktree）**：DNS 内置解析器、build-bins/reproducible flags/CA 打包、指定 A7 minors 已完成；验证与沙箱阻断见 `agent/NOTES-agent-a8.md`、`reviews/agent-a8-codex-summary.md`。余下 A8：mk20lib FEATURE_AGENT、mk20d agent 监管、selftest INFO/WARN、health.json agent block、maint agent.log 轮转。静态 armhf 二进制由 box 构建并提交，本 Mac 未交叉构建；UDP/真实监听及设备验收待开放环境。
 - `tools/mk20-build-bins.sh` 加入 `bin/mk20-agent`，binary-match 测试；MANIFEST 带上 `share/ca-bundle.pem`。
 - `mk20lib.sh`：`FEATURE_AGENT=0` 默认，接入 FAT 标志 `mk20-no-agent` 和 `MK20_AGENT`。
 - `mk20d agent`：照 router/kbd 的模式监管（flock 单实例，backoff 1→30 s，60 s 正常运行后重置）；

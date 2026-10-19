@@ -217,7 +217,7 @@ def full_flow(binary, kbd_build, tmp_path, certs, tcp):
                     time.sleep(.1)
                 assert d["state"] == "done" and d["steps"] == 7 and not d["shots"]
                 assert c.request(f"/api/tasks/{task}/steps/{newest}/shot.jpg")[0] == 404
-                assert c.request(f"/api/tasks/{task}/stop","POST",{})[2]["state"] == "stopped"
+                assert c.request(f"/api/tasks/{task}/stop","POST",{})[2]["state"] == "done"
                 assert c.request("/api/tasks","POST",dict(goal="private web task"))[2]["state"] == "waiting_allow"
                 assert status_client.request(f"/api/tasks/{task}/steps/7/shot.jpg")[0] == 404
                 assert not vnc.events

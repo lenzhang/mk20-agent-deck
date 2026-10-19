@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "net.h"
+#include <fcntl.h>
 #include "json_util.h"
 #include "mbedtls/build_info.h"
 #include "mbedtls/ssl_ciphersuites.h"
@@ -239,6 +240,61 @@ static void cancellation(void)
     int64_t start=test_now();CHECK(net_request(&o,&r));CHECK(!strcmp(r.class_name,"cancelled"));
     CHECK(test_now()-start<500&&cancel_calls>=3);net_response_free(&r);close(pair[0]);close(pair[1]);netcfg_free(&c);
 }
+static unsigned dns_queries;
+static int no_dns(int a,int b,int c) { (void)a; (void)b; (void)c; dns_queries++; return -1; }
+typedef struct { int fd; char line[1024]; size_t used; } proxy_fixture_t;
+static int proxy_service(void *v)
+{
+    proxy_fixture_t *f = v;
+    ssize_t n = recv(f->fd,f->line+f->used,sizeof f->line-1-f->used,0);
+    if (n > 0) {
+        f->used += (size_t)n; f->line[f->used] = 0;
+        if (strstr(f->line,"\r\n\r\n")) {
+            const char *reply = "HTTP/1.1 403 Refused\r\n\r\n";
+            CHECK(send(f->fd,reply,strlen(reply),0) == (ssize_t)strlen(reply));
+        }
+    }
+    return 0;
+}
+static void proxy_target_no_dns(void)
+{
+    char path[] = "/tmp/a8-proxy-resolv-XXXXXX"; int fd = mkstemp(path); CHECK(fd >= 0);
+    const char *ns = "nameserver 127.0.0.1\n"; CHECK(write(fd,ns,strlen(ns)) == (ssize_t)strlen(ns)); close(fd);
+    const char *json = "{\"version\":1,\"profile\":\"mac_proxy\",\"proxy\":{\"url\":\"http://127.0.0.1:7890\"},\"routes\":{\"domestic\":\"proxy\",\"foreign\":\"proxy\"}}";
+    netcfg_t c; CHECK(!netcfg_parse(json,strlen(json),&c));
+    int pair[2]; CHECK(!socketpair(AF_UNIX,SOCK_STREAM,0,pair)); cancel_fd = pair[0];
+    CHECK(!fcntl(pair[1],F_SETFL,O_NONBLOCK));
+    proxy_fixture_t f = {.fd=pair[1]};
+    net_options_t o = {.url="https://open.bigmodel.cn/",.config=&c,.clock={.trust_clock=1},
+        .socket_fn=cancel_factory,.connect_fn=cancel_connect,.service=proxy_service,.service_ctx=&f,
+        .dns={.resolv_path=path,.socket_fn=no_dns},.timeout_ms=500};
+#ifdef MK20_NET_TEST
+    o.connected_fd = -1;
+#endif
+    net_response_t r; CHECK(net_request(&o,&r)); CHECK(!strcmp(r.class_name,"proxy"));
+    CHECK(!strncmp(f.line,"CONNECT open.bigmodel.cn:443 HTTP/1.1\r\n",strlen("CONNECT open.bigmodel.cn:443 HTTP/1.1\r\n"))); CHECK(dns_queries == 0);
+    /* Prove the resolver accounting seam catches a nonliteral endpoint. */
+    dns_addresses_t a; const char *error;
+    CHECK(dns_resolve("open.bigmodel.cn",443,test_now()+100,&o.dns,&a,&error)); CHECK(dns_queries > 0);
+    net_response_free(&r); netcfg_free(&c); close(pair[0]); close(pair[1]); unlink(path);
+}
+static void release_ca_default(void)
+{
+    const char *old = getenv("MK20_REL"); char *saved = old ? strdup(old) : NULL;
+    CHECK(!setenv("MK20_REL","/definitely/missing/a8-release",1));
+    netcfg_t c; const char *json="{\"version\":1,\"profile\":\"usb_wifi\",\"mode\":\"direct\"}";
+    CHECK(!netcfg_parse(json,strlen(json),&c));
+    net_options_t o={.url="https://127.0.0.1/",.config=&c,.clock={.trust_clock=1},.socket_fn=count_socket};
+#ifdef MK20_NET_TEST
+    o.connected_fd=-1;
+#endif
+    net_response_t r; sockets=0;
+    CHECK(net_request(&o,&r) && !strcmp(r.class_name,"config") && sockets==0); net_response_free(&r);
+    o.ca_file=NET_CA_DEFAULT;
+    CHECK(net_request(&o,&r) && !strcmp(r.class_name,"connect") && sockets==1); net_response_free(&r);
+    if (saved) { CHECK(!setenv("MK20_REL",saved,1)); free(saved); } else CHECK(!unsetenv("MK20_REL"));
+    netcfg_free(&c); sockets=0;
+}
 int main(int argc, char **argv)
 {
     if (argc == 5) return request_driver(argv);
@@ -249,6 +305,6 @@ int main(int argc, char **argv)
         CHECK(strstr(name, "GCM") || strstr(name, "CHACHA20-POLY1305")); suite_count++;
     }
     CHECK(suite_count == 9);
-    configs(); urls(); connect_replies(); http(); clock_keys(); config_files(); cancellation();
+    configs(); urls(); connect_replies(); http(); clock_keys(); config_files(); cancellation(); proxy_target_no_dns(); release_ca_default();
     printf("net/clock: %u checks passed, invalid-config socket calls: %u\n", checks, sockets); return 0;
 }

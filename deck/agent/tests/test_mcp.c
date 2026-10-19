@@ -142,12 +142,17 @@ static void session_lifecycle(void)
     strcpy(m.pending_owner,ids[2]); m.pending = 99; strcpy(m.task.owner,ids[3]); m.task.live = 1;
     q.has_session = 0; f.now++; cJSON_Delete(request(&m,&q,&r,init)); CHECK(r.status == 200);
     CHECK(!strcmp(m.sessions[2].id,ids[2]) && !strcmp(m.sessions[3].id,ids[3]));
-    /* Idle expiration uses DELETE semantics, including owner's stop path. */
-    f.now += MCP_SESSION_IDLE_MS+1; mcp_tick(&m); CHECK(!m.task.live && f.stops >= 1);
+    /* Silent busy owners survive expiry; idle age starts again afterward. */
+    m.task.queued = 1; m.task.stop_epoch = l.stop_epoch;
+    f.now += MCP_SESSION_IDLE_MS+1; mcp_tick(&m);
+    CHECK(m.task.live && !strcmp(m.sessions[2].id,ids[2]) && !strcmp(m.sessions[3].id,ids[3]));
+    mcp_disconnect(&m,99); CHECK(strstr(last_log,"method=tools/call tool=none status=499")); CHECK(!m.pending);
+    CHECK(!strstr(last_log,token)); m.task.live = 0;
+    f.now += MCP_SESSION_IDLE_MS; mcp_tick(&m);
+    CHECK(*m.sessions[2].id && *m.sessions[3].id);
+    f.now++; mcp_tick(&m);
     for (int i = 0; i < MCP_SESSIONS; i++) CHECK(!*m.sessions[i].id);
     q.has_session = 1; strcpy(q.session,ids[2]); cJSON_Delete(request(&m,&q,&r,"{}")); CHECK(r.status == 404);
-    mcp_disconnect(&m,99); CHECK(strstr(last_log,"method=tools/call tool=none status=499")); CHECK(!m.pending);
-    CHECK(!strstr(last_log,token));
     /* Expire on access without a server tick, strict greater-than boundary. */
     q.has_session = 0; cJSON_Delete(request(&m,&q,&r,init)); strcpy(q.session,r.session); q.has_session = 1;
     f.now += MCP_SESSION_IDLE_MS; cJSON_Delete(request(&m,&q,&r,"{}")); CHECK(r.status == 200);

@@ -1,11 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rfb.h"
+#include "dns.h"
 #include "des.h"
 #include "zlib.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netdb.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,29 +86,26 @@ static int sized_skip(rfb_t *c, uint32_t cap)
 }
 static int dial(rfb_t *c, const char *host, unsigned port)
 {
-    struct addrinfo hints, *list = NULL; char service[6]; memset(&hints, 0, sizeof hints);
-    hints.ai_socktype = SOCK_STREAM; hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;
-    if (!strcmp(host, "localhost")) host = "127.0.0.1";
-    /* Numeric service, without stdio or DNS. */
-    unsigned n = port, digits = 0; do { service[digits++] = (char)('0' + n % 10); n /= 10; } while (n);
-    for (unsigned i = 0; i < digits / 2; i++) { char b = service[i]; service[i] = service[digits - 1 - i]; service[digits - 1 - i] = b; }
-    service[digits] = 0;
-    if (getaddrinfo(host, service, &hints, &list)) return fail(c, "bad_host");
+    if (!strcmp(host,"localhost")) host = "127.0.0.1"; /* preserve local VNC alias */
+    dns_addresses_t list; const char *error;
+    dns_options_t options = {.service=c->service,.ctx=c->service_ctx};
+    if (dns_resolve(host,port,c->deadline,&options,&list,&error)) return fail(c,errno == ECANCELED ? "cancelled" : errno == ETIMEDOUT ? "timeout" : "dns");
     int ok = -1;
-    for (struct addrinfo *a = list; a; a = a->ai_next) {
-        c->fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol); if (c->fd < 0) continue;
+    for (unsigned i = 0; i < list.n; i++) {
+        if (rfb_check_deadline(c)) return -1;
+        c->fd = socket(list.addr[i].ss_family, SOCK_STREAM, 0); if (c->fd < 0) continue;
 #ifdef SO_NOSIGPIPE
         int one = 1; (void)setsockopt(c->fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
         if (fcntl(c->fd, F_SETFL, O_NONBLOCK)) { close(c->fd); c->fd = -1; continue; }
-        int r = connect(c->fd, a->ai_addr, a->ai_addrlen);
+        int r = connect(c->fd, (const void *)&list.addr[i], list.len[i]);
         if (!r || (errno == EINPROGRESS && !ready(c, POLLOUT))) {
             int err = 0; socklen_t len = sizeof err;
             if (!getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &len) && !err) { ok = 0; break; }
         }
         close(c->fd); c->fd = -1;
     }
-    freeaddrinfo(list); if (ok) return fail(c, c->error ? c->error : "connect");
+    if (ok) return fail(c, c->error ? c->error : "connect");
     return 0;
 }
 static voidpf zalloc(voidpf opaque, uInt n, uInt size)

@@ -1,6 +1,7 @@
 #ifndef MK20_NET_H
 #define MK20_NET_H
 #include "netcfg.h"
+#include "dns.h"
 #include "clock.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -21,6 +22,7 @@ typedef struct {
     int (*service)(void *ctx); void *service_ctx;
     const volatile int *cancelled;
     agent_clock_options_t clock;
+    dns_options_t dns;
     /* Optional socket factory, for accounting/fault injection. NULL = socket(). */
     int (*socket_fn)(int domain, int type, int protocol);
     int (*connect_fn)(int fd, const struct sockaddr *address, socklen_t len);

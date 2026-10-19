@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "httpd.h"
+#include "mem.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -188,6 +189,7 @@ static void drop(connection_t *c, const http_handler_t *unused)
 {
     (void)unused; const http_handler_t *h = c->handler;
     if (c->fd >= 0) { if (c->pending && h && h->disconnect) h->disconnect(h->ctx,c->tag); close(c->fd); }
+    if (c->in) mem_wipe(c->in,HTTPD_HEADERS+HTTPD_BODY+1);
     free(c->in); free(c->out); memset(c,0,sizeof *c); c->fd = -1;
 }
 static int respond(connection_t *c, http_response_t *r)
@@ -251,7 +253,7 @@ static void pump(void *ctx)
                          * request bytes. A hard close with unread TCP input can
                          * reset the response (and race a socketpair writer). */
                         if (shutdown(v->fd,SHUT_WR)) { drop(v,h); continue; }
-                        free(v->out); free(v->in); v->out = v->in = NULL;
+                        free(v->out); if (v->in) mem_wipe(v->in,HTTPD_HEADERS+HTTPD_BODY+1); free(v->in); v->out = v->in = NULL;
                         v->out_len = v->sent = v->used = 0; v->closing = 2;
                         v->start = now_ms(); continue;
                     }

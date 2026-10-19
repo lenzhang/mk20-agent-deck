@@ -139,14 +139,30 @@ def test_boot_launch_gated(dev, rel, g1):
 
 @pytest.mark.skipif(not shutil.which("arm-linux-gnueabihf-gcc"), reason="needs armhf cross gcc")
 def test_release_binaries_match_source(tmp_path):
-    """firmware/release/bin/{ttygs_tcp_bridge,mk20-router,mk20-kbd} are the static armhf builds of the current sources."""
+    """firmware/release/bin/{ttygs_tcp_bridge,mk20-router,mk20-kbd,mk20-agent} are the static armhf builds of the current sources."""
     rel = DECK / "firmware/release/bin"
     kbd = ["-std=c11", "-D_DEFAULT_SOURCE"] + [str(DECK / "kbd" / f) for f in (
         "mk20_kbd.c", "gd32.c", "gd32io.c", "host.c", "panels.c", "screen.c", "jpeg.c", "kbd.c", "hid.c", "ctl.c", "ctlscr.c", "k2estop.c")] + ["-pthread"]
     for name, src in (("ttygs_tcp_bridge", [str(DECK / "m2-scripts/bridge/ttygs_tcp_bridge.c")]),
                       ("mk20-router", [str(DECK / "router/mk20_router.c")]), ("mk20-kbd", kbd)):
         out = tmp_path / name
-        subprocess.run(["arm-linux-gnueabihf-gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-static", "-o", str(out)] + src,
+        subprocess.run(["arm-linux-gnueabihf-gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-static", f"-ffile-prefix-map={DECK}=.", f"-fdebug-prefix-map={DECK}=.", "-o", str(out)] + src,
                        check=True)
         subprocess.run(["arm-linux-gnueabihf-strip", str(out)], check=True)
         assert out.read_bytes() == (rel / name).read_bytes(), f"{name}: run tools/mk20-build-bins.sh"
+
+    agent_build = tmp_path / "agent-build"
+    subprocess.run(["make", "-s", "-C", str(DECK / "agent"), f"BUILD={agent_build}",
+                    "CC=arm-linux-gnueabihf-gcc", "SAN=", "LDFLAGS=-static",
+                    f"CFLAGS=-std=c11 -Wall -Wextra -Werror -O2 -ffile-prefix-map={DECK}=. -fdebug-prefix-map={DECK}=.",
+                    str(agent_build / "mk20-agent-nosan")], check=True)
+    subprocess.run(["arm-linux-gnueabihf-strip", str(agent_build / "mk20-agent-nosan")], check=True)
+    assert (agent_build / "mk20-agent-nosan").read_bytes() == (rel / "mk20-agent").read_bytes(), "mk20-agent: run tools/mk20-build-bins.sh"
+    assert (DECK / "firmware/release/share/ca-bundle.pem").read_bytes() == (DECK / "agent/vendor/ca/cacert.pem").read_bytes()
+
+
+def test_agent_release_ca_bundle():
+    """Public roots ship as an ordinary manifest-enumerated payload file."""
+    assert (DECK / "firmware/release/share/ca-bundle.pem").read_bytes() == (DECK / "agent/vendor/ca/cacert.pem").read_bytes()
+    script = (DECK / "tools/mk20-release-build.sh").read_text()
+    assert 'find . -type f' in script

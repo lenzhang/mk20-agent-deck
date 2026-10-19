@@ -67,7 +67,8 @@ values. Cookies are HttpOnly, SameSite=Strict, Path=/, without Secure on the spe
 plain HTTP USB service. Fixed-length volatile comparisons visit all expected bytes.
 Sessions expire at thirty idle minutes or twelve absolute hours; time rollback
 also invalidates them. Restart loses all sessions. Expiring a task owner stops
-that task. SSE does not refresh the idle timer indefinitely without user requests.
+that task. A8 correction: an authenticated connected SSE stream keeps the session active;
+the twelve-hour absolute limit and rollback checks still apply.
 Cookie/CSRF/pair values and task goals never enter the log sink.
 
 The static configuration and chat pages are approximately 10 KB and 15 KB. They
@@ -118,9 +119,9 @@ Config saves are rejected while tasks/direct calls are live. Validated persisted
 configs load on web startup and reload after saves; subsequent MCP and web tasks
 share them. Invalid/missing pairs clear the runtime config and fail closed.
 POST `/test` returns busy while tasks/direct calls occupy the shared slot, so its
-synchronous probe cannot delay live cancellation. Otherwise it invokes the existing
-`net_request` HTTPS client with the saved provider
-URL/key path/route, four-second deadline and bounded response. HTTP replies
+synchronous probe cannot delay live cancellation. A8 correction: otherwise a short-lived probe child invokes the existing
+`net_request` HTTPS client with the saved provider URL/key path/route, a
+1.5-second deadline and bounded response; the HTTP pump keeps serving clients. HTTP replies
 (including 401/404) mean reachable, matching agentcfg's connection test semantics.
 Proxy failure never becomes direct. It returns only ok/latency_ms/error_class;
 it neither returns peer bodies nor changes a proxy or system clock.

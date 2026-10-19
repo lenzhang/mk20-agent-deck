@@ -2,6 +2,7 @@
 #define MK20_WEB_H
 #include "mcp.h"
 #include "runtime.h"
+#include <sys/types.h>
 #define WEB_SESSIONS 2
 #ifndef WEB_EVENT_INTERVAL_MS
 #define WEB_EVENT_INTERVAL_MS 1000
@@ -17,6 +18,8 @@ typedef struct {
     char host[128], secrets[4096], config[4096], code[7];
     int64_t pair_at; unsigned attempts; int pairing;
     web_session_t sessions[WEB_SESSIONS]; web_event_t events[2];
+    uint64_t probe_tag; pid_t probe_pid; int probe_fd; int64_t probe_deadline;
+    char probe_data[512]; size_t probe_used;
     void *display_ctx; int (*display)(void *, const char code[7]);
     /* Optional test ports, never supplied by a remote request. */
     void *test_ctx; int (*connection_test)(void *, const llm_provider_t *, const netcfg_t *, const char **);
