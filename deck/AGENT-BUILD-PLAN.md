@@ -3,6 +3,7 @@
 > 依据：PRD v1.3 §14（2026-10-18 01:18 SGT 批准）+ 后续决定（网络双 profile、provider 可配置默认国内、
 > 密钥落 `/data/mk20/secrets/<provider>.key`、mk20-kbd 取代 KD、OTA 可用时不回原厂）。
 > 分支：`feature/agent`（自 `feature/kd-replace` @ 19a0057）。v0.1 只是计划；v0.2 写入用户 2026-10-19 的决定（§0.1），A0/A1 开始实现。没有碰设备。
+> 2026-10-19 板载 UI 决定：键盘不依赖 Mac app；旧“no Mac helper”由 **optional helper, never required** 取代。屏幕/配置/PTT 的细化与提前实施见 [ONBOARD-UI-PLAN.md](ONBOARD-UI-PLAN.md) U1–U7；下文历史阶段状态不代表这些新增能力已实现。
 > 本文的约定：A0..A9 = 阶段；**[D]** = 需要真机；**[U]** = 需要用户在场或需要用户决定；**[M]** = 需要 Mac（只读或 Mac 侧小工具）。
 
 ---
@@ -26,12 +27,12 @@
 | D2 出口 | **键盘程序里不做出口 IP 证明。**出口选择由网关/代理负责（mihomo 规则）。A3 删除出口证明，`/run/mk20/egress.json` 取消 | §3.1、A3、A8 health、§6.1 |
 | D3 模型 | **只做一个 OpenAI 兼容 `chat/completions` 适配器**（视觉用 `image_url` base64 data URI，支持 tool calls）。provider 只是配置（`base_url`、`model`、key 文件）：Qwen（默认）、GLM、Kimi、OpenAI | §3.5、A4 |
 | D4 急停 | agent 页固定急停键 + 任意页长按 K2 1 s（按原计划） | §3.4 |
-| D5 聊天/任务入口 | 新增 **HTTP API + 极简网页**（只在 usb0 上服务）：提交任务、查看进度/步骤/截图、暂停、停止。在键盘上打字太累，所以任务从网页/API 下达；**语音任务后续**经 PTT + 现有语音网关 ASR。agent 输入中文用**剪贴板粘贴（Cmd+V）**，剪贴板写入机制待定（见 §3.3） | §3.3、§3.8、A7 |
+| D5 聊天/任务入口（修订 2026-10-19） | HTTP API + usb0 极简网页继续保留；**L5 固定不可覆盖 PTT -> 板载麦克风 -> 配置的 ASR -> 键盘 agent 任务**。按住暂停动作、**不撤销租约**（继续续约）；松开取得新目标后恢复，急停/超时/人手接管优先。**L1 PTT 仍为 Mac Right-Option，按原规则撤销租约**；fb21 明示语音目标 Mac / 键盘 agent。ASR 可后做，键位/状态现在定义。中文粘贴机制见 §3.3 | §3.4、§3.8、ONBOARD-UI-PLAN U4/U6 |
 | D6 MCP | MCP **可以提交任务，但不能启用 agent**；总开关只在键盘上 | §3.7 |
 | D7 密钥 | key 通过板载配置网页录入，存 `/data/mk20/secrets/<provider>.key`（root 0600） | §3.8 |
-| **D1′ 网络出口（修订，2026-10-19）** | 出口是**用户在板载配置网页上选的 profile**：① “Mac 代理”（填 host:port，走 HTTP CONNECT）；② “USB WiFi dongle”（直连，或再配一个代理）。**可达性由用户保证，键盘只按所选 profile 走。**计划里不再设计转发；launchd 转发只作为可选备注（§3.1） | §3.1、A3、A7 配置页 |
-| **D5′ 语音（两条路）** | (a) 给 Mac 侧 agent / Mac 输入法：键盘把自己暴露成 **USB 麦克风**（composite 里加 UAC1/UAC2），macOS 听写/输入法直接用它当输入源；(b) 给键盘 agent：本地录键盘麦克风，发给配置页里配置的 **ASR 模型**。可行性见 §3.9（**UAC 方向有硬件风险**） | §3.9、A1b、A7 |
-| **D8 屏幕开放给 agent** | 21 块屏（fb1–20 键屏 + fb21 副屏）经 kbd 控制 API 开放：读当前页/布局、往键屏或副屏画图/写字、创建 agent 自有页面、在这些页面上绑定按键动作。**保留且不可覆盖**：急停键和 agent 控制页。agent 写屏限速，且只能写 agent 自有页面，除非用户授权 | §3.4b、A1、A7 |
+| **D1′ 网络出口（修订，2026-10-19）** | 出口是**用户在板载配置网页上选的 profile**：① “Mac 代理”（填 host:port，走 HTTP CONNECT）；② “USB WiFi dongle”（配置可达的 CONNECT 代理；无代理则 blocked）。**可达性由用户保证，键盘只按所选 profile 走。**计划里不再设计转发；launchd 转发只作为可选备注（§3.1） | §3.1、A3、A7 配置页 |
+| **D5′ 语音（按 D5 修订）** | L1 保留 Mac Right-Option；L5 保留 PTT 录板载麦克风送配置 ASR，pause-not-revoke。旧 USB 麦克风/UAC 路线仅保留 §3.9 可行性研究，**不是本次实现前置条件** | §3.9、ONBOARD-UI-PLAN U4/U6 |
+| **D8 屏幕开放给 agent（修订 2026-10-19）** | 保留现有 21 屏 API、属主/授权/限速；**home/LS/L5 始终由 mk20-kbd 板载渲染**，L1/L4 仅 Mac 在线时为 host 页面，否则板载离线占位。固定急停键、L5/agent 页 PTT 与 fb21 安全/语音条不可覆盖（授权也不行）。Mac helper **optional, never required**，取代旧 no-helper 决定；采屏顺序 **Mac fast path -> VNC(A2) -> UVC(feature/uvc)**，无 AirPlay | §3.2、§3.4b、ONBOARD-UI-PLAN U1/U2/U4/U5 |
 | D6 | 再次确认：MCP 可提交任务，不能启用 agent | §3.7 |
 | 7（截图提示/遮挡） | 同意默认副屏提示“正在上传画面”，遮挡区域可配置 | §3.2 |
 
@@ -64,8 +65,8 @@
 ```
                       ┌──────────── Mac ────────────┐
   cloud model ◀─HTTPS─┤ mihomo :7890 (只读，不改配置)  │   Screen Sharing :5900 (VNC)
-                      │ mk20deck (Python): 设置页渲染、  │        ▲
-                      │  配置下发、launchd 转发(可选)   │        │ RFB over ECM
+                      │ mk20deck (可选): L1/L4 会话、   │        ▲
+                      │  JPEG/AX fast path (仅 USB .1) │        │ RFB over ECM
                       └──────▲────────────▲───────────┘        │
                  HTTP CONNECT│            │HTTP(配置/密钥/MCP)   │
  ═════════ USB ECM 172.30.250.0/24 ═══════════════════════════════
@@ -77,7 +78,7 @@
                      │ /run/mk20/kbd.sock (unix, 0600, 帧化 JSON-lines 或 TLV)
       ┌──────────────▼──────── mk20-kbd (已有，扩展) ────────────────────────────────┐
       │ input lease + 仲裁 + 急停(进程内) → hid.c → /dev/hidg0 (kbd + abs ptr)        │
-      │ 键面/副屏：agent 状态组件、agent 页、确认页 (≥300 ms 才接受确认)               │
+      │ 键面/副屏：home/LS/L5 板载渲染、配置原子写、确认页 (≥300 ms 才接受确认)      │
       └──────────────────────────────────────────────────────────────────────────────┘
       mk20d: `mk20d agent` 监管 (flock, backoff), health.json "agent", selftest INFO
 ```
@@ -110,20 +111,23 @@
   设备侧**绝不直连**：`net.json` 缺失或解析失败时一律不发请求（fail-closed）。
 - **出口选择归网关/代理（D2）**：设备侧不做出口 IP 证明、不读 mihomo API。国外 provider 走 112 US 出口这件事由 Mac 上
   mihomo 的规则保证（AI 组），**任何情况下都不改代理配置**。设备只保证“所有模型流量只经代理端口，绝不直连”。
-- **网络出口 profile（D1′，取代下面的 D1 条目）**：配置网页上二选一：`mac_proxy{host,port}`（HTTP CONNECT），或
-  `usb_wifi{mode: direct | proxy, proxy:{host,port}}`。`net.json` 按 profile 写；**可达性由用户保证**，设备不做出口探测，
-  只在“连接测试”时报告错误类别。`usb_wifi + direct` 是用户的显式选择，因此允许直连（与旧的“foreign 不许 direct”规则相比是放宽，
-  只在用户在配置页选了这个 profile 时生效）。没有 `net.json` 或解析失败 → 不发请求（fail-closed 不变）。
+- **网络出口 profile（D1′，2026-10-19 板载 UI 修订）**：LS / usb0 配置网页选择 `mac_proxy{host,port}` 或 USB WiFi + 配置的 CONNECT 代理（写现有 `board_wifi` 格式）。**never direct-connect，never fall back to direct**：两类云端路由均为 proxy，无 WiFi 代理则 blocked；旧 domestic-direct / `usb_wifi mode:direct` 决定被本次取代。可达性由用户保证；配置缺失/损坏则 fail-closed。当前 A3 reader 仍接受 direct，须在 ONBOARD-UI-PLAN U3 收紧消费者，不能仅靠 UI。
 - （可选备注，非计划项）**代理接入（D1，旧）**：Mac 上不装驱动。若 mihomo `allow-lan` 且在 172.30.250.1 可达，`net.json.proxy.url` 直接指向该端口；
   否则在 Mac 上加一个极小的 **launchd TCP 转发**（plist + 几十行的转发程序），**只绑 172.30.250.1**，转发
   `172.30.250.1:17891 → 127.0.0.1:7890`。不改 mihomo 配置。哪种方式可行，等用户回家时在设备上实测 [D][M]。
-- **Profile `board_wifi`（后期）**：Wi-Fi dongle + 板载代理。国内直连，国外必须经板载代理，否则 `blocked`，与 agentcfg 的现有规则一致。
-  放在 A10 之后，本计划不展开。
+- **Profile `board_wifi`**：USB WiFi + 显式代理，国内/国外均 proxy，无代理均 blocked；U1 同步修订 agentcfg writer，U3 接设备消费者（详见 ONBOARD-UI-PLAN）。
 - **时间同步（TLS 证书校验依赖正确时钟）**：T113 有没有可靠 RTC 待确认。方案：mk20d 或 agent 启动时，向 Mac 侧
   （`mk20deck` 新增 `GET /time`，或直接读代理返回的 HTTP `Date` 头）取时间，偏差超过 120 s 就 `settimeofday`，并记录日志。
   时钟没校准就**不发 TLS 请求**（不能为了绕过时钟问题而跳过证书校验）。
 
-### 3.2 屏幕采集（VNC → 模型输入）
+### 3.2 屏幕采集（可选 Mac fast path → VNC → UVC）
+
+- **2026-10-19 取代旧 no Mac helper 决定：optional helper, never required**。mk20deck 可选提供
+  `GET /screenshot`（macOS screencapture / ScreenCaptureKit，按 display/window 缩放 JPEG）及
+  `GET /accessibility`（AX windows/buttons/fields/text，屏蔽安全字段），**只绑 172.30.250.1**。
+  agent 按 **Mac fast path 在线优先 -> VNC（A2）-> UVC capture card（feature/uvc，锁屏/崩溃 fallback）** 选择观察源；
+  无 AirPlay。坐标/来源代际、权限失败、超时/回切迟滞和限额见 ONBOARD-UI-PLAN §5/U5；采屏源切换不等于输入通道切换。
+  以下是 VNC 路径的既有细节；helper 缺失不妨碍板载 UI、ASR、VNC/UVC。无可靠时钟仍须 fail-closed，不能依赖 helper 授时才可用。
 
 - 从 `vnc_authcheck.c` 演进成 `rfb.c`：RFB 3.8、VNC Auth（type 2）。口令从 `vnc.pass` 读到栈上，用完立刻 `memset`。
   连接只发往 ECM 网段的 Mac 地址（硬编码白名单），不允许经代理或 Wi-Fi。
@@ -156,7 +160,7 @@
   `calibrate` 步骤：依次移到四角和中心，通过 VNC 光标伪编码或截图找光标，拟合仿射映射，存进 `/data/mk20/agent/calib.json`。
   验收误差 ≤2 逻辑像素（§14.5-3）。
 - **非 ASCII 文本**（中文，D5）：HID 打不出来，改用**剪贴板粘贴**：先把文本放进 Mac 剪贴板，再经 HID 发 `cmd+v`。
-  只规划 VNC 剪贴板路线（见 A2），不加 Mac helper。经典 ClientCutText 仅 Latin-1；中文需测 Extended Clipboard。
+  当前仅规划 VNC 剪贴板路线（见 A2）；旧“不加 Mac helper”已于 2026-10-19 被“optional helper, never required”取代，新增 helper 暂不提供剪贴板写入。经典 ClientCutText 仅 Latin-1；中文需测 Extended Clipboard。
   一期 `type` 仍只接受 ASCII，非 ASCII 走新动作 `paste{text}`，协议支持未确认时返回 `unsupported`；不读回用户剪贴板。
 - **单通道仲裁**：mk20-kbd 维护 `active_input ∈ {hid, vnc}`。VNC 输入由 agent 自己发，但必须先向 kbd 拿到 `input=vnc` 租约，
   kbd 也会对 HID 做 all-up。切换规则照 R-CU-2：连续 2 次失败 → 冻结 → all-up → 切到 VNC；连续 3 次健康 → 在空闲点切回。
@@ -166,11 +170,11 @@
 ### 3.4 mk20-kbd 控制口 `/run/mk20/kbd.sock`（A1）
 
 - unix stream，0600，同 uid / root 校验。当前协议为每行一个 JSON（含换行 ≤1024 B；像素二进制 framing 留给 A7）。同时最多 2 个客户端；通过同 uid / root 校验后权限相同，租约和 agent 页分别绑定连接（当前没有只读第二客户端角色）。
-- 请求：`lease.acquire{owner,ttl_ms}` → token；`lease.renew`；`lease.release`；`act{token,seq,op,...}`；
+- 请求：`lease.acquire{owner,ttl_ms}` → token；`lease.renew`；`lease.release`；`act{token,seq,kind,...}`；
   `ui.agent{state,input,summary,progress}`；`confirm.request{id,cid,summary,risk,timeout_ms}` → 异步返回 `confirm.result{cid,ok,reason}`。
-- 事件推送：`estop`、`confirm.result`、`hid.health`、`key{...}`（只在 agent 页激活时推送）。
+- 事件推送：`lease_revoked`、`estop`、`confirm.result`、`key{...}`（key 仅当前 agent 自有页绑定键的属主）；尚无 `hid.health` 事件，查询 `status`。以 kbd/CTL-PROTOCOL.md 为准。
 - **租约规则**：TTL 默认 3 s，必须续约，超时就 all-up 并撤销租约。急停、按键进入 agent 关闭状态、主机 PTT 按下时也会撤销
-  （人手优先，用户一碰键盘 agent 就让开）。
+  （人手优先）。**例外：L5/agent 页保留 PTT 先于通用 human preemption 分类，按住 gate 动作并 all-up、保留原 token/TTL 继续续约；松开经 ASR 新目标后恢复。TTL/断连/急停仍撤销；L1 Mac PTT 不享受例外。**详见 ONBOARD-UI-PLAN §3/U4，当前协议尚无 pause 扩展。
 - **急停键**：放在 agent 页（L5）的固定键位，**另外**任意页长按 K2 1 s 也算急停（具体键位见 §9 决策 4）。
   触发后：撤销租约 → all-up（键盘和指针按钮）→ 状态写成 `stopped` → 推送给 agent → agent 取消正在进行的 HTTP 请求。
   恢复必须显式重新启用（按 agent 页的“允许”键）。
@@ -182,10 +186,10 @@
 - `screen.layout` → 21 块屏的编号、尺寸（键屏 128×128，副屏 428×142）、总线、当前页 id、每页属主（`system` / `agent` / `user`）。
 - `screen.page.create{name}` → `page_id`（属主 agent，上限 8 页）；`screen.page.delete`、`screen.page.show{page_id}`（只能切到 agent 自有页或 agent 控制页）。
 - `screen.draw{page_id, fb, x, y, w, h, fmt: rgb565|jpeg, bytes}`（当前只校验元数据并返回 rendered:false，像素 binary framing / 渲染在 A7）、`screen.text{page_id, fb, text, size, fg, bg}`（文字由 kbd 内置字体渲染）。
-- `screen.bind{page_id, key(row,col), action}`：agent 页上的按键按下时，kbd 推送事件 `{"ev":"key","page":..,"key":..}` 给 agent（只在该页显示时）。
-- **保留、不可覆盖**：急停键位（agent 页固定键）和 agent 控制页（允许/禁止、急停、确认/取消）。对它们的 draw/bind/delete 一律 `reserved`。
+- `screen.bind{page_id,row,col,action}`（flat JSON，row/col 从0开始）：绑定键 down/up 推送 `{"ev":"key","page":..,"row":..,"col":..,"down":true}`，只发给当前页属主。
+- **保留、不可覆盖**：home/LS/L5、全页固定急停 fb20、L5/agent 自有页 PTT fb16 和 fb21 安全/语音条；即使 grant 也不能覆盖。对保留目标 draw/text/bind/delete 一律 `reserved`。这是在现有 control page/fb20 保护上的 U2/U4 扩展，见 ONBOARD-UI-PLAN。
   K2 长按急停在任何页面都生效。
-- **权限范围**：默认只能写 agent 自有页；写 system/user 页需要用户在键盘上授权（`grant{scope: "all_pages", ttl}`，键面确认，上电失效）。
+- **权限范围**：默认只能写 agent 自有页；非保留的 system/user 内容需要键盘侧 `ctl_screen_grant(c,ttl_ms,now)`（1..120000 ms，上电失效）；没有 socket grant 操作。home/LS/L5 和保留区永不授权。
 - **限速**：每屏 ≤10 帧/s，全体 ≤30 次写/s，单条 ≤64 KB（base64 前）；超限 `rate_limited`，不排队。写屏不得让按键→HID 延迟 P95 恶化 >5 ms。
 - 急停或撤销“允许”时：agent 自有页保留但切回 system 页，agent 的 bind 全部失效。
 - 测试（A1 协议单测 + A7 渲染/sim cases）：保留页拒绝、限速、授权过期、未允许时拒绝、页切换后 key 事件只发给属主。
@@ -196,7 +200,10 @@
   `image_url`（base64 data URI）。provider 只是配置：`base_url`、`model`、`api_key_file`，外加少量可选旋钮
   （`coord_mode`: `pixel` | `norm1000`，`max_image_px`，`supports_tool_choice`），不写 per-provider 代码。
 - 预置 provider：**Qwen（DashScope 兼容模式，默认）**、GLM、Kimi、OpenAI。Anthropic 原生 computer-use 不做。
-  **具体型号要等 A4 用真 key 实测后再定**（视觉 + tool call 都得可用），本文不写死。
+  新增 **`glm-coding` 为默认 GLM 条目**：`https://open.bigmodel.cn/api/coding/paas/v4`，模型
+  **`glm-5.3`（text/tools）/ `glm-5.3-flash`（vision）**。Coding Plan key 只适用 coding endpoint；plain
+  `glm` 保持 `https://open.bigmodel.cn/api/paas/v4`（计量 key），不自动迁移 key。U1 修正 agentcfg.py 及共享 catalogue，
+  C/Python writer 的 provider.json byte-compatible；llm.c 按文件读取，不做 URL 特判（NOTES-agent-a4.md）。其他型号继续按 A4 实测。
 - 请求预算：每步只带**当前一张截图**，历史截图换成文字摘要（“上一步点击了…，结果…”）；system prompt 和 tool 定义每次都带上。
   连接超时 10 s，整个请求 60 s，响应体上限 256 KB。429/5xx 指数退避，最多 2 次；其余错误直接失败。
 - **密钥**：每次请求前读 `/data/mk20/secrets/<provider>.key`（0600），放进 `Authorization` 头，发完 `memset`。
@@ -238,14 +245,14 @@
 
 - mk20-kbd 本地组件（cmd201 widget 或内置渲染）：副屏右半区显示 agent 状态行（状态、通道、最近动作、步数/预算）。
   另有 **agent 页 L5**：允许/禁止、急停、确认/取消、当前任务、provider 和代理连通状态。
-  Mac 端设置页（Python）新增“智能体”入口和状态镜像。
-- **配置下发**：设置页“应用”后，`AgentConfigApplier` 改成通过 HTTP `PUT http://172.30.250.2:8780/config/{net,provider}`
-  （带 token）推给设备，由设备侧原子写 `/data/mk20/agent/*.json`（0700/0600）。设备侧做 schema 校验：拒绝未知字段，
-  拒绝 base_url 不在 provider 表里的写入，**也拒绝 `routes.foreign=direct`**。现在“写本机 /data”的路径保留给仿真和测试用。
-  连接测试也改成调用设备的 `POST /test`，从设备经代理实测，返回延迟和错误类别。
+  home/LS/L5 均由 mk20-kbd 常驻渲染，Mac 仅提供可选 L1/L4 会话页；细节见 ONBOARD-UI-PLAN。
+- **配置归属（2026-10-19）**：LS 从 Mac Python 移入 mk20-kbd；“应用”直接原子写 `/data/mk20/agent`，
+  Mac `AgentConfigApplier` 留作 host 测试 oracle。板载 web 配置也交同一个 kbd writer 串行提交，目录0700/文件0600、
+  tmp+fsync+rename+目录 fsync；双文件提交 marker/reload 闸门见 ONBOARD-UI-PLAN §4。**密钥只能经 usb0 板载网页录入**，
+  不在键盘或 Mac daemon 输入/显示，不进 config。连接测试由设备 agent 的 net.c/llm.c 经所选 proxy profile 执行，无 direct fallback。
 - **密钥录入页**：设备侧 `GET /` 返回一个 ~10 KB 的静态 HTML 表单，表单 `POST /secret/{provider}`：
   - **配对码**：副屏显示 6 位一次性码，5 分钟有效，用来防同机其他进程或 CSRF 偷写。
-  - 只写不读：响应只回“已设置 · 长度 N”，**没有任何读出接口**。
+  - 只写不读：输入始终 masked，响应只回“已设置”，**没有任何读出/长度/部分内容接口**。
   - 写入方式：`O_CREAT|O_EXCL` 临时文件 0600 → fsync → rename → fsync 目录。
   - 支持删除；同一个通道也用来设 `vnc.pass`。
   - SETTINGS.md 里的占位地址 `http://172.30.250.1:8780` 改为设备地址 `172.30.250.2:8780`。
@@ -255,7 +262,7 @@
   - 极简网页 `GET /chat`：一个输入框 + 进度列表 + 截图 + 暂停/停止按钮（~15 KB 静态 HTML/JS，无外部依赖）。
   - 规则：agent 未在键盘上“允许”时，任务可排队但不执行（显示“等待键盘允许”）；网页的“停止”走与急停相同的 kbd 撤销路径；
     网页/API 不能打开总开关。同一时刻只跑一个任务。
-  - 语音任务（后续）：PTT 录音 → 现有语音网关 ASR → 文本作为 `goal` 提交到同一 API。
+  - 语音任务：L5 保留 PTT -> 板载麦克风 -> 配置 ASR -> `goal` 修订；按住 pause-not-revoke，取得新目标才恢复；L1 Right-Option 仍撤销。键/状态 U4，ASR U6。
 
 ---
 
@@ -326,7 +333,7 @@
   b46c562 的完整 Linux suite 已全绿：24 sim，kbd 3829 checks ×2（ASan/UBSan、TSan），real-binary e2e（含 stalled-host 急停），45 agent，58 tools，546 pytest；shellcheck 通过。
   R3 修复：每条 socket 请求（同批次及跨客户端）验证前和 dispatch 后均用新单调时间跑 ctl/K2 safety tick，覆盖 allup 等有界等待；补充 fake-clock socket/HID 背压回归。本轮改动仍需 Linux suite / 静态 armhf 复验；真机描述符、滚轮、K2 press/release、probation/rollback 验收及 release 二进制重建/source-match/MANIFEST 前置条件仍未完成。详见 kbd/CTL-PROTOCOL.md。
   kimi r3 follow-up：gd32io.c knob-init 的 32 位毫秒时基已改 int64_t；K2 timer-only e2e 的 [0.95,1.10] s 窗口仍无法区分 K2 timeout bound 与 100 ms HID base tick，后续用关闭 HID 的 250 ms base tick 或 poll-timeout 单测加强区分。
-- **A1b 屏幕 API（D8）**：协议/规则引擎已实现，draw/text 返回 rendered:false；A7 实现字体/像素 binary framing 和渲染、固定急停键视觉、物理允许/确认 UI。
+- **A1b 屏幕 API（D8）**：协议/规则引擎已实现，draw/text 返回 rendered:false；字体/home/LS 渲染提前到 U1/U2，固定急停/PTT 与物理允许/确认 UI 在 U4；像素 binary framing/agent 自有页仍属 A7 后续。
 
 ### A2 VNC 抓帧（box + [D] 测量）
 - `rfb.c`（ZRLE/Hextile/Raw + Cursor/DesktopSize）、`scale.c`（流式按行累加）、`img.c`（JPEG 编码）；先做 CLI `mk20-agent --snap out.jpg`。
@@ -340,12 +347,12 @@
   macOS Screen Sharing 是否协商/支持 Extended Clipboard、是否把文本同步到系统剪贴板目前未知，必须在 A2 真机测量并记录结果；box 上不推断支持。
 - 规划流程：`paste{text}` → 经 VNC 设置剪贴板 → 在有效输入租约下经 HID 发 `Cmd+V` → 可选恢复（仅恢复 agent 自己先前已知的内容，或协议提供的不读取内容的恢复机制；否则不恢复）。
   写入/粘贴前检查 allowed、e-stop 和租约；中途失效立即停止。
-- 永不读回用户剪贴板；不加 Mac helper。UTF-8 扩展未确认或不可用时，中文 paste 返回 `unsupported`，不降级成乱码。
+- 永不读回用户剪贴板；旧“不加 Mac helper”于 2026-10-19 被“optional helper, never required”取代（U5 仅截图/AX）。UTF-8 扩展未确认或不可用时，中文 paste 返回 `unsupported`，不降级成乱码。
 
 ### A3 网络：CONNECT 代理 + mbedTLS + 时间（box + [M]）
 - **A3 状态（2026-10-19）**：host 实现与 ASan/UBSan C 测试完成；离线 IPC 补充测试 164 pass，标准 TCP 测试受 sandbox EPERM 阻断；armhf/[M][D] 待验，见 `agent/NOTES-agent-a3.md` 与 `reviews/agent-a3-codex-summary.md`。
 - `net.c`：TCP 连接（10 s 超时）→ `CONNECT` → mbedTLS 握手（SNI，用随包 CA 校验）→ HTTP/1.1。
-  `net.json` fail-closed，**代码里根本没有直连路径**（禁止 `routes.*=direct` 用于 foreign；`mac_proxy` profile 两类都只走代理）。
+  `net.json` fail-closed；`mac_proxy` 两类只走代理。A3 当前实现仍支持旧 WiFi direct profile；2026-10-19 的 never-direct 决定由 U3 收紧 reader/transport，不能把本条旧“没有直连路径”表述当作实现事实。
 - 时间同步：从 Mac `GET /time` 或代理 `Date` 头取时间；时钟没校准就拒绝 TLS。
 - **不做出口证明（D2）**。如果 mihomo 不在 172.30.250.1 可达，就装 D1 的 launchd TCP 转发（只绑 USB 接口，不改代理配置）。
 - box：fake_proxy 加本地 TLS 测试服务器（自签 CA 注入测试 bundle）；证书错误、过期、域名不符都必须失败。
@@ -377,7 +384,7 @@
 
 ### A7 键面 UI、配置下发、密钥页（box + sim + [D]）
 - mk20-kbd：agent 状态组件和 L5 agent 页（仿真里先做，JSON cases 覆盖急停、确认、允许开关）。
-- mk20deck：设置页的应用改成推送到设备；连接测试改由设备侧执行；增加“智能体”状态镜像。
+- LS/home 提前到 ONBOARD-UI-PLAN U1（纯 host）/U2（kbd 集成）；L5/PTT 状态 U4，连接测试由 U3 设备侧执行；mk20deck 只保留可选增强功能。
 - 配置网页新增：网络出口 profile（D1′）、ASR 模型配置（D5′b）。
 - mk20-kbd：`screen.*` 渲染与 agent 自有页（D8），保留页与授权确认。
 - A7 follow-up（kimi r1 #8 / #12）：清理或说明仅供观察的 `/tmp/mk20-hid-scroll` marker；真实渲染落地时为 screen.page.show / layout / page.create 评估限速（当前只有 draw/text 消耗额度）。
@@ -416,16 +423,20 @@
 |---|---|---|
 | `/data/mk20/agent/net.json` | root 0600（目录 0700） | 见 agentcfg.py `net_config()` |
 | `/data/mk20/agent/provider.json` | root 0600 | `provider/model/base_url/domestic/route/api_key_file` |
-| `/data/mk20/agent/agent.json` | root 0600 | 预算、风险黑名单、遮挡区域、急停键位（新） |
+| `/data/mk20/agent/agent.json` | root 0600 | 预算、风险黑名单、遮挡区域、固定保留急停键（不可配置覆盖；新） |
 | `/data/mk20/agent/calib.json` | root 0600 | 坐标仿射参数（新） |
 | `/data/mk20/secrets/<provider>.key`、`vnc.pass`、`mcp.token` | root 0600 | 只写不读；不进备份、日志、git |
 | `/run/mk20/kbd.sock` | root 0600 | kbd 控制口 |
 | `/run/mk20/agent.status` | root 0644 | 给 selftest/health 用的非敏感状态 |
 
-### 6.2 net.json 规则（沿用 agentcfg，设备侧再校验一遍）
+### 6.2 net.json / provider.json 规则（2026-10-19 板载 UI 修订）
 - `mac_proxy`：`routes.domestic=proxy`、`routes.foreign=proxy`，回落只在 Mac 的三个地址之间切换。
-- `board_wifi`：`domestic=direct` 可以，`foreign` 只能是 `proxy` 或 `blocked`。
-- 设备拒绝任何 `foreign=direct`，也拒绝 proxy url 不在白名单（Mac 三个地址，或板载代理）里的配置。
+- `board_wifi`（USB WiFi）：两类路由有代理则 proxy，无代理则 blocked；拒绝任何 cloud/ASR direct 路由，绝不 direct fallback。
+- `mac_proxy` 支持显式 host:port；默认 Mac 地址保留原代理回落顺序，自定义 host 不自动添加回落。所有值经过 schema/host/port 校验。
+- provider.json 保留 version1 和 `provider/model/base_url/domestic/route/api_key_file`，密钥只引用 `/data/mk20/secrets/<provider>.key`；
+  glm-coding 与 glm 的 URL/模型见 §3.5，共享 catalogue 保证 C/Python writer byte-compatible。
+- 写入：目录0700、文件0600，临时文件写满 -> fsync -> rename -> **fsync 目录**；双文件不是天然事务，必须有提交 marker 和消费者 reload 闸门，见 ONBOARD-UI-PLAN §4。
+- 上述 writer/consumer 修订属于 U1/U3；当前 agentcfg 的 directory-fsync 缺口和 A3 direct 支持不能视作已修复。
 
 ---
 
@@ -463,7 +474,7 @@
 4 急停 → D4；5 中文/任务入口 → D5；6 MCP → D6（不能启用）；7 截图提示 → 同意默认提示 + 可配置遮挡；密钥录入 → D7。
 
 仍待定：
-- **剪贴板写入机制**：仅 VNC；A2 实测 macOS Screen Sharing 的 Extended Clipboard UTF-8 支持；不做 Mac helper、不读回用户剪贴板。
+- **剪贴板写入机制**：当前仅 VNC，A2 实测 Extended Clipboard UTF-8；不读回用户剪贴板。旧“不做 Mac helper”已被 2026-10-19 的“optional helper, never required”取代，U5 只增截图/AX。
 - **默认国内模型**：A4 基准之后推荐、用户确认；需要用户经板载密钥页录入 Qwen/GLM/Kimi key。
 - **D5′(a) USB 麦克风**：UDC 缺 ISO IN 端点（见 §3.9），需要在“再打内核补丁”与“Mac 侧助手”之间取舍。
 - 麦克风硬件形态（模拟 MIC 进片内 codec 还是 PDM）：真机 `arecord -l` 确认。

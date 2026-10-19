@@ -2,6 +2,14 @@
 
 **Decision (2026-10-19):** replace the vendor KeyboardDevice (KD) completely. Stock themes, ScreenKey app compatibility and the XiaoZhi UI are dropped.
 
+**On-board UI decision (2026-10-19):** the keyboard must work without the Mac app.
+Pull the C renderer forward from K5: [ONBOARD-UI-PLAN.md](ONBOARD-UI-PLAN.md) U1 is
+host-only renderer/font/home/LS/config/catalogue/golden-test foundation; U2 wires it
+into the loop and screen ownership; U3–U7 cover device tests, L5 PTT, optional Mac
+capture/AX, ASR and device acceptance. Home/LS/L5 always belong to mk20-kbd;
+L1/L4 are optional host pages with an offline placeholder. No code/device change is
+implied here; K0–K5 numbering stays intact.
+
 **Evidence base:**
 - Static analysis of KD V2.32 (unstripped).
 - Read-only device checks on fw 1.1.4.
@@ -81,7 +89,7 @@
 - Unknown methods → `{"ack_method":m,"success":false,"errorString":"unsupported"}`.
 - **New:**
   - `cmd 200`: raw RGB565 tile `u8 fb, u16 x, y, w, h, pixels`, acked.
-  - `cmd 201`: widget/state JSON for the future on-board renderer (labels, icons, progress, per-key state).
+  - `cmd 201`: reserved widget/state JSON (not implemented). The renderer foundation moves to ONBOARD-UI-PLAN U1/U2 now; it does not depend on cmd201 or a Mac. U2 gates cmd100/200 by route/owner and composites reserved safety/voice regions; hidden cmd100 frames retain their empty same-id ack.
 
 ## 4. Safety
 
@@ -117,7 +125,13 @@
 | **K2** (done 2026-10-19, K2-RESULTS.md / K2-KNOB-CONFIG.md) | KD stopped manually (one-shot, SSH, reversible by reboot): `--pattern` to verify the fbN ↔ physical key map and bus timing; `--monitor` for GD32 frames | timing script | photo of the pattern; event log for all 20 keys and both knobs |
 | **K3** (in progress, see §8) | Host subset plus JPEG decoder plus per-bus threads; router merged; backlight | codec tests, JPEG conformance vs libjpeg on the box, Mac console e2e in simulator | Mac console works against mk20-kbd; latency press→HID and press→panel |
 | **K4** | Release integration (mk20d, kill switch, selftest, watchdog fallback) | mk20d tests with a fake mk20-kbd | install via the A/B loader, forced-fail rollback test, kill-switch test, 24 h soak |
-| **K5** | Fast path cmd 200/201, on-board renderer hooks; audio module | — | — |
+| **K5** | Remaining cmd201/binary widget fast path and audio follow-up (cmd200 already implemented). **Renderer pulled forward now to ONBOARD-UI-PLAN U1/U2**, not blocked on K5; L5/PTT U4, ASR U6 | U1 host C/glyph/config/golden/sim tests; U2 ownership/fallback tests; see U1–U7 | U7; no device integration in U1 |
+
+The on-board UI adds no GD32 permissions: never send 0x19 or `02 AA E2 78`;
+the only write remains `05 00 r r 00 00`, r=100..105 (RAM). Never log/print keys;
+cloud/model/ASR traffic never direct-connects or falls back to direct. Configuration
+and screen/PTT ownership details are normative in ONBOARD-UI-PLAN; optional Mac
+helper, never required (2026-10-19), replaces the earlier no-helper decision.
 
 ## 7. Risks and open questions
 
