@@ -333,6 +333,7 @@
 - box：对 fake_vnc 做逐像素比对（容差内），并加 RSS 上限测试（`/usr/bin/time -v`，或 qemu-arm 跑 armhf 二进制）。
 - **[D][M]**：真机对 Mac Screen Sharing 实测 P95 延迟、峰值 RSS、CPU，以及 Retina/多屏的 framebuffer 形态。只读操作，不需要用户在场，但 Mac 必须开着且已登录。
 - 验收：§14.5-2（P95 ≤800 ms、峰值 ≤16 MB），数据记录在 `NOTES-agent-a2.md`。
+- **A2 状态（2026-10-19，本 worktree）**：host RFB 3.3/3.7/3.8、DES/None、ZRLE/Hextile/Raw、流式面积缩放、限长 JPEG/CLI、Latin-1 剪贴板与扩展能力检测已实现；ASan/UBSan C 测试及 85 项 socketpair A2 测试通过。非 sanitizer fake 测得 2880×1800→1280×800 峰值 RSS 7,664 KiB、owned heap 6,368,592 B。沙箱禁止 127.0.0.1 bind，标准 pytest 为 38 过/92 环境失败；TCP、Linux/static armhf 和真机 [D][M] 的安全类型、Retina/多屏、P95/CPU/Extended Clipboard 仍待验收，详见 `agent/NOTES-agent-a2.md`。
 
 #### A2 中文剪贴板路线（仅计划，不写代码）
 - 经典 RFB `ClientCutText` 只携带 Latin-1，不能据此承诺中文；Extended Clipboard pseudo-encoding `0xC0A1E5CE` 提供 UTF-8。

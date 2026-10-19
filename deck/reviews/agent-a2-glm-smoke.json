@@ -1,0 +1,178 @@
+{
+ "jpeg_bytes": 4353,
+ "image_px": "256x128",
+ "cases": [
+  {
+   "case": "text_plain",
+   "model": "glm-5.3",
+   "http": 200,
+   "ms": 2161,
+   "req_bytes": 166,
+   "top_keys": [
+    "choices",
+    "created",
+    "id",
+    "model",
+    "object",
+    "request_id",
+    "usage"
+   ],
+   "message_keys": [
+    "content",
+    "reasoning_content",
+    "role"
+   ],
+   "usage": {
+    "completion_tokens": 50,
+    "completion_tokens_details": {
+     "reasoning_tokens": 45
+    },
+    "prompt_tokens": 24,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 74
+   },
+   "parsed": {
+    "ok": true,
+    "finish_reason": "stop",
+    "content": "MK20 OK",
+    "tool_calls": []
+   }
+  },
+  {
+   "case": "text_tools",
+   "model": "glm-5.3",
+   "http": 200,
+   "ms": 6023,
+   "req_bytes": 468,
+   "top_keys": [
+    "choices",
+    "created",
+    "id",
+    "model",
+    "object",
+    "request_id",
+    "usage"
+   ],
+   "message_keys": [
+    "content",
+    "reasoning_content",
+    "role",
+    "tool_calls"
+   ],
+   "usage": {
+    "completion_tokens": 40,
+    "completion_tokens_details": {
+     "reasoning_tokens": 23
+    },
+    "prompt_tokens": 196,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 236
+   },
+   "parsed": {
+    "ok": true,
+    "finish_reason": "tool_calls",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_-7159548751143496959",
+      "name": "click",
+      "arguments": {
+       "x": 500,
+       "y": 500
+      }
+     }
+    ]
+   }
+  },
+  {
+   "case": "image_plain",
+   "model": "glm-5.3-flash",
+   "http": 200,
+   "ms": 1762,
+   "req_bytes": 6118,
+   "top_keys": [
+    "choices",
+    "created",
+    "id",
+    "model",
+    "object",
+    "request_id",
+    "usage"
+   ],
+   "message_keys": [
+    "content",
+    "reasoning_content",
+    "role"
+   ],
+   "usage": {
+    "completion_tokens": 35,
+    "completion_tokens_details": {
+     "reasoning_tokens": 17
+    },
+    "prompt_tokens": 86,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 121
+   },
+   "parsed": {
+    "ok": true,
+    "finish_reason": "stop",
+    "content": "A red square is on the left and a blue circle is on the right.",
+    "tool_calls": []
+   }
+  },
+  {
+   "case": "image_tools",
+   "model": "glm-5.3-flash",
+   "http": 200,
+   "ms": 7274,
+   "req_bytes": 6376,
+   "top_keys": [
+    "choices",
+    "created",
+    "id",
+    "model",
+    "object",
+    "request_id",
+    "usage"
+   ],
+   "message_keys": [
+    "content",
+    "reasoning_content",
+    "role",
+    "tool_calls"
+   ],
+   "usage": {
+    "completion_tokens": 146,
+    "completion_tokens_details": {
+     "reasoning_tokens": 128
+    },
+    "prompt_tokens": 246,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 392
+   },
+   "parsed": {
+    "ok": true,
+    "finish_reason": "tool_calls",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_-7159556860041750661",
+      "name": "click",
+      "arguments": {
+       "x": 225,
+       "y": 460
+      }
+     }
+    ]
+   }
+  }
+ ]
+}
