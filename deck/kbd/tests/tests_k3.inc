@@ -386,13 +386,14 @@ static void test_writers(void)
     screen_stats(&s, w, &e, &d);
     CHECK(w[2] - before == 1 && file_px(dir, 3, 0) == 0x5555);
 
-    /* the two buses run in parallel: fb1 (bus0) + fb10 (bus1), 80 ms each */
-    screen_set_write_delay(&s, 80000);
+    /* the two buses run in parallel: fb1 (bus0) + fb10 (bus1), 300 ms each (serial would be >= 600 ms;
+     * the margin absorbs fsync noise on a loaded disk) */
+    screen_set_write_delay(&s, 300000);
     t0 = t_ms(); fill_tile(&s, 1, 0x0A0A); fill_tile(&s, 10, 0x0B0B);
     CHECK(screen_wait_idle(&s, 3000) == 0);
     dt = t_ms() - t0;
-    CHECK(dt < 150);
-    if (dt >= 150) fprintf(stderr, "  buses not parallel: %ld ms\n", dt);
+    CHECK(dt < 520);
+    if (dt >= 520) fprintf(stderr, "  buses not parallel: %ld ms\n", dt);
 
     /* missing fb: retried with back-off, not idle; recovers when it reappears */
     screen_set_write_delay(&s, 0);
