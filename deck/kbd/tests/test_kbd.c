@@ -6,6 +6,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <errno.h>
+#include <poll.h>
 
 static int fails, checks;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -26,9 +28,10 @@ static void test_gd32_roundtrip(void)
     gd32_parser p; gd32_parser_init(&p);
     CHECK(feed_all(&p, fr, n, last, &ll) == 1 && ll == 6 && !memcmp(last, pl, 6));
     gd32_key_event ev; CHECK(gd32_decode_key(last, ll, &ev) == 0);
-    CHECK(ev.pressed == 1 && ev.col == 3 && ev.row == 2 && ev.keycode == 0);
+    CHECK(ev.pressed == 1 && ev.row == 3 && ev.col == 2 && ev.keycode == 0 && ev.knob == 0);
     uint8_t kn[6] = {0x16, 0, 101, 101, 0x12, 0x34};
     CHECK(gd32_decode_key(kn, 6, &ev) == 0 && ev.col == 101 && ev.row == 101 && !ev.pressed && ev.keycode == 0x1234);
+    CHECK(ev.knob == 1 && ev.knob_action == KNOB_CCW);
     uint8_t notkey[2] = {0x05, 0};
     CHECK(gd32_decode_key(notkey, 2, &ev) == -1);
 }
@@ -56,6 +59,12 @@ static void test_gd32_corrupt(void)
     gd32_parser_init(&p);
     int f = feed_all(&p, s, k, last, &ll);
     CHECK(f == 2);
+    /* inbound LEN cap: a 65-byte payload is refused, 64 accepted */
+    uint8_t bigp[65] = {0x0D}, bigf[80];
+    gd32_parser_init(&p); n = gd32_build_test_frame(bigp, 65, bigf, sizeof bigf);
+    CHECK(feed_all(&p, bigf, n, last, &ll) == 0 && p.bad_len >= 1);
+    gd32_parser_init(&p); n = gd32_build_test_frame(bigp, 64, bigf, sizeof bigf);
+    CHECK(feed_all(&p, bigf, n, last, &ll) == 1 && ll == 64);
 }
 
 static void test_gd32_fuzz(void)
@@ -74,16 +83,61 @@ static void test_gd32_fuzz(void)
     CHECK(f >= 2);
 }
 
+static int expect_allowed(const uint8_t *p, size_t n)
+{
+    return n == 6 && p[0] == 0x05 && p[1] == 0 && p[2] >= 100 && p[2] <= 105 && p[3] == p[2] && p[4] == 0 && p[5] == 0;
+}
+
 static void test_gd32_allowlist(void)
 {
     uint8_t out[300];
     uint8_t boot[1] = {0x19};
     CHECK(!gd32_out_allowed(boot, 1));
     CHECK(gd32_encode(boot, 1, out, sizeof out) == -1);
+    uint8_t boot6[6] = {0x19, 0, 100, 100, 0, 0};
+    CHECK(gd32_encode(boot6, 6, out, sizeof out) == -1);
     uint8_t clear[4] = {0x02, 0xAA, 0xE2, 0x78};
     CHECK(gd32_encode(clear, 4, out, sizeof out) == -1);
-    /* phase 1: nothing at all may be sent */
-    for (int id = 0; id < 256; id++) { uint8_t pl[4] = {(uint8_t)id, 0, 0, 0}; CHECK(gd32_encode(pl, 4, out, sizeof out) == -1); }
+    CHECK(!gd32_out_allowed(NULL, 6));
+    /* every id x every row, the canonical shape: only 05 with 100..105 */
+    int allowed = 0;
+    for (int id = 0; id < 256; id++) for (int r = 0; r < 256; r++) {
+        uint8_t pl[6] = {(uint8_t)id, 0, (uint8_t)r, (uint8_t)r, 0, 0};
+        int ok = gd32_encode(pl, 6, out, sizeof out) > 0;
+        allowed += ok;
+        if (ok != (id == 5 && r >= 100 && r <= 105)) { CHECK(0); fprintf(stderr, "  id=%d r=%d\n", id, r); }
+    }
+    CHECK(allowed == 6);
+    /* EEPROM rows (<100) refused for every col/keycode */
+    for (int r = 0; r < 100; r++) for (int c = 0; c < 256; c += 3) {
+        uint8_t pl[6] = {5, 0, (uint8_t)r, (uint8_t)c, 0, 0};
+        if (gd32_out_allowed(pl, 6)) CHECK(0);
+    }
+    /* single-byte mutations of each valid payload: only the identity passes */
+    for (int s = 100; s <= 105; s++) {
+        uint8_t v[6]; CHECK(gd32_knob_payload(s, v) == 6);
+        for (int i = 0; i < 6; i++) for (int x = 0; x < 256; x++) {
+            uint8_t m[6]; memcpy(m, v, 6); m[i] = (uint8_t)x;
+            if (gd32_out_allowed(m, 6) != expect_allowed(m, 6)) CHECK(0);
+        }
+        /* any length other than 6 with a valid prefix */
+        uint8_t big[16] = {0}; memcpy(big, v, 6);
+        for (size_t n = 0; n <= 16; n++) if (n != 6 && gd32_out_allowed(big, n)) CHECK(0);
+    }
+    CHECK(gd32_knob_payload(99, out) == -1 && gd32_knob_payload(106, out) == -1);
+    /* random fuzz over all ids / lengths */
+    srand(424242);
+    long agree = 0, total = 0;
+    for (int it = 0; it < 400000; it++) {
+        uint8_t pl[12]; size_t n = (size_t)(rand() % 12) + 1;
+        for (size_t i = 0; i < n; i++) pl[i] = (uint8_t)rand();
+        if (it & 1) { pl[0] = 5; if (n > 1 && (it & 2)) pl[1] = 0; if (n > 3 && (it & 4)) { pl[2] = (uint8_t)(98 + rand() % 10); pl[3] = pl[2]; } if (n > 5 && (it & 8)) pl[4] = pl[5] = 0; }
+        if (it % 97 == 0 && n >= 4) memcpy(pl + (n - 4), clear, 4);
+        int got = gd32_encode(pl, n, out, sizeof out) > 0;
+        total++; agree += got == expect_allowed(pl, n);
+        if (got) CHECK(!gd32_raw_is_forbidden(out, (size_t)(n + 7)));
+    }
+    CHECK(agree == total);
     /* raw gate catches the sequences anywhere */
     uint8_t raw1[] = {0x00, 0x02, 0xAA, 0xE2, 0x78, 0x00};
     CHECK(gd32_raw_is_forbidden(raw1, sizeof raw1));
@@ -91,6 +145,35 @@ static void test_gd32_allowlist(void)
     CHECK(n > 0 && gd32_raw_is_forbidden(bootfr, (size_t)n));
     uint8_t keyfr[16]; uint8_t kp[6] = {0x16, 1, 0, 0, 0, 0}; n = gd32_build_test_frame(kp, 6, keyfr, sizeof keyfr);
     CHECK(!gd32_raw_is_forbidden(keyfr, (size_t)n));
+}
+
+/* exact bytes from K2-KNOB-CONFIG.md */
+static void test_knob_frames(void)
+{
+    static const uint8_t want[6][13] = {
+        {0xAA,0x55,0xCD,0x06,0xF9,0x05,0x00,0x64,0x64,0x00,0x00,0xF5,0x5F},
+        {0xAA,0x55,0xCF,0x06,0xF9,0x05,0x00,0x65,0x65,0x00,0x00,0xF5,0x5F},
+        {0xAA,0x55,0xD1,0x06,0xF9,0x05,0x00,0x66,0x66,0x00,0x00,0xF5,0x5F},
+        {0xAA,0x55,0xD3,0x06,0xF9,0x05,0x00,0x67,0x67,0x00,0x00,0xF5,0x5F},
+        {0xAA,0x55,0xD5,0x06,0xF9,0x05,0x00,0x68,0x68,0x00,0x00,0xF5,0x5F},
+        {0xAA,0x55,0xD7,0x06,0xF9,0x05,0x00,0x69,0x69,0x00,0x00,0xF5,0x5F},
+    };
+    for (int i = 0; i < 6; i++) {
+        uint8_t pl[6], fr[32]; gd32_knob_payload(100 + i, pl);
+        int n = gd32_encode(pl, 6, fr, sizeof fr);
+        CHECK(n == 13 && !memcmp(fr, want[i], 13));
+    }
+    /* K2 events decode as knob 2 */
+    gd32_key_event ev;
+    uint8_t p1[6] = {0x16, 1, 0x67, 0x67, 0, 0}, p0[4] = {0x16, 0, 0x67, 0x67}, ccw[4] = {0x16, 1, 0x68, 0x68}, cw[4] = {0x16, 1, 0x69, 0x69};
+    CHECK(gd32_decode_key(p1, 6, &ev) == 0 && ev.knob == 2 && ev.knob_action == KNOB_PRESS && ev.pressed);
+    CHECK(gd32_decode_key(p0, 4, &ev) == 0 && ev.knob == 2 && ev.knob_action == KNOB_PRESS && !ev.pressed);
+    CHECK(gd32_decode_key(ccw, 4, &ev) == 0 && ev.knob == 2 && ev.knob_action == KNOB_CCW);
+    CHECK(gd32_decode_key(cw, 4, &ev) == 0 && ev.knob == 2 && ev.knob_action == KNOB_CW);
+    uint8_t k1[4] = {0x16, 1, 100, 100}, kx[4] = {0x16, 1, 106, 106}, mix[4] = {0x16, 1, 100, 101};
+    CHECK(gd32_decode_key(k1, 4, &ev) == 0 && ev.knob == 1 && ev.knob_action == KNOB_PRESS);
+    CHECK(gd32_decode_key(kx, 4, &ev) == 0 && ev.knob == 0);
+    CHECK(gd32_decode_key(mix, 4, &ev) == 0 && ev.knob == 0);
 }
 
 static void test_host(void)
@@ -170,10 +253,13 @@ static void test_screen(void)
     rmdir(dir);
 }
 
+#include "tests_k3.inc"
+
 int main(void)
 {
-    test_gd32_roundtrip(); test_gd32_corrupt(); test_gd32_fuzz(); test_gd32_allowlist();
+    test_gd32_roundtrip(); test_gd32_corrupt(); test_gd32_fuzz(); test_gd32_allowlist(); test_knob_frames();
     test_host(); test_screen();
+    test_knob_init(); test_jpeg(); test_kbd_core();
     printf("%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }

@@ -1,12 +1,10 @@
 #include "gd32.h"
 #include <string.h>
 
-/* compile-time guard: every allow-listed id is checked against the forbidden id */
-#define GD32_STATIC_CHECK(id) _Static_assert((id) != GD32_FORBIDDEN_BOOTLOADER_JUMP && (id) != 0x02, \
-                                             "forbidden GD32 command in allow-list");
-GD32_OUT_ALLOW_LIST(GD32_STATIC_CHECK)
-#define GD32_AS_BYTE(id) (id),
-static const uint8_t gd32_allow[] = { GD32_OUT_ALLOW_LIST(GD32_AS_BYTE) 0xFF /* sentinel, never allowed */ };
+_Static_assert(GD32_OUT_SET_KEYCODE != GD32_FORBIDDEN_BOOTLOADER_JUMP && GD32_OUT_SET_KEYCODE != 0x02,
+               "forbidden GD32 command in allow-list");
+_Static_assert(GD32_KNOB_SLOT_FIRST == 100 && GD32_KNOB_SLOT_LAST == 105,
+               "0x05 rows <100 write the QMK EEPROM keymap; only encoder slots 100..105 are RAM");
 
 static const uint8_t forbidden_clear[4] = {0x02, 0xAA, 0xE2, 0x78};
 
@@ -56,7 +54,7 @@ static int feed1(gd32_parser *p, uint8_t b)
     case S_SUM: p->sum = b; p->state = S_LEN; return 0;
     case S_LEN: p->len = b; p->state = S_NLEN; return 0;
     case S_NLEN:
-        if ((uint8_t)~p->len != b || p->len == 0) { p->bad_len++; p->state = (b == 0xAA) ? S_55 : S_AA; return 0; }
+        if ((uint8_t)~p->len != b || p->len == 0 || p->len > GD32_MAX_IN_PAYLOAD) { p->bad_len++; p->state = (b == 0xAA) ? S_55 : S_AA; return 0; }
         p->n = 0; p->state = S_DATA; return 0;
     case S_DATA:
         p->buf[p->n++] = b;
@@ -83,9 +81,15 @@ int gd32_decode_key(const uint8_t *pl, int len, gd32_key_event *ev)
 {
     if (len < 4 || pl[0] != GD32_IN_KEY_EVENT) return -1;
     ev->pressed = pl[1] ? 1 : 0;
-    ev->col = pl[2];
-    ev->row = pl[3];
+    ev->row = pl[2];
+    ev->col = pl[3];
     ev->keycode = (len >= 6) ? (uint16_t)((pl[4] << 8) | pl[5]) : 0;
+    ev->knob = 0; ev->knob_action = KNOB_NONE;
+    if (ev->row == ev->col && ev->row >= 100 && ev->row <= 105) {
+        int i = ev->row - 100;
+        ev->knob = (uint8_t)(1 + i / 3);
+        ev->knob_action = (uint8_t)(KNOB_PRESS + i % 3);
+    }
     return 0;
 }
 
@@ -101,14 +105,21 @@ int gd32_raw_is_forbidden(const uint8_t *raw, size_t len)
     return 0;
 }
 
+int gd32_knob_payload(int slot, uint8_t out[GD32_KNOB_PAYLOAD_LEN])
+{
+    if (slot < GD32_KNOB_SLOT_FIRST || slot > GD32_KNOB_SLOT_LAST) return -1;
+    out[0] = GD32_OUT_SET_KEYCODE; out[1] = 0; out[2] = (uint8_t)slot; out[3] = (uint8_t)slot; out[4] = 0; out[5] = 0;
+    return GD32_KNOB_PAYLOAD_LEN;
+}
+
 int gd32_out_allowed(const uint8_t *pl, size_t len)
 {
-    if (!pl || len == 0 || len > GD32_MAX_PAYLOAD) return 0;
-    if (pl[0] == GD32_FORBIDDEN_BOOTLOADER_JUMP) return 0;
-    int ok = 0;
-    for (const uint8_t *a = gd32_allow; *a != 0xFF; a++)
-        if (*a == pl[0]) ok = 1;
-    if (!ok) return 0;
+    if (!pl || len != GD32_KNOB_PAYLOAD_LEN) return 0;
+    if (pl[0] != GD32_OUT_SET_KEYCODE) return 0;          /* also excludes 0x19, 0x02, 0x0A, 0x0B, ... */
+    if (pl[1] != 0) return 0;                               /* layer 0 */
+    if (pl[2] < GD32_KNOB_SLOT_FIRST || pl[2] > GD32_KNOB_SLOT_LAST) return 0; /* <100 = EEPROM keymap */
+    if (pl[3] != pl[2]) return 0;                           /* col == row, as KD writes it */
+    if (pl[4] != 0 || pl[5] != 0) return 0;                 /* KC_NO only: report over serial */
     if (gd32_raw_is_forbidden(pl, len)) return 0;
     return 1;
 }
