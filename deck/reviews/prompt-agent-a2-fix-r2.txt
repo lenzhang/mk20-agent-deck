@@ -1,0 +1,6 @@
+# Fix r2 for MK20 agent A2 (deck/agent/). Same HARD RULES as deck/reviews/prompt-agent-a2.txt (no git commit, host-only, C11 -Werror, no kbd/firmware changes). Keep the change minimal.
+1. [Kimi r1 #3, accepted] deck/agent/src/des.c des_encrypt_block: derived key material (k, cd, c, d, sub[16]) stays on the stack.
+   Wipe it before return with mem_wipe() (src/mem.h) or an equivalent volatile/explicit wipe that the optimiser cannot drop; wipe intermediate
+   block state too if cheap. Do not change the DES output. Keep des.c usable wherever it is linked (check Makefile/tests link lines).
+2. Add a regression asserting the existing DES/VNC-auth known-answer still passes (reuse existing test if present; add one KAT if none).
+Run `make -C deck/agent test` and the agent pytest suite (TCP tests may be sandbox-blocked; say which ran). Summarise changes in <=10 lines.

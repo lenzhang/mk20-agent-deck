@@ -1,5 +1,6 @@
 /* Reused from MK20's deck/m2-scripts/vnc/des.c; independent of system crypto. */
 #include "des.h"
+#include "mem.h"
 static const uint8_t IP[64]={58,50,42,34,26,18,10,2,60,52,44,36,28,20,12,4,62,54,46,38,30,22,14,6,64,56,48,40,32,24,16,8,
 57,49,41,33,25,17,9,1,59,51,43,35,27,19,11,3,61,53,45,37,29,21,13,5,63,55,47,39,31,23,15,7};
 static const uint8_t FP[64]={40,8,48,16,56,24,64,32,39,7,47,15,55,23,63,31,38,6,46,14,54,22,62,30,37,5,45,13,53,21,61,29,
@@ -27,10 +28,15 @@ void des_encrypt_block(const uint8_t key[8],const uint8_t in[8],uint8_t out[8]){
   uint64_t cd=perm(k,PC1,56,64);uint32_t c=(cd>>28)&0xFFFFFFF,d=cd&0xFFFFFFF;
   for(int r=0;r<16;r++){for(int s=0;s<SH[r];s++){c=((c<<1)|(c>>27))&0xFFFFFFF;d=((d<<1)|(d>>27))&0xFFFFFFF;}
     sub[r]=perm(((uint64_t)c<<28)|d,PC2,48,56);}
-  b=perm(b,IP,64,64);uint32_t l=b>>32,rr=b&0xFFFFFFFF;
-  for(int r=0;r<16;r++){uint64_t x=perm(rr,E,48,32)^sub[r];uint32_t f=0;
+  b=perm(b,IP,64,64);uint32_t l=b>>32,rr=b&0xFFFFFFFF,f,t;uint64_t x;
+  for(int r=0;r<16;r++){x=perm(rr,E,48,32)^sub[r];f=0;
     for(int s=0;s<8;s++){int v=(x>>(42-6*s))&0x3F;int row=((v&0x20)>>4)|(v&1),col=(v>>1)&0xF;f=(f<<4)|SB[s][row*16+col];}
-    f=perm(f,P,32,32);uint32_t t=l^f;l=rr;rr=t;}
+    f=perm(f,P,32,32);t=l^f;l=rr;rr=t;}
   uint64_t pre=((uint64_t)rr<<32)|l;uint64_t o=perm(pre,FP,64,64);
   for(int i=7;i>=0;i--){out[i]=o&0xFF;o>>=8;}
+  /* mem_wipe uses volatile stores so key material and block state are erased. */
+  mem_wipe(&k,sizeof k);mem_wipe(&cd,sizeof cd);mem_wipe(&c,sizeof c);mem_wipe(&d,sizeof d);mem_wipe(sub,sizeof sub);
+  mem_wipe(&b,sizeof b);mem_wipe(&l,sizeof l);mem_wipe(&rr,sizeof rr);
+  mem_wipe(&x,sizeof x);mem_wipe(&f,sizeof f);mem_wipe(&t,sizeof t);
+  mem_wipe(&pre,sizeof pre);mem_wipe(&o,sizeof o);
 }
