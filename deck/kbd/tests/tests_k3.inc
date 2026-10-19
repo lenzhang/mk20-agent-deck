@@ -429,3 +429,98 @@ static void test_writers(void)
     for (int i = 1; i <= 21; i++) { snprintf(path, sizeof path, "%s/fb%d", dir, i); unlink(path); }
     rmdir(dir);
 }
+
+/* ---- HID (router merge) ---- */
+#include "hid.h"
+static int rd_reports(int fd, uint8_t out[][9], int max)
+{
+    int n = 0; uint8_t b[9];
+    while (n < max) {
+        ssize_t r = read(fd, b, 1);   /* id first, then the rest by report size */
+        if (r != 1) break;
+        int len = b[0] == 1 ? 9 : b[0] == 2 ? 6 : 1;
+        if (len > 1 && read(fd, b + 1, (size_t)len - 1) != len - 1) break;
+        memset(out[n], 0, 9); memcpy(out[n], b, (size_t)len); n++;
+    }
+    return n;
+}
+
+static void test_hid(void)
+{
+    int p[2]; CHECK(pipe(p) == 0);
+    fcntl(p[0], F_SETFL, O_NONBLOCK); fcntl(p[1], F_SETFL, O_NONBLOCK);
+    char stopf[] = "/tmp/mk20hidstopXXXXXX"; int sfd = mkstemp(stopf); close(sfd); unlink(stopf);
+    hid_t h; hid_init(&h, "/nonexistent/hidg0", stopf);
+    uint8_t rep[64][9]; int n;
+    /* attach: startup all-keys-up */
+    hid_attach_fd(&h, p[1]);
+    n = rd_reports(p[0], rep, 64);
+    CHECK(n == 1 && rep[0][0] == 1 && rep[0][1] == 0 && !h.dirty);
+    /* PTT through the daemon core: key (col 0,row 3) holds RAlt, others local */
+    kbd_t k; char dir[] = "/tmp/mk20hkXXXXXX"; CHECK(mkdtemp(dir) != NULL);
+    CHECK(kbd_init(&k, dir, "", "t") == 0); k.hid = &h;
+    uint8_t ptt_dn[6] = {0x16, 1, 3, 0, 0, 0}, ptt_up[6] = {0x16, 0, 3, 0, 0, 0}, other[6] = {0x16, 1, 0, 0, 0, 0}, knob[4] = {0x16, 1, 103, 103};
+    kbd_on_gd32(&k, other, 6); kbd_on_gd32(&k, knob, 4);
+    CHECK(rd_reports(p[0], rep, 64) == 0);
+    kbd_on_gd32(&k, ptt_dn, 6);
+    n = rd_reports(p[0], rep, 64);
+    CHECK(n == 1 && rep[0][1] == HID_MOD_RALT);
+    kbd_on_gd32(&k, ptt_dn, 6);   /* repeat press: no duplicate report */
+    CHECK(rd_reports(p[0], rep, 64) == 0);
+    kbd_on_gd32(&k, ptt_up, 6);
+    n = rd_reports(p[0], rep, 64);
+    CHECK(n == 1 && rep[0][1] == 0);
+    /* EAGAIN: fill the pipe, press PTT -> dirty, drain -> service re-sends the latest state */
+    uint8_t junk[512]; memset(junk, 0xEE, sizeof junk);
+    while (write(p[1], junk, sizeof junk) > 0) {}
+    while (write(p[1], junk, 1) > 0) {}
+    kbd_on_gd32(&k, ptt_dn, 6);
+    CHECK(h.dirty && h.eagain >= 1 && hid_wants_pollout(&h));
+    kbd_on_gd32(&k, ptt_up, 6);   /* released before delivery: only the final state matters */
+    uint8_t sink[65536]; while (read(p[0], sink, sizeof sink) > 0) {}
+    hid_service(&h, 1000000);
+    n = rd_reports(p[0], rep, 64);
+    CHECK(n == 1 && rep[0][1] == 0 && !h.dirty);
+    /* keys + pointer reports, in order, pointer queue keeps button edges */
+    CHECK(hid_key(&h, 0x04, 1) == 0 && hid_key(&h, 0x05, 1) == 0);
+    hid_pointer_abs(&h, 1, 100, 40000); hid_pointer_abs(&h, 0, 100, 200);
+    n = rd_reports(p[0], rep, 64);
+    CHECK(n == 4 && rep[0][3] == 0x04 && rep[1][3] == 0x04 && rep[1][4] == 0x05);
+    CHECK(rep[2][0] == 2 && rep[2][1] == 1 && rep[2][2] == 100 && rep[2][4] == 0xFF && rep[2][5] == 0x7F && rep[3][1] == 0);
+    for (int i = 0; i < 6; i++) hid_key(&h, (uint8_t)(0x10 + i), 1);
+    CHECK(hid_key(&h, 0x30, 1) == -1);
+    rd_reports(p[0], rep, 64);
+    /* release_all: one all-up */
+    CHECK(hid_release_all(&h, 200) == 0);
+    n = rd_reports(p[0], rep, 64);
+    CHECK(n == 1 && rep[0][1] == 0 && rep[0][3] == 0 && rep[0][8] == 0);
+    CHECK(hid_release_all(&h, 200) == 0 && rd_reports(p[0], rep, 64) == 0);   /* already up: no write */
+    /* stop file: closes the fd (with all-up when something is held), no reopen while present */
+    hid_set_mod(&h, HID_MOD_RALT, 1); rd_reports(p[0], rep, 64);
+    FILE *f = fopen(stopf, "w"); fclose(f);
+    hid_service(&h, 2000000);
+    CHECK(h.fd < 0 && h.closes == 1);
+    n = rd_reports(p[0], rep, 64);
+    CHECK(n == 1 && rep[0][1] == 0);
+    hid_service(&h, 3000000); CHECK(h.fd < 0);
+    /* stop file gone: reopen attempt (path missing -> stays closed, retry later) */
+    unlink(stopf);
+    hid_service(&h, 4000000); CHECK(h.fd < 0 && h.next_open_ms == 4001000);
+    /* close request (SIGUSR1 path) on a fresh fd */
+    int q[2]; CHECK(pipe(q) == 0); fcntl(q[1], F_SETFL, O_NONBLOCK); fcntl(q[0], F_SETFL, O_NONBLOCK);
+    hid_attach_fd(&h, q[1]); rd_reports(q[0], rep, 64);
+    hid_request_close(&h); hid_service(&h, 5000000);
+    CHECK(h.fd < 0 && h.closes == 2);
+    hid_service(&h, 5000300);   /* request is one-shot: next tick may reopen (path missing here) */
+    CHECK(h.close_req == 0);
+    /* hard error (EPIPE: reader gone) throttles, no spin, recovers state on a new fd */
+    int r2[2]; CHECK(pipe(r2) == 0); fcntl(r2[1], F_SETFL, O_NONBLOCK); close(r2[0]);
+    signal(SIGPIPE, SIG_IGN);
+    hid_attach_fd(&h, r2[1]);
+    CHECK(h.hard_fail >= 1 && h.dirty && !hid_wants_pollout(&h));
+    unsigned e0 = h.errors; hid_service(&h, 6000000); hid_service(&h, 6000010);
+    CHECK(h.errors == e0 + 1);   /* second call inside 100 ms is throttled */
+    hid_close(&h, 0);
+    close(p[0]); close(q[0]);
+    kbd_free(&k); rmdir(dir);
+}

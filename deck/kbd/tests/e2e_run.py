@@ -34,14 +34,15 @@ def read_for(fd, secs):
         except OSError: break
     return out
 
-def start(tmp, extra, env=None):
+def start(tmp, extra, env=None, hid=None):
     fb = os.path.join(tmp, "fb"); os.makedirs(fb, exist_ok=True)
     for i in range(1, 22): open(os.path.join(fb, f"fb{i}"), "wb").close()
     gm, gpath, gs = mkpty()
     hm, hpath, hs = mkpty()
     st = os.path.join(tmp, "kbd.status")
     p = subprocess.Popen([BIN, "--run", "--gd32", gpath, "--host", hpath, "--fb", fb, "--bl", "", "--status", st,
-                          "--knob-timeout-ms", "200"] + extra, stderr=subprocess.PIPE, env=env)
+                          "--knob-timeout-ms", "200"] + (["--hid", hid, "--hid-stop-file", hid + ".stop"] if hid else ["--no-hid"]) + extra,
+                         stderr=subprocess.PIPE, env=env)
     return p, gm, hm, fb, st, (gs, hs)
 
 def fd_mode(pid, path):
@@ -55,7 +56,9 @@ def fd_mode(pid, path):
 
 def main():
     with tempfile.TemporaryDirectory() as tmp:
-        p, gm, hm, fb, st, keep = start(tmp, [])
+        hidp = os.path.join(tmp, "hidg0"); os.mkfifo(hidp)
+        hr = os.open(hidp, os.O_RDONLY | os.O_NONBLOCK)
+        p, gm, hm, fb, st, keep = start(tmp, [], hid=hidp)
         # fake GD32: echo the six frames
         wire = b""; t0 = time.time()
         while wire.count(b"\xF5\x5F") < 6 and time.time() - t0 < 3:
@@ -109,8 +112,33 @@ def main():
         s = json.load(open(st))
         check(s["knob_init"] == "ok" and s["knob_ok"] == 6 and s["panels_written"] == 21 and s["echo_frames"] == 1
               and s["key_events"] == 1 and s["knob_events"] == 1 and s["host"] == 1, f"status {s}")
+        # HID: startup all-up, PTT (doc 1,4 = fw col 0,row 3) holds RAlt
+        def hid_reports():
+            b = read_for(hr, 0.3)
+            return [b[i:i + 9] for i in range(0, len(b), 9)]
+        r0 = hid_reports()
+        check(r0 == [bytes(9)[:0] + b"\x01" + bytes(8)], f"startup all-keys-up {r0}")
+        os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0]))
+        r1 = hid_reports()
+        check(r1 == [b"\x01\x40" + bytes(7)], f"PTT down {r1}")
+        par.feed(read_for(hm, 0.2))
+        # stop file: hidg0 closed within the 100 ms tick (+ all-up since RAlt is held)
+        open(hidp + ".stop", "w").close()
+        time.sleep(0.4)
+        r2 = hid_reports()
+        check(r2 == [b"\x01" + bytes(8)], f"all-up before close on stop file {r2}")
+        check(fd_mode(p.pid, hidp) is None, "hidg0 closed while stop file exists")
+        os.unlink(hidp + ".stop")
+        time.sleep(1.5)
+        check(fd_mode(p.pid, hidp) == 1, "hidg0 reopened after stop file removed")
+        r3 = hid_reports()
+        check(r3 == [b"\x01" + bytes(8)], f"all-up on reopen {r3}")
+        os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0])); hid_reports()
         p.send_signal(signal.SIGTERM); p.wait(3)
         check(p.returncode == 0, "clean exit")
+        r4 = hid_reports()
+        check(r4 == [b"\x01" + bytes(8)], f"all-up on SIGTERM {r4}")
+        os.close(hr)
 
         # read-only modes: flag and kill file
         kill = os.path.join(tmp, "nowrite")

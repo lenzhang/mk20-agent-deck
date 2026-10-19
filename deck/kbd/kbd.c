@@ -10,7 +10,7 @@
 int kbd_init(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version)
 {
     memset(k, 0, sizeof *k);
-    k->host_fd = -1; k->backlight = -1; k->version = version ? version : "mk20-kbd";
+    k->host_fd = -1; k->backlight = -1; k->ptt_col = 0; k->ptt_row = 3; k->version = version ? version : "mk20-kbd";
     snprintf(k->bl_dir, sizeof k->bl_dir, "%s", bl_dir ? bl_dir : "");
     if (screen_init(&k->scr, fbdir)) return -1;
     if (host_parser_init(&k->hp, 2u << 20)) return -1;   /* full-canvas JPEG is << 1 MiB */
@@ -91,6 +91,8 @@ void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len)
     char j[160];
     int n = host_json_key_state(j, sizeof j, ev.col, ev.row, ev.pressed);
     if (n > 0 && k->host_fd >= 0) kbd_host_send(k, KBD_EVENT_ID, HOST_CMD_JSON, j, (size_t)n);
+    /* router (r120): PTT key holds Right Alt/Option while pressed; every other key and the knobs are local */
+    if (k->hid && !ev.knob && ev.col == k->ptt_col && ev.row == k->ptt_row) hid_set_mod(k->hid, HID_MOD_RALT, ev.pressed);
     if (k->local_ui && !ev.knob) { kbd_draw_key(k, ev.row, ev.col, ev.pressed); kbd_flush(k); }
 }
 

@@ -4,6 +4,7 @@
 #define MK20_KBD_H
 #include "gd32.h"
 #include "gd32io.h"
+#include "hid.h"
 #include "host.h"
 #include "screen.h"
 #include <stdint.h>
@@ -20,7 +21,9 @@ typedef struct {
     const char *version;
     int backlight;        /* last level 0..100, -1 unknown */
     gd32_knob_status knob;
-    int gd32_rw;          /* 1 if the tty was opened for writing (knob init allowed) */
+    int gd32_rw;
+    hid_t *hid;           /* NULL = no HID output */
+    int ptt_col, ptt_row; /* firmware coords (0-based) of the push-to-talk key; default doc (1,4) */          /* 1 if the tty was opened for writing (knob init allowed) */
     struct {
         uint32_t jpg_ok, jpg_bad, jpg_size, tiles, json_in, json_unsupported, json_bad,
                  key_events, knob_events, echo_frames, other_frames, keycode_nonzero,

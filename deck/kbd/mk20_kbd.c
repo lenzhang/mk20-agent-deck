@@ -8,6 +8,7 @@
  * The ONLY GD32 write path is gd32_tx() (gd32io.c) behind the strict allow-list. */
 #include "gd32.h"
 #include "gd32io.h"
+#include "hid.h"
 #include "host.h"
 #include "kbd.h"
 #include "screen.h"
@@ -73,7 +74,9 @@ static int pattern(const char *fbdir)
 }
 
 static volatile sig_atomic_t g_stop;
+static hid_t g_hid;
 static void on_sig(int s) { (void)s; g_stop = 1; }
+static void on_usr1(int s) { (void)s; hid_request_close(&g_hid); }   /* gadget teardown: drop /dev/hidg0 now */
 
 static long mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
 
@@ -87,15 +90,19 @@ static int open_host(const char *path)
     return fd;
 }
 
-struct run_opts { const char *gd32, *host, *fb, *bl, *status; int no_host, no_write, timeout_ms; };
+struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop; int no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
 
 static int run(const struct run_opts *o)
 {
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_handler = on_sig;
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL);
+    sa.sa_handler = on_usr1; sigaction(SIGUSR1, &sa, NULL);
     kbd_t k;
     if (kbd_init(&k, o->fb, o->bl, KBD_VERSION)) { fprintf(stderr, "mk20-kbd: init failed\n"); return 1; }
+    k.ptt_col = o->ptt_col; k.ptt_row = o->ptt_row;
+    hid_init(&g_hid, o->hid, o->hid_stop);
+    if (!o->no_hid) { k.hid = &g_hid; hid_service(&g_hid, mono_ms()); }   /* open + startup all-keys-up */
     k.local_ui = o->no_host;
     kbd_draw_idle(&k);
     if (screen_start_writers(&k.scr)) {   /* fall back to synchronous flushes */
@@ -136,16 +143,21 @@ static int run(const struct run_opts *o)
             next_host_try = now + 1000;
             if (k.host_fd >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
         }
-        struct pollfd pf[2] = {{gfd, POLLIN, 0}, {k.host_fd, POLLIN, 0}};
+        if (k.hid) hid_service(k.hid, now);
+        struct pollfd pf[3] = {{gfd, POLLIN, 0}, {k.host_fd, POLLIN, 0}, {k.hid ? k.hid->fd : -1, POLLOUT, 0}};
         int np = k.host_fd >= 0 ? 2 : 1;
-        int r = poll(pf, (nfds_t)np, 250);
+        if (!(k.hid && hid_wants_pollout(k.hid))) pf[2].fd = -1;
+        /* 100 ms tick while /dev/hidg0 is open: a stop file must close it well inside gadget.sh's window */
+        int r = poll(pf, 3, (k.hid && k.hid->fd >= 0) ? 100 : 250);
+        (void)np;
         if (r < 0 && errno != EINTR) { perror("poll"); break; }
         if (r > 0 && (pf[0].revents & (POLLIN | POLLERR | POLLHUP))) {
             ssize_t n = read(gfd, buf, sizeof buf);
             if (n <= 0 && errno != EINTR) { perror("gd32 read"); break; }
             for (ssize_t i = 0; i < n; i++) { int l = gd32_feed(&gp, buf[i]); if (l > 0) kbd_on_gd32(&k, gp.buf, l); }
         }
-        if (r > 0 && np == 2 && (pf[1].revents & (POLLIN | POLLERR | POLLHUP))) {
+        if (r > 0 && pf[2].fd >= 0 && (pf[2].revents & (POLLOUT | POLLERR))) hid_service(k.hid, mono_ms());
+        if (r > 0 && k.host_fd >= 0 && pf[1].fd >= 0 && (pf[1].revents & (POLLIN | POLLERR | POLLHUP))) {
             ssize_t n = read(k.host_fd, buf, sizeof buf);
             if (n > 0) kbd_host_feed(&k, buf, (size_t)n);
             else if (n == 0 || (errno != EINTR && errno != EAGAIN)) {   /* pty master gone (bridge restart): EIO */
@@ -155,6 +167,7 @@ static int run(const struct run_opts *o)
         }
         if (o->status && mono_ms() >= next_status) { kbd_write_status(&k, o->status); next_status = mono_ms() + 1000; }
     }
+    if (k.hid) { hid_release_all(k.hid, 1500); hid_close(k.hid, 0); }   /* never leave RAlt stuck (r120) */
     screen_stop_writers(&k.scr, 1, 500);   /* bounded drain of the last frame */
     if (o->status) kbd_write_status(&k, o->status);
     if (k.host_fd >= 0) close(k.host_fd);
@@ -167,6 +180,7 @@ static void usage(void)
 {
     fprintf(stderr, "usage: mk20-kbd --run [--no-host] [--no-gd32-write] [--gd32 TTY] [--host TTY] [--fb DIR]\n"
                     "                      [--bl DIR|''] [--status FILE] [--knob-timeout-ms N]\n"
+                    "                      [--no-hid | --hid PATH] [--hid-stop-file PATH] [--ptt COL,ROW (1-based)]\n"
                     "       mk20-kbd --monitor [tty] | --pattern [fbdir] | --getinfo\n"
                     "  kill file " GD32_NO_WRITE_FILE " = same as --no-gd32-write\n");
 }
@@ -179,7 +193,8 @@ int main(int argc, char **argv)
         char j[8192]; if (host_json_getinfo_ack(j, sizeof j, KBD_VERSION) < 0) return 1; puts(j); return 0;
     }
     if (argc >= 2 && !strcmp(argv[1], "--run")) {
-        struct run_opts o = {"/dev/ttyS1", "/dev/ttyGS0", "/dev", "/sys/kernel/debug/dispdbg", "/run/mk20/kbd.status", 0, 0, 1000};
+        struct run_opts o = {"/dev/ttyS1", "/dev/ttyGS0", "/dev", "/sys/kernel/debug/dispdbg", "/run/mk20/kbd.status",
+                             HID_DEFAULT_PATH, HID_DEFAULT_STOP_FILE, 0, 0, 1000, 0, 0, 3};
         for (int i = 2; i < argc; i++) {
             const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
             if (!strcmp(a, "--no-host")) o.no_host = 1;
@@ -190,6 +205,14 @@ int main(int argc, char **argv)
             else if (v && !strcmp(a, "--bl")) { o.bl = v; i++; }
             else if (v && !strcmp(a, "--status")) { o.status = *v ? v : NULL; i++; }
             else if (v && !strcmp(a, "--knob-timeout-ms")) { o.timeout_ms = atoi(v); i++; }
+            else if (!strcmp(a, "--no-hid")) o.no_hid = 1;
+            else if (v && !strcmp(a, "--hid")) { o.hid = v; i++; }
+            else if (v && !strcmp(a, "--hid-stop-file")) { o.hid_stop = v; i++; }
+            else if (v && !strcmp(a, "--ptt")) {
+                int c, r;
+                if (sscanf(v, "%d,%d", &c, &r) != 2 || c < 1 || c > 5 || r < 1 || r > 4) { usage(); return 2; }
+                o.ptt_col = c - 1; o.ptt_row = r - 1; i++;
+            }
             else { usage(); return 2; }
         }
         return run(&o);
