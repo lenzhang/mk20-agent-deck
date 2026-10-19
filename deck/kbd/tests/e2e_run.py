@@ -188,6 +188,72 @@ def main():
         check(r4 == [b"\x01" + bytes(8)], f"all-up on SIGTERM {r4}")
         os.close(hr); os.close(hr_old)
 
+        # agent A1: --ctl control socket on the real binary: lease, act -> hidg0, e-stop latency + all-up, human preempt
+        hidc = os.path.join(tmp, "hidg0c"); os.mkfifo(hidc)
+        hrc = os.open(hidc, os.O_RDONLY | os.O_NONBLOCK)
+        sockp = os.path.join(tmp, "kbd.sock")
+        p, gm, hm, fb, st, keep = start(tmp, ["--no-gd32-write", "--no-host", "--ctl", sockp, "--ctl-allow"], hid=hidc)
+        import socket as _s
+        t0 = time.time()
+        while not os.path.exists(sockp) and time.time() - t0 < 3: time.sleep(0.05)
+        check(os.path.exists(sockp) and (os.stat(sockp).st_mode & 0o777) == 0o600, "kbd.sock 0600")
+        cs = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM); cs.connect(sockp); cf = cs.makefile("rwb", buffering=0)
+        def rq(obj):
+            cf.write((json.dumps(obj) + "\n").encode())
+            while True:
+                j = json.loads(cf.readline())
+                if "ev" not in j: return j
+        def drain():
+            time.sleep(0.05); b = b""
+            while True:
+                try: d = os.read(hrc, 4096)
+                except BlockingIOError: break
+                if not d: break
+                b += d
+            return b
+        drain()
+        tok = rq({"op": "lease.acquire", "owner": "e2e", "ttl_ms": 2000})["token"]
+        check(rq({"op": "act", "token": tok, "seq": 1, "kind": "key", "usage": 4, "down": 1})["ok"], "act key")
+        check(rq({"op": "act", "token": tok, "seq": 2, "kind": "ptr", "buttons": 1, "x": 10, "y": 20})["ok"], "act ptr")
+        b = drain()
+        check(b == bytes([1, 0, 0, 4, 0, 0, 0, 0, 0]) + bytes([2, 1, 10, 0, 20, 0]), f"act reports {b.hex()}")
+        t1 = time.perf_counter()
+        cf.write(b'{"op":"estop"}\n')
+        got = b""
+        while len(got) < 15 and time.perf_counter() - t1 < 1:
+            try: got += os.read(hrc, 64)
+            except BlockingIOError: time.sleep(0.001)
+        dt = (time.perf_counter() - t1) * 1000
+        check(got == b"\x01" + bytes(8) + bytes([2, 0, 10, 0, 20, 0]), f"estop all-up {got.hex()}")
+        check(dt <= 100, f"estop latency {dt:.1f} ms")
+        print(f"e2e: estop -> all-up in {dt:.1f} ms")
+        while True:   # consume the estop broadcast + its reply
+            j = json.loads(cf.readline())
+            if "ev" not in j: break
+        check(j.get("ok") and j.get("state") == "stopped", f"estop reply {j}")
+        j = rq({"op": "status"}); check(j["state"] == "stopped", f"stopped {j}")
+        check(rq({"op": "lease.acquire", "ttl_ms": 2000}).get("err") == "stopped", "no lease after estop")
+        cs.close(); p.send_signal(signal.SIGTERM); p.wait(3)
+        check(p.returncode == 0 and not os.path.exists(sockp), "ctl clean exit, socket removed")
+        # lease expiry + human preempt
+        p, gm, hm, fb, st, keep = start(tmp, ["--no-gd32-write", "--no-host", "--ctl", sockp, "--ctl-allow"], hid=hidc)
+        t0 = time.time()
+        while not os.path.exists(sockp) and time.time() - t0 < 3: time.sleep(0.05)
+        cs = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM); cs.connect(sockp); cf = cs.makefile("rwb", buffering=0)
+        drain()
+        tok = rq({"op": "lease.acquire", "ttl_ms": 300})["token"]
+        rq({"op": "act", "token": tok, "seq": 1, "kind": "key", "usage": 5, "down": 1}); drain()
+        time.sleep(0.5)
+        check(drain() == b"\x01" + bytes(8), "lease expiry -> all-up")
+        tok = rq({"op": "lease.acquire", "ttl_ms": 3000})["token"]
+        rq({"op": "act", "token": tok, "seq": 1, "kind": "key", "usage": 6, "down": 1}); drain()
+        os.write(gm, gd32_frame([0x16, 1, 0, 2, 0, 0]))   # physical key press (not PTT)
+        time.sleep(0.3)
+        check(drain() == b"\x01" + bytes(8), "human key press preempts agent")
+        check(rq({"op": "act", "token": tok, "seq": 2, "kind": "key", "usage": 6, "down": 1}).get("err") == "no_lease", "lease gone after preempt")
+        cs.close(); p.send_signal(signal.SIGTERM); p.wait(3)
+        os.close(hrc)
+
         # read-only modes: flag and kill file
         kill = os.path.join(tmp, "nowrite")
         open(kill, "w").close()

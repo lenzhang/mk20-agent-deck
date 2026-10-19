@@ -24,6 +24,7 @@ typedef struct {
     gd32_knob_status knob;
     int gd32_rw;
     hid_t *hid;           /* NULL = no HID output */
+    struct ctl_s *ctl;    /* NULL = no kbd.sock control (default) */
     int ptt_col, ptt_row; /* firmware coords (0-based) of the push-to-talk key; default doc (1,4) */          /* 1 if the tty was opened for writing (knob init allowed) */
     struct {
         uint32_t jpg_ok, jpg_bad, jpg_size, tiles, json_in, json_unsupported, json_bad,

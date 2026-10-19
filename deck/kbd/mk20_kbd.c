@@ -11,6 +11,7 @@
 #include "hid.h"
 #include "host.h"
 #include "kbd.h"
+#include "ctl.h"
 #include "screen.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -90,7 +91,7 @@ static int open_host(const char *path)
     return fd;   /* stays O_NONBLOCK: replies are written with a bounded wait (kbd_host_send), never block the loop */
 }
 
-struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop, *lock, *exit_file; int no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
+struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop, *lock, *exit_file, *ctl; int ctl_allow, hid_scroll, no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
 
 static int run(const struct run_opts *o)
 {
@@ -112,6 +113,7 @@ static int run(const struct run_opts *o)
     if (kbd_init(&k, o->fb, o->bl, KBD_VERSION)) { fprintf(stderr, "mk20-kbd: init failed\n"); return 1; }
     k.ptt_col = o->ptt_col; k.ptt_row = o->ptt_row;
     hid_init(&g_hid, o->hid, o->hid_stop);
+    hid_set_scroll(&g_hid, o->hid_scroll);   /* MUST match gadget.sh MK20_HID_SCROLL */
     if (!o->no_hid) { k.hid = &g_hid; hid_service(&g_hid, mono_ms()); }   /* open + startup all-keys-up */
     k.local_ui = o->no_host;
     kbd_draw_idle(&k);
@@ -142,6 +144,12 @@ static int run(const struct run_opts *o)
         fprintf(stderr, "mk20-kbd: knob init %s (%d/6 slots, timeouts=%d tx_errors=%d)\n",
                 gd32_knob_state_name(k.knob.state), k.knob.ok_count, k.knob.timeouts, k.knob.tx_errors);
     }
+    static ctl_t ctl;
+    if (o->ctl && o->ctl[0]) {   /* agent A1, opt-in: without --ctl nothing below runs */
+        ctl_init(&ctl, k.hid);
+        if (ctl_listen(&ctl, o->ctl)) fprintf(stderr, "mk20-kbd: control socket %s failed: %s (agent input disabled)\n", o->ctl, strerror(errno));
+        else { k.ctl = &ctl; if (o->ctl_allow) ctl_set_allowed(&ctl, 1); fprintf(stderr, "mk20-kbd: control socket %s%s\n", o->ctl, o->ctl_allow ? " (dev: allowed at start)" : ""); }
+    }
     if (o->status) kbd_write_status(&k, o->status);
 
     long next_status = mono_ms() + 1000;
@@ -154,11 +162,15 @@ static int run(const struct run_opts *o)
             if (k.host_fd >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
         }
         if (k.hid) hid_service(k.hid, now);
-        struct pollfd pf[3] = {{gfd, POLLIN, 0}, {k.host_fd, POLLIN, 0}, {k.hid ? k.hid->fd : -1, POLLOUT, 0}};
+        if (k.ctl) ctl_tick(k.ctl, now);
+        struct pollfd pf[3 + 1 + CTL_MAX_CLIENTS] = {{gfd, POLLIN, 0}, {k.host_fd, POLLIN, 0}, {k.hid ? k.hid->fd : -1, POLLOUT, 0}};
+        int nctl = k.ctl ? ctl_pollfds(k.ctl, pf + 3, 1 + CTL_MAX_CLIENTS) : 0;
         int np = k.host_fd >= 0 ? 2 : 1;
         if (!(k.hid && hid_wants_pollout(k.hid))) pf[2].fd = -1;
         /* 100 ms tick while /dev/hidg0 is open: a stop file must close it well inside gadget.sh's window */
-        int r = poll(pf, 3, (k.hid && k.hid->fd >= 0) ? 100 : 250);
+        int to = (k.hid && k.hid->fd >= 0) ? 100 : 250;
+        if (k.ctl) to = ctl_timeout_ms(k.ctl, now, to);
+        int r = poll(pf, (nfds_t)(3 + nctl), to);
         (void)np;
         if (r < 0 && errno != EINTR) { perror("poll"); break; }
         if (r > 0 && (pf[0].revents & (POLLIN | POLLERR | POLLHUP))) {
@@ -175,11 +187,13 @@ static int run(const struct run_opts *o)
                 fprintf(stderr, "mk20-kbd: host link closed, retrying\n");
             }
         }
+        if (r > 0 && nctl) ctl_on_poll(k.ctl, pf + 3, nctl, mono_ms());
         if (o->status && mono_ms() >= next_status) { kbd_write_status(&k, o->status); next_status = mono_ms() + 1000; }
         if (o->exit_file && o->exit_file[0] && access(o->exit_file, F_OK) == 0) {
             fprintf(stderr, "mk20-kbd: %s present: exiting\n", o->exit_file); break;
         }
     }
+    if (k.ctl) ctl_close(k.ctl);
     if (k.hid) { hid_release_all(k.hid, 1500); hid_close(k.hid, 0); }   /* never leave RAlt stuck (r120) */
     screen_stop_writers(&k.scr, 1, 500);   /* bounded drain of the last frame */
     if (o->status) kbd_write_status(&k, o->status);
@@ -195,6 +209,7 @@ static void usage(void)
                     "                      [--bl DIR|''] [--status FILE] [--knob-timeout-ms N]\n"
                     "                      [--no-hid | --hid PATH] [--hid-stop-file PATH] [--ptt COL,ROW (1-based)]\n"
                     "                      [--lock FILE (default /tmp/mk20-kbd.lock; '' = none)] [--exit-file FILE]\n"
+                    "                      [--ctl SOCK (agent control, e.g. /run/mk20/kbd.sock)] [--ctl-allow (dev)] [--hid-scroll]\n"
                     "       mk20-kbd --monitor [tty] | --pattern [fbdir] | --getinfo\n"
                     "  kill file " GD32_NO_WRITE_FILE " = same as --no-gd32-write\n");
 }
@@ -208,7 +223,7 @@ int main(int argc, char **argv)
     }
     if (argc >= 2 && !strcmp(argv[1], "--run")) {
         struct run_opts o = {"/dev/ttyS1", "/dev/ttyGS0", "/dev", "/sys/kernel/debug/dispdbg", "/run/mk20/kbd.status",
-                             HID_DEFAULT_PATH, HID_DEFAULT_STOP_FILE, "/tmp/mk20-kbd.lock", NULL, 0, 0, 1000, 0, 0, 3};
+                             HID_DEFAULT_PATH, HID_DEFAULT_STOP_FILE, "/tmp/mk20-kbd.lock", NULL, NULL, 0, 0, 0, 0, 1000, 0, 0, 3};
         for (int i = 2; i < argc; i++) {
             const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
             if (!strcmp(a, "--no-host")) o.no_host = 1;
@@ -224,6 +239,9 @@ int main(int argc, char **argv)
             else if (v && !strcmp(a, "--hid-stop-file")) { o.hid_stop = v; i++; }
             else if (v && !strcmp(a, "--lock")) { o.lock = v; i++; }
             else if (v && !strcmp(a, "--exit-file")) { o.exit_file = v; i++; }
+            else if (v && !strcmp(a, "--ctl")) { o.ctl = v; i++; }
+            else if (!strcmp(a, "--ctl-allow")) o.ctl_allow = 1;   /* dev/test only: release allows from the keyboard */
+            else if (!strcmp(a, "--hid-scroll")) o.hid_scroll = 1;
             else if (v && !strcmp(a, "--ptt")) {
                 int c, r;
                 if (sscanf(v, "%d,%d", &c, &r) != 2 || c < 1 || c > 5 || r < 1 || r > 4) { usage(); return 2; }

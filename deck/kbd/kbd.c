@@ -1,5 +1,6 @@
 #include "kbd.h"
 #include "jpeg.h"
+#include "ctl.h"
 #include <errno.h>
 #include <poll.h>
 #include <time.h>
@@ -107,6 +108,8 @@ void kbd_on_gd32(kbd_t *k, const uint8_t *pl, int len)
     char j[160];
     int n = host_json_key_state(j, sizeof j, ev.col, ev.row, ev.pressed);
     if (n > 0 && k->host_fd >= 0) kbd_host_send(k, KBD_EVENT_ID, HOST_CMD_JSON, j, (size_t)n);
+    /* agent A1: a physical key press takes input back from the agent (lease revoked + all-up) BEFORE the PTT edge */
+    if (k->ctl && !ev.knob && ev.pressed) ctl_human_input(k->ctl, 0);
     /* router (r120): PTT key holds Right Alt/Option while pressed; every other key and the knobs are local */
     if (k->hid && !ev.knob && ev.col == k->ptt_col && ev.row == k->ptt_row) hid_set_mod(k->hid, HID_MOD_RALT, ev.pressed);
     if (k->local_ui && !ev.knob) { kbd_draw_key(k, ev.row, ev.col, ev.pressed); kbd_flush(k); }
