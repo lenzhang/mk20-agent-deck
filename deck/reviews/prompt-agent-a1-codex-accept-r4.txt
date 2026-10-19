@@ -1,0 +1,12 @@
+You are doing a first ACCEPTANCE pass, round 4 (after fix round r3) in a READ-ONLY sandbox. Do not edit files (you cannot). Do not access devices, serial, adb or network.
+
+Repo: this worktree at commit 2ea809a (branch feature/agent). The A1 work = git diff d172921..2ea809a. Spec: ../mk20-a1-task.md (A1 remainder + OpenAI-compatible adapter skeleton) against deck/AGENT-BUILD-PLAN.md (§3.4, §3.4b, §3.5, A1 acceptance, A4 adapter notes). Fix rounds: ../mk20-a1-fix-task.md, ../mk20-a1-fix-r2-task.md, deck/reviews/prompt-agent-a1-fix-r3.txt (r3 fix = git diff 3620415..2ea809a). Previous reports: deck/reviews/agent-a1-codex-accept-r1..r3.md and agent-a1-kimi-r1..r3.md. State for each r3 finding (R3-F1, R3-G1, R3-D1 and any open item) FIXED / NOT FIXED / PARTIAL with evidence, and look for regressions introduced by the r3 fix.
+
+Tests: the authoritative full run is on Linux; the commit message of 2ea809a records it fully green (24 + 4018x2 checks + e2e + 45 + 58 + 546). macOS cannot run the Linux-only kbd tests. You may try read-only runs that work here; if writes are blocked, say so.
+
+Do:
+1. For each spec item and each A1 acceptance criterion in the plan (and the adapter part of A4 that applies to a skeleton), state PASS / PARTIAL / FAIL with evidence (file:line, test name).
+2. Check that defaults are unchanged (no flags -> identical mk20-kbd behaviour, descriptor, mk20d launch line), that the e-stop cannot be bypassed or cleared from the socket and releases all within 100 ms even with a stalled host, that confirm honours >=300 ms, that the API key never enters a request body, and that no GD32 write beyond the allow-listed knob payload was added.
+3. List concrete defects or test gaps, each with severity (blocker/major/minor) and a precise fix. Only blocker/major should fail acceptance.
+4. End with "ACCEPTANCE: PASS" or "ACCEPTANCE: FAIL".
+Output the report as Markdown (it is saved to deck/reviews/agent-a1-codex-accept-r4.md).
