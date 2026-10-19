@@ -5,7 +5,7 @@ import os, re, shutil, signal, socket, subprocess, threading, time
 from pathlib import Path
 
 import pytest
-from conftest import BB, DECK
+from conftest import BB, DECK, scope_gadget_fn
 
 G = (DECK / "firmware/release/share/gadget.sh").read_text()
 FN = G[G.index("router_pids() {"):G.index("# KD stop:")]
@@ -35,7 +35,7 @@ def test_router_stopped_before_every_udc_configfs_change():
 @pytest.fixture
 def h(tmp_path):
     (tmp_path / "mk20").mkdir(); (tmp_path / "bin").mkdir()
-    body = FN.replace("/tmp/mk20-router-stop", str(tmp_path / "stop")).replace("/tmp/mk20/", str(tmp_path / "mk20") + "/")
+    body = scope_gadget_fn(FN, tmp_path)
     s = tmp_path / "rs.sh"
     s.write_text(f'log() {{ echo "$*" >> {tmp_path}/log; }}\n{body}\nrouter_stop\necho done\n')
     return tmp_path, s

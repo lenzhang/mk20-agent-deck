@@ -310,18 +310,19 @@ kbd)
   # stop stock KD unconditionally (KD may be between procd respawns: kd_count=0 proves nothing), then retried while it is
   # still there; never run mk20-kbd beside a live KD (two writers on ttyS1/fb). KD that will not stop: mk20-kbd stays
   # off, "degraded" (KD keeps the panels; nothing is restarted).
-  a=0
+  a=0; sok=0   # sok: the procd service stop itself succeeded (rc 0); without it procd may still respawn KD
   if [ -f "$KSTOP" ]; then why="stop file"
   elif ! composite_up || [ -f "$TM/gadget.busy" ]; then why="composite down/busy"
   else
-    while [ $a = 0 ] || { [ "$(kd_count)" != 0 ] && [ $a -lt "${MK20_KBD_KD_TRIES:-3}" ]; }; do
-      a=$((a+1)); kd_svc stop; i=0; while [ "$(kd_count)" != 0 ] && [ $i -lt "${MK20_KBD_KD_TICKS:-25}" ]; do sleep 0.2; i=$((i+1)); done; done
+    while { [ $sok = 0 ] || [ "$(kd_count)" != 0 ]; } && [ $a -lt "${MK20_KBD_KD_TRIES:-3}" ]; do
+      a=$((a+1)); kd_svc stop && sok=1
+      i=0; while [ "$(kd_count)" != 0 ] && [ $i -lt "${MK20_KBD_KD_TICKS:-25}" ]; do sleep 0.2; i=$((i+1)); done; done
     sleep "${MK20_KBD_KD_SETTLE:-1}"   # a respawn already in flight would show up now
   fi
   if [ -n "$why" ]; then :
-  elif [ "$(kd_count)" != 0 ]; then
-    echo "stock KD did not stop ($a tries)" > "$TM/kbd-degraded"; rm -f "$TM/kbd.mode"; why="kd stop failed"
-    log WARN kbd "degraded: stock KD did not stop after $a tries; mk20-kbd not started"
+  elif [ $sok = 0 ] || [ "$(kd_count)" != 0 ]; then
+    echo "stock KD did not stop ($a tries, service stop ok=$sok)" > "$TM/kbd-degraded"; rm -f "$TM/kbd.mode"; why="kd stop failed"
+    log WARN kbd "degraded: stock KD/service did not stop after $a tries (service ok=$sok); mk20-kbd not started"
   else
     while :; do
       [ -f "$KSTOP" ] && { why="stop file"; break; }
@@ -330,9 +331,10 @@ kbd)
       HA="--hid $HID --hid-stop-file $HSTOP"; [ "${MK20_NOHID:-0}" = 1 ] && HA="--no-hid"
       t0=$(cut -d. -f1 /proc/uptime)
       # --exit-file: the daemon itself refuses to start / exits when teardown's marker appears (closes the window
-      # between this check and the exec); --lock: daemon-lifetime single-writer lock (a surviving orphan wins, rc 3)
+      # between this check and the exec); --lock: daemon-lifetime single-writer lock, the SAME path as the binary's
+      # default (/tmp/mk20-kbd.lock), so a manual `mk20-kbd --run` cannot run beside it (a surviving orphan wins, rc 3)
       # shellcheck disable=SC2086
-      "$KB" --run --host "$R/dev/ttyGS0" $HA --status "$KST" --lock "$TM/kbd-daemon.lock" --exit-file "$KSTOP" </dev/null >>"$KL" 2>&1 5>&-; rc=$?
+      "$KB" --run --host "$R/dev/ttyGS0" $HA --status "$KST" --lock "$R/tmp/mk20-kbd.lock" --exit-file "$KSTOP" </dev/null >>"$KL" 2>&1 5>&-; rc=$?
       t1=$(cut -d. -f1 /proc/uptime)
       [ -f "$KSTOP" ] && { why="stop file"; break; }   # stopped by gadget.sh: not a crash
       total=$((total + 1)); [ $((t1 - t0)) -ge 60 ] && d=1   # a long healthy run resets the backoff

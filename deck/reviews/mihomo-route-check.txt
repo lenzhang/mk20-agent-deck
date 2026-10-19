@@ -1,2 +1,6 @@
 2026-10-18 ~03:16–03:31 SGT (read-only connections API :9090)
 cursor.sh / api2.cursor.sh / api3.cursor.sh → chains US-Exit-Hy2|AI
+2026-10-19 13:47:03 +0800 AI=US-Exit-Hy2 exit=203.0.113.10 US (chatgpt.com trace via TUN and mixed 7890; read-only, pre kdr-r1 codex)
+2026-10-19 13:57:57 +0800 AI=US-Exit-Hy2 exit=203.0.113.10 (chatgpt.com trace via TUN and mixed 7890; read-only, pre kdr-r2 codex)
+2026-10-19 14:11:54 +0800 AI=US-Exit-Hy2 exit=203.0.113.10 (chatgpt.com trace via TUN and mixed 7890; read-only, pre kdr-r3 codex)
+2026-10-19 14:39:27 +0800 AI=US-Exit-Hy2 exit=203.0.113.10 US (chatgpt.com trace via TUN and mixed 7890; read-only, pre kdr-r4 codex)

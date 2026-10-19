@@ -1,0 +1,9 @@
+Re-reviewed `19a0057`. R1 fixes #2 and #4 address the reported paths; #1, #5 and #6 remain incomplete. C and shell syntax checks pass; no device execution or full-suite run. The documented parked-fd crash limitation is excluded as requested.
+
+1. **Teardown can miss surviving threads.** [gadget.sh:104](/Users/dev/worktrees/mk20-review-kdr/deck/firmware/release/share/gadget.sh:104) rediscovers processes through the leader’s cmdline. After SIGKILL, the leader can become a zombie with an empty cmdline while a framebuffer worker remains in uninterruptible I/O, retaining shared descriptors. Both stop checks then report success, permitting HID teardown and KD startup. This follows from the supplied kernel’s exit/proc code. **Minimal fix:** retain validated process identities before signalling and verify the entire thread group disappears; abort while any worker survives.
+
+2. **Failed service stop still permits a second writer.** [mk20d:318](/Users/dev/worktrees/mk20-review-kdr/deck/firmware/release/sbin/mk20d:318) ignores `kd_svc stop` failure. During a respawn gap, KD can remain absent through the one-second settle, allowing mk20-kbd to launch while procd remains armed. The subsequent guard runs only after the foreground daemon exits. A shell reproduction confirms launch proceeds after stop failure. **Minimal fix:** require successful service shutdown before launching; retry or remain degraded on failure.
+
+3. **Default and supervised instances take different locks.** [mk20_kbd.c:211](/Users/dev/worktrees/mk20-review-kdr/deck/kbd/mk20_kbd.c:211) defaults to `/tmp/mk20-kbd.lock`, whereas [mk20d:335](/Users/dev/worktrees/mk20-review-kdr/deck/firmware/release/sbin/mk20d:335) passes `/tmp/mk20/kbd-daemon.lock`. A plain `mk20-kbd --run` therefore starts alongside the supervised instance, allowing two ttyS1/framebuffer writers. **Minimal fix:** use the same canonical lock path for default and supervised launches.
+
+VERDICT: NO-GO

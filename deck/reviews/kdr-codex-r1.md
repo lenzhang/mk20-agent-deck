@@ -1,0 +1,19 @@
+1. **Teardown fails open when killing a holder fails.** [gadget.sh:121](/Users/dev/worktrees/mk20-review-kdr/deck/firmware/release/share/gadget.sh:121) logs surviving hidg0 holders and returns success; `kbd_stop` likewise returns success with surviving processes. Cleanup then unbinds/removes HID and starts KD. An uninterruptible worker can therefore leave an fd referencing freed `f_hidg`, or keep writing framebuffers beside KD. **Minimal fix:** propagate failure, prevent USB mutation/KD startup, and use the existing reboot escalation.
+
+2. **A late supervisor can undo teardown’s stop markers.** [mk20d:295](/Users/dev/worktrees/mk20-review-kdr/deck/firmware/release/sbin/mk20d:295) deletes both markers before publishing its PID, without taking the transition mutex. A pending boot supervisor can start after teardown’s PID scans, erase the markers, and launch while ECM still exists but cleanup is changing the gadget. **Minimal fix:** serialize supervisor startup and child launch with teardown; only the transition owner clears markers, and teardown must fence and reap pending launches.
+
+3. **Crashing with parked fds can permanently disable HID and leave Right Alt held.** [hid.c:112](/Users/dev/worktrees/mk20-review-kdr/deck/kbd/hid.c:112) parks descriptors inside the crashable daemon. Process death closes them anyway, dropping the rebound cdev’s references—the exact r121 failure parking avoids. Restart then gets ENXIO and cannot send startup all-up; a previously delivered RAlt-down remains held until USB recovery/reboot. **Minimal fix:** correct kernel cdev lifetime, or place HID ownership and parked descriptors in a guardian that survives daemon crashes and releases modifiers on control-channel EOF.
+
+4. **Blocking host replies can deadlock the bridge and prevent modifier release.** [mk20_kbd.c:89](/Users/dev/worktrees/mk20-review-kdr/deck/kbd/mk20_kbd.c:89) enables blocking writes; [kbd.c:35](/Users/dev/worktrees/mk20-review-kdr/deck/kbd/kbd.c:35) writes replies synchronously on the GD32/HID thread. Pipelined valid `getInfo` requests can fill both PTY directions: the bridge blocks writing requests while the daemon blocks writing replies. GD32 releases and HID quiescence stop being serviced; EINTR is retried even after SIGTERM. **Minimal fix:** use nonblocking host output with a bounded queue and timeout, keep HID servicing independent, and honor stop requests during transmission.
+
+5. **Transient KD absence skips stopping procd.** [mk20d:300](/Users/dev/worktrees/mk20-review-kdr/deck/firmware/release/sbin/mk20d:300) calls `qt_app2 stop` only while a KD PID exists. If KD has exited and procd is waiting to respawn it, the supervisor immediately starts mk20-kbd; stock KD subsequently returns beside it. **Minimal fix:** stop the service unconditionally and verify its launcher/respawn is stopped before accepting `kd_count=0`.
+
+6. **The flock does not enforce a single daemon instance.** [mk20d:313](/Users/dev/worktrees/mk20-review-kdr/deck/firmware/release/sbin/mk20d:313) explicitly closes the supervisor lock in its child. If the supervisor dies, its daemon survives while a replacement supervisor acquires the lock and starts another writer. The daemon has no independent lock. **Minimal fix:** acquire a daemon-lifetime writer lock before framebuffer/UART access and ensure supervisor termination reaps its child.
+
+Non-blocking notes:
+- GD32 allow-list and read-only startup passed static review; no additional parser memory-safety blocker found.
+- C and shell syntax checks passed.
+- PTY topology and mocked surviving-holder repros confirmed findings 4 and 1.
+- Full test suites were not run in the read-only sandbox; no device execution.
+
+VERDICT: NO-GO
