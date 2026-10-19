@@ -118,7 +118,7 @@ kbd_hid_quiesce() {
   kh=$(kbd_hid_holders); [ -n "$kh" ] || return 0
   log "mk20-kbd ignored SIGTERM -> SIGKILL $kh"; for kp in $kh; do kill -9 "$kp" 2>/dev/null; done
   ki=0; while [ -n "$(kbd_hid_holders)" ] && [ $ki -lt 10 ]; do sleep 0.1; ki=$((ki+1)); done
-  [ -n "$(kbd_hid_holders)" ] && log "WARN mk20-kbd still holds hidg0 after SIGKILL"
+  [ -n "$(kbd_hid_holders)" ] && { log "FAIL mk20-kbd still holds hidg0 after SIGKILL"; return 1; }
   return 0
 }
 # Full stop (every cleanup/setup path, after router_stop): stock KD is restarted by these paths, so mk20-kbd must not
@@ -133,6 +133,9 @@ kbd_stop() {
     for kp in $kps; do kill "$kp" 2>/dev/null; done; sleep 0.2; ki=$((ki+1)); kps=$(kbd_pids); done
   if [ -n "$kps" ]; then log "mk20-kbd did not exit on SIGTERM -> SIGKILL $kps"; for kp in $kps; do kill -9 "$kp" 2>/dev/null; done
     ki=0; while [ -n "$(kbd_pids)" ] && [ $ki -lt 10 ]; do sleep 0.1; ki=$((ki+1)); done; fi
+  sleep 0.2; kps=$(kbd_pids)   # a launch forked just before the supervisor died execs late (it also sees the stop file)
+  [ -n "$kps" ] && { for kp in $kps; do kill -9 "$kp" 2>/dev/null; done; sleep 0.3; }
+  [ -n "$(kbd_pids)" ] && { log "FAIL mk20-kbd survives SIGKILL ($(kbd_pids))"; return 1; }
   rm -f /tmp/mk20/kbd.mode
   return 0
 }
@@ -179,7 +182,9 @@ cleanup() {
   mkdir -p /tmp/mk20; touch /tmp/mk20/gadget.busy
   log "FAILSAFE: undo composite"
   router_stop   # before ANY UDC/configfs change (hidg0 fd vs f_hid free)
-  kbd_stop      # mk20-kbd off too: these paths hand the panels back to stock KD
+  # mk20-kbd off too (these paths hand the panels back to stock KD); fail closed: a surviving mk20-kbd means no
+  # UDC/configfs change (hidg0 fd) and no KD start (two writers on ttyS1/fb)
+  kbd_stop || { log "FAILSAFE ABORT: mk20-kbd not stopped -> UDC/configfs untouched, KD not started"; rm -f /tmp/mk20/gadget.busy; return 1; }
   touch /tmp/mk20-flapmon-stop
   killall adbd 2>/dev/null
   echo "" > $G/UDC 2>/dev/null
@@ -368,7 +373,7 @@ kd_stop; killall adbd 2>/dev/null; sleep 1
 pgrep -f /data/KeyboardDevice >/dev/null && die "KD still running/respawned after stop"
 # ---- unbind + clean stale links ----
 router_stop   # 1.2.0: no open /dev/hidg0 across unbind/unlink (re-setup over a live composite)
-kbd_stop      # KD replacement off too (stock KD restarted below; mk20d kbd retakes it after boot)
+kbd_stop || die "mk20-kbd not stopped (no open /dev/hidg0 across unbind/unlink, no KD beside it)"   # stock KD restarted below; mk20d kbd retakes it after boot
 i=0; while [ -n "$(udc_now)" ] && [ $i -lt 10 ]; do echo "" > $G/UDC 2>/dev/null; sleep 0.3; i=$((i+1)); done
 [ -z "$(udc_now)" ] || die "cannot unbind"
 for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done

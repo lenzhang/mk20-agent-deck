@@ -41,7 +41,7 @@ def start(tmp, extra, env=None, hid=None):
     hm, hpath, hs = mkpty()
     st = os.path.join(tmp, "kbd.status")
     p = subprocess.Popen([BIN, "--run", "--gd32", gpath, "--host", hpath, "--fb", fb, "--bl", "", "--status", st,
-                          "--knob-timeout-ms", "200"] + (["--hid", hid, "--hid-stop-file", hid + ".stop"] if hid else ["--no-hid"]) + extra,
+                          "--knob-timeout-ms", "200", "--lock", os.path.join(tmp, "kbd.lock")] + (["--hid", hid, "--hid-stop-file", hid + ".stop"] if hid else ["--no-hid"]) + extra,
                          stderr=subprocess.PIPE, env=env)
     return p, gm, hm, fb, st, (gs, hs)
 
@@ -155,6 +155,33 @@ def main():
         hid_reports(); os.unlink(hidp + ".stop"); time.sleep(1.5)
         check(fd_mode(p.pid, hidp) == 1, "reopened after teardown")
         hid_reports(); os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0])); hid_reports()
+        # host stops reading (bridge blocked): replies time out (bounded), GD32/HID keep being serviced
+        par.feed(read_for(hm, 0.2))
+        flood = P.encode_frame(P.CMD_JSON, json.dumps({"method": "getInfo"}).encode(), 77) * 300
+        sent = 0; t0 = time.time()
+        while sent < len(flood) and time.time() - t0 < 3:
+            _, w, _ = select.select([], [hm], [], 0.2)
+            if w:
+                try: sent += os.write(hm, flood[sent:sent + 4096])
+                except BlockingIOError: pass
+        t1 = time.time()
+        os.write(gm, gd32_frame([0x16, 0, 3, 0, 0, 0]))   # PTT release while the host is not reading
+        rel = []
+        while time.time() - t1 < 1.5 and not rel: rel = [r for r in hid_reports() if r == b"\x01" + bytes(8)]
+        check(rel and time.time() - t1 < 1.5, f"HID serviced while host not reading ({time.time() - t1:.2f}s)")
+        read_for(hm, 1.0)   # drain; replies resume
+        os.write(hm, P.encode_frame(P.CMD_JSON, json.dumps({"method": "getInfo"}).encode(), 78))
+        got = []; t2 = time.time()
+        while time.time() - t2 < 3 and not got:
+            got = [f for f in par.feed(read_for(hm, 0.3)) if f.cmd == P.CMD_JSON and f.frame_id == 78]
+        check(got, "host replies resume after the stall")
+        time.sleep(1.1); s = json.load(open(st))
+        check(s["host_tx_timeouts"] >= 1, f"host_tx_timeouts counted {s.get('host_tx_timeouts')}")
+        # single writer: a second instance on the same lock exits 3 without touching ttyS1
+        p2 = subprocess.run([BIN, "--run", "--no-host", "--no-hid", "--gd32", "/nonexistent", "--status", "",
+                             "--lock", os.path.join(tmp, "kbd.lock")], capture_output=True, timeout=10)
+        check(p2.returncode == 3, f"second instance refused rc={p2.returncode} {p2.stderr[-200:]}")
+        os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0])); hid_reports()
         p.send_signal(signal.SIGTERM); p.wait(3)
         check(p.returncode == 0, "clean exit")
         r4 = hid_reports()

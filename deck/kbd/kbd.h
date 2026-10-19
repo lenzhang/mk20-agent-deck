@@ -13,6 +13,7 @@
 
 typedef struct {
     int host_fd;          /* -1 = no host link (local mode) */
+    int host_tx_stuck;    /* last reply timed out: next ones fail fast until a write succeeds */
     int local_ui;         /* 1 = draw key feedback locally (no-host mode) */
     screen_t scr;
     host_parser hp;
@@ -27,7 +28,7 @@ typedef struct {
     struct {
         uint32_t jpg_ok, jpg_bad, jpg_size, tiles, json_in, json_unsupported, json_bad,
                  key_events, knob_events, echo_frames, other_frames, keycode_nonzero,
-                 host_tx, host_tx_errors, flush_errors, panel_writes;
+                 host_tx, host_tx_errors, host_tx_timeouts, flush_errors, panel_writes;
     } st;
 } kbd_t;
 
@@ -51,5 +52,6 @@ void kbd_draw_key(kbd_t *k, int row, int col, int pressed);
 /* JSON helpers (tiny, tolerant). */
 int kbd_json_str(const char *s, size_t n, const char *key, char *out, size_t cap);
 int kbd_json_int(const char *s, size_t n, const char *key, long *v);
+#define KBD_HOST_TX_MS 200   /* max wait for one reply when the host side is not reading */
 int kbd_write_status(kbd_t *k, const char *path);
 #endif

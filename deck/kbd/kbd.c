@@ -1,6 +1,8 @@
 #include "kbd.h"
 #include "jpeg.h"
 #include <errno.h>
+#include <poll.h>
+#include <time.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,13 +33,27 @@ int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
     if (!out) return -1;
     int len = host_encode(id, cmd, pl, n, out, cap), rc = 0;
     if (len < 0) rc = -1;
+    /* non-blocking fd, bounded wait (KBD_HOST_TX_MS): a host/bridge that stops reading must never stall the GD32 /
+     * HID / teardown loop (the bridge may itself be blocked writing requests to us). A frame cut short is counted
+     * as an error; the host parser resyncs on the next A1A55A5E magic. */
+    long deadline = 0;
     for (int off = 0; rc == 0 && off < len;) {
         ssize_t w = write(k->host_fd, out + off, (size_t)(len - off));
-        if (w < 0) { if (errno == EINTR) continue; rc = -1; break; }
-        off += (int)w;
+        if (w > 0) { off += (int)w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && errno == EAGAIN) {
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            long now = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+            if (!deadline) deadline = now + (k->host_tx_stuck ? 0 : KBD_HOST_TX_MS);   /* stuck: fail fast */
+            if (now >= deadline) { rc = -1; k->st.host_tx_timeouts++; k->host_tx_stuck = 1; break; }
+            struct pollfd pf = {k->host_fd, POLLOUT, 0};
+            poll(&pf, 1, (int)(deadline - now));
+            continue;
+        }
+        rc = -1;
     }
     if (out != stackbuf) free(out);
-    if (rc) k->st.host_tx_errors++; else k->st.host_tx++;
+    if (rc) k->st.host_tx_errors++; else { k->st.host_tx++; k->host_tx_stuck = 0; }
     return rc;
 }
 
@@ -274,11 +290,11 @@ int kbd_write_status(kbd_t *k, const char *path)
     fprintf(f, "{\"version\":\"%s\",\"gd32_rw\":%d,\"knob_init\":\"%s\",\"knob_ok\":%d,\"knob_timeouts\":%d,"
                "\"knob_tx_errors\":%d,\"panels_written\":%d,\"panels_dirty\":%d,\"write_errors\":%u,\"key_events\":%u,\"knob_events\":%u,"
                "\"echo_frames\":%u,\"other_frames\":%u,\"jpg_ok\":%u,\"jpg_bad\":%u,\"jpg_size\":%u,\"json_in\":%u,"
-               "\"host\":%d,\"host_tx_errors\":%u,\"backlight\":%d,\"hid_open\":%d,\"hid_reopens\":%u,\"hid_replaced\":%u}\n",
+               "\"host\":%d,\"host_tx_errors\":%u,\"host_tx_timeouts\":%u,\"backlight\":%d,\"hid_open\":%d,\"hid_reopens\":%u,\"hid_replaced\":%u}\n",
             k->version, k->gd32_rw, gd32_knob_state_name(ks->state), ks->ok_count, ks->timeouts, ks->tx_errors,
             panels_written, dirty, werr, k->st.key_events, k->st.knob_events, k->st.echo_frames,
             k->st.other_frames, k->st.jpg_ok, k->st.jpg_bad, k->st.jpg_size, k->st.json_in, k->host_fd >= 0,
-            k->st.host_tx_errors, k->backlight, k->hid ? k->hid->fd >= 0 : -1, k->hid ? k->hid->reopens : 0u,
+            k->st.host_tx_errors, k->st.host_tx_timeouts, k->backlight, k->hid ? k->hid->fd >= 0 : -1, k->hid ? k->hid->reopens : 0u,
             k->hid ? k->hid->replaced : 0u);
     if (fclose(f)) { unlink(tmp); return -1; }
     return rename(tmp, path);

@@ -212,9 +212,14 @@ boot)
     [ $SADB = 1 ] && stock_adb
   else log ERROR boot "$why -> no USB changes (stock ACM+KD only)"; fi
   if [ $KBDM = 1 ] && [ "${grc:-1}" = 0 ]; then
-    touch "$TM/kbd.mode"   # selftest now expects mk20-kbd (not KD); cleared by gadget.sh kbd_stop or "KD did not stop"
-    ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V MK20_NOHID=$NOHID exec sh "$REL/sbin/mk20d" kbd </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) &
-    log INFO kbd "supervisor launched (nohid=$NOHID); router off"
+    # boot is the transition owner here: under the gadget transition mutex (no failsafe/rollback in progress, composite
+    # still up) clear teardown's stop markers (setup_main's kbd_stop left them) and launch; the supervisor itself never
+    # clears them, so a late supervisor cannot undo a later teardown
+    if ( exec 7>"$TM/transition.lock" && flock -n 7 || exit 1; [ ! -f "$TM/gadget.busy" ] && composite_up || exit 1
+         rm -f "$R/tmp/mk20-kbd-stop" "$R/tmp/mk20-router-stop"; touch "$TM/kbd.mode"
+         ( trap '' HUP INT; MK20_REL=$REL MK20_VERSION=$V MK20_NOHID=$NOHID exec sh "$REL/sbin/mk20d" kbd </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- ) & ); then
+      log INFO kbd "supervisor launched (nohid=$NOHID); router off"
+    else log WARN kbd "transition busy or composite gone -> mk20-kbd not started, stock KD stays"; fi
   elif [ $KBDM = 1 ]; then log WARN kbd "composite rc=${grc:-} -> stock KD stays"; fi
   # 1.2.0 on-board router: only on a composite that set up cleanly with HID; never part of the confirm decision
   # (mk20-kbd mode: the router's job is done inside mk20-kbd)
@@ -297,25 +302,37 @@ router)
 kbd)
   exec 5>"$TM/kbd.lock"; flock -n 5 || exit 0
   KB=$REL/bin/mk20-kbd; HID=$R/dev/hidg0; KSTOP=$R/tmp/mk20-kbd-stop; HSTOP=$R/tmp/mk20-router-stop; KL=$TM/kbd.log
-  rm -f "$KSTOP" "$HSTOP" "$TM/kbd-degraded"; echo $$ > "$TM/kbd-loop.pid"; why=""; total=0; d=1   # gadget.sh kbd_stop kills this loop first
-  mkdir -p "$R/run/mk20"
+  echo $$ > "$TM/kbd-loop.pid"; why=""; total=0; d=1   # pid published BEFORE the first stop-marker check (gadget.sh
+  # kbd_stop touches the marker, then reads the pid: either it sees us or we see the marker). Markers are cleared only by
+  # boot (transition owner), never here.
+  rm -f "$TM/kbd-degraded"; mkdir -p "$R/run/mk20"
   log INFO kbd "start pid=$$"
-  # stop stock KD (procd would respawn a plainly killed KD), retried; never run mk20-kbd beside a live KD (two writers
-  # on ttyS1/fb). KD that will not stop: mk20-kbd stays off, "degraded" (KD keeps the panels; nothing is restarted).
-  a=0; while [ "$(kd_count)" != 0 ] && [ $a -lt "${MK20_KBD_KD_TRIES:-3}" ]; do
-    a=$((a+1)); kd_svc stop; i=0; while [ "$(kd_count)" != 0 ] && [ $i -lt "${MK20_KBD_KD_TICKS:-25}" ]; do sleep 0.2; i=$((i+1)); done; done
-  if [ "$(kd_count)" != 0 ]; then
+  # stop stock KD unconditionally (KD may be between procd respawns: kd_count=0 proves nothing), then retried while it is
+  # still there; never run mk20-kbd beside a live KD (two writers on ttyS1/fb). KD that will not stop: mk20-kbd stays
+  # off, "degraded" (KD keeps the panels; nothing is restarted).
+  a=0
+  if [ -f "$KSTOP" ]; then why="stop file"
+  elif ! composite_up || [ -f "$TM/gadget.busy" ]; then why="composite down/busy"
+  else
+    while [ $a = 0 ] || { [ "$(kd_count)" != 0 ] && [ $a -lt "${MK20_KBD_KD_TRIES:-3}" ]; }; do
+      a=$((a+1)); kd_svc stop; i=0; while [ "$(kd_count)" != 0 ] && [ $i -lt "${MK20_KBD_KD_TICKS:-25}" ]; do sleep 0.2; i=$((i+1)); done; done
+    sleep "${MK20_KBD_KD_SETTLE:-1}"   # a respawn already in flight would show up now
+  fi
+  if [ -n "$why" ]; then :
+  elif [ "$(kd_count)" != 0 ]; then
     echo "stock KD did not stop ($a tries)" > "$TM/kbd-degraded"; rm -f "$TM/kbd.mode"; why="kd stop failed"
     log WARN kbd "degraded: stock KD did not stop after $a tries; mk20-kbd not started"
   else
     while :; do
       [ -f "$KSTOP" ] && { why="stop file"; break; }
       composite_up || { why="composite down"; break; }   # gadget.sh cleanup owns KD on that path
+      [ "$(kd_count)" != 0 ] && { kd_svc stop; sleep 1 5>&-; [ "$(kd_count)" != 0 ] && { why="kd came back"; echo "stock KD came back" > "$TM/kbd-degraded"; rm -f "$TM/kbd.mode"; break; }; }
       HA="--hid $HID --hid-stop-file $HSTOP"; [ "${MK20_NOHID:-0}" = 1 ] && HA="--no-hid"
       t0=$(cut -d. -f1 /proc/uptime)
-      [ -f "$KSTOP" ] && { why="stop file"; break; }   # re-check right before launch (transition in progress)
+      # --exit-file: the daemon itself refuses to start / exits when teardown's marker appears (closes the window
+      # between this check and the exec); --lock: daemon-lifetime single-writer lock (a surviving orphan wins, rc 3)
       # shellcheck disable=SC2086
-      "$KB" --run --host "$R/dev/ttyGS0" $HA --status "$KST" </dev/null >>"$KL" 2>&1 5>&-; rc=$?
+      "$KB" --run --host "$R/dev/ttyGS0" $HA --status "$KST" --lock "$TM/kbd-daemon.lock" --exit-file "$KSTOP" </dev/null >>"$KL" 2>&1 5>&-; rc=$?
       t1=$(cut -d. -f1 /proc/uptime)
       [ -f "$KSTOP" ] && { why="stop file"; break; }   # stopped by gadget.sh: not a crash
       total=$((total + 1)); [ $((t1 - t0)) -ge 60 ] && d=1   # a long healthy run resets the backoff

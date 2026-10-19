@@ -49,7 +49,8 @@ def kb(dev, rel, g1):
     (dev.mock / "kbd.status.json").write_text(json.dumps(GOOD))
     (rel / "share/gadget.sh").write_text('[ "$1" = --boot ] && env | grep "^MK20_" | sort > "$MK20_ROOT/tmp/mk20/gadget.boot.env"\n'
                                          'echo "$*" >> "$MK20_ROOT/tmp/mk20/gadget.args"\n')
-    dev.env.update({"MK20_KDSVC": str(svc), "MK20_KBD_BACKOFF_MAX": "0", "MK20_KBD_KD_TICKS": "5"})
+    dev.env.update({"MK20_KDSVC": str(svc), "MK20_KBD_BACKOFF_MAX": "0", "MK20_KBD_KD_TICKS": "5",
+                    "MK20_KBD_KD_SETTLE": "0"})
     return dev
 
 
@@ -94,7 +95,8 @@ def test_supervisor_stops_kd_runs_kbd_and_ends_on_stop_file(kb, rel):
         args = (dev.mock / "kbd.args").read_text().split()
         R = str(dev.root)
         assert args[:3] == ["--run", "--host", f"{R}/dev/ttyGS0"]
-        assert " ".join(args[3:]) == f"--hid {R}/dev/hidg0 --hid-stop-file {R}/tmp/mk20-router-stop --status {R}/run/mk20/kbd.status"
+        assert " ".join(args[3:]) == (f"--hid {R}/dev/hidg0 --hid-stop-file {R}/tmp/mk20-router-stop --status {R}/run/mk20/kbd.status"
+                                      f" --lock {R}/tmp/mk20/kbd-daemon.lock --exit-file {R}/tmp/mk20-kbd-stop")
         assert wait(lambda: dev.p("run/mk20/kbd.status").exists())
         assert dev.read("tmp/mk20/kbd-loop.pid") == str(p.pid)
         assert dev.run(rel / "sbin/mk20d", "kbd", timeout=10).returncode == 0   # single instance (flock)
@@ -190,7 +192,41 @@ def test_composite_down_ends_without_touching_kd(kb, rel):
     dev = kb
     os.rmdir(dev.p("sys/kernel/config/usb_gadget/g1/configs/c.1/ecm.usb0"))
     r = dev.run(rel / "sbin/mk20d", "kbd", timeout=20)
-    assert r.returncode == 0 and svclog(dev) == ["stop"] and "stop (composite down)" in mlog(dev)
+    assert r.returncode == 0 and svclog(dev) == [] and "stop (composite down/busy)" in mlog(dev)   # KD untouched
+
+
+@pytest.mark.parametrize("why", ["stop-marker", "busy"])
+def test_late_supervisor_after_teardown_does_nothing(kb, rel, why):
+    """codex kdr-r1 #2: a supervisor starting after teardown never clears the markers and never touches KD."""
+    dev = kb
+    dev.p("tmp/mk20-kbd-stop" if why == "stop-marker" else "tmp/mk20/gadget.busy").write_text("")
+    r = dev.run(rel / "sbin/mk20d", "kbd", timeout=20)
+    assert r.returncode == 0 and svclog(dev) == [] and not (dev.mock / "kbd.args").exists()
+    assert why != "stop-marker" or dev.p("tmp/mk20-kbd-stop").exists()
+
+
+def test_kd_absent_still_stops_procd_service(kb, rel):
+    """codex kdr-r1 #5: KD between respawns (no pid) -> qt_app2 stop is still issued before mk20-kbd starts."""
+    dev = kb
+    os.unlink(dev.mock / "pgrep.kd")
+    ok, alive = run_sup(dev, rel, lambda: (dev.mock / "kbd.args").exists())
+    assert ok and svclog(dev)[0] == "stop"
+
+
+def test_kd_respawn_after_start_stops_kbd_launches(kb, rel):
+    dev = kb
+    (dev.mock / "kbd.crash").write_text("")
+    def respawn():
+        if (dev.mock / "kbd.args").exists():
+            (dev.mock / "kd.stubborn").write_text(""); (dev.mock / "pgrep.kd").write_text("123\n"); return True
+    p = subprocess.Popen([BB, "sh", str(rel / "sbin/mk20d"), "kbd"], env=dict(dev.env, MK20_KBD_BACKOFF_MAX="1"))
+    try:
+        assert wait(respawn); p.wait(15)
+    finally:
+        if p.poll() is None:
+            p.kill(); p.wait(5)
+    assert "stop (kd came back)" in mlog(dev) and "came back" in dev.read("tmp/mk20/kbd-degraded")
+    assert nruns(dev) <= 2 and "start" not in svclog(dev)
 
 
 # ---------------- selftest / health ----------------
@@ -516,8 +552,29 @@ def test_selftest_warns_hid_lost_after_restart(kmode, rel):
 
 
 def test_mk20_kbd_has_no_hid_exit_path():
-    """HID recovery is in-process: the run loop leaves only on a signal, poll() or GD32 read failure."""
+    """HID recovery is in-process: the run loop leaves only on a signal, the teardown exit file, poll() or GD32 read failure."""
     src = (DECK / "kbd/mk20_kbd.c").read_text()
     loop = src[src.index("while (!g_stop)"):src.index("if (k.hid) { hid_release_all")]
-    assert loop.count("break;") == 2 and "perror(\"poll\")" in loop and "perror(\"gd32 read\")" in loop
+    assert loop.count("break;") == 3 and "perror(\"poll\")" in loop and "perror(\"gd32 read\")" in loop and "present: exiting" in loop
     assert "exit(" not in loop and "return" not in loop.replace("return;", "")
+
+
+def test_gadget_fails_closed_when_kbd_survives(gh):
+    """codex kdr-r1 #1: a surviving holder/mk20-kbd makes kbd_stop / kbd_hid_quiesce return 1, and cleanup() /
+    setup_main refuse the UDC/configfs change and the KD start."""
+    t, start, run, hid = gh
+    cl = G[G.index("cleanup() {"):]
+    assert 'kbd_stop || { log "FAILSAFE ABORT' in cl and cl.index("kbd_stop ||") < cl.index("$G/UDC") < cl.index("kd_start")
+    sm = G[G.index("setup_main() {"):]
+    assert 'kbd_stop || die "mk20-kbd not stopped' in sm
+    # simulate a survivor: pgrep keeps reporting a validated mk20-kbd pid that cannot be killed (our own shell's
+    # child running `sleep` under the matching cmdline is killable, so fake kill instead)
+    p = start("stubborn")
+    s = t / "ks.sh"
+    s.write_text(f'log() {{ echo "$*" >> {t}/log; }}\nkill() {{ :; }}\n'
+                 + FN.replace("/tmp/mk20-kbd-stop", str(t / "kstop")).replace("/tmp/mk20/", str(t / "mk20") + "/")
+                 + '\nkbd_stop; echo "rc=$?"\nkbd_hid_quiesce; echo "rq=$?"\n')
+    r = subprocess.run([BB, "sh", str(s)], capture_output=True, text=True, timeout=30,
+                       env=dict(os.environ, MK20_HIDG=str(hid), MK20_KBD_TERM_TICKS="2", MK20_KBD_HID_TICKS="2"))
+    assert "rc=1" in r.stdout and "rq=1" in r.stdout and "FAIL" in (t / "log").read_text()
+    assert p.poll() is None

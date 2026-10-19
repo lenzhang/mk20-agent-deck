@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
+#include <sys/file.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -86,14 +87,23 @@ static int open_host(const char *path)
     if (fd < 0) return -1;
     struct termios t;
     if (tcgetattr(fd, &t) == 0) { cfmakeraw(&t); tcsetattr(fd, TCSANOW, &t); }
-    int fl = fcntl(fd, F_GETFL); fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);   /* blocking writes */
-    return fd;
+    return fd;   /* stays O_NONBLOCK: replies are written with a bounded wait (kbd_host_send), never block the loop */
 }
 
-struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop; int no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
+struct run_opts { const char *gd32, *host, *fb, *bl, *status, *hid, *hid_stop, *lock, *exit_file; int no_host, no_write, timeout_ms, no_hid, ptt_col, ptt_row; };
 
 static int run(const struct run_opts *o)
 {
+    /* single writer: a daemon-lifetime lock taken BEFORE touching ttyS1 / framebuffers (a surviving instance whose
+     * supervisor died keeps it; a second one exits 3) */
+    if (o->lock && o->lock[0]) {
+        int lfd = open(o->lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (lfd < 0 || flock(lfd, LOCK_EX | LOCK_NB)) { fprintf(stderr, "mk20-kbd: %s busy: another instance runs\n", o->lock); return 3; }
+        /* lfd intentionally kept open for the process lifetime */
+    }
+    if (o->exit_file && o->exit_file[0] && access(o->exit_file, F_OK) == 0) {   /* teardown fence (gadget.sh kbd_stop) */
+        fprintf(stderr, "mk20-kbd: %s present: not starting\n", o->exit_file); return 0;
+    }
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_handler = on_sig;
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL);
@@ -166,6 +176,9 @@ static int run(const struct run_opts *o)
             }
         }
         if (o->status && mono_ms() >= next_status) { kbd_write_status(&k, o->status); next_status = mono_ms() + 1000; }
+        if (o->exit_file && o->exit_file[0] && access(o->exit_file, F_OK) == 0) {
+            fprintf(stderr, "mk20-kbd: %s present: exiting\n", o->exit_file); break;
+        }
     }
     if (k.hid) { hid_release_all(k.hid, 1500); hid_close(k.hid, 0); }   /* never leave RAlt stuck (r120) */
     screen_stop_writers(&k.scr, 1, 500);   /* bounded drain of the last frame */
@@ -181,6 +194,7 @@ static void usage(void)
     fprintf(stderr, "usage: mk20-kbd --run [--no-host] [--no-gd32-write] [--gd32 TTY] [--host TTY] [--fb DIR]\n"
                     "                      [--bl DIR|''] [--status FILE] [--knob-timeout-ms N]\n"
                     "                      [--no-hid | --hid PATH] [--hid-stop-file PATH] [--ptt COL,ROW (1-based)]\n"
+                    "                      [--lock FILE (default /tmp/mk20-kbd.lock; '' = none)] [--exit-file FILE]\n"
                     "       mk20-kbd --monitor [tty] | --pattern [fbdir] | --getinfo\n"
                     "  kill file " GD32_NO_WRITE_FILE " = same as --no-gd32-write\n");
 }
@@ -194,7 +208,7 @@ int main(int argc, char **argv)
     }
     if (argc >= 2 && !strcmp(argv[1], "--run")) {
         struct run_opts o = {"/dev/ttyS1", "/dev/ttyGS0", "/dev", "/sys/kernel/debug/dispdbg", "/run/mk20/kbd.status",
-                             HID_DEFAULT_PATH, HID_DEFAULT_STOP_FILE, 0, 0, 1000, 0, 0, 3};
+                             HID_DEFAULT_PATH, HID_DEFAULT_STOP_FILE, "/tmp/mk20-kbd.lock", NULL, 0, 0, 1000, 0, 0, 3};
         for (int i = 2; i < argc; i++) {
             const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
             if (!strcmp(a, "--no-host")) o.no_host = 1;
@@ -208,6 +222,8 @@ int main(int argc, char **argv)
             else if (!strcmp(a, "--no-hid")) o.no_hid = 1;
             else if (v && !strcmp(a, "--hid")) { o.hid = v; i++; }
             else if (v && !strcmp(a, "--hid-stop-file")) { o.hid_stop = v; i++; }
+            else if (v && !strcmp(a, "--lock")) { o.lock = v; i++; }
+            else if (v && !strcmp(a, "--exit-file")) { o.exit_file = v; i++; }
             else if (v && !strcmp(a, "--ptt")) {
                 int c, r;
                 if (sscanf(v, "%d,%d", &c, &r) != 2 || c < 1 || c > 5 || r < 1 || r > 4) { usage(); return 2; }

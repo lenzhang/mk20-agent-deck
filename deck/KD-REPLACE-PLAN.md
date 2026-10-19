@@ -195,6 +195,17 @@
   - Status file: `hid_open`, `hid_reopens`, `hid_replaced`. Covered by unit tests and e2e.
 - **Release binary:** `tools/mk20-build-bins.sh` builds `bin/mk20-kbd` (static armhf, stripped, 529,696 B) next to the bridge and router. `test_release_binaries_match_source` covers it. FEATURE_KBD stays off by default.
 
+**codex review kdr-r1 (2026-10-19, NO-GO, 6 findings; reviews/kdr-codex-r1.md on the Mac worktree), fixes in the next commit:**
+- **#1 teardown fail-open:** `kbd_stop` and `kbd_hid_quiesce` now return 1 when a holder or mk20-kbd survives SIGKILL. `cleanup()` then aborts with UDC/configfs untouched and KD not started; `setup_main` dies.
+- **#2 late supervisor undoing teardown:** markers are cleared only by `mk20d boot`, under the gadget transition mutex and only with no `gadget.busy` and the composite up. The supervisor publishes its pid before the first marker check and does nothing (KD untouched) when the marker, busy flag or composite-down is seen. mk20-kbd also gets `--exit-file /tmp/mk20-kbd-stop`: it refuses to start, or exits, once the marker exists. kbd_stop rescans once for a late exec.
+- **#4 host write deadlock:** the host fd stays O_NONBLOCK. A reply waits at most 200 ms, then later replies fail fast until a write succeeds (`host_tx_timeouts`). e2e floods getInfo without reading and checks that the PTT release still reaches HID within 1.5 s and that replies resume.
+- **#5 KD between respawns:** `qt_app2 stop` is issued unconditionally, followed by a 1 s settle. A KD that comes back mid-run stops further launches (degraded).
+- **#6 single instance:** mk20-kbd takes a daemon-lifetime flock (`--lock`, supervisor passes `/tmp/mk20/kbd-daemon.lock`) before touching ttyS1/fb; a second instance exits 3.
+- **#3 (open, needs a decision):** a CRASH of mk20-kbd closes its parked hidg0 fds. After the ~74 s re-bind, HID then stays ENXIO until reboot, and a RAlt that was held at crash time stays held on the host until USB reset or reboot. The router 1.2.1 has the same property. The fix codex suggests is a separate HID guardian process (owns hidg0 + parked fds, releases modifiers on control-socket EOF), or fixing the kernel cdev lifetime. Mitigations today:
+  - HID errors never end the process;
+  - selftest WARNs about lost HID after a restart;
+  - RECOVERY.md says to reboot.
+
 **Plan to make FEATURE_KBD default-on:**
 1. On-device trial with `FEATURE_KBD=1` in mk20.conf on a release that carries the binary. Pass criteria:
    - confirm passes;
