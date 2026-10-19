@@ -350,7 +350,7 @@ def test_real_ctl_estop_ipc(binary, kbd_build, tmp_path, state):
 
 
 @contextlib.contextmanager
-def real_daemon(kbd_build, tmp_path):
+def real_daemon(kbd_build, tmp_path, *, allowed=True):
     # Darwin's pytest base path can exceed sockaddr_un.sun_path and hid.path.
     # Keep the real daemon's fixture paths short on every host.
     tmp_path = Path(tempfile.mkdtemp(prefix="a5-kbd-", dir="/tmp"))
@@ -364,7 +364,8 @@ def real_daemon(kbd_build, tmp_path):
     command = [str(kbd_build[0]), "--run", "--gd32", os.ttyname(gs), "--host", os.ttyname(hs),
         "--fb", str(fb), "--bl", "", "--status", str(tmp_path / "status"), "--knob-timeout-ms", "1",
         "--lock", str(tmp_path / "kbd.lock"), "--no-gd32-write", "--hid", str(fifo),
-        "--hid-stop-file", str(tmp_path / "stop"), "--ctl", str(path), "--ctl-allow"]
+        "--hid-stop-file", str(tmp_path / "stop"), "--ctl", str(path)]
+    if allowed: command.append("--ctl-allow")
     p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         end = time.monotonic() + 3

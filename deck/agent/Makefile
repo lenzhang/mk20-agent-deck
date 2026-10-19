@@ -15,6 +15,8 @@ CPPFLAGS += -Ivendor/zlib -DZ_SOLO
 LLM_HDR = src/llm.h src/oai.h
 LLM_OBJ = $(BUILD)/llm.o $(BUILD)/oai.o
 LLM_NS = $(BUILD)/ns-llm.o $(BUILD)/ns-oai.o
+A6_SRC = src/mcp.c src/httpd.c src/mcp_cli.c
+A6_HDR = src/mcp.h src/httpd.h
 A5_SRC = src/policy.c src/loop.c src/calib.c src/kbdc.c src/loop_test.c
 A5_HDR = src/policy.h src/loop.h src/calib.h src/kbdc.h src/loop_test.h src/runtime.h
 NET_SRC = src/net.c src/netcfg.c src/clock.c src/json_util.c
@@ -61,19 +63,20 @@ $(BUILD)/stb_jpeg.o: src/stb_jpeg.c vendor/stb/stb_image_write.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -fwrapv -w -c -o $@ $<
 $(BUILD)/ns-stb_jpeg.o: src/stb_jpeg.c vendor/stb/stb_image_write.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -fwrapv -w -c -o $@ $<
-$(BUILD)/mk20-agent: $(A5_SRC) $(A5_HDR) src/runtime.c src/agent_cli.c src/img.c src/img.h src/oai.h $(RFB_SRC) $(RFB_HDR) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_OBJ) $(BUILD)/cJSON.o $(LLM_OBJ) $(LLM_HDR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ $(A5_SRC) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(LLM_OBJ) $(TLS_OBJ) $(BUILD)/cJSON.o -lm
-$(BUILD)/mk20-agent-nosan: $(A5_SRC) $(A5_HDR) src/runtime.c src/agent_cli.c src/img.c src/img.h src/oai.h $(RFB_SRC) $(RFB_HDR) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_NS) $(BUILD)/ns-cJSON.o $(LLM_NS) $(LLM_HDR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(A5_SRC) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(LLM_NS) $(TLS_NS) $(BUILD)/ns-cJSON.o -lm
+$(BUILD)/mk20-agent: $(A6_SRC) $(A6_HDR) $(A5_SRC) $(A5_HDR) src/runtime.c src/agent_cli.c src/img.c src/img.h src/oai.h $(RFB_SRC) $(RFB_HDR) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_OBJ) $(BUILD)/cJSON.o $(LLM_OBJ) $(LLM_HDR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ $(A6_SRC) $(A5_SRC) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(LLM_OBJ) $(TLS_OBJ) $(BUILD)/cJSON.o -lm
+$(BUILD)/mk20-agent-nosan: $(A6_SRC) $(A6_HDR) $(A5_SRC) $(A5_HDR) src/runtime.c src/agent_cli.c src/img.c src/img.h src/oai.h $(RFB_SRC) $(RFB_HDR) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_NS) $(BUILD)/ns-cJSON.o $(LLM_NS) $(LLM_HDR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(A6_SRC) $(A5_SRC) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_NS) $(BUILD)/ns-stb_jpeg.o $(NET_SRC) $(LLM_NS) $(TLS_NS) $(BUILD)/ns-cJSON.o -lm
 $(BUILD)/test_rfb: tests/test_rfb.c $(RFB_SRC) $(RFB_HDR) src/img.c src/img.h $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_rfb.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o -lm
 $(BUILD)/test_net: tests/test_net.c $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_net.c $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
-$(BUILD)/test_cli: $(A5_SRC) $(A5_HDR) tests/test_cli.c src/agent_cli.c $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o $(LLM_OBJ) $(LLM_HDR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ $(A5_SRC) tests/test_cli.c $(NET_SRC) $(LLM_OBJ) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
+$(BUILD)/test_cli: $(A6_SRC) $(A6_HDR) src/runtime.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o src/img.c $(A5_SRC) $(A5_HDR) tests/test_cli.c src/agent_cli.c $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o $(LLM_OBJ) $(LLM_HDR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ $(A6_SRC) src/runtime.c $(filter-out src/mem.c,$(RFB_SRC)) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o src/img.c $(A5_SRC) tests/test_cli.c $(NET_SRC) $(LLM_OBJ) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
 $(BUILD)/test_llm: tests/test_llm.c $(LLM_OBJ) $(LLM_HDR) $(NET_SRC) $(NET_HDR) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_llm.c $(LLM_OBJ) $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
-test: $(BUILD)/test_a5 $(BUILD)/test_llm $(BUILD)/test_oai $(BUILD)/oai_cli $(BUILD)/mk20-agent $(BUILD)/test_rfb $(BUILD)/test_net $(BUILD)/test_cli
+test: $(BUILD)/test_mcp $(BUILD)/mk20-agent-mcp-test $(BUILD)/test_a5 $(BUILD)/test_llm $(BUILD)/test_oai $(BUILD)/oai_cli $(BUILD)/mk20-agent $(BUILD)/test_rfb $(BUILD)/test_net $(BUILD)/test_cli
+	$(BUILD)/test_mcp
 	$(BUILD)/test_a5
 	$(BUILD)/test_llm
 	$(BUILD)/test_oai
@@ -92,3 +95,12 @@ armhf:
 
 $(BUILD)/test_a5: tests/test_a5.c $(A5_SRC) $(A5_HDR) src/json_util.c $(BUILD)/cJSON.o $(LLM_OBJ) $(NET_SRC) $(NET_HDR) $(TLS_OBJ)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_a5.c $(A5_SRC) $(LLM_OBJ) $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
+
+$(BUILD)/mk20-agent-mcp-test: $(A6_SRC) $(A6_HDR) $(A5_SRC) $(A5_HDR) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(RFB_HDR) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(NET_HDR) $(TLS_OBJ) $(BUILD)/cJSON.o $(LLM_OBJ)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) -DMK20_MCP_TEST $(LDFLAGS) -o $@ $(A6_SRC) $(A5_SRC) src/runtime.c src/agent_cli.c src/img.c $(RFB_SRC) $(ZLIB_OBJ) $(BUILD)/stb_jpeg.o $(NET_SRC) $(LLM_OBJ) $(TLS_OBJ) $(BUILD)/cJSON.o -lm
+
+$(BUILD)/test_mcp: tests/test_mcp.c src/mcp.c src/httpd.c $(A6_HDR) $(A5_SRC) $(A5_HDR) $(LLM_OBJ) $(NET_SRC) $(NET_HDR) $(TLS_OBJ) $(BUILD)/cJSON.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/test_mcp.c src/mcp.c src/httpd.c $(A5_SRC) $(LLM_OBJ) $(NET_SRC) src/mem.c $(TLS_OBJ) $(BUILD)/cJSON.o -lm
+
+$(BUILD)/mcp-bind-probe: tests/mcp_bind_probe.c src/httpd.c src/httpd.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN) $(LDFLAGS) -o $@ tests/mcp_bind_probe.c src/httpd.c

@@ -14,6 +14,7 @@ typedef struct { kbd_event_kind_t kind; unsigned cid; int ok; } kbd_event_t;
 typedef struct {
     const unsigned char *jpeg; size_t jpeg_len; uint64_t hash;
     int width, height, locked, secure_input;
+    int source_width, source_height;
     char title[513], app[129];
 } loop_frame_t;
 typedef struct {
@@ -40,8 +41,11 @@ typedef struct {
     const char *const *secrets; size_t secret_count;
 } loop_ports_t;
 typedef struct {
+    /* Optional server I/O pump: ports still use this same safety guard. */
+    void (*cooperate)(void *); void *cooperate_ctx;
     loop_state_t state; policy_config_t policy; loop_ports_t ports; arbitration_t input;
     int allowed, cancelled, leased, busy, confirmed, ask_user, retry_wait;
+    int direct, direct_epoch;
     unsigned steps, model_calls, retries, cid, same_hash;
     int64_t start, action_start, model_start, renew_at, confirm_until, retry_at, last_now;
     uint64_t previous_hash;
@@ -50,6 +54,9 @@ typedef struct {
 } agent_loop_t;
 void loop_init(agent_loop_t *, const policy_config_t *, const loop_ports_t *);
 int loop_submit(agent_loop_t *); /* submits only when already allowed by kbd */
+/* Uses the same policy/confirmation/execute states without observing or calling
+ * the model. Repeated direct calls share budget until a keyboard allow cycle. */
+int loop_direct(agent_loop_t *, const action_t *, const loop_frame_t *);
 void loop_stop(agent_loop_t *);  /* local e-stop; no enable API exists */
 void loop_tick(agent_loop_t *);
 /* Nonzero aborts ports after any finish; idle/disabled outside a task return 0. */

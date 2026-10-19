@@ -371,6 +371,7 @@
 - 验收：§14.5 第 3、4、5、6、7 条。
 
 ### A6 MCP 服务（box + [M]）
+- **A6 host 状态（2026-10-19，本 worktree）**：Streamable HTTP/MCP、token/session/usb0 fail-closed、13 工具、A5 direct-action 安全链和单槽任务队列已实现；make test（含 236 A6 检查）通过，IPC 回归 331 passed（1 既有 skip / 13 显式 deselect），A6 pytest 30 passed / 4 监听 EPERM；Linux 真实监听/netns、armhf、可信窗口检测及 [D][M][U] 实测待验收，详见 `agent/NOTES-agent-a6.md`、`reviews/agent-a6-codex-summary.md`。
 - `mcp.c`：Streamable HTTP、JSON-RPC、工具注册、bearer token、usb0 绑定。
 - box：用官方 MCP inspector 或自写客户端做协议一致性测试；未认证 401；非 usb0 地址不可达（测试 netns）。
 - **[M]**：在 Mac 上把它注册成 Claude/Codex 的 MCP server，只读调用 `status` 和 `screenshot`。动作类调用要等用户在场。

@@ -1,0 +1,69 @@
+# MK20 agent phase A6 — MCP server (host build only)
+Repo root = cwd. Work only under deck/agent/ (src, tests, Makefile, README, NOTES-agent-a6.md), deck/reviews/agent-a6-*,
+and the A6 status line in deck/AGENT-BUILD-PLAN.md. Read first: deck/AGENT-BUILD-PLAN.md (§0.1 D6, §3.4, §3.6, §3.7, "A6" section,
+§10), deck/agent/NOTES-agent-a5.md, src/loop.h/.c, src/policy.h, src/runtime.h/.c, src/kbdc.h, src/loop_test.c, src/agent_cli.c,
+src/rfb.h, src/json_util.h, tests/test_loop.py (real kbd daemon harness), tests/fakes/, deck/kbd/CTL-PROTOCOL.md (READ ONLY).
+
+HARD RULES: no git commit/push; no network access; no device/adb/serial; do NOT modify deck/kbd/**, deck/mk20deck/** (agentcfg.py,
+settings), vendor/, firmware, kernel, or anything outside this worktree. C11 -Wall -Wextra -Werror, ASan/UBSan like the existing
+Makefile, armhf/32-bit safe (no long==64 assumptions), no new warning suppressions, no new dependencies. Never print/log the MCP
+token, API keys, Authorization headers, vnc.pass or secrets contents. Keep A2–A5 behaviour and all existing tests green.
+Your sandbox denies listening sockets (EPERM): write real-socket tests anyway (they run on Linux box CI); do NOT skip/xfail them —
+instead add socketpair/fd-injected variants that run here, and report EPERM failures separately like NOTES-agent-a5.md does.
+
+## Part 1 — src/mcp.c/.h + src/httpd.c/.h (small single-threaded HTTP/1.1 server)
+- Streamable HTTP per MCP 2025-06-18: `POST /mcp` JSON-RPC 2.0 (single message; reject batches with -32600 since 2025-06-18
+  removed batching). Responses as `application/json` (no SSE needed; GET /mcp → 405 with Allow: POST). Methods: initialize
+  (protocolVersion "2025-06-18", capabilities {tools:{listChanged:false}}, serverInfo mk20-agent), notifications/initialized
+  (→ 202 no body), ping, tools/list, tools/call. Unknown method -32601; bad params -32602; parse error -32700. Notifications/
+  responses from client → 202. Issue `Mcp-Session-Id` (random, 128-bit hex) on initialize; require it afterwards (missing → 400,
+  unknown → 404); DELETE /mcp ends session. Validate `MCP-Protocol-Version` header when present (unsupported → 400).
+- Security: `Authorization: Bearer <token>` required on every request (missing/wrong → 401 with WWW-Authenticate: Bearer, constant-
+  time compare, no detail). Token file default /data/mk20/secrets/mcp.token: if absent, generate 32 random bytes (getrandom or
+  /dev/urandom) hex, write O_CREAT|O_EXCL 0600 tmp → fsync → rename → fsync dir; if present require regular file, 0600, owned by
+  service uid, else refuse to start. Reject requests with an Origin header that is not exactly http://172.30.250.2:8765 (DNS
+  rebinding). Validate Host. Limits: headers ≤8 KiB, body ≤64 KiB (Content-Length required, no chunked → 411/413), ≤4 concurrent
+  connections, per-connection read deadline 5 s, keep-alive allowed but bounded. Never log bodies; log method/tool/status/latency only
+  via agent_redact.
+- Binding: default 172.30.250.2:8765 with SO_BINDTODEVICE "usb0" (Linux). If bind/bindtodevice fails → refuse to start (fail closed,
+  no fallback to wildcard). Never bind INADDR_ANY: reject 0.0.0.0/:: even if passed. A test-only override `--mcp-listen 127.0.0.1:PORT
+  --mcp-no-bindtodevice` is accepted only for loopback addresses. Also accept an inherited listening fd for tests if convenient.
+- CLI: `mk20-agent --mcp [--mcp-token-file P] [--kbd-sock P] [--policy P] ...` runs the server loop; SIGTERM clean exit.
+
+## Part 2 — tools (one registry, JSON Schema inputSchema for each)
+status, screenshot, click, double_click, move, drag, scroll, type_text, key, estop, run_task{goal}, task_status{id}, cancel_task{id}.
+- D6: NO tool can enable/allow the agent; there is no such code path. Permission comes only from kbd status (same as A5).
+- Every action tool goes through EXACTLY the same policy validation, risk/never-do rules, confirmation flow, input lease, per-action
+  deadline and budget accounting as the A5 loop (reuse policy.c/loop/kbdc; add a direct-action entry point in loop.c if needed rather
+  than duplicating rules). MCP-driven sessions do not call the model. Coordinates are screenshot pixels of the most recent MCP
+  screenshot (require a screenshot first + valid calibration; else error).
+- Results: tool errors as `isError:true` content with a short class: disabled (kbd not allowed), stopped (after estop until re-allowed
+  at the keyboard), needs_confirmation→denied/timeout, rejected (policy/never-do), budget, busy (a task is running), unsupported
+  (paste/VNC input), error. `estop` always works (even when disabled) and sends estop to kbd.
+- screenshot: JPEG image content (base64, mimeType image/jpeg) + text with frame/scale info, via the existing RFB capture path
+  (existing authenticated RFB connection supplied by runtime; on host use the fake VNC). Respect the existing occlusion/upload-notice
+  behaviour if implemented; otherwise note it.
+- run_task: single-slot in-process task queue shared design for A7 web (/api/tasks): returns id; when not allowed → disabled (not queued
+  executed); task_status returns state/steps summary (no screenshots, no typed text); cancel_task stops it via the loop stop path.
+
+## Part 3 — tests
+- C unit tests (sanitized): HTTP parser (limits, malformed, pipelining, slowloris deadline), JSON-RPC dispatch, auth (missing/wrong/
+  right, constant-time path), Origin/Host, session id, token file creation/permission refusal, bind refusal for wildcard.
+- pytest protocol conformance with a self-written client: initialize → initialized → tools/list → tools/call; 401 unauthenticated;
+  bad session; GET 405; batch rejected. Non-usb0 reachability: on Linux, if `unshare -rn` (user+net ns) works, create a dummy/veth
+  "usb0" in the netns and prove a listener bound to usb0 address is unreachable from another address; otherwise prove the
+  bind-time refusal paths (visible failure, not skip, when the netns tooling exists but fails).
+- e2e (critical acceptance): real mk20-kbd daemon harness from tests/test_loop.py + fake VNC: MCP click while disabled → disabled;
+  after allow → executes with lease; high-risk key → needs confirmation (deny/timeout → no HID report); estop mid-action → stopped
+  and no further HID reports, MCP stays stopped until allow off→on; action budget exhaustion → budget; run_task while disabled →
+  disabled. Assert no token/Authorization appears in any log output.
+- Add the new tests to `make -C deck/agent test` and pytest.
+
+## Part 4 — docs + first acceptance
+- NOTES-agent-a6.md: design, limits, test results (pass/fail counts, EPERM list), [M] registration snippets for Codex
+  (~/.codex/config.toml mcp_servers entry, streamable HTTP with bearer header from file/env) and Claude (`claude mcp add --transport http
+  ... --header "Authorization: Bearer $(cat token)"`), but DO NOT run them; list [D]/[U] steps (device bind on usb0, token retrieval via adb
+  without printing, read-only status/screenshot from Mac, action calls only with user present).
+- Update the A6 status line in AGENT-BUILD-PLAN.md.
+- Finish with a first acceptance pass: re-read your diff against this prompt and the A6 plan, run make -C deck/agent test, write
+  deck/reviews/agent-a6-codex-summary.md with a checklist (each requirement → file/test → PASS/FAIL/NOT-RUN) and an honest verdict.

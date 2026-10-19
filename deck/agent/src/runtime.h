@@ -15,6 +15,9 @@ typedef struct {
     void (*sink)(void *, const char *); void *sink_ctx;
     const char *const *secrets; size_t secret_count;
 } runtime_t;
+/* Read-only capture; no calibration or window detector is required. Missing
+ * trusted hints mark the frame secure, so it cannot authorize input. */
+int runtime_snapshot(runtime_t *, loop_frame_t *, loop_guard_t, void *);
 int runtime_ports(runtime_t *, loop_ports_t *);
 void runtime_free(runtime_t *);
 #endif

@@ -45,6 +45,7 @@ void loop_init(agent_loop_t *l, const policy_config_t *c, const loop_ports_t *p)
 int loop_submit(agent_loop_t *l)
 {
     if (!l->allowed || l->cancelled || (l->state != S_IDLE && l->state != S_DONE && l->state != S_STOPPED && l->state != S_ERROR)) return -1;
+    l->direct = l->direct_epoch = 0;
     l->steps = l->model_calls = l->retries = l->same_hash = 0;
     l->busy = l->cancelled = l->confirmed = l->ask_user = l->retry_wait = 0;
     l->history[0] = l->previous_title[0] = l->previous_app[0] = l->reason[0] = 0;
@@ -58,12 +59,13 @@ void loop_stop(agent_loop_t *l)
 int loop_service(void *v)
 {
     agent_loop_t *l = v; kbd_event_t e; int rc = 0;
+    if (l->cooperate) l->cooperate(l->cooperate_ctx);
     /* Bound hostile event floods; a non-draining peer cannot allow an act. */
     unsigned count = 0; int confirmation = -1;
     while (l->ports.poll && (rc = l->ports.poll(l->ports.ctx, &e)) > 0) {
         if (++count > 64) { finish(l, S_STOPPED, "event_flood", 1); return -1; }
         if (e.kind == K_ESTOP || e.kind == K_LEASE_LOST) { finish(l, S_STOPPED, e.kind == K_ESTOP ? "estop" : "lease_lost", 1); return -1; }
-        if (e.kind == K_ALLOW && (l->state == S_DISABLED || l->state == S_STOPPED || l->state == S_ERROR)) { l->allowed = 1; l->cancelled = 0; l->state = S_IDLE; }
+        if (e.kind == K_ALLOW && (l->state == S_DISABLED || l->state == S_STOPPED || l->state == S_ERROR)) { l->allowed = 1; l->cancelled = 0; l->direct_epoch = 0; l->state = S_IDLE; }
         if (e.kind == K_HID_HEALTH) arbitration_probe(&l->input, e.ok);
         if (e.kind == K_CONFIRM && l->state == S_AWAITING_CONFIRM && e.cid == l->cid) {
             confirmation = e.ok;
@@ -72,7 +74,7 @@ int loop_service(void *v)
     if (rc < 0) { finish(l, S_STOPPED, "kbd_lost", 1); return -1; }
     if (l->cancelled) return -1;
     if (confirmation >= 0) {
-        if (!confirmation || l->ports.now(l->ports.ctx) >= l->confirm_until) { finish(l,S_STOPPED,"confirm_denied",0); return -1; }
+        if (!confirmation || l->ports.now(l->ports.ctx) >= l->confirm_until) { finish(l,S_STOPPED,l->direct && l->ports.now(l->ports.ctx) >= l->confirm_until ? "confirm_timeout" : "confirm_denied",0); return -1; }
         l->confirmed = 1;
     }
     /* A port may check again after finish: terminal states must keep aborting.
@@ -120,6 +122,37 @@ static void record(agent_loop_t *l, int fault)
     memcpy(l->history + n,line,add + 1);
     strcpy(l->previous_title,l->frame.title); strcpy(l->previous_app,l->frame.app);
 }
+static void validate_action(agent_loop_t *l)
+{
+    policy_context_t x = {l->steps,l->frame.locked,l->frame.secure_input,l->input.state == INPUT_VNC,
+        l->frame.title,l->frame.app,l->previous_title,l->previous_app,l->frame.width,l->frame.height};
+    const char *reason; policy_result_t decision = policy_check(&l->policy,&x,&l->reply.action,&reason);
+    if (decision == P_REJECT || decision == P_UNSUPPORTED) { finish(l,S_ERROR,reason,0); return; }
+    l->confirmed = 0; l->state = S_ACTING;
+    if (decision == P_CONFIRM) {
+        l->state = S_AWAITING_CONFIRM; l->confirm_until = l->ports.now(l->ports.ctx) + l->policy.confirm_ms;
+        /* Fixed bounded summary excludes model text and secrets. */
+        if (!l->ports.confirm || l->ports.confirm(l->ports.ctx,++l->cid,"Confirm next agent action",l->policy.confirm_ms)) finish(l,S_STOPPED,"confirm_denied",0);
+    }
+}
+int loop_direct(agent_loop_t *l, const action_t *a, const loop_frame_t *frame)
+{
+    (void)loop_service(l);
+    if (!l->allowed || l->cancelled || active(l)) return -1;
+    if (!l->direct_epoch) {
+        l->steps = l->model_calls = l->same_hash = 0;
+        l->start = l->last_now = l->ports.now(l->ports.ctx);
+        l->previous_title[0] = l->previous_app[0] = l->history[0] = 0;
+        l->direct_epoch = 1;
+    }
+    l->direct = 1; l->busy = l->confirmed = 0; l->reason[0] = 0;
+    l->frame = *frame; memset(&l->reply,0,sizeof l->reply); l->reply.action = *a;
+    l->model_start = l->ports.now(l->ports.ctx); l->state = S_PLANNING;
+    if (loop_service(l)) return 0;
+    if (l->steps >= l->policy.max_steps) { finish(l,S_ERROR,"step_budget",0); return 0; }
+    if (switch_input(l)) return 0;
+    validate_action(l); return 0;
+}
 void loop_tick(agent_loop_t *l)
 {
     if (loop_service(l) || !active(l)) return;
@@ -159,19 +192,10 @@ void loop_tick(agent_loop_t *l)
             finish(l,S_ERROR,"model",0); return;
         }
         l->reply.model[128] = 0;
-        policy_context_t x = {l->steps,l->frame.locked,l->frame.secure_input,l->input.state == INPUT_VNC,
-            l->frame.title,l->frame.app,l->previous_title,l->previous_app,l->frame.width,l->frame.height};
-        const char *reason; policy_result_t decision = policy_check(&l->policy,&x,&l->reply.action,&reason);
-        if (decision == P_REJECT || decision == P_UNSUPPORTED) { finish(l,S_ERROR,reason,0); return; }
-        l->confirmed = 0; l->state = S_ACTING;
-        if (decision == P_CONFIRM) {
-            l->state = S_AWAITING_CONFIRM; l->confirm_until = l->ports.now(l->ports.ctx) + l->policy.confirm_ms;
-            /* Fixed bounded summary excludes model text and secrets. */
-            if (!l->ports.confirm || l->ports.confirm(l->ports.ctx,++l->cid,"Confirm next agent action",l->policy.confirm_ms)) finish(l,S_STOPPED,"confirm_denied",0);
-        }
+        validate_action(l);
         return;
     case S_AWAITING_CONFIRM:
-        if (now >= l->confirm_until) { finish(l,S_STOPPED,"confirm_denied",0); return; }
+        if (now >= l->confirm_until) { finish(l,S_STOPPED,l->direct ? "confirm_timeout" : "confirm_denied",0); return; }
         if (l->confirmed) l->state = S_ACTING;
         return;
     case S_ACTING:
@@ -193,7 +217,10 @@ void loop_tick(agent_loop_t *l)
         l->busy = 0;
         if (rc && rc != -2) { finish(l,S_ERROR,rc == -3 ? "unsupported" : "action",0); return; }
         if (rc == -2) arbitration_probe(&l->input,0);
-        record(l,rc == -2); l->state = S_OBSERVING; return;
+        record(l,rc == -2);
+        if (l->direct) finish(l,S_DONE,rc == -2 ? "action" : "done",0);
+        else l->state = S_OBSERVING;
+        return;
     default: return;
     }
 }

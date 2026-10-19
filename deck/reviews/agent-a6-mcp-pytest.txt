@@ -1,0 +1,59 @@
+..................FFF...........F.                                       [100%]
+=================================== FAILURES ===================================
+__________________________ test_real_socket_protocol ___________________________
+deck/agent/tests/test_mcp.py:328: in test_real_socket_protocol
+    with keyboard(kbd_build, tmp_path) as (kbd, _, _, _), server(mcp_binary, tmp_path, kbd, tcp=True) as (cs, _, _):
+                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_mcp.py:147: in server
+    assert "mcp ready" in logpath.read_text(), "MCP startup failed: " + logpath.read_text()
+E   AssertionError: MCP startup failed: mcp startup: bind refused
+E     mcp bind errno=1
+E     
+E   assert 'mcp ready' in 'mcp startup: bind refused\nmcp bind errno=1\n'
+E    +  where 'mcp startup: bind refused\nmcp bind errno=1\n' = read_text()
+E    +    where read_text = PosixPath('/private/var/folders/_6/v8ptvn4x1gvdhnx06swqtm_80000gn/T/pytest-of-leo/pytest-80/test_real_socket_protocol0/mcp.log').read_text
+______________________ test_real_socket_daemon_mcp[False] ______________________
+deck/agent/tests/test_mcp.py:335: in test_real_socket_daemon_mcp
+    with real_daemon(kbd_build, tmp_path, allowed=allow) as (path, reader), FakeVNC() as vnc:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_loop.py:378: in real_daemon
+    raise RuntimeError("real Unix kbd listener unavailable: " + err.decode())
+E   RuntimeError: real Unix kbd listener unavailable: mk20-kbd: host link /dev/ttys005 open
+E   mk20-kbd: GD32 write disabled (--no-gd32-write); knob K2 stays as configured in the GD32
+E   mk20-kbd: control socket /tmp/a5-kbd-yvounmc6/kbd.sock failed: Operation not permitted (agent input disabled)
+______________________ test_real_socket_daemon_mcp[True] _______________________
+deck/agent/tests/test_mcp.py:335: in test_real_socket_daemon_mcp
+    with real_daemon(kbd_build, tmp_path, allowed=allow) as (path, reader), FakeVNC() as vnc:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_loop.py:378: in real_daemon
+    raise RuntimeError("real Unix kbd listener unavailable: " + err.decode())
+E   RuntimeError: real Unix kbd listener unavailable: mk20-kbd: host link /dev/ttys005 open
+E   mk20-kbd: GD32 write disabled (--no-gd32-write); knob K2 stays as configured in the GD32
+E   mk20-kbd: control socket /tmp/a5-kbd-8n3kd4kc/kbd.sock failed: Operation not permitted (agent input disabled)
+_______________________ test_real_socket_estop_mid_drag ________________________
+deck/agent/tests/test_mcp.py:440: in test_real_socket_estop_mid_drag
+    with real_daemon(kbd_build, tmp_path) as (path, reader), FakeVNC() as vnc:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.13.16-macos-aarch64-none/lib/python3.13/contextlib.py:141: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+deck/agent/tests/test_loop.py:378: in real_daemon
+    raise RuntimeError("real Unix kbd listener unavailable: " + err.decode())
+E   RuntimeError: real Unix kbd listener unavailable: mk20-kbd: host link /dev/ttys005 open
+E   mk20-kbd: GD32 write disabled (--no-gd32-write); knob K2 stays as configured in the GD32
+E   mk20-kbd: control socket /tmp/a5-kbd-q6_5dtrx/kbd.sock failed: Operation not permitted (agent input disabled)
+=========================== short test summary info ============================
+FAILED deck/agent/tests/test_mcp.py::test_real_socket_protocol - AssertionErr...
+FAILED deck/agent/tests/test_mcp.py::test_real_socket_daemon_mcp[False] - Run...
+FAILED deck/agent/tests/test_mcp.py::test_real_socket_daemon_mcp[True] - Runt...
+FAILED deck/agent/tests/test_mcp.py::test_real_socket_estop_mid_drag - Runtim...
+4 failed, 30 passed in 27.99s

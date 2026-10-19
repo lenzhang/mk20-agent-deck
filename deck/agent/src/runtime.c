@@ -10,24 +10,32 @@ static int confirm(void *v, unsigned cid, const char *s, unsigned timeout) { ret
 static int ui(void *v, const char *s, int input, unsigned progress) { return kbdc_ui(((runtime_t *)v)->kbd,s,input,progress); }
 static int execute(void *v, const action_t *a, int input, int64_t deadline, loop_guard_t g, void *ctx) { return kbdc_execute(((runtime_t *)v)->kbd,a,input,deadline,g,ctx); }
 static void log_line(void *v, const char *line) { runtime_t *r = v; if (r->sink) r->sink(r->sink_ctx,line); }
-static int observe(void *v, loop_frame_t *frame, loop_guard_t g, void *ctx)
+int runtime_snapshot(runtime_t *r, loop_frame_t *frame, loop_guard_t g, void *ctx)
 {
-    runtime_t *r = v;
-    if (!r->rfb || !r->window_hint || g(ctx)) return -1;
+    if (!r->rfb || g(ctx)) return -1;
     mem_free(rfb_memory(r->rfb),r->jpeg); r->jpeg = NULL;
     rfb_set_service(r->rfb,g,ctx);
     if (rfb_snapshot(r->rfb,1280,800)) return -1;
     const scale_t *f = rfb_frame(r->rfb);
     memset(frame,0,sizeof *frame); frame->hash = agent_hash(f->data,(size_t)f->w*f->h*3);
     frame->width = (int)f->w; frame->height = (int)f->h;
-    if (!r->kbd->calibration.valid || r->kbd->calibration.width != frame->width || r->kbd->calibration.height != frame->height) return -1;
+    frame->source_width = (int)rfb_info(r->rfb)->w; frame->source_height = (int)rfb_info(r->rfb)->h;
     if (g(ctx) || img_jpeg(rfb_memory(r->rfb),f->data,f->w,f->h,70,&r->jpeg,&frame->jpeg_len) || g(ctx)) return -1;
     frame->jpeg = r->jpeg;
+    if (!r->window_hint) { frame->secure_input = 1; return 0; }
     return r->window_hint(r->hint_ctx,frame);
+}
+static int observe(void *v, loop_frame_t *frame, loop_guard_t g, void *ctx)
+{
+    runtime_t *r = v;
+    if (!r->window_hint || runtime_snapshot(r,frame,g,ctx)) return -1;
+    if (!r->kbd->calibration.valid || r->kbd->calibration.width != frame->width || r->kbd->calibration.height != frame->height) return -1;
+    return 0;
 }
 static int model(void *v, const loop_frame_t *f, const char *history, loop_reply_t *out, loop_guard_t g, void *ctx)
 {
     runtime_t *r = v; char user[8193];
+    if (!r->provider || !r->net) return -1;
     if (!r->task || strlen(r->task) > 4096 || snprintf(user,sizeof user,"Task: %s\nHistory: %s",r->task,history) >= (int)sizeof user || g(ctx)) return -1;
     net_options_t transport = r->transport; transport.service = g; transport.service_ctx = ctx;
     llm_request_t q = {.system="Use one action per turn. Report risk low/high and target. Never enter passwords or alter security, sharing, or proxy settings.",
@@ -74,9 +82,9 @@ static char *tools(void)
 }
 int runtime_ports(runtime_t *r, loop_ports_t *p)
 {
-    if (!r->kbd || !r->provider || !r->net) return -1;
+    if (!r->kbd) return -1;
     r->tools = tools(); if (!r->tools) return -1;
     *p = (loop_ports_t){.ctx=r,.now=now,.poll=poll_kbd,.observe=observe,.model=model,.lease=lease,
         .execute=execute,.confirm=confirm,.ui=ui,.log=log_line,.secrets=r->secrets,.secret_count=r->secret_count}; return 0;
 }
-void runtime_free(runtime_t *r) { mem_free(rfb_memory(r->rfb),r->jpeg); r->jpeg = NULL; cJSON_free(r->tools); r->tools = NULL; }
+void runtime_free(runtime_t *r) { if (r->rfb) mem_free(rfb_memory(r->rfb),r->jpeg); r->jpeg = NULL; cJSON_free(r->tools); r->tools = NULL; }
