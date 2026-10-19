@@ -33,7 +33,8 @@ def harness(tmp_path, cleanup_makes_stock=True, cleanup_s=1, hang=False, unkilla
     script = f'''T={t}; C=$T/c
 log() {{ echo "$*" >> $T/log; }}
 udc_now() {{ echo udc; }}
-pgrep() {{ return 0; }}
+# K4 stock USB has no KD. Only its dedicated PID file can report a leftover KD.
+pgrep() {{ [ "$*" = "-f ^/data/KeyboardDevice" ] && [ -s "$T/kd.pids" ] && cat "$T/kd.pids"; }}
 cleanup() {{ echo "$$" >> $T/cleanups; {hangcmd} sleep {cleanup_s}; {mk}; }}
 {body}
 echo "fell-through"; exit 9
@@ -55,6 +56,21 @@ def run(dev, script, wait=True):
 def cleanups(t):
     f = t / "cleanups"
     return len(f.read_text().split()) if f.exists() else 0
+
+
+@pytest.mark.parametrize("kd_present", [False, True])
+def test_stock_ok_requires_kd_absent(tmp_path, kd_present):
+    """Portable predicate check: serial USB alone cannot verify stock while KD is alive."""
+    s = harness(tmp_path, cleanup_s=0)
+    (tmp_path / "c/acm.usb0").touch()
+    (tmp_path / "mounts").write_text("")
+    if kd_present:
+        (tmp_path / "kd.pids").write_text("123\n")
+    s.write_text(s.read_text().replace("/proc/mounts", str(tmp_path / "mounts"))
+                 .replace('echo "fell-through"; exit 9', 'stock_ok; exit $?'))
+    r = subprocess.run(["sh", str(s)], capture_output=True, text=True)
+    assert r.returncode == int(kd_present), r.stderr
+    assert cleanups(tmp_path) == 0
 
 
 def test_concurrent_callers_one_cleanup(dev, tmp_path):

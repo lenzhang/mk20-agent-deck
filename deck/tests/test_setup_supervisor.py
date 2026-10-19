@@ -23,7 +23,7 @@ SUP = SUP[:SUP.index("# <<< setup-supervisor\n}\n") + len("# <<< setup-superviso
 
 HUNG = {
     "setusbconfig": "sh $T/hung-setusbconfig.sh serial",
-    "service": "sh $T/qt_app2 start",
+    "service": "sh $T/qt_app2 stop",
     "none": ":",
 }
 
@@ -39,7 +39,8 @@ def harness(t, setup="none", setup_rc=0, cleanup_hang=False, unkillable=False):
     script = f'''T={t}; C=$T/c; OK=0
 log() {{ echo "$*" >> $T/log; }}
 udc_now() {{ echo udc; }}
-pgrep() {{ return 0; }}
+# K4 cleanup restores serial USB with KD absent, never a restarted stock KD.
+pgrep() {{ return 1; }}
 cleanup() {{ [ "$OK" = 1 ] && return; touch $T/mk20/gadget.busy; echo "$$" >> $T/cleanups; {add_adb} touch $T/c/acm.usb0; rm -f $T/mk20/gadget.busy; }}
 setup_main() {{
   trap cleanup EXIT; trap 'exit 1' INT TERM

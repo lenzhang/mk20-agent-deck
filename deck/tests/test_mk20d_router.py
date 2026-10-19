@@ -121,12 +121,33 @@ def test_selftest_router_is_info_only(dev, rel, g1):
     assert base.returncode == 0
 
 
-def test_health_status_not_degraded_by_router(dev, rel, g1):
-    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+@pytest.mark.parametrize("kbd_enabled", [False, True])
+def test_health_status_not_degraded_by_router(dev, rel, g1, kbd_enabled):
+    # Healthy USB + independent KD/kbd/router process lists: changing router state must
+    # not invent a forbidden KD or hide a missing mk20-kbd (K4 defaults to FEATURE_KBD=1).
+    (g1 / "configs/c.1/ecm.usb0").mkdir()
+    (dev.mock / "netstat.out").write_text("Proto Recv-Q Send-Q Local Address Foreign Address State\n"
+        "tcp 0 0 172.30.250.2:17890 0.0.0.0:* LISTEN\n"
+        "tcp 0 0 169.254.7.2:17890 0.0.0.0:* LISTEN\n")
+    (dev.mock / "pgrep.keyed").touch()
+    (dev.mock / "pgrep.kd").write_text("")
+    (dev.mock / "pgrep.kbd").write_text("456\n" if kbd_enabled else "")
+    (dev.mock / "pgrep.router").write_text("")
+    if kbd_enabled:
+        status = dev.p("run/mk20/kbd.status"); status.parent.mkdir(parents=True, exist_ok=True)
+        status.write_text(json.dumps({"knob_ok": 6, "panels_written": 21, "write_errors": 0}))
+    env = {"MK20_KBD": str(int(kbd_enabled))}
+    h = json.loads(dev.run(rel / "sbin/mk20d", "health", env=env).stdout)
     st = h["status"]
-    (dev.mock / "pgrep.out").write_text("123\n")
-    h2 = json.loads(dev.run(rel / "sbin/mk20d", "health", env={"MK20_ROUTER": "0"}).stdout)
+    assert st == "ok" and h["selftest"]["pass"] is True and h["kd"] == 0
+    assert h["kbd"]["enabled"] is kbd_enabled and h["kbd"]["running"] is kbd_enabled
+    assert h["router"]["running"] is False
+    (dev.mock / "pgrep.router").write_text("123\n")
+    running = json.loads(dev.run(rel / "sbin/mk20d", "health", env=env).stdout)
+    assert running["status"] == st and running["router"]["running"] is True
+    h2 = json.loads(dev.run(rel / "sbin/mk20d", "health", env=dict(env, MK20_ROUTER="0")).stdout)
     assert h2["status"] == st and h2["router"]["enabled"] is False and h["router"]["enabled"] is True
+    assert h2["router"]["running"] is True and h2["kd"] == 0 and h2["selftest"]["pass"] is True
 
 
 def test_boot_launch_gated(dev, rel, g1):
