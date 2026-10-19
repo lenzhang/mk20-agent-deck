@@ -67,7 +67,7 @@
  ═════════ USB ECM 172.30.250.0/24 ═══════════════════════════════
  T113 ┌──────────────────────── mk20-agent (新，static C) ─────────────────────────┐
       │ cfg  rfb(VNC client+ZRLE→流式缩放)  img(JPEG)  net(TCP/CONNECT/mbedTLS)       │
-      │ llm(OpenAI 兼容适配器×N)  loop(观察→规划→执行)  policy(风险/预算/确认)         │
+      │ llm(OpenAI 兼容适配器×1)  loop(观察→规划→执行)  policy(风险/预算/确认)         │
       │ mcp(Streamable HTTP, :8765@usb0)  web(密钥页 :8780@usb0)  log(脱敏)          │
       └──────────────┬───────────────────────────────────────────────────────────┘
                      │ /run/mk20/kbd.sock (unix, 0600, 帧化 JSON-lines 或 TLV)

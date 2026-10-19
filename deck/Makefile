@@ -1,4 +1,4 @@
-test: sim-test kbd-test
+test: sim-test kbd-test agent-test
 	shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh tools/mk20-build-bins.sh
 	shellcheck -s bash -S warning tools/tf-identify.sh tools/tf-restore-boot.sh
 	python3 -m py_compile tools/mk20_key_latency.py tools/mk20_accept.py tools/mk20_soak.py tools/mk20_host_net.py tools/tcp_transport.py tools/tf_gpt_check.py
@@ -14,10 +14,13 @@ release:
 kbd-test:   # mk20-kbd (KD replacement): ASan/UBSan unit tests + e2e of the real binary on ptys
 	$(MAKE) -C kbd test
 
+agent-test:   # on-device agent: host fakes (VNC / OpenAI-compatible model / CONNECT proxy) + their tests
+	uv run --with pytest python -m pytest -q agent/tests
+
 sim-test:
 	uv run --with pytest python -m pytest -q tests_sim
 
 sim:
 	uv run python -m mk20sim --port 8766
 
-.PHONY: test bins release sim-test sim kbd-test
+.PHONY: test bins release sim-test sim kbd-test agent-test
