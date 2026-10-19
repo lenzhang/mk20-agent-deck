@@ -467,7 +467,7 @@ kbd)
   echo $$ > "$TM/kbd-loop.pid"; why=""; d=1; last_rc=$(num "$(sed -n 's/.*last_rc=\([0-9]*\).*/\1/p' "$TM/kbd.crashes" 2>/dev/null)"); reason=normal
   rm -f "$TM/kbd-degraded"; mkdir -p "$R/run/mk20"
   maint_init || { log ERROR maint "unsafe maintenance directory"; exit 1; }
-  [ -f "$MP/safe" ] && reason=crash-loop
+  [ -f "$MP/safe" ] && reason='crash-loop'
   log INFO kbd "start pid=$$"
   stopped=0; kd_d=1
   while :; do
@@ -480,7 +480,7 @@ kbd)
       sleep "${MK20_KBD_KD_SETTLE:-1}" 5>&-
       if [ "$stopped" = 0 ] || [ "$(kd_count)" != 0 ]; then
         stopped=0
-        reason=kd-stop; echo "waiting for stock KD to stop" > "$TM/kbd-degraded"
+        reason='kd-stop'; echo "waiting for stock KD to stop" > "$TM/kbd-degraded"
         kbd_state
         kdwait=0; while [ "$kdwait" -lt "$((kd_d * 5))" ]; do
           kbd_hooks; [ -f "$KSTOP" ] && break
@@ -490,12 +490,12 @@ kbd)
         continue
       fi
       kd_d=1
-      rm -f "$TM/kbd-degraded"; reason=normal; [ -f "$MP/safe" ] && reason=crash-loop
+      rm -f "$TM/kbd-degraded"; reason=normal; [ -f "$MP/safe" ] && reason='crash-loop'
     fi
     if [ "$(kbd_recent)" -ge "${MK20_KBD_CRASHES:-3}" ] && [ ! -f "$MP/safe" ]; then
-      ( umask 077; touch "$MP/safe" ); reason=crash-loop
+      ( umask 077; touch "$MP/safe" ); reason='crash-loop'
     fi
-    [ -f "$MP/safe" ] && reason=crash-loop
+    [ -f "$MP/safe" ] && reason='crash-loop'
     set -- --hid "$HID" --hid-stop-file "$HSTOP"
     [ "${MK20_NOHID:-0}" = 1 ] && set -- --no-hid
     set -- "$@" --status "$KST" --lock "$R/tmp/mk20-kbd.lock" --exit-file "$KSTOP"
@@ -507,7 +507,7 @@ kbd)
     [ "${MK20_K2_ESTOP:-0}" = 1 ] && set -- "$@" --k2-estop
     [ "${MK20_K2_RELEASE:-0}" = 1 ] && set -- "$@" --k2-release
     debug_read; [ "$DEBUG_VERBOSE" = 1 ] && set -- "$@" --verbose
-    [ -x "$KB" ] || reason=missing-binary
+    [ -x "$KB" ] || reason='missing-binary'
     kbd_state
     t0=$(cut -d. -f1 /proc/uptime)
     # Markers are cleared only by boot under the transition lock. The binary rechecks --exit-file.
@@ -526,7 +526,7 @@ kbd)
         if [ "$(kd_count)" != 0 ]; then
           # A respawn means procd ownership is uncertain, even if its next stop
           # removes the PID but fails. Quiesce our writer before any stop/retry.
-          stopped=0; requested=1; reason=kd-stop
+          stopped=0; requested=1; reason='kd-stop'
           if ! kbd_child_stop; then stop_failed=1; fi
           break
         fi
@@ -534,7 +534,7 @@ kbd)
       sleep 0.2 5>&-
     done
     if [ "$stop_failed" = 1 ]; then
-      why=child-stop-failed; reason=$why
+      why='child-stop-failed'; reason=$why
       log ERROR kbd "mk20-kbd did not stop after bounded TERM/KILL; supervisor exiting"
       break
     fi
