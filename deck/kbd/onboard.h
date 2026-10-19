@@ -14,6 +14,8 @@ void onboard_route(struct kbd_s *k, enum onboard_route route);
 int onboard_input(struct kbd_s *k, int row, int col, int knob, int down, int keycode, int64_t now);
 int onboard_timeout(struct kbd_s *k, int64_t now, int dflt);
 void onboard_loss(struct kbd_s *k);
+/* Main-loop only: queue pending releases before taps; -1 if still backpressured. */
+int onboard_host_flush(struct kbd_s *k);
 int onboard_json(struct kbd_s *k, const char *method, const char *s, size_t n, char *result, size_t cap);
 void onboard_jpeg(struct kbd_s *k, const uint8_t *data, size_t n);
 int onboard_tile_allowed(struct kbd_s *k, int fb, int y, int h);

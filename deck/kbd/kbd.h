@@ -54,6 +54,8 @@ void kbd_host_push(kbd_t *k, const uint8_t *d, size_t n);
 void kbd_host_feed(kbd_t *k, const uint8_t *d, size_t n);
 void kbd_on_host_frame(kbd_t *k, const host_frame *f);
 void kbd_host_drain(kbd_t *k);
+/* Main-loop only: append without draining or flushing onboard priority events. */
+int kbd_host_queue(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n);
 int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n);
 /* Backlight 0..100 via dispdbg (name=lcd0, command=setbl, param, start). */
 int kbd_set_backlight(kbd_t *k, int level);

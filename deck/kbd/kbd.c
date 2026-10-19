@@ -54,7 +54,7 @@ void kbd_service(kbd_t *k, int64_t now)
     if (k->onboard) kbd_safety_tick(k,kbd_now(k));
 }
 
-void kbd_host_drain(kbd_t *k)
+static void host_write(kbd_t *k)
 {
     if (k->host_fd < 0 || k->host_out_off == k->host_out_len) return;
     ssize_t n = write(k->host_fd,k->host_out+k->host_out_off,k->host_out_len-k->host_out_off);
@@ -67,21 +67,40 @@ void kbd_host_drain(kbd_t *k)
     }
 }
 
+void kbd_host_drain(kbd_t *k)
+{
+    host_write(k);
+    if (k->onboard) {
+        onboard_host_flush(k);
+        host_write(k);
+    }
+}
+
+int kbd_host_queue(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
+{
+    if (k->host_fd < 0) return -1;
+    size_t len = k->host_out_len-k->host_out_off;
+    /* Keep room for 64 empty JPEG acks even during a getInfo flood.
+     * Compliant JPEG hosts are stop-and-wait (one outstanding frame). */
+    size_t limit = sizeof k->host_out - (cmd == HOST_CMD_JPG ? 0 : 64*(HOST_HDR+4));
+    if (len > limit || n > limit-len || HOST_HDR+4 > limit-len-n) {
+        k->st.host_tx_errors++; return -1;
+    }
+    memmove(k->host_out,k->host_out+k->host_out_off,len);
+    k->host_out_off=0; k->host_out_len=len;
+    int count=host_encode(id,cmd,pl,n,k->host_out+len,sizeof k->host_out-len);
+    if (count < 0) return -1;
+    k->host_out_len += (size_t)count; k->st.host_tx++;
+    return 0;
+}
+
 int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
 {
     if (k->host_fd < 0) return -1;
     if (k->onboard) {
         kbd_host_drain(k);
-        size_t len = k->host_out_len-k->host_out_off;
-        /* Keep room for 64 empty JPEG acks even during a getInfo flood.
-         * Compliant JPEG hosts are stop-and-wait (one outstanding frame). */
-        size_t limit = sizeof k->host_out - (cmd == HOST_CMD_JPG ? 0 : 64*(HOST_HDR+4));
-        if (len+n+HOST_HDR+4 > limit) { k->st.host_tx_errors++; return -1; }
-        memmove(k->host_out,k->host_out+k->host_out_off,len);
-        k->host_out_off=0; k->host_out_len=len;
-        int count=host_encode(id,cmd,pl,n,k->host_out+len,sizeof k->host_out-len);
-        if (count < 0) return -1;
-        k->host_out_len += (size_t)count; k->st.host_tx++;
+        if (onboard_host_flush(k)) { k->st.host_tx_errors++; return -1; }
+        if (kbd_host_queue(k,id,cmd,pl,n)) return -1;
         kbd_host_drain(k); return 0;
     }
     size_t cap = n + HOST_HDR + 4;

@@ -11,6 +11,7 @@
 #define ALL_PANELS ((1u << PANEL_COUNT) - 1)
 #define RESERVED ((1u << 19) | (1u << 20))
 #define FRAME_MAX (1u << 20)
+#define HOST_TAPS 16
 struct onboard_s {
     ui_t ui;
     enum onboard_route route, back, host_page;
@@ -24,7 +25,12 @@ struct onboard_s {
     int key_owner[20], knob_down[2], knob_long[2];
     struct { int page, client; uint64_t generation; } agent_owner[20];
     uint32_t pressed;
+    uint32_t pending_up;
+    int taps[HOST_TAPS], tap_head, tap_count, tap_up;
     uint16_t *tile_px; int tile_fb, tile_x, tile_y, tile_w, tile_h;
+    uint64_t tile_epoch;
+    enum onboard_route tile_route;
+    long tile_generation;
     int64_t budget_at, panel_at[PANEL_COUNT]; size_t bus_left[2];
     int64_t knob_at[2];
     int last_page, last_stop, confirm_pending, incompatible; long confirm_id;
@@ -37,6 +43,31 @@ static void host_tap(kbd_t *k, int slot);
 static int host_route(const onboard_t *o) { return o->route == ONBOARD_L1 || o->route == ONBOARD_L4; }
 static int safety_footer(const onboard_t *o) { return host_route(o) && (o->fresh || o->health==HOST_SUSPECT); }
 static int page_id(enum onboard_route r) { return r == ONBOARD_L5 ? 1 : r == ONBOARD_L1 || r == ONBOARD_L4 ? 2 : 0; }
+int onboard_host_flush(kbd_t *k)
+{
+    onboard_t *o=k->onboard;
+    if (!o) return 0;
+    if (k->host_fd < 0) {
+        for (int i=0;i<20;i++) if (o->key_owner[i]==1) o->key_owner[i]=0;
+        o->pending_up=0; o->tap_head=o->tap_count=o->tap_up=0;
+        return 0;
+    }
+    /* At most 20 releases and HOST_TAPS tap pairs. No waits or recursion:
+     * ownership is retained until the complete up is in the transport queue. */
+    for (int i=0;i<20;i++) if (o->pending_up & (1u<<i)) {
+        char j[160]; int n=host_json_key_state(j,sizeof j,i%5,i/5,0);
+        if (n<=0 || kbd_host_queue(k,KBD_EVENT_ID,HOST_CMD_JSON,j,(size_t)n)) return -1;
+        o->pending_up &= ~(1u<<i); o->key_owner[i]=0;
+    }
+    while (o->tap_count) {
+        int slot=o->taps[o->tap_head];
+        char j[160]; int n=host_json_key_state(j,sizeof j,slot,slot,!o->tap_up);
+        if (n<=0 || kbd_host_queue(k,KBD_EVENT_ID,HOST_CMD_JSON,j,(size_t)n)) return -1;
+        if (!o->tap_up) o->tap_up=1;
+        else { o->tap_up=0; o->tap_head=(o->tap_head+1)%HOST_TAPS; o->tap_count--; }
+    }
+    return 0;
+}
 static void release_mac(kbd_t *k)
 {
     onboard_t *o = k->onboard;
@@ -48,11 +79,13 @@ static void release_mac(kbd_t *k)
 static void release_key(kbd_t *k, int i)
 {
     onboard_t *o = k->onboard; int owner = o->key_owner[i];
-    o->key_owner[i] = 0; /* notify may disconnect a client */
     if (owner == 1) {
-        char j[160]; int n=host_json_key_state(j,sizeof j,i%5,i/5,0);
-        if (n>0) kbd_host_send(k,KBD_EVENT_ID,HOST_CMD_JSON,j,(size_t)n);
-    } else if (owner == 2 && k->hid) hid_set_mod(k->hid,HID_MOD_RALT,0);
+        o->pending_up |= 1u<<i;
+        kbd_host_drain(k);
+        return;
+    }
+    o->key_owner[i] = 0; /* notify may disconnect a client */
+    if (owner == 2 && k->hid) hid_set_mod(k->hid,HID_MOD_RALT,0);
     else if (owner == 3 && k->ctl) {
         int ci=o->agent_owner[i].client;
         if (ci >= 0 && ci < CTL_MAX_CLIENTS &&
@@ -140,6 +173,7 @@ void onboard_free(kbd_t *k)
 void onboard_loss(kbd_t *k)
 {
     onboard_t *o = k->onboard; if (!o) return;
+    if (k->host_fd<0) onboard_host_flush(k); /* no old events on a replacement connection */
     o->health = HOST_OFFLINE; o->beats = 0; o->handshake_required = 1;
     boundary(k,0);
 }
@@ -235,6 +269,7 @@ int onboard_tile(kbd_t *k, int fb, int x, int y, int w, int h, const uint16_t *p
     if (o->tile_fb && (o->tile_fb!=fb || o->tile_x!=x || o->tile_y!=y || o->tile_w!=w || o->tile_h!=h)) return -1;
     memcpy(o->tile_px,px,(size_t)w*h*2);
     o->tile_fb=fb; o->tile_x=x; o->tile_y=y; o->tile_w=w; o->tile_h=h;
+    o->tile_epoch=o->epoch; o->tile_route=o->route; o->tile_generation=o->generation;
     return 0;
 }
 static int budget(onboard_t *o, int fb, int64_t now)
@@ -261,6 +296,8 @@ void onboard_tick(kbd_t *k, int64_t now)
     if ((o->health == HOST_ONLINE || o->health == HOST_PROBING || o->health == HOST_SUSPECT) && now-o->seen >= 5000) onboard_loss(k);
     else if ((o->health == HOST_ONLINE || o->health == HOST_PROBING) && now-o->seen >= 3000) {
         o->health = HOST_SUSPECT; release_mac(k); o->epoch++; o->fresh = o->publishing = 0;
+        o->tile_fb=0;
+        free(o->next_jpg); o->next_jpg=NULL;
         k->hp.barrier = k->hp.len; o->render |= 1u << 20;
     }
     int online = o->health == HOST_ONLINE;
@@ -294,10 +331,12 @@ void onboard_tick(kbd_t *k, int64_t now)
 }
 static void host_tap(kbd_t *k, int slot)
 {
-    for (int down=1;down>=0;down--) {
-        char j[160]; int n=host_json_key_state(j,sizeof j,slot,slot,down);
-        if(n>0) kbd_host_send(k,KBD_EVENT_ID,HOST_CMD_JSON,j,(size_t)n);
-    }
+    onboard_t *o=k->onboard;
+    kbd_host_drain(k);
+    if (k->host_fd<0) return;
+    if (o->tap_count==HOST_TAPS) { k->st.host_tx_errors++; return; }
+    o->taps[(o->tap_head+o->tap_count)%HOST_TAPS]=slot; o->tap_count++;
+    kbd_host_drain(k);
 }
 static void short_knob(kbd_t *k, int knob, int64_t now)
 {
@@ -345,6 +384,12 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
         return 1; /* release_key delivers to the press-time owner */
     }
     if (fb == 20) { stop(k,"page_key",now); return 1; }
+    /* Do not overwrite a still-owned host press with a new press while its up
+     * is backpressured. Safety keys and deadlines have already been handled. */
+    if (o->pending_up & (1u<<(fb-1))) {
+        kbd_host_drain(k);
+        if (o->pending_up & (1u<<(fb-1))) return 1;
+    }
     if (keycode) return 1; /* incompatible GD32 mapping: never synthesize a second action */
     if (host_route(o) && o->health == HOST_SUSPECT) return 1;
     if (host_route(o) && o->health == HOST_ONLINE && o->fresh) {
@@ -456,6 +501,11 @@ void onboard_service(kbd_t *k, int64_t now)
         o->next_jpg=NULL; o->job=1; pthread_cond_signal(&o->cv);
     }
     pthread_mutex_unlock(&o->mu);
+    /* Staging acknowledges handling, not a promise to publish in a later epoch.
+     * Validate again before any budget or overlay early return can retain it. */
+    if (o->tile_fb && (o->tile_epoch!=o->epoch || o->tile_route!=o->route ||
+        o->tile_generation!=o->generation ||
+        !onboard_tile_allowed(k,o->tile_fb,o->tile_y,o->tile_h))) o->tile_fb=0;
     /* Reserved overlays win even when a stream of ready tiles keeps arriving. */
     if (o->render & (1u<<19)) {
         render(k,20); o->render &= ~(1u<<19); return;
