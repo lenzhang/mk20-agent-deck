@@ -4,6 +4,8 @@
 #endif
 #include "rfb.h"
 #include "img.h"
+#include "net.h"
+#include "cJSON.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,7 +42,7 @@ static long rss_kb(void)
     if (f) {
         char line[256]; long peak = 0;
         while (fgets(line, sizeof line, f)) if (sscanf(line, "VmHWM: %ld kB", &peak) == 1) break;
-        fclose(f); return peak;
+        fclose(f); if (peak > 0) return peak;
     }
 #endif
     struct rusage r; if (getrusage(RUSAGE_SELF, &r)) return 0;
@@ -50,8 +52,63 @@ static long rss_kb(void)
     return r.ru_maxrss;
 #endif
 }
+static int network_cli(int argc, char **argv)
+{
+    net_options_t o = {0}; netcfg_t config = {0}; net_response_t response = {0};
+    const char *path = "/data/mk20/agent/net.json", *mac = NULL;
+    unsigned port = 80, timeout = 60, cap = NET_BODY_MAX;
+    int sync = !strcmp(argv[1], "--time-sync"), rc = -1;
+    o.provider_route = "foreign"; o.config = &config;
+#ifdef MK20_NET_TEST
+    o.connected_fd = -1;
+    const char *fd = getenv("MK20_NET_TEST_FD"); if (fd) o.connected_fd = atoi(fd);
+#endif
+    int i = 2;
+    if (!sync) { if (i == argc) goto bad; o.url = argv[i++]; }
+    while (i < argc) {
+        const char *arg = argv[i++];
+        if (!strcmp(arg, "--trust-clock") && !sync) { o.clock.trust_clock = 1; continue; }
+        if (!strcmp(arg, "--set-clock") && sync) { o.clock.set_clock = 1; o.clock.setter = agent_clock_system_set; continue; }
+        if (i == argc) goto bad;
+        const char *v = argv[i++];
+        if (!strcmp(arg, "--net") && !sync) path = v;
+        else if (!strcmp(arg, "--route") && !sync) o.provider_route = v;
+        else if (!strcmp(arg, "--key-file") && !sync) o.key_file = v;
+        else if (!strcmp(arg, "--ca") && !sync) o.ca_file = v;
+        else if (!strcmp(arg, "--timeout") && !sync) { if (number(v, 600, &timeout)) goto bad; }
+        else if (!strcmp(arg, "--body-cap") && !sync) { if (number(v, NET_BODY_MAX, &cap)) goto bad; }
+        else if (!strcmp(arg, "--mac-host") && sync) mac = v;
+        else if (!strcmp(arg, "--port") && sync) { if (number(v, 65535, &port)) goto bad; }
+        else if (!strcmp(arg, "--clock-marker")) o.clock.marker_path = v;
+        else goto bad;
+    }
+    if (sync) { if (!mac) goto bad; rc = net_time_sync(mac, port, &o.clock, &response); }
+    else {
+        if (netcfg_load(path, &config)) goto bad;
+        o.timeout_ms = (int)timeout * 1000; o.body_cap = cap;
+        rc = net_request(&o, &response);
+    }
+    goto output;
+bad:
+    response.class_name = "config"; strcpy(response.detail, "invalid arguments or network configuration");
+output:;
+    /* Peer headers/body, URLs, paths and keys are never included in diagnostics. */
+    cJSON *j = cJSON_CreateObject();
+    if (!j) { net_response_free(&response); netcfg_free(&config); puts("{\"ok\":false,\"class\":\"io\",\"detail\":\"allocation failed\",\"http_status\":0,\"bytes\":0,\"via\":\"\"}"); return 1; }
+    cJSON_AddBoolToObject(j, "ok", rc == 0);
+    cJSON_AddStringToObject(j, "class", response.class_name ? response.class_name : "config");
+    cJSON_AddStringToObject(j, "detail", response.detail);
+    cJSON_AddNumberToObject(j, "http_status", response.http_status);
+    cJSON_AddNumberToObject(j, "bytes", (double)response.bytes);
+    cJSON_AddStringToObject(j, "via", response.via);
+    cJSON_AddNumberToObject(j, "peak_rss_kb", (double)rss_kb());
+    char *json = cJSON_PrintUnformatted(j);
+    if (json) { puts(json); free(json); } else puts("{\"ok\":false,\"class\":\"io\"}");
+    cJSON_Delete(j); net_response_free(&response); netcfg_free(&config); return rc == 0 ? 0 : 1;
+}
 int main(int argc, char **argv)
 {
+    if (argc > 1 && (!strcmp(argv[1], "--net-test") || !strcmp(argv[1], "--time-sync"))) return network_cli(argc, argv);
     const char *out = NULL, *host = "127.0.0.1", *passfile = NULL, *error = "bad_args";
     unsigned port = 5900, mw = 1280, mh = 800, quality = 70, timeout = 5000;
     rfb_t *c = NULL; unsigned char pw[8] = {0}, *jpeg = NULL; size_t pn = 0, bytes = 0;
@@ -85,8 +142,8 @@ int main(int argc, char **argv)
     const scale_t *s = rfb_frame(c); int64_t enc = rfb_now_ms();
     if (rfb_check_deadline(c)) { error = rfb_error(c); goto bad; }
     rc = img_jpeg(rfb_memory(c), s->data, s->w, s->h, (int)quality, &jpeg, &bytes);
-    if (rfb_check_deadline(c)) { error = rfb_error(c); goto bad; }
     if (rc) { error = rc == -2 ? "image_limit" : "jpeg"; goto bad; }
+    if (rfb_check_deadline(c)) { error = rfb_error(c); goto bad; }
     double enc_ms = (double)(rfb_now_ms() - enc) + rfb_info(c)->finish_ms;
     FILE *f = fopen(out, "wb"); if (!f) { error = "output_file"; goto bad; }
     int write_bad = fwrite(jpeg, 1, bytes, f) != bytes; if (fclose(f)) write_bad = 1;

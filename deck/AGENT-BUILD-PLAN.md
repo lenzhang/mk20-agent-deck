@@ -343,6 +343,7 @@
 - 永不读回用户剪贴板；不加 Mac helper。UTF-8 扩展未确认或不可用时，中文 paste 返回 `unsupported`，不降级成乱码。
 
 ### A3 网络：CONNECT 代理 + mbedTLS + 时间（box + [M]）
+- **A3 状态（2026-10-19）**：host 实现与 ASan/UBSan C 测试完成；离线 IPC 补充测试 164 pass，标准 TCP 测试受 sandbox EPERM 阻断；armhf/[M][D] 待验，见 `agent/NOTES-agent-a3.md` 与 `reviews/agent-a3-codex-summary.md`。
 - `net.c`：TCP 连接（10 s 超时）→ `CONNECT` → mbedTLS 握手（SNI，用随包 CA 校验）→ HTTP/1.1。
   `net.json` fail-closed，**代码里根本没有直连路径**（禁止 `routes.*=direct` 用于 foreign；`mac_proxy` profile 两类都只走代理）。
 - 时间同步：从 Mac `GET /time` 或代理 `Date` 头取时间；时钟没校准就拒绝 TLS。

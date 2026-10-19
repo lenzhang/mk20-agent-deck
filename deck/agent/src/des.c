@@ -28,9 +28,9 @@ void des_encrypt_block(const uint8_t key[8],const uint8_t in[8],uint8_t out[8]){
   uint64_t cd=perm(k,PC1,56,64);uint32_t c=(cd>>28)&0xFFFFFFF,d=cd&0xFFFFFFF;
   for(int r=0;r<16;r++){for(int s=0;s<SH[r];s++){c=((c<<1)|(c>>27))&0xFFFFFFF;d=((d<<1)|(d>>27))&0xFFFFFFF;}
     sub[r]=perm(((uint64_t)c<<28)|d,PC2,48,56);}
-  b=perm(b,IP,64,64);uint32_t l=b>>32,rr=b&0xFFFFFFFF,f,t;uint64_t x;
+  b=perm(b,IP,64,64);uint32_t l=b>>32,rr=b&0xFFFFFFFF,f,t;uint64_t x;int v=0,row=0,col=0;
   for(int r=0;r<16;r++){x=perm(rr,E,48,32)^sub[r];f=0;
-    for(int s=0;s<8;s++){int v=(x>>(42-6*s))&0x3F;int row=((v&0x20)>>4)|(v&1),col=(v>>1)&0xF;f=(f<<4)|SB[s][row*16+col];}
+    for(int s=0;s<8;s++){v=(x>>(42-6*s))&0x3F;row=((v&0x20)>>4)|(v&1),col=(v>>1)&0xF;f=(f<<4)|SB[s][row*16+col];}
     f=perm(f,P,32,32);t=l^f;l=rr;rr=t;}
   uint64_t pre=((uint64_t)rr<<32)|l;uint64_t o=perm(pre,FP,64,64);
   for(int i=7;i>=0;i--){out[i]=o&0xFF;o>>=8;}
@@ -38,5 +38,6 @@ void des_encrypt_block(const uint8_t key[8],const uint8_t in[8],uint8_t out[8]){
   mem_wipe(&k,sizeof k);mem_wipe(&cd,sizeof cd);mem_wipe(&c,sizeof c);mem_wipe(&d,sizeof d);mem_wipe(sub,sizeof sub);
   mem_wipe(&b,sizeof b);mem_wipe(&l,sizeof l);mem_wipe(&rr,sizeof rr);
   mem_wipe(&x,sizeof x);mem_wipe(&f,sizeof f);mem_wipe(&t,sizeof t);
+  mem_wipe(&v,sizeof v);mem_wipe(&row,sizeof row);mem_wipe(&col,sizeof col);
   mem_wipe(&pre,sizeof pre);mem_wipe(&o,sizeof o);
 }

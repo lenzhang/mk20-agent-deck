@@ -7,9 +7,20 @@
 import select, socket, threading, time
 
 class FakeProxy:
-    def __init__(self, allow=None, fail=None, delay_s=0.0, host="127.0.0.1"):
+    def __init__(self, allow=None, fail=None, delay_s=0.0, host="127.0.0.1",
+                 mode=None, targets=None, socketpair=False, upstream_factory=None, record=None):
         self.allow, self.fail, self.delay_s = allow, fail, delay_s
+        self.mode, self.targets, self.upstream_factory = mode, targets or {}, upstream_factory
+        self.record = record
+        self.client = None
         self.connects, self.violations, self.errors = [], [], []
+        self._stop = False
+        if socketpair:
+            self.client, c = socket.socketpair()
+            self.sock = None
+            self.port = 7890; self.url = "http://127.0.0.1:7890"
+            threading.Thread(target=self._conn, args=(c,), daemon=True).start()
+            return
         self.sock = socket.socket(); self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((host, 0)); self.sock.listen(8)
         self.port = self.sock.getsockname()[1]
@@ -19,7 +30,9 @@ class FakeProxy:
 
     def close(self):
         self._stop = True
-        try: self.sock.close()
+        try:
+            if self.client: self.client.close()
+            if self.sock: self.sock.close()
         except OSError: pass
     def __enter__(self): return self
     def __exit__(self, *a): self.close()
@@ -45,13 +58,27 @@ class FakeProxy:
                 self.violations.append(line)
                 c.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); return
             target = parts[1]; self.connects.append(target)
+            if self.record is not None: self.record.append(self.port)
+            if self.mode == "slowloris":
+                for b in b"HTTP/1.1 200 Connection established\r\n\r\n":
+                    c.sendall(bytes([b])); time.sleep(0.15)
+                return
+            replies = {"407": b"HTTP/1.1 407 Authentication Required\r\n\r\n",
+                       "403": b"HTTP/1.1 403 Forbidden\r\n\r\n",
+                       "garbage": b"garbage\r\n\r\n",
+                       "extra-bytes": b"HTTP/1.1 200 OK\r\n\r\nX",
+                       "oversize": b"HTTP/1.1 200 OK\r\nX: " + b"a" * 8192 + b"\r\n\r\n"}
+            if self.mode in replies:
+                c.sendall(replies[self.mode]); return
             if self.delay_s: time.sleep(self.delay_s)
             if self.fail == "close": return
             if self.fail == "refuse" or (self.allow is not None and target not in self.allow):
                 c.sendall(b"HTTP/1.1 " + (b"403 Forbidden" if self.fail != "refuse" else b"502 Bad Gateway") +
                           b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); return
             h, p = target.rsplit(":", 1)
-            try: u = socket.create_connection((h, int(p)), timeout=5)
+            try:
+                u = (self.upstream_factory() if self.upstream_factory else
+                     socket.create_connection(self.targets.get(target, (h, int(p))), timeout=5))
             except OSError:
                 c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"); return
             c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")

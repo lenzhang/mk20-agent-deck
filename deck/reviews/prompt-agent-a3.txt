@@ -1,0 +1,69 @@
+# MK20 agent phase A3 — network: HTTP CONNECT proxy + mbedTLS + clock (host build only)
+Repo root = cwd. Work only under deck/agent/ (plus deck/reviews/agent-a3-* notes and the A3 status line in deck/AGENT-BUILD-PLAN.md).
+Read first: deck/AGENT-BUILD-PLAN.md (§3.1, D1/D1'/D2 rows, "A3" section), deck/agent/CTL-PROTOCOL.md if present, deck/agent/NOTES-agent-a2.md,
+deck/agent/Makefile, deck/mk20deck/agentcfg.py (net_config/provider_config/route_for = the net.json/provider.json writer; DO NOT modify it).
+
+HARD RULES: no git commit/push; no network access (sandbox; vendored sources are already in the tree); no device/adb/serial; no kbd/firmware/
+kernel changes; C11, -Wall -Wextra -Werror, ASan/UBSan test builds like the existing Makefile; never print/log API keys, Authorization
+headers or key file contents (mask as "***"); keep existing A2 behaviour and tests green. Vendored code under deck/agent/vendor/ is unmodified
+(mbedtls 3.6.7 LTS in vendor/mbedtls, Mozilla CA bundle in vendor/ca/cacert.pem, see vendor/VENDOR-A3.md); configure mbedTLS ONLY via
+our own config header (MBEDTLS_CONFIG_FILE, e.g. src/mbedtls_config.h): TLS client only (1.2 + 1.3), ECDHE (x25519, secp256r1/384r1),
+RSA + ECDSA verify, AES-GCM + ChaCha20-Poly1305, SHA-256/384, X.509 + PEM, HAVE_TIME_DATE (expiry checked), no server, no renegotiation,
+no SSLv3/TLS1.0/1.1, no FS_IO requirement (we read files ourselves). Compile only the library/*.c that are needed; vendor TUs may get
+warning suppressions in the Makefile (like stb), our code may not. Add sanitized + nosan object sets like zlib.
+
+## Deliverables
+1. src/netcfg.c/.h — parse net.json (version 1) exactly as agentcfg.py writes it: profile mac_proxy {proxy.url http://host:port,
+   proxy.fallbacks[], routes.domestic/foreign="proxy"} and board_wifi {routes.domestic="direct", foreign "proxy"|"blocked"}; also accept the
+   D1' profile "usb_wifi" {mode:"direct"|"proxy", proxy.url when mode=proxy}. FAIL-CLOSED: missing/unreadable/oversize(>16 KiB)/malformed
+   file, unknown version/profile/route value, bad URL (only http://host:port, port 1..65535, host = IPv4 literal or hostname <=253),
+   mac_proxy with any "direct" route, or "proxy" route without proxy.url → error, and NO socket is ever created. route_for(provider route)
+   → {proxy list | direct | blocked}; "direct" is only possible for usb_wifi mode=direct or board_wifi domestic (user-chosen profiles).
+   There is no other direct code path anywhere. No egress-IP proof, no mihomo API (D2).
+2. src/net.c/.h — HTTPS client:
+   - TCP connect with 10 s timeout (non-blocking connect + poll), getaddrinfo for hostnames; overall per-request deadline (default 60 s,
+     configurable); every recv/send/handshake step honours the deadline.
+   - proxy route: try proxy.url then fallbacks in order, only on connect failure to the proxy itself (never fall to direct). Send
+     "CONNECT host:443 HTTP/1.1\r\nHost: host:443\r\n\r\n"; read headers with a hard cap (8 KiB), require "HTTP/1.x 200"; 407/403/other →
+     error class "proxy" (status kept). Bytes after the header block in the CONNECT reply → error.
+   - mbedTLS over that socket: SNI = target host, verify against CA bundle (default vendor/ca/cacert.pem path configurable, test bundle
+     injectable), MBEDTLS_SSL_VERIFY_REQUIRED, hostname check; psa_crypto_init; entropy+ctr_drbg. Verify failures → "tls_verify"
+     (expired / not-yet-valid / name mismatch / unknown CA distinguished in detail string), other handshake errors → "tls".
+   - HTTP/1.1: one request per connection, "Connection: close", method GET/POST, extra headers (Authorization read from a key file,
+     which must be a regular file, not group/other readable (0600/0400), <=4 KiB, trailing whitespace stripped, never logged), body with
+     Content-Length. Response: status line + headers (cap 16 KiB), body via Content-Length, chunked, or until-close; body cap (default
+     8 MiB, configurable) → "too_large". Keep the response Date header.
+   - Error classes (stable strings for the future config page "connection test"): config, blocked, dns, connect, proxy, clock, tls_verify,
+     tls, timeout, http_parse, too_large, io. No exit-IP checks.
+   - Wipe key/Authorization buffers with mem_wipe after use; free everything on every path.
+3. src/clock.c/.h — TLS refuses to start unless the clock is "trusted": wall clock >= a compile-time floor (build date, overridable
+   -DMK20_TIME_FLOOR) AND (a sync marker file such as /run/mk20/clock.synced newer than boot, path configurable for tests, OR an explicit
+   --trust-clock flag). Time sources: (a) parse an RFC 7231 IMF-fixdate Date header (strict parser, reject obsolete/garbage) — used from
+   the proxy/HTTP response; (b) GET http://<mac>/time on the usb0 Mac address returning JSON {"epoch":<int>} (client only; plain HTTP,
+   10 s timeout, only to the configured Mac host, never via Wi-Fi). If |skew| > 120 s → settimeofday via an injectable setter (CLI only
+   does it with --set-clock; tests use a fake setter), then write the marker. Never skip certificate verification to work around time.
+4. CLI in mk20-agent (src/agent_cli.c): `--net-test URL [--net PATH] [--route domestic|foreign] [--key-file PATH] [--ca PATH]
+   [--timeout S] [--trust-clock]` → prints one JSON line {ok, class, detail, http_status, bytes, via:"proxy host:port"|"direct"} and never
+   the body or headers containing secrets; `--time-sync --mac-host H [--port P] [--set-clock]`. Exit 0 only on HTTP response received.
+5. Tests (C unit + pytest, in existing style; CI must not need internet):
+   - C: netcfg table tests (all fail-closed cases, no socket created — e.g. count socket() via an injected hook), URL parser, CONNECT
+     reply parser, HTTP response parser incl. chunked edge cases (bad hex, oversize chunk, missing CRLF, trailer), Date parser, key file
+     permission checks.
+   - pytest fakes in tests/fakes/: fake_proxy (CONNECT tunnel that records targets; modes 200/407/403/garbage/slowloris/extra-bytes) and
+     a TLS server (python ssl) with a throwaway CA + certs generated at test time via the `openssl` CLI into tmp_path: valid, expired,
+     not-yet-valid, wrong hostname, unknown CA → all non-valid ones must fail with tls_verify; valid → 200 through proxy. Prove "proxy
+     unreachable → failure and the target got zero direct connections"; mac_proxy never connects directly; usb_wifi direct works;
+     fallbacks used in order; deadline/timeout; too_large; Authorization reaches the fake server but never appears in CLI stdout/stderr;
+     clock untrusted → class clock and no TLS connection attempted. Use hostname "localhost"/SNI test names resolving to 127.0.0.1.
+   - NOTE: your sandbox may forbid binding 127.0.0.1 — still write these tests; they are run on Linux afterwards. Mark nothing as xfail.
+6. Kimi A2 minors (fold in): (a) agent_cli.c rss_kb: /proc/self/status opened but no VmHWM line → fall back to getrusage instead of 0;
+   (b) agent_cli.c ~88: a real img_jpeg failure (image_limit/jpeg) after the deadline must be reported as that error, not timeout (check rc
+   first); (c) des.c: S-box temps v/row/col declared at function scope and mem_wipe'd with the rest. Add/keep tests.
+7. Memory: document peak RSS of a --net-test against the local TLS server (nosan build) in deck/agent/NOTES-agent-a3.md (device budget:
+   agent total <=16 MB); also note mbedTLS config choices, error-class table, net.json rules, and what remains for [M][D] (device through
+   Mac proxy /models 200/401; mihomo reachability on 172.30.250.1) and A4 (llm.c on top of net.c).
+8. Makefile: `make -C deck/agent test` builds and runs all C tests; add an `armhf` target building a static nosan mk20-agent with
+   CC=arm-linux-gnueabihf-gcc if available (do not fail test if the toolchain is missing).
+Finally run `make -C deck/agent test` and `python3 -m pytest deck/agent/tests -q` (report which TCP tests the sandbox blocked) and then act as
+first acceptance reviewer of your own diff against the A3 section: list each requirement PASS/FAIL. Write the summary (<=40 lines) to
+deck/reviews/agent-a3-codex-summary.md.
