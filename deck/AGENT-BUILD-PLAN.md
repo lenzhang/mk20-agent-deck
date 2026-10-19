@@ -22,13 +22,17 @@
 
 | # | 决定 | 对计划的影响 |
 |---|---|---|
-| D1 代理接入 | **Mac 上不需要任何“键盘驱动”。**板子直接连 Mac 的代理端口：若 mihomo `allow-lan` 在 USB 链路（172.30.250.1）上可达就直连该端口；否则在 Mac 上加一个极小的 launchd TCP 转发，**只绑 USB 接口 172.30.250.1**，转发到 `127.0.0.1:7890`。**代理配置永不修改。**设备侧连通性检查等用户回家再做 | §3.1、A3、§10 |
+| D1 代理接入（**已被 D1′ 取代**） | **Mac 上不需要任何“键盘驱动”。**板子直接连 Mac 的代理端口：若 mihomo `allow-lan` 在 USB 链路（172.30.250.1）上可达就直连该端口；否则在 Mac 上加一个极小的 launchd TCP 转发，**只绑 USB 接口 172.30.250.1**，转发到 `127.0.0.1:7890`。**代理配置永不修改。**设备侧连通性检查等用户回家再做 | §3.1、A3、§10 |
 | D2 出口 | **键盘程序里不做出口 IP 证明。**出口选择由网关/代理负责（mihomo 规则）。A3 删除出口证明，`/run/mk20/egress.json` 取消 | §3.1、A3、A8 health、§6.1 |
 | D3 模型 | **只做一个 OpenAI 兼容 `chat/completions` 适配器**（视觉用 `image_url` base64 data URI，支持 tool calls）。provider 只是配置（`base_url`、`model`、key 文件）：Qwen（默认）、GLM、Kimi、OpenAI | §3.5、A4 |
 | D4 急停 | agent 页固定急停键 + 任意页长按 K2 1 s（按原计划） | §3.4 |
 | D5 聊天/任务入口 | 新增 **HTTP API + 极简网页**（只在 usb0 上服务）：提交任务、查看进度/步骤/截图、暂停、停止。在键盘上打字太累，所以任务从网页/API 下达；**语音任务后续**经 PTT + 现有语音网关 ASR。agent 输入中文用**剪贴板粘贴（Cmd+V）**，剪贴板写入机制待定（见 §3.3） | §3.3、§3.8、A7 |
 | D6 MCP | MCP **可以提交任务，但不能启用 agent**；总开关只在键盘上 | §3.7 |
 | D7 密钥 | key 通过板载配置网页录入，存 `/data/mk20/secrets/<provider>.key`（root 0600） | §3.8 |
+| **D1′ 网络出口（修订，2026-10-19）** | 出口是**用户在板载配置网页上选的 profile**：① “Mac 代理”（填 host:port，走 HTTP CONNECT）；② “USB WiFi dongle”（直连，或再配一个代理）。**可达性由用户保证，键盘只按所选 profile 走。**计划里不再设计转发；launchd 转发只作为可选备注（§3.1） | §3.1、A3、A7 配置页 |
+| **D5′ 语音（两条路）** | (a) 给 Mac 侧 agent / Mac 输入法：键盘把自己暴露成 **USB 麦克风**（composite 里加 UAC1/UAC2），macOS 听写/输入法直接用它当输入源；(b) 给键盘 agent：本地录键盘麦克风，发给配置页里配置的 **ASR 模型**。可行性见 §3.9（**UAC 方向有硬件风险**） | §3.9、A1b、A7 |
+| **D8 屏幕开放给 agent** | 21 块屏（fb1–20 键屏 + fb21 副屏）经 kbd 控制 API 开放：读当前页/布局、往键屏或副屏画图/写字、创建 agent 自有页面、在这些页面上绑定按键动作。**保留且不可覆盖**：急停键和 agent 控制页。agent 写屏限速，且只能写 agent 自有页面，除非用户授权 | §3.4b、A1、A7 |
+| D6 | 再次确认：MCP 可提交任务，不能启用 agent | §3.7 |
 | 7（截图提示/遮挡） | 同意默认副屏提示“正在上传画面”，遮挡区域可配置 | §3.2 |
 
 ---
@@ -106,7 +110,11 @@
   设备侧**绝不直连**：`net.json` 缺失或解析失败时一律不发请求（fail-closed）。
 - **出口选择归网关/代理（D2）**：设备侧不做出口 IP 证明、不读 mihomo API。国外 provider 走 112 US 出口这件事由 Mac 上
   mihomo 的规则保证（AI 组），**任何情况下都不改代理配置**。设备只保证“所有模型流量只经代理端口，绝不直连”。
-- **代理接入（D1，已定）**：Mac 上不装驱动。若 mihomo `allow-lan` 且在 172.30.250.1 可达，`net.json.proxy.url` 直接指向该端口；
+- **网络出口 profile（D1′，取代下面的 D1 条目）**：配置网页上二选一：`mac_proxy{host,port}`（HTTP CONNECT），或
+  `usb_wifi{mode: direct | proxy, proxy:{host,port}}`。`net.json` 按 profile 写；**可达性由用户保证**，设备不做出口探测，
+  只在“连接测试”时报告错误类别。`usb_wifi + direct` 是用户的显式选择，因此允许直连（与旧的“foreign 不许 direct”规则相比是放宽，
+  只在用户在配置页选了这个 profile 时生效）。没有 `net.json` 或解析失败 → 不发请求（fail-closed 不变）。
+- （可选备注，非计划项）**代理接入（D1，旧）**：Mac 上不装驱动。若 mihomo `allow-lan` 且在 172.30.250.1 可达，`net.json.proxy.url` 直接指向该端口；
   否则在 Mac 上加一个极小的 **launchd TCP 转发**（plist + 几十行的转发程序），**只绑 172.30.250.1**，转发
   `172.30.250.1:17891 → 127.0.0.1:7890`。不改 mihomo 配置。哪种方式可行，等用户回家时在设备上实测 [D][M]。
 - **Profile `board_wifi`（后期）**：Wi-Fi dongle + 板载代理。国内直连，国外必须经板载代理，否则 `blocked`，与 agentcfg 的现有规则一致。
@@ -168,6 +176,20 @@
   触发后：撤销租约 → all-up（键盘和指针按钮）→ 状态写成 `stopped` → 推送给 agent → agent 取消正在进行的 HTTP 请求。
   恢复必须显式重新启用（按 agent 页的“允许”键）。
 - 确认页：显示摘要，展示满 ≥300 ms 后才接受“确认”键；“取消”键和超时（默认 30 s）都按拒绝处理。
+
+### 3.4b 屏幕 API（D8，A1 定协议 / A7 实现渲染）
+
+在 kbd.sock 上增加 `screen.*`（同一 uid 检查与 2 客户端上限；**不需要输入租约，但需要 agent 已被键盘“允许”**）：
+- `screen.layout` → 21 块屏的编号、尺寸（键屏 128×128，副屏 428×142）、总线、当前页 id、每页属主（`system` / `agent` / `user`）。
+- `screen.page.create{name}` → `page_id`（属主 agent，上限 8 页）；`screen.page.delete`、`screen.page.show{page_id}`（只能切到 agent 自有页或 agent 控制页）。
+- `screen.draw{page_id, fb, x, y, w, h, fmt: rgb565|jpeg, data(base64)}`、`screen.text{page_id, fb, text, size, fg, bg}`（文字由 kbd 内置字体渲染）。
+- `screen.bind{page_id, key(row,col), action}`：agent 页上的按键按下时，kbd 推送事件 `{"ev":"key","page":..,"key":..}` 给 agent（只在该页显示时）。
+- **保留、不可覆盖**：急停键位（agent 页固定键）和 agent 控制页（允许/禁止、急停、确认/取消）。对它们的 draw/bind/delete 一律 `reserved`。
+  K2 长按急停在任何页面都生效。
+- **权限范围**：默认只能写 agent 自有页；写 system/user 页需要用户在键盘上授权（`grant{scope: "all_pages", ttl}`，键面确认，上电失效）。
+- **限速**：每屏 ≤10 帧/s，全体 ≤30 次写/s，单条 ≤64 KB（base64 前）；超限 `rate_limited`，不排队。写屏不得让按键→HID 延迟 P95 恶化 >5 ms。
+- 急停或撤销“允许”时：agent 自有页保留但切回 system 页，agent 的 bind 全部失效。
+- 测试（A1 协议单测 + A7 渲染/sim cases）：保留页拒绝、限速、授权过期、未允许时拒绝、页切换后 key 事件只发给属主。
 
 ### 3.5 模型客户端与 provider 适配
 
@@ -238,6 +260,26 @@
 
 ---
 
+### 3.9 语音（D5′）与 UAC 可行性（box 上只读调研，2026-10-19，未碰设备）
+
+**(b) 键盘 agent 本地录音 → 配置的 ASR 模型**：可行性高。
+- 内核 `config-221`（`/workspace/kpatch/live-221/config-221`，即量产 5.4.61 内核配置）：`CONFIG_SND=y`、`CONFIG_SND_PCM=y`、
+  `CONFIG_SND_SUNXI_SOC=y`、`CONFIG_SND_SUNXI_SOC_SUN8IW20_CODEC=y`（T113 片内 codec，ADC/麦克风输入）、`SIMPLE_CARD`、`DAUDIO`；
+  `SND_SOC_DMIC`/`SUNXI_SOC_DMIC` 未开（若麦克风是 PDM 数字麦则不可用，需真机确认麦克风接在 codec 的模拟 MIC 输入上）。
+- stock KD 的 `ConfigManager::updateUSBtype()` 会 `killall arecord/aplay`，说明 stock rootfs 有 `arecord`、且曾经录过音。
+- 待真机确认 [D]：`/proc/asound/cards`、`arecord -l`、增益/mixer 名称；PTT 按下录音、松开结束，16 kHz mono PCM → ASR（OpenAI 兼容
+  `/audio/transcriptions` 或 provider 自定义，配置项 `asr{base_url, model, key_file}`）。
+
+**(a) 键盘当 USB 麦克风给 Mac**：**有硬件风险，可能不可行。**
+- 内核里 `CONFIG_USB_F_UAC1=y`、`CONFIG_USB_CONFIGFS_F_UAC1=y`、`CONFIG_USB_U_AUDIO=y`（内建）；**`F_UAC2` 和 `UAC1_LEGACY` 未开**（UAC2 要换内核）。
+- 但 stock `/data/setusbconfig`（`/workspace/mk20-research/fw/rootfs/bin/setusbconfig` L128–140）的 uac1 模式写着
+  **“lack of ISO(IN) endpoint, disable PC capture”** 并设 `p_chmask=0`——即 sunxi UDC 上**没有可用的 ISO IN 端点**，
+  恰好就是“设备→主机”的麦克风方向。加上 composite 已经为 ECM+HID+ADB 打过 ep3→int 内核补丁，EP 预算本来就紧。
+- 结论：UAC 麦克风要么需要再改 UDC 端点分配（内核补丁、要真机验证，风险同 ep3 补丁），要么放弃 UAC，改用
+  **Mac 侧小助手**（经 ECM 收 PCM，注入虚拟音频设备，如 BlackHole 类驱动）——但那就回到“Mac 上要装东西”。
+- 下一步（box，只读）：读 sunxi UDC 驱动的端点表（`kallsyms`/源码里的 `ep_fifo`/ISO 能力）确认 ISO IN 是否真的没有、能否把某个
+  bulk/int 端点改成 ISO；在此之前 (a) 标为 **待定，需要用户在“内核补丁”和“Mac 助手”之间取舍**。
+
 ## 4. 资源预算（T113：2×A7，约 57 MB 可用）
 
 | 项 | 常驻 | 峰值 |
@@ -277,6 +319,11 @@
 - 测试：租约过期会 all-up、急停 ≤100 ms（e2e 里计时）、急停后 act 被拒、PTT 按下抢占、确认 <300 ms 无效、hidg0 rebind 期间动作排队或失败但不 spin。
 - **[D]**：装到真机（kbd 本来就要真机验证），在 Mac 上 `ioreg` 看描述符，并验证滚轮。这一步属于 **gadget 变更**，按惯例走 probation，自检不过就回滚。
 - 验收：box 测试全过；真机能滚动；kbd 原有验收不退化。
+
+- **A1 状态（2026-10-19）**：已实现并测试 kbd.sock 租约/续约/释放、act（key/mod/ptr/scroll/allup）、急停（e2e 实测 1.1 ms all-up）、
+  人手抢占、HID 滚轮描述符变体（`MK20_HID_SCROLL=1` + `--hid-scroll`，默认关）。未做：K2 长按急停（要先真机确认 K2 press/release
+  上报）、`confirm.request`、`ui.agent`、`screen.*`（D8）、mk20d/mk20lib 把 `--ctl`/`--hid-scroll` 接到发布开关上。
+- **A1b 屏幕 API 协议（D8）**：在 kbd.sock 上定义并单测 `screen.*` 的权限/限速/保留页规则（渲染在 A7）。
 
 ### A2 VNC 抓帧（box + [D] 测量）
 - `rfb.c`（ZRLE/Hextile/Raw + Cursor/DesktopSize）、`scale.c`（流式按行累加）、`img.c`（JPEG 编码）；先做 CLI `mk20-agent --snap out.jpg`。
@@ -318,6 +365,8 @@
 ### A7 键面 UI、配置下发、密钥页（box + sim + [D]）
 - mk20-kbd：agent 状态组件和 L5 agent 页（仿真里先做，JSON cases 覆盖急停、确认、允许开关）。
 - mk20deck：设置页的应用改成推送到设备；连接测试改由设备侧执行；增加“智能体”状态镜像。
+- 配置网页新增：网络出口 profile（D1′）、ASR 模型配置（D5′b）。
+- mk20-kbd：`screen.*` 渲染与 agent 自有页（D8），保留页与授权确认。
 - mk20-agent `--web`：配对码、写入式密钥页、`PUT /config`、`POST /test`，以及 **D5 任务 API + `/chat` 极简网页**（提交/进度/截图/暂停/停止）。
 - 测试：sim cases、web 表单安全测试（无读出接口、配对码过期、CSRF、权限 0600、原子性），secrets 不进 backup（已排除，加测试固化）。
 - **[D]**：真机看页面效果，用户回家后核对一次。
@@ -402,7 +451,8 @@
 仍待定：
 - **剪贴板写入机制**（VNC ClientCutText vs Mac 剪贴板助手）：A2 实测 ClientCutText 后由我推荐。
 - **默认国内模型**：A4 基准之后推荐、用户确认；需要用户经板载密钥页录入 Qwen/GLM/Kimi key。
-- **D1 两种方式哪种可行**：用户回家时设备上实测。
+- **D5′(a) USB 麦克风**：UDC 缺 ISO IN 端点（见 §3.9），需要在“再打内核补丁”与“Mac 侧助手”之间取舍。
+- 麦克风硬件形态（模拟 MIC 进片内 codec 还是 PDM）：真机 `arecord -l` 确认。
 
 ## 10. 需要设备 / 用户的步骤汇总
 
