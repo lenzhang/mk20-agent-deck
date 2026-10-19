@@ -95,9 +95,13 @@ Every boundary resets confirmation `shown` and its timestamp. Returning to L5
 requires a new completed presentation and a new 300 ms guard.
 
 Host output has a bounded 16 KiB nonblocking buffer; partial writes are retained.
-Space for 64 empty cmd100 acks is reserved against JSON reply floods. This preserves
-the stop-and-wait host's ack under backpressure without delaying safety. A physically
-lost link cannot promise delivery; unbounded noncompliant floods may exhaust the
+Space for 64 empty cmd100 acks is reserved against all other output, including
+cmd200 floods. Another 64 one-byte cmd200 error acks (or empty success acks) are
+reserved against ordinary output. Both protocol acks bypass pending key-ups and
+navigation taps; key-ups retain ownership until queued and precede later taps and
+ordinary output. This preserves the stop-and-wait host's ack under backpressure
+without delaying safety. A physically lost link cannot promise delivery;
+unbounded noncompliant floods may exhaust the
 fixed buffer. Ack means handled, never physically displayed.
 
 The L5 scaffold provides physical allow/disable, guarded confirm/cancel, HOME/LS,

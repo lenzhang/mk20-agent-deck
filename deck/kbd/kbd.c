@@ -76,13 +76,21 @@ void kbd_host_drain(kbd_t *k)
     }
 }
 
+static int host_protocol_ack(uint32_t cmd, size_t n)
+{
+    return (cmd == HOST_CMD_JPG && n == 0) || (cmd == HOST_CMD_TILE565 && n <= 1);
+}
+
 int kbd_host_queue(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
 {
     if (k->host_fd < 0) return -1;
     size_t len = k->host_out_len-k->host_out_off;
-    /* Keep room for 64 empty JPEG acks even during a getInfo flood.
-     * Compliant JPEG hosts are stop-and-wait (one outstanding frame). */
-    size_t limit = sizeof k->host_out - (cmd == HOST_CMD_JPG ? 0 : 64*(HOST_HDR+4));
+    /* Reserve 64 empty JPEG acks against all other output, including tile
+     * floods, plus 64 worst-case tile acks (one-byte E) against ordinary
+     * output. Compliant image hosts are stop-and-wait. Keep the fixed bound. */
+    size_t limit = sizeof k->host_out;
+    if (!(cmd == HOST_CMD_JPG && n == 0)) limit -= 64*(HOST_HDR+4);
+    if (!host_protocol_ack(cmd,n)) limit -= 64*(HOST_HDR+5);
     if (len > limit || n > limit-len || HOST_HDR+4 > limit-len-n) {
         k->st.host_tx_errors++; return -1;
     }
@@ -99,7 +107,10 @@ int kbd_host_send(kbd_t *k, uint32_t id, uint32_t cmd, const void *pl, size_t n)
     if (k->host_fd < 0) return -1;
     if (k->onboard) {
         kbd_host_drain(k);
-        if (onboard_host_flush(k)) { k->st.host_tx_errors++; return -1; }
+        /* Pending releases/taps fence ordinary output, but must not fence
+         * protocol acks: their reserved space keeps stop-and-wait alive.
+         * A failed flush retains release ownership and navigation ordering. */
+        if (onboard_host_flush(k) && !host_protocol_ack(cmd,n)) { k->st.host_tx_errors++; return -1; }
         if (kbd_host_queue(k,id,cmd,pl,n)) return -1;
         kbd_host_drain(k); return 0;
     }
