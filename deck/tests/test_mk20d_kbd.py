@@ -393,6 +393,8 @@ HOLDER = r'''import os, signal, sys, time
 # fake mk20-kbd: holds the "hidg0" file open; mode: close (SIGUSR1 closes fd), ignore (USR1 ignored), stubborn (+TERM)
 hid, mode, ready = sys.argv[2], sys.argv[3], sys.argv[4]
 fd = [os.open(hid, os.O_WRONLY)]
+if mode == "deleted":   # parked stale fd: "/dev/hidg0 (deleted)"; a new node appears at the path
+    os.unlink(hid); open(hid, "w").close()
 def usr1(*_):
     if mode == "close" and fd[0] >= 0:
         os.close(fd[0]); fd[0] = -1
@@ -459,6 +461,14 @@ def test_router_stop_fails_closed_term_then_kill(gh):
     r, dt = run("router_stop", MK20_KBD_HID_TICKS="3")
     assert r.stdout.strip() == "done" and dt < 6 and p2.wait(2) == -signal.SIGKILL
     assert "SIGKILL" in (t / "log").read_text()
+
+
+def test_router_stop_sees_parked_deleted_hidg0_fd(gh):
+    t, start, run, hid = gh
+    p = start("deleted")
+    assert any(os.readlink(f"/proc/{p.pid}/fd/{f}") == f"{hid} (deleted)" for f in os.listdir(f"/proc/{p.pid}/fd"))
+    r, dt = run("router_stop", MK20_KBD_HID_TICKS="3")
+    assert r.stdout.strip() == "done" and p.wait(3) == -signal.SIGTERM   # still held after USR1 -> fail closed
 
 
 def test_router_stop_ignores_kbd_without_hid_and_foreign_pids(gh):

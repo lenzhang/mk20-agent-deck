@@ -134,13 +134,14 @@ def main():
         r3 = hid_reports()
         check(r3 == [b"\x01" + bytes(8)], f"all-up on reopen {r3}")
         os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0])); hid_reports()
-        # fw 1.2.0: hidg0 node deleted + re-created after gadget setup -> detected (~1 s check), reopened,
-        # all-up then the held RAlt re-sent on the new node; nothing more goes to the dead one
+        # fw 1.2.0: hidg0 node deleted + re-created after gadget setup -> detected (~1 s check); the stale fd is
+        # PARKED (kept open: closing it after a re-bind kills the new cdev, codex r121), the new node opened,
+        # all-up then the held RAlt re-sent on it; nothing more goes to the stale one
         os.rename(hidp, hidp + ".old"); os.mkfifo(hidp)
         hr2 = os.open(hidp, os.O_RDONLY | os.O_NONBLOCK)
         t0 = time.time()
         while fd_mode(p.pid, hidp) is None and time.time() - t0 < 3: time.sleep(0.05)
-        check(fd_mode(p.pid, hidp) == 1 and fd_mode(p.pid, hidp + ".old") is None, "hidg0 replacement: old closed, new opened")
+        check(fd_mode(p.pid, hidp) == 1 and fd_mode(p.pid, hidp + ".old") == 1, "hidg0 replacement: old parked, new opened")
         b = read_for(hr2, 0.3); r5 = [b[i:i + 9] for i in range(0, len(b), 9)]
         check(r5 == [b"\x01" + bytes(8), b"\x01\x40" + bytes(7)], f"replacement: all-up then held RAlt {r5}")
         check(hid_reports() == [], "nothing written to the dead node")
@@ -148,6 +149,12 @@ def main():
         s = json.load(open(st))
         check(s["hid_open"] == 1 and s["hid_replaced"] == 1 and s["hid_reopens"] == 1, f"status hid counters {s}")
         hr_old, hr = hr, hr2
+        # teardown (stop file): current AND parked fds closed before any UDC/configfs change
+        open(hidp + ".stop", "w").close(); time.sleep(0.4)
+        check(fd_mode(p.pid, hidp) is None and fd_mode(p.pid, hidp + ".old") is None, "stop file closes current + parked")
+        hid_reports(); os.unlink(hidp + ".stop"); time.sleep(1.5)
+        check(fd_mode(p.pid, hidp) == 1, "reopened after teardown")
+        hid_reports(); os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0])); hid_reports()
         p.send_signal(signal.SIGTERM); p.wait(3)
         check(p.returncode == 0, "clean exit")
         r4 = hid_reports()

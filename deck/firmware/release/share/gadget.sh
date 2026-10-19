@@ -104,8 +104,9 @@ router_stop() {
 kbd_pids() { for p in $(pgrep -f 'bin/mk20-kbd --run' 2>/dev/null); do
   case "$p" in ''|*[!0-9]*) continue;; esac
   tr '\000' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'bin/mk20-kbd --run' && echo "$p"; done; }
+# a parked stale fd (mk20-kbd keeps it open after a node re-create, see kbd/hid.h) reads "/dev/hidg0 (deleted)"
 kbd_hid_holders() { for p in $(kbd_pids); do for f in /proc/"$p"/fd/*; do
-  [ "$(readlink "$f" 2>/dev/null)" = "${MK20_HIDG:-/dev/hidg0}" ] && { echo "$p"; break; }; done; done; }
+  case "$(readlink "$f" 2>/dev/null)" in "${MK20_HIDG:-/dev/hidg0}"|"${MK20_HIDG:-/dev/hidg0} (deleted)") echo "$p"; break;; esac; done; done; }
 kbd_hid_quiesce() {
   kh=$(kbd_hid_holders); [ -n "$kh" ] || return 0
   for kp in $kh; do kill -USR1 "$kp" 2>/dev/null; done

@@ -17,10 +17,10 @@ void hid_init(hid_t *h, const char *path, const char *stop_file)
     snprintf(h->path, sizeof h->path, "%s", path ? path : HID_DEFAULT_PATH);
     snprintf(h->stop_file, sizeof h->stop_file, "%s", stop_file ? stop_file : "");
     h->dirty = 1;
-    h->backoff_ms = 1000;
+    h->backoff_ms = 100;
 }
 
-static int gone_errno(int e) { return e == ENXIO || e == ESHUTDOWN || e == ENODEV || e == EPIPE; }
+static int gone_errno(int e) { return e == ENXIO || e == ESHUTDOWN || e == ENODEV || e == EPIPE || e == EBADF; }
 
 static void kbd_report(const hid_t *h, uint8_t *r)
 {
@@ -32,9 +32,9 @@ static int wr(hid_t *h, const uint8_t *rep, size_t n)
     if (h->fd < 0) { errno = EBADF; return -1; }
     ssize_t w;
     do w = write(h->fd, rep, n); while (w < 0 && errno == EINTR && !h->close_req);
-    if (w == (ssize_t)n) { h->writes++; h->hard_fail = 0; return 0; }
+    if (w == (ssize_t)n) { h->writes++; h->hard_fail = 0; h->backoff_ms = 100; return 0; }
     if (w >= 0) errno = EIO;
-    if (errno == EAGAIN) h->eagain++; else { h->errors++; h->hard_fail++; if (gone_errno(errno)) h->reopen_req = 1; }
+    if (errno == EAGAIN) h->eagain++; else { h->errors++; h->hard_fail++; if (gone_errno(errno)) h->reopen_req = 1; }   /* -> identity check now, nothing closed */
     return -1;
 }
 
@@ -71,6 +71,13 @@ void hid_close(hid_t *h, int release)
     h->ptr_n = 0; h->watch = 0; h->reopen_req = 0; h->keep = 0;
 }
 
+void hid_close_parked(hid_t *h)
+{
+    unsigned n = h->nparked < HID_MAX_PARKED ? h->nparked : HID_MAX_PARKED;
+    for (unsigned i = 0; i < n; i++) close(h->parked[i]);
+    h->nparked = 0;
+}
+
 int hid_node_replaced(const hid_t *h)
 {
     struct stat a, b;
@@ -93,34 +100,35 @@ void hid_request_close(hid_t *h) { h->close_req = 1; }
 
 void hid_service(hid_t *h, long now)
 {
-    if (h->fd >= 0 && (h->close_req || stop_present(h))) {
+    if ((h->fd >= 0 || h->nparked) && (h->close_req || stop_present(h))) {   /* teardown: no hidg0 fd at all */
         hid_close(h, 1);
+        hid_close_parked(h);
         h->next_open_ms = now + 200;
     }
-    if (h->fd >= 0 && h->watch && !h->reopen_req && now >= h->next_check_ms) {
-        h->next_check_ms = now + 1000;
-        if (hid_node_replaced(h)) h->reopen_req = 1;
-    }
-    if (h->fd >= 0 && h->reopen_req) {   /* dead node: no all-up there (it cannot reach the host), reopen soon */
-        fprintf(stderr, "mk20-kbd: %s replaced/gone, reopening\n", h->path);
-        close(h->fd); h->fd = -1; h->closes++; h->replaced++; h->ptr_n = 0;
-        h->reopen_req = 0; h->watch = 0; h->keep = 1;
-        h->backoff_ms = 100; h->next_open_ms = now + 100;
-        return;
+    if (h->fd >= 0 && (h->reopen_req || (h->watch && now >= h->next_check_ms))) {
+        h->next_check_ms = now + 1000; h->reopen_req = 0;
+        if (hid_node_replaced(h)) {   /* stale node: PARK the fd (never close it), reopen the path with back-off */
+            fprintf(stderr, "mk20-kbd: %s replaced/gone: parking stale fd (#%u), reopening\n", h->path, h->nparked + 1);
+            if (h->nparked < HID_MAX_PARKED) h->parked[h->nparked] = h->fd;
+            h->nparked++;   /* past HID_MAX_PARKED the fd is leaked, still never closed */
+            h->fd = -1; h->replaced++; h->ptr_n = 0; h->watch = 0; h->keep = 1;
+            h->next_open_ms = now + h->backoff_ms;
+            return;
+        }
     }
     if (h->fd < 0) {
         if (h->close_req && !stop_present(h)) h->close_req = 0;   /* one-shot request; reopen next tick */
         if (h->close_req || stop_present(h) || now < h->next_open_ms) return;
         int fd = open(h->path, O_WRONLY | O_CLOEXEC | O_NONBLOCK);
-        if (fd < 0) {   /* ENXIO until the link is up again: short back-off after a replacement */
-            h->next_open_ms = now + h->backoff_ms;
+        if (fd < 0) {   /* ENXIO until the link is up again: back-off 100 ms .. 1 s */
             h->backoff_ms = h->backoff_ms * 2 > 1000 ? 1000 : h->backoff_ms * 2;
+            h->next_open_ms = now + h->backoff_ms;
             return;
         }
         struct stat st;
         if (fstat(fd, &st) == 0) { h->dev = st.st_dev; h->ino = st.st_ino; h->rdev = st.st_rdev; }
         if (h->keep) reattach_keep(h, fd); else hid_attach_fd(h, fd);
-        h->keep = 0; h->watch = 1; h->backoff_ms = 1000; h->next_check_ms = now + 1000;
+        h->keep = 0; h->watch = 1; h->next_check_ms = now + 1000;   /* back-off resets only on a delivered report */
         return;
     }
     if (h->dirty || h->ptr_n) {

@@ -185,8 +185,13 @@
   - `kbd_stop` (stop file, validated supervisor kill, TERM→KILL) runs right after `router_stop` in `cleanup()` and `setup_main`, before any UDC write and before `kd_start`. Those paths (flap rollback, `--rollback-now`, gadget failure) end in stock ACM+KD by design.
 - **hidg0 replacement (fw 1.2.0 field finding):**
   - The node is deleted and re-created about 13 s after gadget setup (link drop near uptime 74 s), so an early fd becomes "(deleted)" and new opens fail ENXIO until the link is up.
-  - `hid.c` checks the open node every ~1 s (fstat vs stat: dev/ino/rdev, nlink 0, path gone) and on ENXIO/ESHUTDOWN/ENODEV/EPIPE. On a hit it closes without writing to the dead node and reopens with back-off 100 ms → 1 s, then sends all-keys-up and re-sends held keys/mods.
-  - Status file: `hid_open`, `hid_reopens`, `hid_replaced`. Covered by unit tests and e2e (FIFO renamed away + new FIFO).
+  - `hid.c` checks the open node every ~1 s (fstat vs stat: dev/ino/rdev, nlink 0, path gone) and right after a fatal write error (ENXIO/ESHUTDOWN/ENODEV/EPIPE/EBADF).
+  - **A stale fd is PARKED, never closed.** Same rule as router 1.2.1: Tina's `hidg_bind()` re-runs `cdev_init()` on the same cdev, so closing the stale fd after a re-bind breaks every later open (codex r121 #1).
+  - The new node is opened by path with back-off 100 ms → 1 s (reset only after a delivered report), then all-keys-up and held keys/mods are re-sent.
+  - A fatal error on a node that is not stale closes and reopens nothing; retries stay on the 100 ms hard-error tick (no open/ESHUTDOWN spin, r121 #2).
+  - Teardown (stop file / SIGUSR1) closes the current and all parked fds. gadget.sh's holder check also matches `/dev/hidg0 (deleted)`.
+  - **Limitation:** if mk20-kbd dies while the gadget stays up with a parked fd, hidg0 stays unopenable until the next re-bind or reboot. mk20-kbd keeps retrying the open (≤1 s), and keys/panels keep working without HID.
+  - Status file: `hid_open`, `hid_reopens`, `hid_replaced`. Covered by unit tests and e2e.
 - **Release binary:** `tools/mk20-build-bins.sh` builds `bin/mk20-kbd` (static armhf, stripped, 529,696 B) next to the bridge and router. `test_release_binaries_match_source` covers it. FEATURE_KBD stays off by default.
 
 **Plan to make FEATURE_KBD default-on:**

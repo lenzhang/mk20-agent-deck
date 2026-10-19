@@ -9,10 +9,17 @@
  *    touches it before any UDC/configfs change) or hid_request_close() was called (SIGUSR1),
  *    send a bounded all-up and close; reopen only after the stop file is gone.
  * Node replacement (fw 1.2.0 field finding): ~13 s after gadget setup the kernel tears /dev/hidg0 down and
- * recreates it (USB link drop), leaving an early fd on "/dev/hidg0 (deleted)"; fresh opens fail ENXIO until the
- * link is up. An fd we opened from the path is checked every ~1 s (fstat vs stat: st_dev/st_ino/st_rdev, nlink 0,
- * path gone) and after write errors ENXIO/ESHUTDOWN/ENODEV/EPIPE; then it is closed and reopened with a short
- * back-off (100 ms doubling to 1 s), and after the reopen all-keys-up is sent and the held state re-sent. */
+ * recreates it (USB link drop / re-bind), leaving an early fd on "/dev/hidg0 (deleted)"; fresh opens fail ENXIO
+ * until the link is up. Tina's hidg_bind() re-runs cdev_init() on the SAME embedded cdev, so CLOSING the stale fd
+ * after the re-bind drops the new registration's count and later opens fail ENXIO for good (codex r121, router
+ * 1.2.1). Therefore a stale fd is PARKED: kept open, never closed while the gadget lives (up to HID_MAX_PARKED
+ * tracked; beyond that leaked, still never closed). Staleness = fstat vs stat (st_dev/st_ino/st_rdev), nlink 0 or
+ * path gone, checked every ~1 s and immediately after a fatal write error (ENXIO/ESHUTDOWN/ENODEV/EPIPE/EBADF).
+ * A fatal error on a node that is NOT stale closes/reopens nothing: retries stay on the 100 ms hard-error tick.
+ * The new node is opened by path with back-off 100 ms doubling to 1 s (reset only after a delivered report), then
+ * all-keys-up + the held state. Teardown (stop file / SIGUSR1, i.e. before any UDC/configfs change) closes the
+ * current AND all parked fds - same as the router's SIGTERM at teardown. Limitation: if mk20-kbd dies while the
+ * gadget stays up with a parked fd, hidg0 stays unopenable until the next re-bind or reboot (it keeps retrying). */
 #ifndef MK20_HID_H
 #define MK20_HID_H
 #include <stdint.h>
@@ -22,6 +29,7 @@
 #define HID_MOD_RALT 0x40
 #define HID_KBD_LEN 9
 #define HID_PTR_LEN 6
+#define HID_MAX_PARKED 64
 
 typedef struct {
     char path[128], stop_file[128];
@@ -32,6 +40,7 @@ typedef struct {
     uint8_t ptrq[16][HID_PTR_LEN]; int ptr_head, ptr_n;   /* pointer reports, FIFO (button edges never dropped) */
     volatile int close_req;
     long next_open_ms, last_hard_ms;
+    int parked[HID_MAX_PARKED]; unsigned nparked;   /* stale fds kept open (never closed while the gadget lives) */
     int watch, reopen_req, keep;         /* keep: reopen after replacement keeps held state; watch: fd came from open(path) -> identity is checked */
     unsigned long long dev, ino, rdev;   /* identity of the open node */
     long next_check_ms, backoff_ms;
@@ -48,7 +57,8 @@ int hid_key(hid_t *h, uint8_t usage, int down);         /* -1 if 6 keys already 
 int hid_pointer_abs(hid_t *h, uint8_t buttons, uint16_t x, uint16_t y);
 /* Bounded all-keys-up (default ~1.5 s, under gadget.sh's SIGTERM->SIGKILL window). 0 = delivered. */
 int hid_release_all(hid_t *h, int timeout_ms);
-void hid_close(hid_t *h, int release);
+void hid_close(hid_t *h, int release);   /* closes the current fd only */
+void hid_close_parked(hid_t *h);          /* teardown only: close every parked fd */
 void hid_request_close(hid_t *h);       /* async-signal-safe */
 int hid_wants_pollout(const hid_t *h);  /* dirty and no hard failure */
 int hid_node_replaced(const hid_t *h);  /* 1 if the open fd no longer is the node at h->path */

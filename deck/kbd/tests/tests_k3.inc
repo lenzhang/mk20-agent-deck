@@ -506,7 +506,7 @@ static void test_hid(void)
     hid_service(&h, 3000000); CHECK(h.fd < 0);
     /* stop file gone: reopen attempt (path missing -> stays closed, retry later) */
     unlink(stopf);
-    hid_service(&h, 4000000); CHECK(h.fd < 0 && h.next_open_ms == 4001000);
+    hid_service(&h, 4000000); CHECK(h.fd < 0 && h.next_open_ms == 4000200);   /* back-off 100 -> 200 */
     /* close request (SIGUSR1 path) on a fresh fd */
     int q[2]; CHECK(pipe(q) == 0); fcntl(q[1], F_SETFL, O_NONBLOCK); fcntl(q[0], F_SETFL, O_NONBLOCK);
     hid_attach_fd(&h, q[1]); rd_reports(q[0], rep, 64);
@@ -519,13 +519,20 @@ static void test_hid(void)
     signal(SIGPIPE, SIG_IGN);
     hid_attach_fd(&h, r2[1]);
     CHECK(h.hard_fail >= 1 && h.dirty && !hid_wants_pollout(&h));
-    /* EPIPE is a "node gone" error: no retry spin on the dead fd, it is closed and reopened (path missing here) */
+    /* EPIPE is a "node gone" error: identity check right away; the node (path missing here) is stale -> the fd is
+     * PARKED (kept open, codex r121: closing it after a re-bind kills the new cdev), the path reopened with back-off */
     CHECK(h.reopen_req == 1);
-    unsigned e0 = h.errors, rp0 = h.replaced; hid_service(&h, 6000000); hid_service(&h, 6000010);
-    CHECK(h.errors == e0 && h.fd < 0 && h.replaced == rp0 + 1 && h.next_open_ms == 6000100);
-    hid_service(&h, 6000100); CHECK(h.fd < 0 && h.next_open_ms == 6000200);   /* back-off 100, 200, 400 .. 1000 */
-    hid_service(&h, 6000200); CHECK(h.next_open_ms == 6000400);
-    hid_service(&h, 6000400); hid_service(&h, 6000800); hid_service(&h, 6001600); CHECK(h.next_open_ms == 6002600);
+    unsigned e0 = h.errors, rp0 = h.replaced; long b0 = h.backoff_ms;
+    hid_service(&h, 6000000); hid_service(&h, 6000010);
+    CHECK(h.errors == e0 && h.fd < 0 && h.replaced == rp0 + 1 && h.nparked == 1 && h.next_open_ms == 6000000 + b0);
+    CHECK(fcntl(r2[1], F_GETFD) != -1);                                   /* parked: still open */
+    long tt = h.next_open_ms;
+    for (int i = 0; i < 6; i++) { hid_service(&h, tt); CHECK(h.next_open_ms - tt == h.backoff_ms); tt = h.next_open_ms; }
+    CHECK(h.backoff_ms == 1000);                                           /* 100 .. 1000 cap */
+    /* teardown (stop file) closes the parked fds too: nothing may hold hidg0 across UDC/configfs changes */
+    FILE *f2 = fopen(stopf, "w"); fclose(f2);
+    hid_service(&h, tt + 1); CHECK(h.nparked == 0 && fcntl(r2[1], F_GETFD) == -1);
+    unlink(stopf);
     hid_close(&h, 0);
     close(p[0]); close(q[0]);
     kbd_free(&k); rmdir(dir);
@@ -549,35 +556,47 @@ static void test_hid_replace(void)
     CHECK(h.fd >= 0 && h.watch && h.opens == 1 && fsize(path) == 9);     /* startup all-up */
     hid_set_mod(&h, HID_MOD_RALT, 1); CHECK(fsize(path) == 18);           /* PTT held */
     hid_service(&h, 1500); CHECK(h.fd >= 0 && !hid_node_replaced(&h));    /* same node: nothing happens */
-    /* replacement: old node renamed away (unlinked from the path), a new one created */
+    /* replacement: old node renamed away (unlinked from the path), a new one created later */
+    int oldfd = h.fd;
     CHECK(rename(path, old) == 0);
-    hid_service(&h, 1900); CHECK(h.fd >= 0);                              /* not checked before ~1 s */
-    hid_service(&h, 2000); CHECK(h.fd < 0 && h.replaced == 1 && h.next_open_ms == 2100);
-    CHECK(fsize(old) == 18);                                               /* no all-up into the dead node */
-    hid_service(&h, 2100); CHECK(h.fd < 0 && h.next_open_ms == 2200 && h.backoff_ms == 200);   /* path missing (link down): back-off */
+    hid_service(&h, 1900); CHECK(h.fd == oldfd);                          /* not checked before ~1 s */
+    hid_service(&h, 2000); CHECK(h.fd < 0 && h.replaced == 1 && h.nparked == 1 && h.parked[0] == oldfd && h.next_open_ms == 2100);
+    CHECK(fcntl(oldfd, F_GETFD) != -1 && fsize(old) == 18);               /* parked (open), no all-up into it */
+    hid_service(&h, 2100); CHECK(h.fd < 0 && h.next_open_ms == 2300 && h.backoff_ms == 200);   /* link down: back-off */
     f = fopen(path, "w"); fclose(f);
-    hid_service(&h, 2200);
-    CHECK(h.fd >= 0 && h.reopens == 1 && h.watch);
+    hid_service(&h, 2300);
+    CHECK(h.fd >= 0 && h.reopens == 1 && h.watch && h.backoff_ms == 100);
     n = rd_file(path, rep, 64);
     CHECK(n == 2 && rep[0][1] == 0 && rep[1][1] == HID_MOD_RALT);          /* all-up, then the held RAlt re-sent */
     CHECK(h.mods == HID_MOD_RALT && !h.dirty);
     /* deleted node (nlink 0) is detected too */
     CHECK(unlink(path) == 0); f = fopen(path, "w"); fclose(f);
     hid_set_mod(&h, HID_MOD_RALT, 0);
-    hid_service(&h, 3300); CHECK(h.fd < 0 && h.replaced == 2);
+    hid_service(&h, 3300); CHECK(h.fd < 0 && h.replaced == 2 && h.nparked == 2);
     hid_service(&h, 3400); CHECK(h.fd >= 0 && h.reopens == 2);
     n = rd_file(path, rep, 64); CHECK(n == 1 && rep[0][1] == 0);           /* nothing held: one all-up only */
-    /* a write error that means "node gone" triggers the same path without waiting for the 1 s check */
+    /* fatal write error on a node that is NOT stale (path resolves to the same pipe): nothing closed or reopened,
+     * retries stay on the 100 ms hard-error tick (no open/ESHUTDOWN spin, codex r121 #2) */
     hid_close(&h, 0);
     int r2[2]; CHECK(pipe(r2) == 0); fcntl(r2[1], F_SETFL, O_NONBLOCK); close(r2[0]); signal(SIGPIPE, SIG_IGN);
-    hid_attach_fd(&h, r2[1]); hid_set_mod(&h, HID_MOD_RALT, 1);
+    hid_t g; char self[64]; snprintf(self, sizeof self, "/proc/self/fd/%d", r2[1]); hid_init(&g, self, NULL);
+    hid_attach_fd(&g, r2[1]); hid_set_mod(&g, HID_MOD_RALT, 1);
+    CHECK(g.reopen_req && g.hard_fail);
+    unsigned ge = g.errors;
+    for (long t = 10000; t < 11000; t += 10) hid_service(&g, t);
+    CHECK(g.fd == r2[1] && g.nparked == 0 && g.replaced == 0 && g.opens == 1);
+    CHECK(g.errors - ge >= 9 && g.errors - ge <= 11);                      /* ~1 per 100 ms, not 100 */
+    hid_close(&g, 0);
+    /* a stale attached fd after a fatal error: parked at once (no 1 s wait), new node gets all-up + held state */
+    int r3[2]; CHECK(pipe(r3) == 0); fcntl(r3[1], F_SETFL, O_NONBLOCK); close(r3[0]);
+    hid_attach_fd(&h, r3[1]); hid_set_mod(&h, HID_MOD_RALT, 1);
     CHECK(h.reopen_req);
-    hid_service(&h, 5000); CHECK(h.fd < 0);
     unlink(path); f = fopen(path, "w"); fclose(f);
-    hid_service(&h, 5100); CHECK(h.fd >= 0);
+    hid_service(&h, 5000); CHECK(h.fd < 0 && h.nparked == 3 && fcntl(r3[1], F_GETFD) != -1);
+    hid_service(&h, 5000 + h.backoff_ms); CHECK(h.fd >= 0);
     n = rd_file(path, rep, 64); CHECK(n == 2 && rep[0][1] == 0 && rep[1][1] == HID_MOD_RALT);
-    /* a stop-file / SIGUSR1 close in between does not carry "keep" over: next open is a fresh startup all-up */
-    hid_request_close(&h); hid_service(&h, 6000); CHECK(h.fd < 0 && !h.keep);
-    hid_close(&h, 0);
+    /* SIGUSR1 / stop file = teardown: current + all parked fds closed; "keep" not carried over */
+    hid_request_close(&h); hid_service(&h, 6000);
+    CHECK(h.fd < 0 && h.nparked == 0 && !h.keep && fcntl(oldfd, F_GETFD) == -1 && fcntl(r3[1], F_GETFD) == -1);
     unlink(path); unlink(old); rmdir(dir);
 }
