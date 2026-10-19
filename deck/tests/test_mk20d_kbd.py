@@ -4,8 +4,13 @@ Linux behavioural shims use BusyBox; static/portable regressions run without it.
 import json, os, re, signal, subprocess, sys, time
 from pathlib import Path
 import pytest
-from conftest import BB, DECK, scope_gadget_fn
+from conftest import BB, DECK, scope_gadget_fn, _bbdir
 from test_mk20d import rel, g1, conf, cfg, run_boot  # noqa: F401  (fixtures)
+
+# macOS stat lacks BusyBox's -c; only adapt the host harness, never production code.
+STAT_SHIM = r'''
+stat() { if [ "$1" = -c ] && [ "$2" = %h ]; then command stat -f %l "$3"; else command stat "$@"; fi; }
+''' if sys.platform == "darwin" else ""
 
 GOOD = {"version": "mk20-kbd-0.3", "gd32_rw": 1, "knob_init": "ok", "knob_ok": 6, "panels_written": 21,
         "key_events": 0, "knob_events": 0, "echo_frames": 0, "other_frames": 0, "host": 1}
@@ -686,6 +691,210 @@ def test_harness_scoped_to_own_fakes(gh, tmp_path_factory):
 
 # ---------------- maintenance contract and release invariants ----------------
 
+@pytest.fixture(params=["sh", "busybox"])
+def hook_shell(tmp_path, request):
+    """Run actual maintenance helpers under host sh and BusyBox ash when available."""
+    import shutil
+    if request.param == "busybox" and not BB:
+        pytest.skip("BusyBox unavailable")
+    shell = [BB, "ash"] if request.param == "busybox" else ["sh"]
+    root = tmp_path / "root"; release = tmp_path / "rel"
+    (release / "share").mkdir(parents=True)
+    shutil.copy(DECK / "firmware/release/share/mk20lib.sh", release / "share/mk20lib.sh")
+    src = (DECK / "firmware/release/sbin/mk20d").read_text()
+    prefix = src[:src.index('case "${1:-}" in\nboot)')]
+    env = dict(os.environ, MK20_ROOT=str(root), MK20_REL=str(release), MK20_VERSION="1.3.0")
+    if request.param == "busybox":
+        env["PATH"] = str(_bbdir(tmp_path)) + os.pathsep + env["PATH"]
+    def run(body):
+        script = tmp_path / "hooks.sh"
+        script.write_text(prefix + (STAT_SHIM if request.param == "sh" else "") + '''
+maint_init || exit 99
+kbd_recent() { echo 0; }
+reason=normal
+''' + body)
+        return subprocess.run(shell + [str(script)], capture_output=True, text=True, timeout=10,
+                              env=env)
+    run.shell = shell; run.env = env
+    assert run(":").returncode == 0
+    return root, run
+
+
+@pytest.mark.parametrize("failure", ["failed-stop", "surviving-kd"])
+def test_live_kd_race_quiesces_child_retries_with_backoff_then_resumes(hook_shell, failure):
+    root, run = hook_shell
+    release = root.parent / "rel"; mock = root.parent / "mock"; mock.mkdir()
+    (release / "bin").mkdir()
+    binary = release / "bin/mk20-kbd"
+    binary.write_text(FAKE_KBD.replace('echo "$*" >>', 'echo kbd-start >> "$MOCK_DIR/events"\necho "$*" >>')
+                      .replace("trap 'echo term", "trap 'echo kbd-term >> \"$MOCK_DIR/events\"; echo term"))
+    binary.chmod(0o755)
+    (mock / "kbd.status.json").write_text(json.dumps(GOOD))
+    svc = root.parent / "qt_app2"
+    svc.write_text(FAKE_SVC.replace('echo "$1" >>', 'echo "svc:$1" >> "$MOCK_DIR/events"\necho "$1" >>'))
+    svc.chmod(0o755)
+    src = (DECK / "firmware/release/sbin/mk20d").read_text()
+    prefix = (root.parent / "hooks.sh").read_text().split("maint_init || exit 99")[0]
+    shims = '''
+cut() { case "$*" in *'/proc/uptime') date +%s;; *) command cut "$@";; esac; }
+flock() { return 0; }
+kd_count() { if [ -s "$MOCK_DIR/pgrep.kd" ]; then echo 1; else echo 0; fi; }
+'''
+    script = root.parent / "supervisor.sh"
+    script.write_text(prefix + shims + '\ncase kbd in' + src[src.index('\nkbd)\n'):src.index('\nselftest) cfg_load;')] + '\nesac\n')
+    env = dict(run.env, MK20_KDSVC=str(svc), MOCK_DIR=str(mock), MK20_KBD_KD_SETTLE="0", MK20_KBD_KD_BACKOFF_MAX="2",
+               MK20_AGENT_CTL="1", MK20_HID_SCROLL="1", MK20_K2_ESTOP="1", MK20_K2_RELEASE="1")
+    p = subprocess.Popen(run.shell + [str(script)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    args = mock / "kbd.args"; log = mock / "qt_app2.log"
+    def runs():
+        return args.read_text().count("--run") if args.exists() else 0
+    def calls():
+        return log.read_text().split() if log.exists() else []
+    state = root / "tmp/mk20/maint/state.json"
+    try:
+        assert wait(lambda: runs() == 1)
+        assert args.read_text().splitlines()[0].split() == [
+            "--run", "--host", str(root / "dev/ttyGS0"), "--hid", str(root / "dev/hidg0"),
+            "--hid-stop-file", str(root / "tmp/mk20-router-stop"), "--status", str(root / "run/mk20/kbd.status"),
+            "--lock", str(root / "tmp/mk20-kbd.lock"), "--exit-file", str(root / "tmp/mk20-kbd-stop"),
+            "--ctl", str(root / "run/mk20/kbd.sock"), "--hid-scroll", "--k2-estop", "--k2-release"]
+        blocker = mock / ("svc.fail" if failure == "failed-stop" else "kd.stubborn"); blocker.touch()
+        (mock / "pgrep.kd").write_text("123\n")
+        seen = []
+        def retried():
+            n = len(calls()) - 1
+            if n > len(seen):
+                seen.extend([time.monotonic()] * (n - len(seen)))
+            return n >= 3
+        assert wait(retried)
+        assert all(b - a >= minimum for a, b, minimum in zip(seen, seen[1:], [.8, 1.8])), seen
+        assert (mock / "events").read_text().splitlines()[:4] == ["svc:stop", "kbd-start", "kbd-term", "svc:stop"]
+        assert runs() == 1 and p.poll() is None
+        assert json.loads(state.read_text())["reason"] == "kd-stop"
+        assert not (root / "tmp/mk20/kbd.crashes").exists()
+        if failure == "failed-stop":
+            # The failed stop removed the old PID but left procd armed: another
+            # respawn during retry must still find no mk20-kbd writer running.
+            assert not (mock / "pgrep.kd").exists()
+            (mock / "pgrep.kd").write_text("456\n")
+            previous = len(calls())
+            assert wait(lambda: len(calls()) > previous)
+            assert runs() == 1
+        blocker.unlink()
+        assert wait(lambda: runs() == 2)
+        assert not (mock / "pgrep.kd").exists()
+        assert json.loads(state.read_text())["reason"] == "normal"
+        assert set(calls()) == {"stop"} and not (root / "tmp/mk20/kbd.crashes").exists()
+    finally:
+        (root / "tmp/mk20-kbd-stop").touch()
+        try: p.wait(10)
+        except subprocess.TimeoutExpired: p.kill(); p.wait(3)
+    assert p.returncode == 0
+
+
+@pytest.mark.parametrize("hook", ["debug", "restart-kbd", "exit-safe-mode"])
+@pytest.mark.parametrize("dest", ["symlink-file", "symlink-dir", "dangling", "directory", "fifo", "hardlink", "same-inode"])
+def test_hook_claim_exact_destination(hook_shell, hook, dest):
+    root, run = hook_shell
+    inbox = root / "tmp/mk20/maint"
+    outside = root / "outside"; outside.mkdir()
+    sentinel = outside / "sentinel"; sentinel.write_text("keep"); sentinel.chmod(0o640)
+    source = inbox / hook; source.write_text("verbose=1" if hook == "debug" else "")
+    claim = inbox / f".{hook}.consume"
+    if dest.startswith("symlink") or dest == "dangling":
+        claim.symlink_to({"symlink-file": sentinel, "symlink-dir": outside, "dangling": outside / "missing"}[dest])
+    elif dest == "directory":
+        claim.mkdir()
+    elif dest == "fifo":
+        os.mkfifo(claim)
+    else:
+        os.link(source if dest == "same-inode" else sentinel, claim)
+    result = run(f'hook_take "$MR" {hook}; echo "rc=$?"\n')
+    assert result.returncode == 0, result.stderr
+    refused = dest in ("directory", "fifo")
+    assert result.stdout.strip() == f"rc={1 if refused else 0}"
+    assert source.exists() == refused
+    if not refused:
+        assert claim.is_file() and not claim.is_symlink() and claim.stat().st_nlink == 1
+    assert set(p.name for p in outside.iterdir()) == {"sentinel"}
+    assert sentinel.read_text() == "keep" and sentinel.stat().st_mode & 0o777 == 0o640
+
+
+@pytest.mark.parametrize("inbox", ["data/mk20/state/maint", "tmp/mk20/maint"])
+def test_hardlinked_hook_rejected_before_chmod(hook_shell, inbox):
+    root, run = hook_shell
+    sentinel = root / "sentinel"; sentinel.write_text("verbose=1"); sentinel.chmod(0o640)
+    request = root / inbox / "debug"; os.link(sentinel, request)
+    result = run("kbd_hooks\n")
+    assert result.returncode == 0, result.stderr
+    assert not request.exists() and not (root / inbox / ".debug.consume").exists()
+    assert not (root / "data/mk20/state/maint/debug.conf").exists()
+    assert sentinel.read_text() == "verbose=1" and sentinel.stat().st_mode & 0o777 == 0o640
+
+
+@pytest.mark.parametrize("target", ["symlink-file", "symlink-dir", "directory", "hardlink"])
+def test_state_exclusive_temp_and_exact_destination(hook_shell, target):
+    root, run = hook_shell
+    runtime = root / "tmp/mk20/maint"
+    outside = root / "outside"; outside.mkdir()
+    sentinel = outside / "sentinel"; sentinel.write_text("keep"); sentinel.chmod(0o640)
+    state = runtime / "state.json"
+    if target.startswith("symlink"):
+        state.symlink_to(outside if target == "symlink-dir" else sentinel)
+    elif target == "directory":
+        state.mkdir()
+    else:
+        os.link(sentinel, state)
+    # Both attacks on the old predictable state temp must remain untouched.
+    result = run('''
+ln -s "$R/outside/sentinel" "$MR/.state.$$"
+kbd_state; echo "symlink_rc=$?"
+[ -L "$MR/.state.$$" ] || exit 98
+rm -f "$MR/.state.$$"
+ln "$R/outside/sentinel" "$MR/.state.$$"
+kbd_state; echo "hardlink_rc=$?"
+rm -f "$MR/.state.$$"
+''')
+    rc = 1 if target == "directory" else 0
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [f"symlink_rc={rc}", f"hardlink_rc={rc}"]
+    if target != "directory":
+        assert json.loads(state.read_text())["mode"] == "normal" and not state.is_symlink()
+        assert state.stat().st_mode & 0o777 == 0o444
+    assert not list(runtime.glob(".state.*"))
+    assert set(p.name for p in outside.iterdir()) == {"sentinel"}
+    assert sentinel.read_text() == "keep" and sentinel.stat().st_mode & 0o777 == 0o640
+
+
+def test_state_mktemp_failure_keeps_previous_snapshot(hook_shell):
+    root, run = hook_shell
+    state = root / "tmp/mk20/maint/state.json"; state.write_text("previous")
+    result = run('mktemp() { return 1; }; kbd_state; echo "rc=$?"\n')
+    assert result.stdout.strip() == "rc=1" and state.read_text() == "previous"
+    assert not list(state.parent.glob(".state.*"))
+
+
+@pytest.mark.parametrize("target", ["symlink-file", "symlink-dir", "directory", "hardlink"])
+def test_debug_config_exact_destination(hook_shell, target):
+    root, run = hook_shell
+    outside = root / "outside"; outside.mkdir()
+    sentinel = outside / "sentinel"; sentinel.write_text("keep"); sentinel.chmod(0o640)
+    config = root / "data/mk20/state/maint/debug.conf"
+    if target.startswith("symlink"):
+        config.symlink_to(outside if target == "symlink-dir" else sentinel)
+    elif target == "directory":
+        config.mkdir()
+    else:
+        os.link(sentinel, config)
+    (root / "tmp/mk20/maint/debug").write_text("verbose=1\n")
+    assert run("kbd_hooks\n").returncode == 0
+    if target != "directory":
+        assert config.read_text() == "verbose=1\n" and not config.is_symlink()
+        assert config.stat().st_mode & 0o777 == 0o600
+    assert set(p.name for p in outside.iterdir()) == {"sentinel"}
+    assert sentinel.read_text() == "keep" and sentinel.stat().st_mode & 0o777 == 0o640
+
+
 def test_no_stock_kd_start_in_release_or_rescue():
     paths = [DECK / "firmware/release/sbin/mk20d", DECK / "firmware/release/share/gadget.sh"]
     paths += list((DECK / "firmware/rescue").glob("*.sh"))
@@ -828,7 +1037,7 @@ cut() { case "$*" in *'/proc/uptime') date +%s;; *) command cut "$@";; esac; }
 flock() { return 0; }
 kd_count() { if [ -s "$MOCK_DIR/pgrep.kd" ]; then echo 1; else echo 0; fi; }
 '''
-    script = tmp_path / 'mk20d'; script.write_text(prefix + shims + '\ncase kbd in' + block + '\nesac\n')
+    script = tmp_path / 'mk20d'; script.write_text(prefix + shims + STAT_SHIM + '\ncase kbd in' + block + '\nesac\n')
     env = dict(os.environ, MK20_ROOT=str(root), MK20_REL=str(release), MK20_VERSION='1.3.0',
                MK20_KDSVC=str(svc), MOCK_DIR=str(mock), MK20_KBD_BACKOFF_MAX='0', MK20_KBD_KD_SETTLE='0')
     p = subprocess.Popen(['sh', str(script)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

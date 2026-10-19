@@ -199,8 +199,10 @@ remain untouched. Firmware A/B rollback to the previous release remains independ
   Exit-safe clears recent crashes/latch and restarts normally; maintenance restarts
   do not count as crashes. Atomic read-only runtime `state.json` publishes mode,
   restarts, recent crashes, last rc, reason, version. The authenticated usb0 admin
-  web at `172.30.250.2:8780` consumes this contract in U3; agent/web implementation
-  is separate. Mac mirror is optional/out of scope; no keytrace/secret logging.
+  `mk20-agent --web` at `172.30.250.2:8780` consumes this contract; U3 adds
+  config/key/maintenance pages to that sole service (AGENT-BUILD-PLAN §3.8b),
+  never a second server on 8780. Agent/web implementation is outside K4. Mac mirror
+  is optional/out of scope; no keytrace/secret logging.
 - **Selftest:** kd=0 always required. Kbd missing/not running, stale status, no
   GD32 proof (`knob_ok=6` or parsed frame), panels !=21 or panel errors are FAIL
   on probation, WARN after confirm. Safe mode/crash-loop indication is WARN even

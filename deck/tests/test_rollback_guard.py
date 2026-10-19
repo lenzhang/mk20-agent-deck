@@ -249,9 +249,10 @@ def test_every_service_and_helper_call_in_cleanup_closes_fd7():
             assert "7>&-" in code, line
 
 
-def test_daemons_started_by_cleanup_are_detached():
-    body = G[G.index("kd_start() {"):G.index("OK=0\ncleanup()")]
-    assert "( ( trap '' HUP INT; exec /data/appLunch.sh" in body
+def test_cleanup_never_starts_kd_and_adb_is_detached():
+    # K4 removed stock KD startup; rescue adb is the remaining detached daemon.
+    assert "kd_start" not in G and "exec /data/appLunch.sh" not in G
+    assert "$KDSVC start" not in G and "$KDSVC stop" in G
     a = (Path(__file__).resolve().parents[1] / "firmware/release/share/mk20-add-adb.sh").read_text()
     assert "( /bin/adbd </dev/null >/tmp/adbd.log 2>&1 7>&- & )" in a
 

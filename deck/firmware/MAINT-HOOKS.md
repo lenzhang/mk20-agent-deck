@@ -1,9 +1,11 @@
 # mk20d maintenance hooks (K4 / 1.3.0-rc1)
 
 The usb0 admin web (`http://172.30.250.2:8780`, `mk20-agent --web`, implemented
-separately by U3) uses this local file contract. K4 implements the supervisor side
-only. The web service owns authentication, pairing/CSRF protection and usb0-only
-binding. No Mac app or keyboard combo is required. No hook starts stock KD, changes
+on the agent track) uses this local file contract. Per AGENT-BUILD-PLAN §3.8b,
+`mk20-agent --web` is the ONLY usb0 admin web service; U3 adds its config/key/
+maintenance pages to that service, never a second server on 8780. K4 implements
+the supervisor side only. The web service owns authentication, pairing/CSRF
+protection and usb0-only binding. No Mac app or keyboard combo is required. No hook starts stock KD, changes
 the USB gadget, installs a release, accepts a command/path, or reads secrets.
 
 ## Inboxes and publication
@@ -19,6 +21,9 @@ the USB gadget, installs a release, accepts a command/path, or reads secrets.
   FIFOs, directories or hard links. User input must never determine a filename.
 - The single kbd supervisor checks every ~200 ms during a run/backoff, claims each
   fixed basename by rename to `.<name>.consume`, validates it, then unlinks it.
+  Before claiming, existing regular/symlink consume destinations are unlinked;
+  directories and other non-regular destinations are refused without moving the
+  request. Claimed hard links are rejected before reading or changing permissions.
   Bodies are bounded to 128 bytes before reading. Invalid requests are discarded
   with a fixed diagnostic; contents are never logged. Unknown names are ignored;
   actual directories are not traversed/removed. Clean abandoned producer temps in
@@ -42,7 +47,9 @@ hook. Use `restart-kbd` after a debug change if immediate application is needed.
 ## Read-only state
 
 `/tmp/mk20/maint/state.json` is an atomic, mode-0444 snapshot produced on supervisor
-start/transitions and about once per second while running. Its directory is private;
+start/transitions and about once per second while running. Its directory is private.
+Snapshots use an exclusively created temporary file in the private runtime inbox;
+symlink destinations are unlinked and directories refused before rename.
 0444 signals producer ownership, not an authorization boundary against root. The web
 service reads it and never modifies it. It is absent before the supervisor starts;
 check process health/status freshness separately if the supervisor dies.
@@ -78,10 +85,13 @@ Safe mode itself is WARN even on probation. Missing/dead kbd, stale status, miss
 GD32 liveness, incomplete panels or panel errors remain FAIL on probation and WARN
 after confirmation. KD alongside kbd is always FAIL. The loader retains A/B rollback
 for unconfirmed releases; entering safe mode never tears down ECM/usb0 or adb.
+If KD reappears during a run, the supervisor stops its kbd child first, then retries
+`qt_app2 stop` with 1,2,4…30 s backoff. A failed service stop blocks kbd relaunch
+even when no KD PID is visible; relaunch requires a successful stop and KD gone.
 A missing binary cannot render a rescue page: supervision retries, selftest fails
 on probation, and the loader restores the previous slot.
 
 Restarting after Tina's HID re-bind may leave hidg0 ENXIO or a modifier held until
 USB reset/reboot. Prefer watcher `cmd-reboot` when HID is lost; see [RECOVERY.md](RECOVERY.md).
-The web service itself is a separate U3 dependency; adb plus A/B remain usable while
-that service is unavailable. No hook changes rootfs p5 or the stock binaries.
+The agent web service is an agent-track dependency extended by U3; adb plus A/B
+remain usable while that service is unavailable. No hook changes rootfs p5 or the stock binaries.

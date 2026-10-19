@@ -68,13 +68,27 @@ maint_init() {
   [ ! -L "$MP" ] && [ ! -L "$MR" ] || return 1
   mkdir -p "$MP" "$MR" && chmod 700 "$MP" "$MR"
 }
-# Rename first, then inspect the claimed inode. A symlink is unlinked, never followed/read.
+# mv without -T can descend into a destination directory (including a symlink).
+# In these private inboxes, unlink only files/symlinks and require an absent exact target.
+maint_dest_clear() {
+  if [ -L "$1" ] || [ -f "$1" ]; then rm -f "$1" || return 1
+  elif [ -e "$1" ]; then return 1; fi
+  [ ! -e "$1" ] && [ ! -L "$1" ]
+}
+# Preserve atomic replacement of an existing regular snapshot/config file.
+maint_replace() {
+  if [ -L "$2" ]; then rm -f "$2" || return 1
+  elif [ -e "$2" ] && [ ! -f "$2" ]; then return 1; fi
+  mv -f "$1" "$2"
+}
+# Rename first, then inspect the claimed inode. Never read/chmod a symlink or hard link.
 hook_take() { # $1=trusted inbox $2=fixed basename; sets HF
   HF=$1/.$2.consume
   [ -e "$1/$2" ] || [ -L "$1/$2" ] || return 1
   if [ ! -L "$1/$2" ] && [ -d "$1/$2" ]; then return 1; fi
+  maint_dest_clear "$HF" || return 1
   mv -f "$1/$2" "$HF" 2>/dev/null || return 1
-  if [ -L "$HF" ] || [ ! -f "$HF" ] || [ "$(wc -c < "$HF")" -gt 128 ]; then
+  if [ -L "$HF" ] || [ ! -f "$HF" ] || [ "$(stat -c %h "$HF" 2>/dev/null)" != 1 ] || [ "$(wc -c < "$HF")" -gt 128 ]; then
     rm -f "$HF"; log WARN maint "invalid hook"; return 1
   fi
 }
@@ -86,10 +100,12 @@ debug_read() { # complete replacement, one allow-listed boolean; no key/event tr
 }
 kbd_state() {
   ( umask 077
+    tmp=$(mktemp "$MR/.state.XXXXXX") || exit 1
+    trap 'rm -f "$tmp"' 0
     printf '{"mode":%s,"restarts":%s,"recent_crashes":%s,"last_rc":%s,"reason":%s,"version":%s}\n' \
       "$(jstr "$(kbd_mode)")" "$(kbd_total)" "$(num "$(kbd_recent)")" "$(num "${last_rc:-0}")" \
-      "$(jstr "$reason")" "$(jstr "$V")" > "$MR/.state.$$" &&
-      chmod 444 "$MR/.state.$$" && mv -f "$MR/.state.$$" "$MR/state.json" )
+      "$(jstr "$reason")" "$(jstr "$V")" > "$tmp" &&
+      chmod 444 "$tmp" && maint_replace "$tmp" "$MR/state.json" )
 }
 kbd_hooks() {
   restart=0
@@ -99,7 +115,7 @@ kbd_hooks() {
       case "$hook" in
         debug)
           case "$(cat "$HF")" in
-            verbose=0|verbose=1) chmod 600 "$HF"; mv -f "$HF" "$MP/debug.conf";;
+            verbose=0|verbose=1) chmod 600 "$HF" && maint_replace "$HF" "$MP/debug.conf";;
             *) log WARN maint "invalid debug hook";;
           esac;;
         restart-kbd|exit-safe-mode)
@@ -350,7 +366,7 @@ kbd)
   maint_init || { log ERROR maint "unsafe maintenance directory"; exit 1; }
   [ -f "$MP/safe" ] && reason=crash-loop
   log INFO kbd "start pid=$$"
-  stopped=0
+  stopped=0; kd_d=1
   while :; do
     [ -f "$KSTOP" ] && { why="stop file"; break; }
     [ -f "$TM/gadget.busy" ] && { why="composite busy"; break; }
@@ -360,9 +376,17 @@ kbd)
       if kd_svc stop; then stopped=1; else stopped=0; fi
       sleep "${MK20_KBD_KD_SETTLE:-1}" 5>&-
       if [ "$stopped" = 0 ] || [ "$(kd_count)" != 0 ]; then
+        stopped=0
         reason=kd-stop; echo "waiting for stock KD to stop" > "$TM/kbd-degraded"
-        kbd_state; sleep 1 5>&-; continue
+        kbd_state
+        kdwait=0; while [ "$kdwait" -lt "$((kd_d * 5))" ]; do
+          kbd_hooks; [ -f "$KSTOP" ] && break
+          sleep 0.2 5>&-; kdwait=$((kdwait+1))
+        done
+        kd_d=$((kd_d * 2)); [ "$kd_d" -gt "${MK20_KBD_KD_BACKOFF_MAX:-30}" ] && kd_d=${MK20_KBD_KD_BACKOFF_MAX:-30}
+        continue
       fi
+      kd_d=1
       rm -f "$TM/kbd-degraded"; reason=normal; [ -f "$MP/safe" ] && reason=crash-loop
     fi
     if [ "$(kbd_recent)" -ge "${MK20_KBD_CRASHES:-3}" ] && [ ! -f "$MP/safe" ]; then
@@ -371,6 +395,7 @@ kbd)
     [ -f "$MP/safe" ] && reason=crash-loop
     set -- --hid "$HID" --hid-stop-file "$HSTOP"
     [ "${MK20_NOHID:-0}" = 1 ] && set -- --no-hid
+    set -- "$@" --status "$KST" --lock "$R/tmp/mk20-kbd.lock" --exit-file "$KSTOP"
     if [ -f "$MP/safe" ]; then set -- "$@" --safe-mode
     else
       [ "${MK20_AGENT_CTL:-0}" = 1 ] && set -- "$@" --ctl "$R/run/mk20/kbd.sock"
@@ -383,7 +408,7 @@ kbd)
     kbd_state
     t0=$(cut -d. -f1 /proc/uptime)
     # Markers are cleared only by boot under the transition lock. The binary rechecks --exit-file.
-    "$KB" --run --host "$R/dev/ttyGS0" "$@" --status "$KST" --lock "$R/tmp/mk20-kbd.lock" --exit-file "$KSTOP" </dev/null >>"$KL" 2>&1 5>&- &
+    "$KB" --run --host "$R/dev/ttyGS0" "$@" </dev/null >>"$KL" 2>&1 5>&- &
     child=$!; requested=0; state_tick=0
     while kill -0 "$child" 2>/dev/null; do
       kbd_hooks
@@ -394,8 +419,10 @@ kbd)
       if [ "$state_tick" -ge 5 ]; then
         kbd_state; state_tick=0
         if [ "$(kd_count)" != 0 ]; then
-          kd_svc stop
-          if [ "$(kd_count)" != 0 ]; then requested=1; kbd_child_stop && break; fi
+          # A respawn means procd ownership is uncertain, even if its next stop
+          # removes the PID but fails. Quiesce our writer before any stop/retry.
+          stopped=0; requested=1; reason=kd-stop
+          kbd_child_stop && break
         fi
       fi
       sleep 0.2 5>&-
