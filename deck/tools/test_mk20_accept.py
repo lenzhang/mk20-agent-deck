@@ -31,3 +31,21 @@ def test_module_doc_does_not_claim_hid_writes():
     import mk20_accept
     doc = mk20_accept.__doc__
     assert "enumeration only" in doc and "reports written" not in doc and "consumed by the host" not in doc
+
+
+H = {"usb": {"composite": True}, "watchdog": True, "selftest": {"pass": True}}
+
+
+def test_keyboard_check_stock_needs_kd():
+    assert acc.keyboard_check(dict(H, kd=1)) == ("health: composite + kd=1 + watchdog + selftest", True)
+    assert acc.keyboard_check(dict(H, kd=0))[1] is False
+
+
+def test_keyboard_check_mk20_kbd_release():
+    k = {"enabled": True, "running": True, "mode": "normal"}
+    name, ok = acc.keyboard_check(dict(H, kd=0, kbd=k))
+    assert ok and "kd=0" in name and "mk20-kbd" in name
+    assert acc.keyboard_check(dict(H, kd=1, kbd=k))[1] is False                       # KD beside mk20-kbd
+    assert acc.keyboard_check(dict(H, kd=0, kbd=dict(k, running=False)))[1] is False
+    assert acc.keyboard_check(dict(H, kd=0, kbd=dict(k, mode="safe")))[1] is False
+    assert acc.keyboard_check(dict(H, kd=0, kbd=k, selftest={"pass": False}))[1] is False

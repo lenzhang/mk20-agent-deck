@@ -34,6 +34,8 @@ vendor_check() { # prints "ok" or the first mismatch; all 4 vendor entries must 
   echo ok
 }
 num() { case "$1" in ''|*[!0-9]*) echo 0;; *) echo "$1";; esac; }
+mtime() { date -r "$1" +%s 2>/dev/null; }   # device BusyBox has no stat applet (K4 rc2 install: every age = now)
+nlinks() { ls -ld "$1" 2>/dev/null | awk '{print $2}'; }
 kd_count() { pgrep -f '^/data/KeyboardDevice' | wc -l | tr -d ' '; }   # not -x: BusyBox 1.27 -x never matches KD (1.0.3 field failure)
 composite_up() { [ -e "$C/ecm.usb0" ]; }
 listening() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }   # exact local address
@@ -64,7 +66,7 @@ agent_report() { # Always INFO/WARN, never changes the selftest result or prints
   [ "$(agent_recent)" -lt 3 ] || echo "WARN agent crash loop (3+ exits in 300s)"
   if [ ! -f "$AST" ] || [ -L "$AST" ]; then echo "WARN agent status missing"
   else
-    age=$(( $(date +%s) - $(num "$(stat -c %Y "$AST" 2>/dev/null)") ))
+    age=$(( $(date +%s) - $(num "$(mtime "$AST")") ))
     if [ "$age" -gt "${MK20_AGENT_STATUS_MAX_AGE:-10}" ] || [ "$age" -lt 0 ]; then echo "WARN agent status stale"
     else agent_status_load; [ "$ASTATE" != unknown ] || echo "WARN agent status unknown"; fi
   fi
@@ -85,8 +87,8 @@ kbd_bad() { if probation; then echo "FAIL $1"; else echo "WARN $1"; fi; }
 kbd_status_check() { # PASS/FAIL|WARN lines for the mk20-kbd status file; rc 0 = healthy
   local age kn fr pw rc; rc=0
   [ -f "$KST" ] || { kbd_bad "kbd status missing ($KST)"; return 1; }
-  age=$(( $(date +%s) - $(num "$(stat -c %Y "$KST" 2>/dev/null)") ))
-  [ $age -le "${MK20_KBD_STATUS_MAX_AGE:-10}" ] && echo "PASS kbd status fresh (${age}s)" || { kbd_bad "kbd status stale (${age}s)"; rc=1; }
+  age=$(( $(date +%s) - $(num "$(mtime "$KST")") ))
+  [ $age -ge 0 ] && [ $age -le "${MK20_KBD_STATUS_MAX_AGE:-10}" ] && echo "PASS kbd status fresh (${age}s)" || { kbd_bad "kbd status stale (${age}s)"; rc=1; }
   kn=$(jnum knob_ok); fr=$(( $(jnum key_events) + $(jnum knob_events) + $(jnum echo_frames) + $(jnum other_frames) ))
   if [ "$kn" = 6 ] || [ $fr -gt 0 ]; then echo "PASS kbd gd32 knob_ok=$kn frames=$fr"; else kbd_bad "kbd gd32 silent (knob_ok=$kn frames=$fr)"; rc=1; fi
   pw=$(jnum panels_written)
@@ -130,7 +132,7 @@ hook_take() { # $1=trusted inbox $2=fixed basename; sets HF
   if [ ! -L "$1/$2" ] && [ -d "$1/$2" ]; then return 1; fi
   maint_dest_clear "$HF" || return 1
   mv -f "$1/$2" "$HF" 2>/dev/null || return 1
-  if [ -L "$HF" ] || [ ! -f "$HF" ] || [ "$(stat -c %h "$HF" 2>/dev/null)" != 1 ] || [ "$(wc -c < "$HF")" -gt 128 ]; then
+  if [ -L "$HF" ] || [ ! -f "$HF" ] || [ "$(nlinks "$HF")" != 1 ] || [ "$(wc -c < "$HF")" -gt 128 ]; then
     rm -f "$HF"; log WARN maint "invalid hook"; return 1
   fi
 }

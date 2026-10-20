@@ -11,16 +11,25 @@ P4 = "7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc"
 BB = os.environ.get("MK20_TEST_BUSYBOX") or shutil.which("busybox")
 
 
+# Commands that exist on the device PATH. The host busybox has far more applets (stat, timeout, od, ...), and a GNU
+# fallback on PATH hid the missing `stat` until the 1.3.0-rc2 field install (it never confirmed).
+DEVICE_CMDS = {l for l in (pathlib.Path(__file__).parent / "fixtures/device-commands.txt").read_text().split("\n")
+               if l and not l.startswith("#")}
+
+
 def _bbdir(tmp):
-    """PATH dir of busybox applet symlinks so scripts run against busybox tools, not GNU coreutils."""
+    """PATH dir with only the device's commands: busybox applets where the device has that command, else the host
+    binary (non-busybox device tools such as curl). Nothing else: a command the device lacks is "not found"."""
     d = tmp / "bb"
     d.mkdir()
     bb = BB
     (d / "busybox").symlink_to(bb)
-    for a in subprocess.run([bb, "--list"], capture_output=True, text=True).stdout.split():
-        if a in ("flock", "mount", "pgrep", "ubus", "busybox"):
-            continue
-        (d / a).symlink_to(bb)
+    applets = set(subprocess.run([bb, "--list"], capture_output=True, text=True).stdout.split())
+    for a in sorted(DEVICE_CMDS - {"flock", "mount", "pgrep", "ubus", "busybox"}):
+        if a in applets:
+            (d / a).symlink_to(bb)
+        elif shutil.which(a):
+            (d / a).symlink_to(shutil.which(a))
     return d
 
 
@@ -34,7 +43,7 @@ class Dev:
             (self.root / p).mkdir(parents=True, exist_ok=True)
         self.bb = _bbdir(tmp)
         self.env = {
-            "PATH": f"{SHIMS}:{self.bb}:/usr/bin:/bin",
+            "PATH": f"{SHIMS}:{self.bb}",
             "MK20_ROOT": str(self.root),
             "MOCK_DIR": str(self.mock),
             "MK20_P4_SHA": P4,

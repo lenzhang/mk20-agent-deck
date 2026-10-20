@@ -80,10 +80,6 @@ else: os.execv('/usr/bin/tar',['tar']+sys.argv[1:])
 if sys.argv[-1]=='/proc/uptime': print(int(time.monotonic()))
 else: os.execv('/usr/bin/cut',['cut']+sys.argv[1:])
 ''')
-            self.helper("stat", '''import os,sys
-if sys.argv[1:3]==['-c','%Y']: print(int(os.stat(sys.argv[3]).st_mtime))
-else: os.execv('/usr/bin/stat',['stat']+sys.argv[1:])
-''')
 
     def helper(self, name, code):
         p = self.bin / name

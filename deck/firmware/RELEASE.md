@@ -4,6 +4,19 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
+## 1.3.1-rc3 (K4 field fix)
+
+`firmware/VERSION` is **1.3.1**; build id **rc3**: `sh tools/mk20-release-build.sh firmware out rc3`.
+Binaries are unchanged from 1.3.0-rc2 (6f2788b); only `sbin/mk20d` changed.
+
+1.3.0-rc2 field install (2026-10-20 21:08 SGT) booted mk20-kbd fine (21/21 panels, knobs 6/6, 0 kernel
+WARN/Oops) but never confirmed: the device BusyBox has **no `stat` applet**, so `stat -c %Y` was empty, the
+kbd status age became "now" (38525 s) -> `FAIL kbd status stale` on probation -> loader deadline reset ->
+rollback to 1.2.1. Host tests passed because PATH fell back to GNU stat. Fixes: file mtime via
+`date -r FILE +%s`, link count via `ls -ld` (the maintenance hook hard-link guard rejected every hook on the
+device for the same reason), kbd status age < 0 is stale (`/run` persists across boots on the overlay and there
+is no RTC), and `tests/shims/stat` fails like the device so the suite cannot fall back again.
+
 ## 1.3.0-rc1 (K4)
 
 `firmware/VERSION` is **1.3.0**; package with build id **rc1**:
@@ -90,6 +103,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
+| 1.3.1 | 2026-10-20 | **1.3.1-rc3**, build id `rc3`: K4 field fix — device BusyBox has no `stat`: kbd status age and maintenance hook link-count checks used `stat -c` and always failed on hardware (rc2 never confirmed, rolled back to 1.2.1); now `date -r` / `ls -ld`, negative age is stale, test shim removes `stat`. Binaries unchanged. |
 | 1.3.0 | 2026-10-20 | **1.3.0-rc1**, build id `rc1`: K4 default mk20-kbd, no stock-KD starts/overrides, crash-loop safe mode, maintenance file hooks, unchanged verified one-switch A/B installer; no rootfs writes. Web handlers/device acceptance separate. |
 | 1.0.0 | 2026-10-18 | M1: first release layout (A/B slots, MANIFEST, loader, rescue tier) |
 | 1.0.1 | 2026-10-18 | M1 review fixes (upgrade 1.0.0 → 1.0.1 on hardware at 17:35) |

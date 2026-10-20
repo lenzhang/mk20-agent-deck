@@ -4,7 +4,8 @@
   mk20_accept.py [--reboot] [--json OUT] [--no-hid]
 
 Checks (each PASS/FAIL, exit 1 if any FAIL):
-  adb shell; loader good==current, nothing pending; mk20d health status ok / composite / kd=1 / watchdog / selftest
+  adb shell; loader good==current, nothing pending; mk20d health status ok / composite / keyboard owner (stock: kd=1; mk20-kbd release: kd=0 + mk20-kbd normal) /
+  watchdog / selftest
   (the device-side HID check is mk20d's self-test "PASS hid"); ping 172.30.250.2 and link-local 169.254.7.2, both
   bound to the MK20 interface; device netstat shows the bridge listening on primary + link-local; HID: the Mac
   enumerates the 1d6b:0104 keyboard (hidutil list; enumeration only, nothing is written to /dev/hidg0; --no-hid
@@ -195,6 +196,18 @@ def hid(run: Run) -> None:
     run.check("hid: Mac enumerates 1d6b:0104 keyboard", hid_enumerated())
 
 
+def keyboard_check(h: dict) -> tuple[str, bool]:
+    """Composite + keyboard owner + watchdog + selftest. Stock-era releases need KD (kd=1); a release with mk20-kbd
+    enabled (health "kbd".enabled, K4 >= 1.3) must have no KD and mk20-kbd running in normal mode."""
+    base = (h.get("usb", {}).get("composite") is True and h.get("watchdog") is True
+            and (h.get("selftest") or {}).get("pass") is True)
+    k = h.get("kbd") or {}
+    if k.get("enabled") is True:
+        return ("health: composite + kd=0 + mk20-kbd running (normal) + watchdog + selftest",
+                base and h.get("kd") == 0 and k.get("running") is True and k.get("mode") == "normal")
+    return "health: composite + kd=1 + watchdog + selftest", base and h.get("kd") == 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reboot", action="store_true")
@@ -227,9 +240,8 @@ def main() -> int:
     v = st.get("good", "")
     h = health(v) if v else {}
     run.check("health: status ok", h.get("status") == "ok", f"v={h.get('version')} status={h.get('status')}")
-    run.check("health: composite + kd=1 + watchdog + selftest",
-              h.get("usb", {}).get("composite") is True and h.get("kd") == 1 and h.get("watchdog") is True
-              and h.get("selftest", {}).get("pass") is True, (h.get("selftest") or {}).get("detail", ""))
+    name, ok = keyboard_check(h)
+    run.check(name, ok, (h.get("selftest") or {}).get("detail", ""))
     fat, mem = h.get("fat_free_kb", 0), h.get("mem_avail_kb", 0)
     run.check("health: headroom (FAT >= 1024 KiB, mem >= 20 MiB)", fat >= 1024 and mem >= 20480, f"fat={fat} mem={mem}")
     iface = tt.mk20_interface()

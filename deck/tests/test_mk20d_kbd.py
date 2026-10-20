@@ -292,6 +292,7 @@ def test_selftest_kbd_mode_pass(kmode, rel):
     ({"panels_written": 20}, "FAIL kbd panels 20/21"),
     ({"write_errors": 1}, "FAIL kbd panel write errors"),
     ({"age": 30}, "FAIL kbd status stale"),
+    ({"age": -3600}, "FAIL kbd status stale"),           # clock went back: /run survives reboot, no RTC
     ({"missing": 1}, "FAIL kbd status missing"),
     ({"kd": 1}, "FAIL kd=1 beside mk20-kbd"),
 ])
