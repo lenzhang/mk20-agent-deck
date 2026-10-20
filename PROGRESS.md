@@ -1,22 +1,23 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-20 21:07 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-20 21:47 SGT
 
 ## 1. 当前状态
 
 | 工作线 | 分支 | 提交 | 状态 |
 |---|---|---|---|
 | hidfix（HID 模块修复） | feature/hidfix | 5452175（证据 4eb0bf4） | 第 11 次通过（20:50）：T4 50/50 + T7×3，解绑 57 次，0 Oops；codex 第 3 轮复审由用户豁免（Kimi GO + 离线 58/58） |
-| K4 rc2（替换原厂 KD，fw 1.3.0） | feature/kd-replace-k4 | 6f2788b | 安装中：已推送，等待试用期结果 |
+| K4 rc（替换原厂 KD） | feature/kd-replace-k4 | 6f2788b（rc2）→ rc3 修复中 | rc2（1.3.0）上机未确认、已自动回滚到 1.2.1：设备 BusyBox 没有 `stat`，kbd 状态年龄恒等于当前时间 → 自检 FAIL。rc3（1.3.1）已修，正在全量测试，过了就装 |
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
 | UVC 采集卡 | feature/uvc | 02f1d41 | UHC07P = MS2130，USB 2.0 下仅 MJPEG；待上机 |
-| 设备 | — | — | fw 1.2.1 → 1.3.0 试用期 |
+| 设备 | — | — | fw 1.2.1（good，slot A）；1.3.0 已标记 failed |
 
 rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191afadab6c26644d30a2e870a46b06dc92a9b5c73bad0a4e9019e4f4f`。
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-20 21:47** K4 rc2 结论更正：rc2（1.3.0）**没有装成功**，键盘已自动回滚到 1.2.1（loader：`last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)`，进程是原厂 KeyboardDevice）。21:20 的状态行列的是失败项名称，被误读成了通过。1.3.0 本身能启动（mk20-kbd 运行，21/21 屏，旋钮 6/6，0 内核告警），但自检 `FAIL kbd status stale (38525s)` → 试用期不确认 → 600 s 后 loader 硬复位 → 回滚。根因：设备 BusyBox 1.27.2 没有 `stat` applet，`stat -c %Y` 为空 → 年龄 = 当前时间；离线测试退到主机 GNU stat 所以没发现。同因还有维护请求的硬链接检查 `stat -c %h` 在设备上会拒绝所有请求。rc3（1.3.1）修复：`date -r` / `ls -ld` 替代，负年龄判过期（`/run` 跨重启保留、无 RTC）；测试只暴露设备上真有的命令（fixtures/device-commands.txt，从设备采集），并用 busybox 1.27.2 跑。另修：验收工具 K4 下按 kd=0 + mk20-kbd 判断；里程碑脚本崩溃（macOS bash 3.2 在 `$VAR` 后紧跟中文时吞字节）。证据 deck/reviews/k4-install/k4-install-20261020-210750/
 - **10-20 21:07** K4 rc2：安装前验收 1.2.1 通过（12 项），槽位已备份；开始安装 + 重启（watcher cmd-reboot）
 - **10-20 21:07** K4 rc2：开始安装（sha 已核对 49284d19…）；先做安装前验收和槽位备份
 - **10-20 21:04** 文档修正：表头时间和状态表改为每次里程碑自动更新；~/mk20-full 根目录的 PROGRESS.md 是散放副本（不在 git 里），之前同步只更新了里面的仓库 mk20-agent-deck/，现在每次都从 origin 复制并核对 sha（见 ~/mk20-full/SYNC.txt）。K4 rc2 开始安装
@@ -45,9 +46,9 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 ## 3. 接下来要做
 
 - [ ] 排查 usb-storage（usb 1-1）每约 23.4 秒一次的复位：mk20-router 用户态（或其子进程）引起，quiesce 停掉 router 后立即停止；每次运行约 53–59 次；会打断该存储的读写（证据见 hidfix/LOG-ERRORS-RCA.md）
-- [ ] hidfix：第 11 次已过；下一步：安装 K4 rc2（需你同意）；可选：补 codex 复审、在测试里加 clear_warn_once
+- [ ] hidfix：第 11 次已过；可选：补 codex 复审、在测试里加 clear_warn_once
 - [ ] USB 麦克风测试：Mac 音响 `say` 播放 + ASR 比对（阻塞：第 9 次占用键盘）
-- [ ] 安装 K4 rc2：进行中
+- [ ] 安装 K4：rc3（1.3.1）全量测试中，过了就装（用户 21:30 授权直接安装）
 - [ ] UVC 采集卡上机测试（UHC07P）
 - [ ] 仅充电器供电、Mac 重启测试
 - [ ] 键盘上的 agent 测试：MCP 注册、急停、校准、GLM 实时循环
@@ -57,7 +58,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 - [ ] TF 卡恢复演练
 - [ ] 如用户需要，删除助手电脑密钥配置里的 MK20_VNC_PASSWORD
 
-负责人：代码由 codex/ccai 写，Kimi 交叉评审，助手负责编排与验收；装固件/刷写需用户同意。
+负责人：代码由 codex/ccai 写，Kimi 交叉评审，助手负责编排与验收。10-20 21:30 起 codex 额度用完，由 Claude Code 接手修复与安装；用户授权装 RC/上机验证不必再问（刷写 GD32 等硬规则不变）。构建/测试可在 dev-mbp 本机做（colima + mk20-build:trixie 镜像，busybox 1.27.2 在 ~/mk20-build-local/tools/bb127）。
 
 ## 4. 规则与约束
 
