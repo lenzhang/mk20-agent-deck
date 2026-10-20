@@ -1,12 +1,12 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-20 11:43 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-20 12:16 SGT
 
 ## 1. 当前状态
 
 | 工作线 | 分支 | 提交 | 状态 |
 |---|---|---|---|
-| hidfix（HID 模块修复） | feature/hidfix | 3245bbc（第 10 次结果） | 第 10 次未过：测试时间预算不够（T4 31/50），模块本身干净；等你决定 |
+| hidfix（HID 模块修复） | feature/hidfix | 35b577a 测试逻辑评审 hidfix/TEST-REVIEW.md | 第 11 次暂停；先按评审一次修完测试工具，再试运行 → 完整跑 |
 | K4 rc2（替换原厂 KD，fw 1.3.0） | feature/kd-replace-k4 | 6f2788b | 测试全过，未安装；等 hidfix 通过 |
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
@@ -17,6 +17,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-20 12:15** hidfix 第 11 次暂停，先审测试逻辑（hidfix/TEST-REVIEW.md）：第 6–10 次全是测试工具的问题，累计 84 次带设备文件的真实重绑，模块诊断 0 条。另外找到必然失败的缺陷：主机端身份校验对 kmsg 文件必然报错（离线复现），所以就算设备全过也会判失败；时间预算估高约一倍；错误关键词不分大小写会误报（debug、WiFi Warning）。建议：codex 一轮修完，设备上先跑约 3 分钟的试运行，再完整跑一次。
 - **10-20 11:33** hidfix 第 10 次未过：T4 跑到 31/50 时测试总时长预算不够，主动收尾（剩 506 s，需要 511 s），不是模块出错。共解绑/绑定 33 次，T7 未到；第 9 次的 ESHUTDOWN 没再出现（重试 0 次）；sunxi 报错对豁免 2 次（3 秒内恢复）；不可回收内存斜率 对照 +0.13、实测 −1.04 kB/轮（样本不全，未认证）；usb_f_hidfix 相关 Oops/告警 0；kmsg 连续；Mac 两次都识别到 HID；键盘自行恢复。harness 1f62c71，结果与 RCA 3245bbc。
 - **10-20 09:55** hidfix 第 9 次未过：T4 第 3 轮重新绑定后立即写 HID 报告返回 ESHUTDOWN（主机还没配好）。共解绑/绑定 5 次（T4 2/50），T7 未到；sunxi 报错对豁免 1 次（3 秒内恢复）；未见 usb_f_hidfix 崩溃/告警，kmsg 无缺口；键盘自行恢复（1.2.1，adb/usb0 正常），未用 hardreset。结果与 RCA：hidfix/reviews/run9/，e6996ca。
 - **10-20 09:50** hidfix 第 9 次开跑（codex、Kimi 复审均 GO），过滤修复 8e645d5：只在重新绑定时放过相邻的 sunxi_udc -108 报错对，且 3 秒内 UDC/usb0 必须恢复。
@@ -29,7 +30,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 3. 接下来要做
 
-- [ ] hidfix 第 10 次未过（时间预算）→ 等你决定：是否让 codex 压缩每轮耗时（或拆成两段/放宽 worker 定时器并相应调整看门狗余量），补 kmsg ready 游标的标识头，所有门槛不放宽，再跑第 11 次。未经同意不跑第 11 次
+- [ ] hidfix：按 TEST-REVIEW.md §4 冻结规格，codex 一轮修 D1–D16 → 离线全套 + 端到端校验 → 设备试运行 → 完整跑一次（等你点头）
 - [ ] USB 麦克风测试：Mac 音响 `say` 播放 + ASR 比对（阻塞：第 9 次占用键盘）
 - [ ] 安装 K4 rc2（阻塞：hidfix 通过）。风险：rescue-hardreset.sh 须先放到键盘上；glm-coding 需单独的 key 文件
 - [ ] UVC 采集卡上机测试（UHC07P）
