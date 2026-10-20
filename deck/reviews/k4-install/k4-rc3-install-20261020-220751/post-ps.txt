@@ -1,0 +1,1 @@
+ 2879 root     29348 S    /tmp/mk20/rel/bin/mk20-kbd --run --host /dev/ttyGS0 --hid /dev/hidg0 --hid-stop-file /tmp/mk20-router-sto

@@ -1,0 +1,43 @@
+/data/mk20/releases:
+drwxrwxrwx    5 root     root          4096 Jan  1 18:42 [1;34m.[0m
+drwxr-xr-x   11 root     root          4096 Jan  2  1970 [1;34m..[0m
+drwxr-xr-x    6 root     root          4096 Jan  1  1970 [1;34m1.2.0[0m
+drwxr-xr-x    6 root     root          4096 Jan  1  1970 [1;34m1.2.1[0m
+drwxr-xr-x    6 root     root          4096 Jan  1 18:42 [1;34m1.3.0[0m
+
+/data/mk20/slots:
+drwxrwxrwx    2 root     root          4096 Jan  1 18:49 [1;34m.[0m
+drwxr-xr-x   11 root     root          4096 Jan  2  1970 [1;34m..[0m
+-rw-r--r--    1 root     root           168 Jan  1 18:49 [0;0mA[0m
+-rw-rw-rw-    1 root     root           168 Jan  1 18:42 [0;0mB[0m
+
+/data/mk20/state:
+drwxrwxrwx    3 root     root          4096 Jan  1 18:50 [1;34m.[0m
+drwxr-xr-x   11 root     root          4096 Jan  2  1970 [1;34m..[0m
+-rw-r--r--    1 root     root             4 Jan  1 09:25 [0;0mdeadline-reset-1.0.3[0m
+-rw-r--r--    1 root     root             4 Jan  1 18:50 [0;0mdeadline-reset-1.3.0[0m
+-rw-r--r--    1 root     root            33 Jan  1 09:24 [0;0mfailed-1.0.3[0m
+-rw-r--r--    1 root     root            33 Jan  1 18:49 [0;0mfailed-1.3.0[0m
+-rw-r--r--    1 root     root             6 Jan  1  1970 [0;0mgood[0m
+-rw-r--r--    1 root     root            55 Jan  1 18:50 [0;0mhardreset.last[0m
+-rw-r--r--    1 root     root            46 Jan  1 18:49 [0;0mlast-rollback[0m
+drwx------    2 root     root          4096 Jan  1 18:41 [1;34mmaint[0m
+-rw-r--r--    1 root     root          1822 Jan  1 18:42 [0;0mselftest-1.json[0m
+-rw-r--r--    1 root     root           940 Jan  1 18:24 [0;0mselftest-2.json[0m
+-rw-r--r--    1 root     root           940 Jan  1 18:17 [0;0mselftest-3.json[0m
+-rw-r--r--    1 root     root           940 Jan  1 12:23 [0;0mselftest-4.json[0m
+-rw-r--r--    1 root     root           940 Jan  1 18:51 [0;0mselftest-last.json[0m
+name=mk20-agent-firmware
+version=1.2.1
+build=92d35ac
+kernels=7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc
+--
+3c835994de925f8c25ccf92094e7ab54def6d4f6b29dbdc592152db5effcbc59 755 bin/mk20-router
+9f925f80c75593b3b9789f4fc03c18f6377f7178bf4868349983b8c14799134a 755 bin/ttygs_tcp_bridge
+a82809f7dde4dffc137bcf447d0665467330128006bf95f350840dfd11ab7ae5 644 lib/usb_f_ecm.ko
+0eb4950553b3c8fe4cedf7b9f156e91b8dc7fd3be5a9f35b36c80fc39c34632b 755 sbin/mk20d
+f730267028f7840d016f83f0ae8506a16309207f53729adcb9051d8f723a479e 644 share/flapmon.sh
+49be92451e4d3f06ccf7c0136993cbd897b9f5cb2b216dc640ce269e7da934a4 755 share/gadget.sh
+b322fc9afada7d3c822f5f499cd65f1db5398a6e496b25c3c3a4cdbc9cb8f61c 755 share/mk20-add-adb.sh
+fed9a7fc9aa352a1454d4e32a925da53e1b7e7f30c57b1a460faee38d24f863e 644 share/mk20lib.sh
+dd99b390b27ea77b8ba1828c56ae15208785bf3dce20c64199825c12e1d214e9 644 share/vendor.sha256

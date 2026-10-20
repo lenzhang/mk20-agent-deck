@@ -1,0 +1,14 @@
+MK20 acceptance 2026-10-20 22:07:55 +08
+PASS adb shell
+PASS loader: good release current, none pending - current=A 17 1.2.1 good=1.2.1 pending= attempts= active=1.2.1 last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)
+PASS health: status ok - v=1.2.1 status=ok
+PASS health: composite + kd=1 + watchdog + selftest - PASS kd=1 PASS udc bound PASS ttyGS0 PASS watchdog armed PASS bridge 172.30.250.2:17890 PASS bridge link-local PASS hid INFO router running
+PASS health: headroom (FAT >= 1024 KiB, mem >= 20 MiB) - fat=1217 mem=53752
+PASS mac: MK20 interface present - en13
+PASS mac: route to device via MK20 interface (not TUN) - 172.30.250.2 -> en13
+PASS ping device (primary) - loss=0.0% avg=1.067ms
+PASS bridge listening on primary + link-local (device netstat) - primary=True ll=True
+PASS ping link-local 169.254.7.2 (bound) - 0.0% packet loss
+PASS tcp bridge: active connects skipped (use --tcp when no other client uses the bridge) - passive
+PASS hid: Mac enumerates 1d6b:0104 keyboard
+RESULT PASS
