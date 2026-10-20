@@ -32,3 +32,17 @@ def test_events_and_summary(tmp_path, monkeypatch):
     assert sm["samples"] == 3 and sm["reboots"] == 1 and sm["kd_restarts"] == 1
     assert sm["rollbacks"] == [{"time": "t", "record": "1.1.2->1.1.1"}]
     assert sm["min_mem_kb"] == 50000 and sm["min_fat_free_kb"] == 1200
+
+
+def test_keyboard_owner_restart_counts_mk20_kbd(tmp_path, monkeypatch):
+    monkeypatch.setenv("MK20_ADB", "true")
+    seq = [{"health": {"uptime_s": 100}, "kd_pid": "", "kbd_pid": "20", "loader": {}},
+           {"health": {"uptime_s": 400}, "kd_pid": "", "kbd_pid": "21", "loader": {}},
+           {"health": {"uptime_s": 700}, "kd_pid": "", "kbd_pid": "21", "loader": {}}]
+    monkeypatch.setattr(soak, "sample", _samples(seq))
+    monkeypatch.setattr(soak.time, "sleep", lambda s: None)
+    monkeypatch.setattr("sys.argv", ["x", "--hours", "1", "--interval", "0", "--out", str(tmp_path)])
+    monkeypatch.setattr(soak, "STOP", False)
+    assert soak.main() == 0
+    sm = json.loads(next(p for p in tmp_path.iterdir() if p.name.endswith(".summary.json")).read_text())
+    assert sm["kd_restarts"] == 1 and sm["reboots"] == 0

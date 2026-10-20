@@ -52,11 +52,16 @@ def sample(deep: bool) -> dict:
                                              "fat_free_kb", "data_free_kb", "shim_mounts", "adbd", "flapmon")}
         s["health"]["composite"] = (h.get("usb") or {}).get("composite")
         s["health"]["selftest"] = (h.get("selftest") or {}).get("pass")
+        k = h.get("kbd") or {}   # mk20-kbd releases (K4, >= 1.3): mode/restarts from mk20d health
+        s["health"]["kbd"] = {x: k.get(x) for x in ("enabled", "mode", "running", "restarts", "recent_crashes")}
+        s["keyboard_ok"] = acc.keyboard_check(h)[1]   # stock: kd=1; mk20-kbd release: kd=0 + mk20-kbd normal
         _, o = acc.sh("echo kd=$(pgrep -f '^/data/KeyboardDevice' | head -n 1); "
+                      "echo kbd=$(pgrep -f 'bin/mk20-kbd --run' | head -n 1); "
                       "echo logkb=$(du -k /data/mk20/logs /mnt/SDCARD/mk20/logs 2>/dev/null | awk '{print $1}' | tr '\\n' ' '); "
                       "echo bridgelog=$(wc -c < /tmp/mk20/bridge.log 2>/dev/null)")
         f = dict(l.split("=", 1) for l in o.splitlines() if "=" in l)
         s["kd_pid"] = f.get("kd", "").strip()
+        s["kbd_pid"] = f.get("kbd", "").strip()
         s["log_kb"] = f.get("logkb", "").strip()
         s["bridge_log_b"] = f.get("bridgelog", "").strip()
         lp, ll = acc.bridge_listening()
@@ -79,7 +84,7 @@ def sample(deep: bool) -> dict:
     if deep and not STOP:
         s["hid"] = acc.hid_enumerated()
     h = s.get("health") or {}
-    s["ok"] = bool(s["adb"] and iface and s["route_if"] == iface and h.get("status") == "ok" and h.get("kd") == 1 and h.get("composite") is True
+    s["ok"] = bool(s["adb"] and iface and s["route_if"] == iface and h.get("status") == "ok" and s.get("keyboard_ok") is True
                    and s["ping_loss"] == 0 and s.get("ping_ll_loss", 100) == 0
                    and s.get("listen_primary") and s.get("listen_ll")
                    and s.get("hid", True))
@@ -139,7 +144,7 @@ def main() -> int:
                 reboots += 1
                 s["event"] = "reboot"
             last_up = up if isinstance(up, int) else last_up
-            kd = s.get("kd_pid")
+            kd = s.get("kbd_pid") or s.get("kd_pid")   # the keyboard owner: mk20-kbd (K4) or stock KD
             if kd and last_kd and kd != last_kd and s.get("event") != "reboot":
                 kd_restarts += 1
                 s["event"] = (s.get("event", "") + " kd-restart").strip()
