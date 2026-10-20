@@ -1,12 +1,15 @@
 """Config file (~/.config/mk20-agent-deck/config.toml) and persisted state."""
 from __future__ import annotations
 
+import ipaddress
 import json
+import logging
 import os
 import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from .adapters.codex_desktop import DEFAULT_ORIGINATORS, CodexDesktopConfig
 from .adapters.herdr import HerdrConfig
@@ -14,6 +17,10 @@ from .adapters.tmux import TmuxConfig
 from .model import Mode
 
 CONFIG_DIR = os.path.expanduser(os.environ.get("MK20DECK_HOME", "~/.config/mk20-agent-deck"))
+# Device web settings, opened on the Mac when the keyboard sends {"method":"ui.openSettings"} (网页设置 key).
+# The URL comes only from this config, never from the device.
+DEFAULT_WEB_URL = "http://172.30.250.2:8780/"
+log = logging.getLogger(__name__)
 
 DEFAULT_SKILLS = (
     ("审 PR", "请审查当前分支相对主干的改动（PR review），列出问题与建议。"),
@@ -62,6 +69,40 @@ class DeckConfig:
     # keycode-form key events (keyCodeH/L): "0x00e6" -> "1,4" (document col,row) or "K1:cw"
     keycode_map: dict[str, str] = field(default_factory=dict)
     state_path: str = os.path.join(CONFIG_DIR, "state.json")
+    web_url: str = DEFAULT_WEB_URL  # see parse_web_url
+
+
+def parse_web_url(v: Any) -> str:
+    """http(s) URL whose host is an IP literal or ``localhost`` and that carries no credentials; anything else
+    falls back to DEFAULT_WEB_URL with a warning (it is handed to ``open`` on a device-initiated event)."""
+    reason = None
+    if not isinstance(v, str) or not v:
+        reason = "not a string"
+    elif any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in v):
+        reason = "whitespace/control characters"
+    else:
+        u = urlsplit(v)
+        try:
+            u.port  # noqa: B018 — raises ValueError on a bad port
+        except ValueError:
+            reason = "bad port"
+        host = u.hostname or ""
+        if reason:
+            pass
+        elif u.scheme not in ("http", "https"):
+            reason = "scheme must be http or https"
+        elif u.username is not None or u.password is not None or "@" in u.netloc:
+            reason = "credentials are not allowed"
+        elif host != "localhost":
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                reason = "host must be an IP literal or localhost"
+    if reason:
+        shown = "<redacted>" if reason.startswith("credentials") else repr(v)[:120]
+        log.warning("config web_url %s rejected (%s): using %s", shown, reason, DEFAULT_WEB_URL)
+        return DEFAULT_WEB_URL
+    return v
 
 
 def parse_backlight(v: Any) -> int | None:
@@ -89,6 +130,8 @@ def load_config(path: str | None = None) -> DeckConfig:
         if k in deck:
             setattr(cfg, k, deck[k])
     cfg.backlight = parse_backlight(cfg.backlight)
+    if "web_url" in deck:
+        cfg.web_url = parse_web_url(deck["web_url"])
     if cfg.fw_coord_base == "auto":
         cfg.fw_coord_base = None
     cfg.max_fps = min(float(cfg.max_fps), 8.0)  # PRD §7.4 hard ceiling

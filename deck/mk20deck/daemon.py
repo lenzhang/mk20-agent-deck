@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import queue
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -10,6 +12,7 @@ from typing import Callable
 
 from . import keytrace as _keytrace
 from . import protocol as P
+from .config import DEFAULT_WEB_URL
 from .controller import LONG_PRESS, Controller
 from .link import DeviceLink, LatencyStats
 from .render.canvas import Renderer
@@ -17,9 +20,27 @@ from .render.canvas import Renderer
 log = logging.getLogger(__name__)
 
 
+OPEN_SETTINGS_EVENT = {"method": "ui.openSettings"}  # mk20-kbd 网页设置 key, exactly this (no payload)
+
+
+def open_url(url: str) -> bool:
+    """Open ``url`` in the Mac's default browser (``open``); elsewhere only log. Never raises."""
+    if sys.platform != "darwin":
+        log.info("web settings %s: not on macOS, not opening", url)
+        return False
+    try:
+        r = subprocess.run(["open", url], timeout=5, capture_output=True)
+    except Exception as e:  # noqa: BLE001 — timeout / missing binary: the deck keeps running
+        log.warning("open %s failed: %s", url, e)
+        return False
+    if r.returncode != 0:
+        log.warning("open %s exited %s", url, r.returncode)
+    return r.returncode == 0
+
+
 @dataclass
 class InputEvent:
-    kind: str  # "key" | "knob"
+    kind: str  # "key" | "knob" | "ui"
     a: int
     b: int | str
     pressed: bool = False
@@ -57,6 +78,12 @@ class Daemon:
     _next_power: float = 0.0
     power_log: list = field(default_factory=list)
     trace: object | None = field(default_factory=lambda: _keytrace.from_env())  # MK20_KEYTRACE=1
+    web_url: str = DEFAULT_WEB_URL  # validated config value (config.parse_web_url), never from the device
+    open_settings_min_s: float = 3.0
+    opener: Callable[[str], object] = open_url
+    settings_opened: int = 0
+    settings_dropped: int = 0  # rate-limited or malformed ui.openSettings events
+    _last_settings: float = -1e9
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -94,6 +121,30 @@ class Daemon:
         col, row = lay.fw_to_doc(ev.col, ev.row)
         self.events.put(InputEvent("key", col, row, ev.pressed, t=now, code=code))
 
+    def on_device_event(self, obj: dict) -> None:
+        """Non-key device JSON event, called from the link reader thread: only queue, never block or raise."""
+        method = obj.get("method")
+        if method != OPEN_SETTINGS_EVENT["method"]:
+            log.info("ignored device event %r", str(method)[:64])
+            return
+        if obj != OPEN_SETTINGS_EVENT:  # the device never sends a payload: refuse to act on one
+            self.settings_dropped += 1
+            log.warning("ui.openSettings with extra fields %s dropped", sorted(str(k)[:32] for k in obj)[:8])
+            return
+        self.events.put(InputEvent("ui", 0, "openSettings", t=self.clock()))
+
+    def _open_settings(self) -> None:
+        now = self.clock()
+        if now - self._last_settings < self.open_settings_min_s:
+            self.settings_dropped += 1
+            log.info("ui.openSettings rate-limited (%.1f s since the last one)", now - self._last_settings)
+            return
+        self._last_settings = now
+        self.settings_opened += 1
+        log.info("ui.openSettings: opening %s", self.web_url)
+        # `open` can take a moment (LaunchServices): never stall the render loop for it.
+        threading.Thread(target=self.opener, args=(self.web_url,), name="mk20-open-settings", daemon=True).start()
+
     def inject_key(self, col: int, row: int, pressed: bool) -> None:
         """Document coordinates (simulator)."""
         self.events.put(InputEvent("key", col, row, pressed, t=self.clock()))
@@ -102,6 +153,10 @@ class Daemon:
         self.events.put(InputEvent("knob", knob, kind, t=self.clock()))
 
     def _apply(self, ev: InputEvent) -> None:
+        if ev.kind == "ui":  # device UI request, not controller input (no render/latency bookkeeping)
+            if ev.b == "openSettings":
+                self._open_settings()
+            return
         log.info("input %s %s %s%s", ev.kind, ev.a, ev.b, "" if ev.kind != "key" else (" down" if ev.pressed else " up"))
         tr = self.trace
         if tr:

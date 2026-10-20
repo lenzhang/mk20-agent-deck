@@ -8,13 +8,13 @@ is **not** implemented (not approved).
 | module | what |
 |---|---|
 | `protocol.py` | Protocol A codec (`A1A55A5E`, crc32 of size & data), stream parser with resync, method allow-list (no `keyboardInput`) |
-| `transport.py` / `link.py` | pyserial transport (CDC `1d6b:0104`, alt `1234:5678`), `MockDevice`, handshake (1 MiB `'0'` preamble + `getInfo`), SHOW_JPG stop-and-wait using the device ack as display ACK, latency stats |
+| `transport.py` / `link.py` | pyserial transport (CDC `1d6b:0104`, alt `1234:5678`), `MockDevice`, handshake (1 MiB `'0'` preamble + `getInfo`, then `ui.hello`; on mk20-kbd fw >= 1.3 a `ui.heartbeat` thread keeps the host ONLINE on every device page, see `kbd/UI.md`), SHOW_JPG stop-and-wait using the device ack as display ACK, latency stats |
 | `layout.py` | canvas/rect model; default guess 640×656 (sub 428×142 @106,0; keys 128² @ (c·128, 144+r·128)); replaced by `getInfo` |
 | `adapters/codex_desktop.py` | read-only Codex Desktop source: `state_5.sqlite` (`mode=ro`), rollout tail, `.codex-global-state.json` unread, `codex://` deep links |
 | `adapters/tmux.py`, `adapters/herdr.py` | tmux (generation identity, states unknown) / herdr stub |
 | `slots.py`, `controller.py` | slot manager (sticky, strict-higher replace, pins, per-mode memory), gestures, stop long-press, roles L1/L4 |
 | `render/` | key & sub-screen renderer, ≤8 fps global cap, single attention animation |
-| `daemon.py`, `cli.py` | daemon loop, heartbeat, offline frame on exit, CLI |
+| `daemon.py`, `cli.py` | daemon loop, heartbeat, offline frame on exit, CLI; device event `ui.openSettings` (网页设置 key) opens `[deck] web_url` (Mac config only, IP/localhost, max once per 3 s) |
 | `sim.py` | headless screenshots + interactive web sim |
 | `supervisor.py` | find port → open → handshake → run; reconnect on unplug / ACK loss / wake; busy-port hint (never kills) |
 | `hw/devtest.py` | on-device validation harness (`devtest`), markdown + JSON report |

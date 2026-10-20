@@ -9,6 +9,8 @@ jpeg_quality = 85
 poll_interval_s = 2.0
 heartbeat_s = 2.0
 backlight = 80                   # sent after every handshake (host mode starts at 0 = dark); false = leave alone
+web_url = "http://172.30.250.2:8780/"  # opened on the Mac by the 网页设置 key (device event ui.openSettings);
+                                 # http/https, IP literal or localhost, no credentials - else this default
 
 [codex_desktop]
 codex_home = "~/.codex"
