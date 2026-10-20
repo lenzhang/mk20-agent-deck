@@ -1,12 +1,12 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-20 09:55 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-20 10:06 SGT
 
 ## 1. 当前状态
 
 | 工作线 | 分支 | 提交 | 状态 |
 |---|---|---|---|
-| hidfix（HID 模块修复） | feature/hidfix | 8e645d5（过滤修复）/ 7db8f6e（最新） | 第 9 次上机进行中（09:50 开跑） |
+| hidfix（HID 模块修复） | feature/hidfix | e6996ca（第 9 次结果） | 第 9 次未过（测试时序问题，非模块崩溃）；等你决定下一步 |
 | K4 rc2（替换原厂 KD，fw 1.3.0） | feature/kd-replace-k4 | 6f2788b | 测试全过，未安装；等 hidfix 通过 |
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
@@ -17,6 +17,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-20 09:55** hidfix 第 9 次未过：T4 第 3 轮重新绑定后立即写 HID 报告返回 ESHUTDOWN（主机还没配好）。共解绑/绑定 5 次（T4 2/50），T7 未到；sunxi 报错对豁免 1 次（3 秒内恢复）；未见 usb_f_hidfix 崩溃/告警，kmsg 无缺口；键盘自行恢复（1.2.1，adb/usb0 正常），未用 hardreset。结果与 RCA：hidfix/reviews/run9/，e6996ca。
 - **10-20 09:50** hidfix 第 9 次开跑（codex、Kimi 复审均 GO），过滤修复 8e645d5：只在重新绑定时放过相邻的 sunxi_udc -108 报错对，且 3 秒内 UDC/usb0 必须恢复。
 - **10-20** 编译测试主机迁到 iMac build-imac.local（colima/Debian 容器，见 `docs/box-archive-imac:docs/BUILD-HOST-IMAC.md`）；助手电脑上的副本已删除；完整副本在 dev-mbp.lan `~/mk20-full`；未推改动在 `wip/box-*` 分支，归档在 `docs/box-archive-imac`。
 - **10-20** 第 6–8 次未过，均只因测试判定：dmesg 环形缓冲回卷（16 KiB）、Slab 总量噪声、重新绑定时良性的 sunxi_udc 报错对。HID 模块本身无崩溃、无告警。
@@ -27,7 +28,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 3. 接下来要做
 
-- [ ] 第 9 次结果（自动链路：`~/worktrees/hidfix-run9-chain.log`）→ 结果写入 hidfix/reviews/run9/。不跑第 10 次
+- [ ] hidfix 第 9 次未过 → 等你决定：是否让 codex 修测试（重新绑定后有上限地等待/重开再写报告、记录失败的 syscall、补 t4-slabinfo 头、抓 Mac HID 枚举）后跑第 10 次。未经同意不跑第 10 次
 - [ ] USB 麦克风测试：Mac 音响 `say` 播放 + ASR 比对（阻塞：第 9 次占用键盘）
 - [ ] 安装 K4 rc2（阻塞：hidfix 通过）。风险：rescue-hardreset.sh 须先放到键盘上；glm-coding 需单独的 key 文件
 - [ ] UVC 采集卡上机测试（UHC07P）
@@ -37,7 +38,6 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 - [ ] 板载 U3–U7（维护页面放进 `mk20-agent --web`）
 - [ ] agent A9；遗留 minor
 - [ ] TF 卡恢复演练
-- [ ] hardreset.sh 路径：仓库 hidfix/ref/firmware/rescue/hardreset.sh；设备上 /data/mk20/rescue/ 或 /mnt/SDCARD/mk20/（已定位，Mac 链路待接入）
 - [ ] 如用户需要，删除助手电脑密钥配置里的 MK20_VNC_PASSWORD
 
 负责人：代码由 codex/ccai 写，Kimi 交叉评审，助手负责编排与验收；装固件/刷写需用户同意。
@@ -55,6 +55,8 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 - 每个并行任务独立 worktree。
 
 ## 5. 资料位置
+
+- hardreset.sh：仓库 hidfix/ref/firmware/rescue/hardreset.sh；设备上 /data/mk20/rescue/hardreset.sh 或 /mnt/SDCARD/mk20/hardreset.sh（带 .sha256 校验）
 
 - Gitea：ssh://git@192.168.88.6:2222/leo/mk20-agent-deck.git
 - 完整副本：dev-mbp.lan `~/mk20-full/mk20-agent-deck`，交接 `~/mk20-full/HANDOFF.md`，归档 `~/mk20-backup/box-archive/`
