@@ -105,6 +105,8 @@ class DeviceLink:
             try:
                 chunk = self.t.read(0.05)
             except Exception as e:  # device unplugged
+                if self._stop.is_set():  # close() shut the transport under us (EBADF): not a loss
+                    return
                 log.warning("transport read failed: %s", e)
                 self._lost(f"读取失败（拔线？）: {e}")
                 return
