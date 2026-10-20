@@ -68,13 +68,12 @@ class Client:
         body, self.buffer = self.buffer[:n], self.buffer[n:]
         return status, h, json.loads(body) if h["Content-Type"] == "application/json" and body else body
 
-    def pair(self, fd):
+    def pair(self, pair_file):
+        # mk20-kbd's view: the challenge file exists once /pair/start has answered.
         assert self.request("/pair/start", "POST", {})[0] == 200
-        if not select.select([fd], [], [], 2)[0]: raise AssertionError("pair display injection not received")
-        code = os.read(fd, 7).strip().decode()
-        if not re.fullmatch(r"[0-9]{6}", code): raise AssertionError("invalid display code format")
+        code, expires = read_pair(pair_file)
         status, h, d = self.request("/pair", "POST", dict(code=code))
-        assert status == 200
+        assert status == 200 and not pair_file.exists()
         self.cookie = h["Set-Cookie"].split(";", 1)[0]; self.csrf = d["csrf"]
         assert "HttpOnly; SameSite=Strict; Path=/" in h["Set-Cookie"]
         return code
@@ -91,8 +90,21 @@ class Client:
         return json.loads(data)
 
 
+def uptime():
+    return int(float(Path("/proc/uptime").read_text().split()[0]))
+
+
+def read_pair(pair_file):
+    """Exact /run/mk20/pair-code contract: 0600, <=64 bytes, code + uptime expiry (TTL <= 10 min)."""
+    text = pair_file.read_text()
+    m = re.fullmatch(r"code=([0-9]{6})\nexpires_uptime=([0-9]+)\n", text)
+    assert m and len(text.encode()) <= 64 and pair_file.stat().st_mode & 0o7777 == 0o600, text
+    if Path("/proc/uptime").exists(): assert 0 < int(m[2]) - uptime() <= 600
+    return m[1], int(m[2])
+
+
 @contextlib.contextmanager
-def server(binary, tmp_path, kbd, *, tcp=False, vnc=None, model_streams=(), ca=None, connections=3, display=True, combined=False, small_send=False):
+def server(binary, tmp_path, kbd, *, tcp=False, vnc=None, model_streams=(), ca=None, connections=3, display=True, combined=False, small_send=False, extra=()):
     # resolve() avoids Darwin's /var and /tmp symlink ancestors, which the server
     # deliberately refuses for persisted credentials/configuration.
     tmp_path = tmp_path.resolve()
@@ -100,12 +112,17 @@ def server(binary, tmp_path, kbd, *, tcp=False, vnc=None, model_streams=(), ca=N
     pw = tmp_path / "vnc.pass"; pw.write_bytes(b"secret12"); pw.chmod(0o600)
     calibration = tmp_path / "calib.json"; write_calibration(calibration)
     policy = tmp_path / "policy.json"; policy.write_text(json.dumps(dict(confirm_first=False, confirm_app_switch=False)))
+    pair_file, maint = tmp_path / "run/pair-code", tmp_path / "maint"
     cmd = [str(binary), "--web", "--web-listen", "127.0.0.1:8780", "--web-no-bindtodevice",
-           "--web-secrets-dir", str(secrets), "--web-config-dir", str(config), "--calibration", str(calibration), "--policy", str(policy)]
+           "--web-secrets-dir", str(secrets), "--web-config-dir", str(config),
+           "--web-pair-file", str(pair_file), "--web-health-file", str(tmp_path / "health.json"),
+           "--web-maint-dir", str(maint), "--web-debug-file", str(tmp_path / "debug.conf"), *extra]
+    if kbd is not None: cmd += ["--calibration", str(calibration), "--policy", str(policy)]
     clients, children, inherited = [], [], []
-    pair_read, pair_write = os.pipe()
-    if display: cmd += ["--web-pair-fd", str(pair_write)]; inherited.append(pair_write)
-    if isinstance(kbd, Path): cmd += ["--kbd-sock", str(kbd)]
+    # Without a usable display directory no challenge can be shown (display_unavailable).
+    if not display: (tmp_path / "run").mkdir(mode=0o777); (tmp_path / "run").chmod(0o777)
+    if kbd is None: pass  # settings-only web (FEATURE_AGENT=0): no keyboard client
+    elif isinstance(kbd, Path): cmd += ["--kbd-sock", str(kbd)]
     else: cmd += ["--kbd-fd", str(kbd.fileno())]; inherited.append(kbd.fileno())
     if vnc:
         cmd += ["--vnc-host", "127.0.0.1", "--vnc-port", str(vnc.port), "--password-file", str(pw)]
@@ -126,7 +143,6 @@ def server(binary, tmp_path, kbd, *, tcp=False, vnc=None, model_streams=(), ca=N
     logpath = tmp_path / "web.log"
     with logpath.open("w+") as log:
         proc = subprocess.Popen(cmd, pass_fds=tuple(inherited), stdout=subprocess.PIPE, stderr=log)
-        os.close(pair_write)
         for child in children: child.close()
         try:
             deadline = time.monotonic() + 10
@@ -134,12 +150,12 @@ def server(binary, tmp_path, kbd, *, tcp=False, vnc=None, model_streams=(), ca=N
             if "web ready" not in logpath.read_text(): raise AssertionError("web startup failed: " + logpath.read_text())
             if tcp: clients = [Client(socket.create_connection(("127.0.0.1", 8780))) for _ in range(connections)]
             mcp = MCPClient(mcp_parent,(tmp_path / "mcp.token").read_text()) if combined else None
-            yield clients, pair_read, proc, logpath, secrets, config, mcp
+            yield clients, pair_file, proc, logpath, secrets, config, mcp
         finally:
             for c in clients: c.sock.close()
             if mcp_parent: mcp_parent.close()
             if proc.poll() is None: proc.terminate()
-            out, _ = proc.communicate(timeout=6); os.close(pair_read)
+            out, _ = proc.communicate(timeout=6)
             logs = logpath.read_bytes() + out
             forbidden = [b"secret12", b"Authorization", b"private web task", b"web-synthetic-key"]
             forbidden += [c.cookie.encode() for c in clients if c.cookie] + [c.csrf.encode() for c in clients if c.csrf]
@@ -150,7 +166,7 @@ def server(binary, tmp_path, kbd, *, tcp=False, vnc=None, model_streams=(), ca=N
 
 def configuration(secrets, port=7890):
     net = dict(version=1, profile="mac_proxy", proxy=dict(url=f"http://172.30.250.1:{port}", fallbacks=[]), routes=dict(domestic="proxy", foreign="proxy"))
-    provider = dict(version=1, provider="qwen", model="fake-vl", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    provider = dict(version=1, provider="qwen", model="qwen-vl-max", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
                     domestic=True, route="domestic", api_key_file=str(secrets / "qwen.key"))
     return net, provider
 
@@ -177,7 +193,7 @@ def full_flow(binary, kbd_build, tmp_path, certs, tcp):
                 c, status_client, events = cs
                 assert c.request("/config/net")[0] == 401
                 code = c.pair(fd); status_client.share(c); events.share(c)
-                assert c.request("/secret/qwen","POST",dict(value="web-synthetic-key"))[2] == dict(set=True,len=17)
+                assert c.request("/secret/qwen","POST",dict(value="web-synthetic-key"))[2] == dict(set=True)
                 assert c.request("/secret/qwen")[2] == dict(set=True)
                 assert (secrets / "qwen.key").stat().st_mode & 0o7777 == 0o600
                 net, provider = configuration(secrets)
@@ -243,7 +259,8 @@ def test_auth_csrf_origin_and_secrets_ipc(web_binary,kbd_build,tmp_path):
         assert c.request("/secret/qwen","POST",dict(value="web-synthetic-key"),headers={"X-CSRF-Token":None})[0] == 403
         assert c.request("/secret/qwen","POST",dict(value="web-synthetic-key"),headers={"Sec-Fetch-Site":None})[0] == 403
         assert c.request("/secret/qwen","POST",dict(value="web-synthetic-key"),headers={"Origin":"http://evil"})[0] == 403
-        assert c.request("/secret/qwen","POST",dict(value="web-synthetic-key"),headers={"Sec-Fetch-Site":None,"Origin":"http://172.30.250.2:8780"})[0] == 200
+        assert c.request("/secret/qwen","POST",dict(value="web-synthetic-key"),headers={"Sec-Fetch-Site":None,"Origin":"http://172.30.250.2:8780"})[0] == 403
+        assert c.request("/secret/qwen","POST",dict(value="web-synthetic-key"),headers={"Sec-Fetch-Site":None,"Origin":"http://127.0.0.1:8780"})[0] == 200
         assert other.request("/secret/qwen")[0] == 401
         assert c.request("/secret/qwen")[2] == dict(set=True)
         assert c.request("/secret/qwen","DELETE")[0] == 200
@@ -278,13 +295,14 @@ def test_display_unavailable_ipc(web_binary,kbd_build,tmp_path):
     with keyboard(kbd_build,tmp_path) as (kbd,_,_,_), server(web_binary,tmp_path,kbd,display=False) as (cs,_,_,_,_,_,_):
         assert cs[0].request("/pair/start","POST",{})[2] == dict(error="display_unavailable")
         assert cs[0].request("/pair","POST",dict(code="000000"))[0] == 401
+        assert not (tmp_path.resolve() / "run/pair-code").exists()
 
 
 def test_static_pages_hashes_ipc(web_binary,kbd_build,tmp_path):
     with keyboard(kbd_build,tmp_path) as (kbd,_,_,_), server(web_binary,tmp_path,kbd) as (cs,_,_,_,_,_,_):
         for path in ("/","/chat"):
             status,h,body = cs[0].request(path); assert status == 200 and h["Cache-Control"] == "no-store"
-            assert len(body) >= 9000 and b"https://cdn" not in body and b"eval(" not in body
+            assert len(body) >= 6000 and b"https://" not in body and b"eval(" not in body and b"lang=\"zh-CN\"" in body
             for kind in ("script","style"):
                 values = re.findall(fr"<{kind}>(.*?)</{kind}>",body.decode(),re.S)
                 assert len(values) == 1
@@ -376,7 +394,8 @@ def test_production_rejects_test_seams(web_binary,arg):
     assert result.returncode and b"invalid configuration" in result.stderr
 
 
-@pytest.mark.parametrize("address,no_device",[("0.0.0.0:8780",True),("[::]:8780",True),("192.168.1.2:8780",False),("172.30.250.2:8780",True),("127.0.0.1:8780",False),("172.30.250.2:9999",False)])
+@pytest.mark.parametrize("address,no_device",[("0.0.0.0:8780",True),("[::]:8780",True),("192.168.1.3:8780",False),("172.30.250.1:8780",False),
+    ("169.254.7.2:8780",False),("0.1.2.2:8780",False),("172.30.250.2:8780",True),("127.0.0.1:8780",False),("172.30.250.2:9999",False),("172.30.9.2:18780",False)])
 def test_listener_override_refusal(web_binary,address,no_device):
     command=[str(web_binary),"--web","--web-listen",address]
     if no_device: command += ["--web-no-bindtodevice"]
@@ -482,3 +501,83 @@ def test_oversized_header_response_halfclose_ipc(web_binary,kbd_build,tmp_path):
         # still has bytes to write. The server drains them under its deadline.
         c.sock.sendall(b"x"*128)
         assert c.sock.recv(1) == b""
+
+
+def test_settings_only_web_default_ipc(web_binary,tmp_path):
+    # FEATURE_AGENT=0 default: no keyboard client, no task API, settings + maintenance only.
+    root = tmp_path.resolve(); maint = root / "maint"; maint.mkdir(mode=0o700)
+    (root / "health.json").write_text(json.dumps(dict(version="9.9.9", release=dict(slot="A", good="9.9.8", pending="9.9.9", last_rollback=""),
+        kbd=dict(mode="normal", running=True, restarts=0, recent_crashes=0, status='{"private":"KBD-RAW"}'), mem_avail_kb=50000,
+        fat_free_kb=4096, data_free_kb=90000, config=dict(src="/data/mk20/config/mk20.conf"),
+        selftest={"pass": True, "detail": "PASS kd=0 (mk20-kbd mode) WARN web not running"}, status="degraded")))
+    with server(web_binary,tmp_path,None,connections=2) as (cs,pair_file,proc,log,secrets,config,_):
+        c, other = cs
+        assert "web ready (settings only)" in log.read_text()
+        status, h, body = c.request("/")
+        assert status == 200 and "script-src 'sha256-" in h["Content-Security-Policy"]
+        assert c.request("/", headers={"Host": "mk20.attacker.example:8780"})[0] == 403  # DNS rebinding
+        assert c.request("/api/status")[0] == 401
+        code = c.pair(pair_file)
+        assert c.request("/api/session")[2] == dict(csrf=c.csrf, agent=False, web_url="http://127.0.0.1:8780")
+        other.cookie = c.cookie  # a new tab recovers its CSRF token from the same-origin session endpoint
+        assert other.request("/api/session")[2]["csrf"] == c.csrf
+        for path, method in (("/api/tasks","POST"), ("/api/tasks/t1","GET"), ("/api/events","GET")):
+            assert c.request(path, method, dict(goal="x") if method == "POST" else None)[2] == dict(error="agent_disabled")
+        cat = c.request("/api/catalogue")[2]
+        assert [p["id"] for p in cat["providers"]] == [p["id"] for p in json.loads((AGENT.parent / "share/providers.json").read_text())["providers"]]
+        assert c.request("/api/provider","PUT",dict(provider="glm-coding",model="glm-5.3-flash"))[0] == 200
+        assert c.request("/config/provider")[2]["api_key_file"] == str(secrets / "glm-coding.key")
+        assert c.request("/api/provider","PUT",dict(provider="glm-coding",model="free-text"))[0] == 400
+        assert c.request("/secret/glm-coding","POST",dict(value="web-synthetic-key"))[2] == dict(set=True)
+        s = c.request("/api/status")[2]
+        assert s["version"] == "9.9.9" and s["release"]["slot"] == "A" and s["kbd"]["mode"] == "normal" and s["agent"] is False
+        assert s["selftest"]["problems"] == ["WARN web not running"] and "KBD-RAW" not in json.dumps(s) and "mk20.conf" not in json.dumps(s)
+        assert c.request("/api/maint/restart-kbd","POST",dict(confirm="restart-kbd"))[0] == 202
+        assert (maint / "restart-kbd").stat().st_size == 0 and (maint / "restart-kbd").stat().st_mode & 0o7777 == 0o600
+        assert c.request("/api/maint/debug","POST",dict(confirm="debug",verbose=True))[0] == 202
+        assert (maint / "debug").read_text() == "verbose=1\n"
+        assert c.request("/api/status")[2]["maint"]["pending"] == ["restart-kbd","debug"]
+        assert not [p for p in maint.iterdir() if p.name.startswith(".web-")]
+        assert code not in log.read_text()
+    assert not pair_file.exists()
+
+
+def test_pair_file_removed_on_exit_and_restart_ipc(web_binary,tmp_path):
+    root = tmp_path.resolve(); stale = root / "run/pair-code"; stale.parent.mkdir(mode=0o700)
+    stale.write_text("code=123456\nexpires_uptime=99999999\n"); stale.chmod(0o600)
+    with server(web_binary,tmp_path,None,connections=1) as (cs,pair_file,proc,_,_,_,_):
+        assert pair_file == stale and not stale.exists()  # a previous instance's challenge is void
+        assert cs[0].request("/pair/start","POST",{})[0] == 200 and read_pair(pair_file)
+    assert not stale.exists()  # SIGTERM shutdown removes a live challenge
+
+
+def test_settings_only_refuses_agent_inputs(web_binary,tmp_path):
+    for extra in (["--vnc-host","172.30.250.1"],["--provider",str(tmp_path / "p.json"),"--net",str(tmp_path / "n.json")]):
+        r = subprocess.run([str(web_binary),"--web","--web-listen","127.0.0.1:8780","--web-no-bindtodevice",*extra],capture_output=True)
+        assert r.returncode and b"invalid configuration" in r.stderr
+
+
+@pytest.mark.parametrize("address",["172.30.9.2:8780","10.20.0.2:8780"])
+def test_configured_subnet_listener_accepted(web_binary,address):
+    # Any mk20d ECM_SUBNET device address (.2) passes validation; binding still needs usb0.
+    r = subprocess.run([str(AGENT / "build/mk20-agent"),"--web","--web-listen",address],capture_output=True,timeout=10)
+    assert b"invalid configuration" not in r.stderr
+    if "usb0" not in [name for _,name in socket.if_nameindex()]:
+        assert r.returncode and b"web startup: bind refused" in r.stderr
+
+
+def test_web_catalogue_generated_from_single_source(tmp_path):
+    # share/providers.json -> tools/gen-providers.py -> kbd/providers.inc + agent/src/web_providers.inc
+    deck = AGENT.parent
+    assert subprocess.run([os.sys.executable, str(deck / "tools/gen-providers.py"), "--check"], capture_output=True).returncode == 0
+    for rel in ("tools/gen-providers.py", "share/providers.json", "kbd/providers.inc", "agent/src/web_providers.inc"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes((deck / rel).read_bytes())
+    data = json.loads((tmp_path / "share/providers.json").read_text())
+    data["providers"][0]["models"].append(dict(id="new-model", vision=True, tools=True))
+    (tmp_path / "share/providers.json").write_text(json.dumps(data))
+    r = subprocess.run([os.sys.executable, str(tmp_path / "tools/gen-providers.py"), "--check"], capture_output=True, text=True)
+    assert r.returncode and "web_providers.inc" in r.stderr and "providers.inc" in r.stderr
+    assert subprocess.run([os.sys.executable, str(tmp_path / "tools/gen-providers.py")]).returncode == 0
+    assert '"new-model"' in (tmp_path / "agent/src/web_providers.inc").read_text()
+    assert subprocess.run([os.sys.executable, str(tmp_path / "tools/gen-providers.py"), "--check"]).returncode == 0

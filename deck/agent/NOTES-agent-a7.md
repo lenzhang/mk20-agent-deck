@@ -1,5 +1,9 @@
 # A7 agent-side host implementation
 
+> Superseded in part (feature/web-settings): the keyboard `screen.text` pairing display was
+> removed; pairing now writes `/run/mk20/pair-code` for mk20-kbd to show, the web is default-on
+> in settings-only mode and binds the gadget.env usb0 address. Current contract: [README.md](README.md).
+
 Scope: `deck/agent/{src,tests,Makefile,README.md,NOTES-agent-a7.md}`, A7 review
 records and the A7 plan status line only. No device/adb/serial, external network access,
 provider credential, commit, push, dependency download, firmware/vendor/tool or

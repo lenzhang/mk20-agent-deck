@@ -8,6 +8,31 @@ the supervisor side only. The web service owns authentication, pairing/CSRF
 protection and usb0-only binding. No Mac app or keyboard combo is required. No hook starts stock KD, changes
 the USB gadget, installs a release, accepts a command/path, or reads secrets.
 
+## Maintenance page in the web
+
+The default-on web (`FEATURE_WEB=1`, supervised by `mk20d web`; user guide
+[../SETTINGS.md](../SETTINGS.md)) has a 维护 (maintenance) section, available only to a
+paired browser session:
+
+- **Status (read-only)**: `GET /api/status` copies an allow-list of fields from
+  `/tmp/mk20/health.json` (`mk20d health`, refreshed by the maint loop about every 300 s:
+  version, `release.slot/good/pending/last_rollback`, memory/FAT/data free, kbd mode/
+  restarts, selftest pass and its WARN/FAIL lines as printable ASCII) plus the live
+  uptime, the bound usb0 address, `state.json` below and the `debug.conf` verbose flag.
+  Raw `kbd.status`, config paths, agent/provider state and every other field are dropped;
+  nothing under `/data/mk20/secrets` is read.
+- **Actions**: 重启键盘程序 (`restart-kbd`), 退出安全模式 (`exit-safe-mode`) and 详细调试日志
+  (`debug`, `verbose=0|1`). Each is `POST /api/maint/<name>` with the session CSRF token,
+  a same-origin request and a body that confirms the action by name
+  (`{"confirm":"restart-kbd"}`; debug adds `"verbose":true|false`); the page asks first.
+  The web publishes only into the runtime inbox `/tmp/mk20/maint/` with the contract
+  below (exclusive `.web-<random>.tmp`, mode 0600, fsync, rename, directory fsync). It
+  never creates or chmods the inbox: a missing, symlinked or non-0700 inbox returns
+  `maint_unavailable`. Its own abandoned temporaries are removed at web startup.
+  The page then re-reads `state.json`, and lists a request as pending while its fixed
+  basename is still unclaimed.
+- There are no reboot, rollback, install, keytrace or log-file actions in this version.
+
 ## Inboxes and publication
 
 - `/data/mk20/state/maint/`: persistent inbox (survives reboot), mode 0700.

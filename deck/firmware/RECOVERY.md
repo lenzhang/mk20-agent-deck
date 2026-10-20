@@ -26,10 +26,12 @@ A missing/dead binary, no GD32 proof, stale status, incomplete panels or panel w
 errors still fail probation; the loader rolls the unconfirmed slot back. Confirmed
 kbd failures are WARN and keep the admin/update path.
 
-Open `http://172.30.250.2:8780` from a USB host once U3's separate admin service is
-installed. Its maintenance handlers use [MAINT-HOOKS.md](MAINT-HOOKS.md). K4 implements
-the file contract only; if the web service is unavailable, use adb and A/B. To exit
-safe mode over adb, publish an **empty regular file** atomically:
+Open `http://172.30.250.2:8780` (the configured subnet's `.2`) in a Mac browser: the
+usb0 web is on by default (`FEATURE_WEB=1`, `mk20d web`). Pair with the code shown on the
+keyboard, then use 维护 → 退出安全模式 / 重启键盘程序; it publishes the
+[MAINT-HOOKS.md](MAINT-HOOKS.md) requests. If the web is unavailable (or the safe-mode
+screen cannot show the pairing code), use adb and A/B. To exit safe mode over adb,
+publish an **empty regular file** atomically:
 
 ```sh
 $MK20_ADB shell 'umask 077; d=/data/mk20/state/maint; mkdir -p "$d"; : > "$d/exit-safe-mode.new"; mv "$d/exit-safe-mode.new" "$d/exit-safe-mode"'

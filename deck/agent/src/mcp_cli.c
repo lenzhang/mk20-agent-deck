@@ -4,7 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "mcp.h"
 #include "runtime.h"
-#include "web.h"
+#include "web_store.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -42,14 +42,8 @@ static int number(const char *s, int max, int *out)
 /* Host test binary only: trusted detector fixture, never a remote parameter. */
 static int hint(void *v, loop_frame_t *f) { (void)v; strcpy(f->app,"Notes"); strcpy(f->title,"Notes"); return 0; }
 #endif
-static int display(void *ctx, const char code[7]) { return kbdc_pair_display(ctx,code); }
 #ifdef MK20_WEB_TEST
-static int display_fd = -1, model_fds[128]; static size_t model_count, model_next;
-static int test_display(void *ctx, const char code[7])
-{
-    (void)ctx; if (display_fd < 0) return -1;
-    char b[7]; memcpy(b,code,6); b[6] = '\n'; return write(display_fd,b,sizeof b) == sizeof b ? 0 : -1;
-}
+static int model_fds[128]; static size_t model_count, model_next;
 static int test_socket(int domain, int type, int protocol)
 {
     (void)domain; (void)type; (void)protocol;
@@ -60,7 +54,11 @@ static int test_connect(int fd, const struct sockaddr *a, socklen_t n) { (void)f
 int mcp_cli(int argc, char **argv)
 {
     int use_mcp = !strcmp(argv[1],"--mcp"), use_web = !strcmp(argv[1],"--web");
-    const char *web_listen = "172.30.250.2:8780", *secrets_dir = "/data/mk20/secrets", *config_dir = "/data/mk20/agent", *ca_file = NULL;
+    const char *web_listen = "172.30.250.2:" WEB_PORT, *secrets_dir = "/data/mk20/secrets", *config_dir = "/data/mk20/agent", *ca_file = NULL;
+    /* Device files shared with mk20-kbd (pairing display) and mk20d (health, maintenance inbox). */
+    const char *pair_file = "/run/mk20/pair-code", *uptime_file = "/proc/uptime", *health_file = "/tmp/mk20/health.json";
+    const char *maint_dir = "/tmp/mk20/maint", *debug_file = "/data/mk20/state/maint/debug.conf";
+    int kbd_given = 0;
     int web_no_device = 0, web_listener = -1; int web_fds[HTTPD_CONNECTIONS]; size_t web_count = 0;
     const char *listen = "172.30.250.2:8765", *token_path = "/data/mk20/secrets/mcp.token";
     const char *kbd_path = "/run/mk20/kbd.sock", *policy_path = NULL, *calib_path = CALIB_PATH;
@@ -89,7 +87,12 @@ int mcp_cli(int argc, char **argv)
         else if (!strcmp(arg,"--web-secrets-dir")) secrets_dir = v;
         else if (!strcmp(arg,"--web-config-dir")) config_dir = v;
         else if (!strcmp(arg,"--ca-file")) ca_file = v;
-        else if (!strcmp(arg,"--kbd-sock")) kbd_path = v;
+        else if (!strcmp(arg,"--kbd-sock")) { kbd_path = v; kbd_given = 1; }
+        else if (!strcmp(arg,"--web-pair-file")) pair_file = v;
+        else if (!strcmp(arg,"--web-uptime-file")) uptime_file = v;
+        else if (!strcmp(arg,"--web-health-file")) health_file = v;
+        else if (!strcmp(arg,"--web-maint-dir")) maint_dir = v;
+        else if (!strcmp(arg,"--web-debug-file")) debug_file = v;
         else if (!strcmp(arg,"--policy")) policy_path = v;
         else if (!strcmp(arg,"--calibration")) calib_path = v;
         else if (!strcmp(arg,"--vnc-host")) vnc_host = v;
@@ -101,7 +104,6 @@ int mcp_cli(int argc, char **argv)
         else if (!strcmp(arg,"--mcp-connected-fd")) { if (fd_count == HTTPD_CONNECTIONS || number(v,INT_MAX,&fds[fd_count])) goto bad; fd_count++; }
 #ifdef MK20_WEB_TEST
         else if (!strcmp(arg,"--web-connected-fd")) { if (web_count == HTTPD_CONNECTIONS || number(v,INT_MAX,&web_fds[web_count])) goto bad; web_count++; }
-        else if (!strcmp(arg,"--web-pair-fd")) { if (number(v,INT_MAX,&display_fd)) goto bad; }
         else if (!strcmp(arg,"--web-model-fd")) { if (model_count == 128 || number(v,INT_MAX,&model_fds[model_count])) goto bad; model_count++; }
         else if (!strcmp(arg,"--web-schema-fd")) {
             int fd; if (number(v,INT_MAX,&fd)) goto bad;
@@ -110,13 +112,20 @@ int mcp_cli(int argc, char **argv)
             size_t n = strlen(data); int bad_write = write(fd,data,n) != (ssize_t)n; free(data); return bad_write;
         }
 #endif
-        else if (!strcmp(arg,"--kbd-fd")) { if (number(v,INT_MAX,&kbd_fd)) goto bad; }
+        else if (!strcmp(arg,"--kbd-fd")) { if (number(v,INT_MAX,&kbd_fd)) goto bad; kbd_given = 1; }
         else if (!strcmp(arg,"--vnc-fd")) { if (number(v,INT_MAX,&vnc_fd)) goto bad; }
 #endif
         else goto bad;
     }
-    if (httpd_address(listen,no_device,host) || httpd_address(web_listen,web_no_device,web_host) || (!web_no_device && strcmp(web_listen,"172.30.250.2:8780"))) goto bad;
+    /* The web binds the usb0 address mk20d read from gadget.env; the port is fixed. */
+    size_t wl = strlen(web_listen);
+    if (httpd_address(listen,no_device,host) || httpd_address(web_listen,web_no_device,web_host) ||
+        (!web_no_device && (wl < 5 || strcmp(web_listen+wl-5,":" WEB_PORT)))) goto bad;
     if (strlen(secrets_dir) >= 4000 || strlen(config_dir) >= 4000 || fd_count+web_count > HTTPD_CONNECTIONS) goto bad;
+    if (strlen(pair_file) >= 4000 || strlen(uptime_file) >= 250 || strlen(health_file) >= 4000 || strlen(maint_dir) >= 4000 || strlen(debug_file) >= 4000) goto bad;
+    /* Settings-only web (agent off): no keyboard client, capture or model runtime inputs. */
+    int want_kbd = use_mcp || kbd_given;
+    if (!want_kbd && (vnc_host || vnc_fd >= 0 || provider_path || net_path)) goto bad;
     /* Disable dumps before loading any secret. */
     struct rlimit core = {0,0}; if (setrlimit(RLIMIT_CORE,&core)) goto bad;
 #ifdef __linux__
@@ -125,8 +134,10 @@ int mcp_cli(int argc, char **argv)
     if (use_mcp && httpd_token(token_path,token)) { sink(NULL,"mcp startup: token refused"); goto end; }
     if (provider_path && (!net_path || llm_provider_load(provider_path,&provider) || netcfg_load(net_path,&net))) goto bad;
     if (!provider_path && net_path) goto bad;
-    if (kbd_fd >= 0 ? kbdc_connected(&kbd,kbd_fd) : kbdc_open(&kbd,kbd_path)) { sink(NULL,"mcp startup: keyboard unavailable"); goto end; }
-    (void)calib_load(calib_path,&kbd.calibration);
+    if (want_kbd) {
+        if (kbd_fd >= 0 ? kbdc_connected(&kbd,kbd_fd) : kbdc_open(&kbd,kbd_path)) { sink(NULL,"mcp startup: keyboard unavailable"); goto end; }
+        (void)calib_load(calib_path,&kbd.calibration);
+    }
     if (vnc_host || vnc_fd >= 0) {
         int loopback = vnc_host && (!strcmp(vnc_host,"127.0.0.1") || !strcmp(vnc_host,"localhost"));
         if (!vnc_host || (strcmp(vnc_host,"172.30.250.1") && strcmp(vnc_host,"10.20.0.1") && strcmp(vnc_host,"169.254.7.1") && !((no_device || web_no_device) && loopback))) goto bad;
@@ -156,11 +167,12 @@ int mcp_cli(int argc, char **argv)
     mcp_init(&m,&loop,token,host); initialized = 1;
     m.ctx = &runtime; m.snapshot = snapshot; m.calibrated = calibrated; m.preflight = preflight; m.task_goal = task_goal; m.log = sink;
     if (use_web) {
-        web_init(&web,&m,&runtime,web_host,secrets_dir,config_dir); web_initialized = 1;
-        web.display = display; web.display_ctx = &kbd;
-#ifdef MK20_WEB_TEST
-        if (display_fd >= 0) web.display = test_display;
-#endif
+        web_init(&web,&m,&runtime,web_host,secrets_dir,config_dir); web_initialized = 1; web.agent = want_kbd;
+        snprintf(web.pair_path,sizeof web.pair_path,"%s",pair_file); snprintf(web.uptime_path,sizeof web.uptime_path,"%s",uptime_file);
+        snprintf(web.health_path,sizeof web.health_path,"%s",health_file); snprintf(web.maint_dir,sizeof web.maint_dir,"%s",maint_dir);
+        snprintf(web.debug_path,sizeof web.debug_path,"%s",debug_file);
+        /* A previous instance's challenge is void; drop crash leftovers of our own temporaries. */
+        web_pair_clear(&web); web_clean_temps(secrets_dir); web_clean_temps(config_dir); web_clean_temps(maint_dir);
         if (!web_count) { web_listener = httpd_listen(web_listen,web_no_device); if (web_listener < 0) { fprintf(stderr,"web startup: bind refused errno=%d\n",errno); goto end; } }
     }
     if (use_mcp && !fd_count) {
@@ -170,8 +182,8 @@ int mcp_cli(int argc, char **argv)
     struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_handler = stop_signal; sigemptyset(&sa.sa_mask);
     if (sigaction(SIGTERM,&sa,NULL) || sigaction(SIGINT,&sa,NULL)) goto bad;
     stopping = 0; http_service_t services[2]; size_t service_count = 0;
-    if (use_mcp) { services[service_count++] = (http_service_t){listener,fds,fd_count,{&m,mcp_handle,use_web ? NULL : mcp_tick,mcp_disconnect,mcp_attach_pump}}; sink(NULL,"mcp ready"); }
-    if (use_web) { services[service_count++] = (http_service_t){web_listener,web_fds,web_count,{&web,web_handle,web_tick,web_disconnect,web_attach_pump}}; sink(NULL,"web ready"); }
+    if (use_mcp) { services[service_count++] = (http_service_t){listener,fds,fd_count,{&m,mcp_handle,use_web ? NULL : mcp_tick,mcp_disconnect,mcp_attach_pump,NULL}}; sink(NULL,"mcp ready"); }
+    if (use_web) { services[service_count++] = (http_service_t){web_listener,web_fds,web_count,{&web,web_handle,web_tick,web_disconnect,web_attach_pump,use_mcp ? NULL : web_idle}}; sink(NULL,want_kbd ? "web ready" : "web ready (settings only)"); }
     rc = httpd_run_services(services,service_count,&stopping) ? 1 : 0; listener = web_listener = -1;
     if (loop.leased || m.task.live || m.pending) loop_stop(&loop);
     goto end;
@@ -185,7 +197,6 @@ end:
     mem_wipe(token,sizeof token); mem_wipe(pw,sizeof pw);
 #ifdef MK20_WEB_TEST
     for (size_t i = 0; i < model_count; i++) close(model_fds[i]);
-    if (display_fd >= 0) close(display_fd);
 #endif
     runtime_free(&runtime); rfb_close(rfb); kbdc_close(&kbd); netcfg_free(&net);
     return rc;
