@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from .adapters.codex_desktop import DEFAULT_ORIGINATORS, CodexDesktopConfig
 from .adapters.herdr import HerdrConfig
-from .adapters.tmux import TmuxConfig
+from .adapters.tmux import DEFAULT_AGENT_COMMANDS, DEFAULT_PATTERNS, TmuxConfig
 from .model import Mode
 
 CONFIG_DIR = os.path.expanduser(os.environ.get("MK20DECK_HOME", "~/.config/mk20-agent-deck"))
@@ -51,6 +51,7 @@ class DeckConfig:
     animations: bool = True
     jpeg_quality: int = 85
     poll_interval_s: float = 2.0
+    background_poll_s: float = 10.0  # non-current modes (attention counts); 0 disables
     heartbeat_s: float = 2.0
     ack_timeout_s: float = 1.0
     preamble_flush: int = 1024 * 1024
@@ -154,11 +155,18 @@ def load_config(path: str | None = None) -> DeckConfig:
     tm = d.get("tmux", {})
     cfg.tmux = TmuxConfig(
         binary=tm.get("binary", "tmux"),
-        patterns=tuple(tm.get("patterns", ("ag-ccai-*", "ag-codex-*"))),
+        patterns=tuple(tm.get("patterns", DEFAULT_PATTERNS)),
         registered_panes=tuple(tm.get("registered_panes", ())),
         terminal_app=tm.get("terminal_app", ""),
         new_session_cmd=tm.get("new_session_cmd", ""),
+        agent_commands=tuple(str(c) for c in tm.get("agent_commands", DEFAULT_AGENT_COMMANDS)),
+        use_hooks=bool(tm.get("use_hooks", True)),
+        state_dir=os.path.expanduser(str(tm.get("state_dir", ""))),
+        hook_max_age_s=float(tm.get("hook_max_age_s", 12 * 3600)),
+        running_stale_s=float(tm.get("running_stale_s", 900)),
     )
+    if "background_poll_s" in deck:
+        cfg.background_poll_s = max(0.0, float(deck["background_poll_s"]))
     cfg.herdr = HerdrConfig(binary=d.get("herdr", {}).get("binary", "herdr"))
     if "knobs" in d:  # a [knobs] table replaces the measured defaults
         cfg.knob_map = {str(k): str(v) for k, v in d["knobs"].items()}

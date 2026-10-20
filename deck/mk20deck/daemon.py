@@ -12,9 +12,11 @@ from typing import Callable
 
 from . import keytrace as _keytrace
 from . import protocol as P
+from .adapters.base import BackendUnavailable
 from .config import DEFAULT_WEB_URL
 from .controller import LONG_PRESS, Controller
 from .link import DeviceLink, LatencyStats
+from .model import MODE_CYCLE
 from .render.canvas import Renderer
 
 log = logging.getLogger(__name__)
@@ -84,6 +86,14 @@ class Daemon:
     settings_opened: int = 0
     settings_dropped: int = 0  # rate-limited or malformed ui.openSettings events
     _last_settings: float = -1e9
+    # Cross-mode awareness: non-current modes are polled on a worker thread every bg_poll_s
+    # (0 = off); results are applied on the loop thread in step().  bg_adapters should be
+    # separate instances (cli.build_adapters) so a poll never races the foreground refresh.
+    bg_poll_s: float = 10.0
+    bg_adapters: dict | None = None
+    bg_first_delay_s: float = 1.0
+    bg_results: "queue.Queue[tuple]" = field(default_factory=queue.Queue)
+    bg_polls: int = 0
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -174,6 +184,44 @@ class Daemon:
         if self._pending_t is None:
             self._pending_t = ev.t
 
+    # -------------------------------------------------------------- background (other modes)
+    def poll_background_once(self) -> int:
+        """Poll every non-current mode once (worker thread or tests); results are queued, not applied."""
+        ads = self.bg_adapters or self.controller.adapters
+        current = self.controller.mode
+        n = 0
+        for m in MODE_CYCLE:
+            ad = ads.get(m)
+            if m == current or ad is None:
+                continue
+            t0 = self.controller.wall()
+            try:
+                res = (m, ad.poll(()), "", t0)
+            except BackendUnavailable as e:
+                res = (m, None, str(e), t0)
+            except Exception as e:  # noqa: BLE001 — a background backend bug never stops the deck
+                log.warning("background poll %s failed: %s", m.value, type(e).__name__)
+                res = (m, None, f"读取失败：{type(e).__name__}", t0)
+            self.bg_results.put(res)
+            n += 1
+        self.bg_polls += 1
+        return n
+
+    def _bg_loop(self, stop: threading.Event, done: threading.Event) -> None:
+        wait = self.bg_first_delay_s
+        while not (stop.wait(wait) or done.is_set()):
+            wait = self.bg_poll_s
+            if not self.paused:
+                self.poll_background_once()
+
+    def _drain_background(self) -> None:
+        while True:
+            try:
+                m, sessions, err, t0 = self.bg_results.get_nowait()
+            except queue.Empty:
+                return
+            self.controller.apply_background(m, sessions, err, t0)
+
     # -------------------------------------------------------------- loop
     def step(self, force: bool = False) -> bool:
         """One iteration; returns True if a frame was produced."""
@@ -183,6 +231,7 @@ class Daemon:
                 self._apply(self.events.get_nowait())
             except queue.Empty:
                 break
+        self._drain_background()
         self.controller.tick()
         if now >= self._next_poll:
             self.controller.refresh()
@@ -250,6 +299,15 @@ class Daemon:
                     raise WakeReconnect(ev)
 
     def run(self, stop: threading.Event) -> None:
+        done = threading.Event()
+        if self.bg_poll_s > 0:
+            threading.Thread(target=self._bg_loop, args=(stop, done), name="mk20-bg-poll", daemon=True).start()
+        try:
+            self._run(stop)
+        finally:
+            done.set()
+
+    def _run(self, stop: threading.Event) -> None:
         while not stop.is_set():
             self.check_power()
             if self.paused:

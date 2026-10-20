@@ -11,7 +11,8 @@ is **not** implemented (not approved).
 | `transport.py` / `link.py` | pyserial transport (CDC `1d6b:0104`, alt `1234:5678`), `MockDevice`, handshake (1 MiB `'0'` preamble + `getInfo`, then `ui.hello`; on mk20-kbd fw >= 1.3 a `ui.heartbeat` thread keeps the host ONLINE on every device page, see `kbd/UI.md`), SHOW_JPG stop-and-wait using the device ack as display ACK, latency stats |
 | `layout.py` | canvas/rect model; default guess 640×656 (sub 428×142 @106,0; keys 128² @ (c·128, 144+r·128)); replaced by `getInfo` |
 | `adapters/codex_desktop.py` | read-only Codex Desktop source: `state_5.sqlite` (`mode=ro`), rollout tail, `.codex-global-state.json` unread, `codex://` deep links |
-| `adapters/tmux.py`, `adapters/herdr.py` | tmux (generation identity, states unknown) / herdr stub |
+| `adapters/tmux.py`, `adapters/herdr.py` | tmux (generation identity; state from Claude/codex hook records, else unknown) / herdr stub |
+| `agentstate.py` | read side of the hook state records (`agent-state/*.json`), pane/process-tree matching |
 | `slots.py`, `controller.py` | slot manager (sticky, strict-higher replace, pins, per-mode memory), gestures, stop long-press, roles L1/L4 |
 | `render/` | key & sub-screen renderer, ≤8 fps global cap, single attention animation |
 | `daemon.py`, `cli.py` | daemon loop, heartbeat, offline frame on exit, CLI; device event `ui.openSettings` (网页设置 key) opens `[deck] web_url` (Mac config only, IP/localhost, max once per 3 s) |
@@ -29,6 +30,8 @@ python3 -m venv .venv && .venv/bin/pip install -e . pytest
 .venv/bin/python -m mk20deck sim-shots --out ../artifacts
 .venv/bin/python -m mk20deck sim-serve        # http://127.0.0.1:8765 (--source real on the Mac)
 python3 -m mk20deck probe-codex [--json]      # read-only Codex Desktop snapshot (Mac)
+python3 -m mk20deck probe-tmux [--json]       # read-only tmux panes + hook-derived states (Mac)
+.venv/bin/python -m mk20deck sim-shots --scenario attention --out ../artifacts/attention
 .venv/bin/python -m mk20deck [--config ~/.config/mk20-agent-deck/config.toml] run [--port /dev/cu.usbmodemXXX]
 .venv/bin/python -m mk20deck launchd-plist > ~/Library/LaunchAgents/com.leo.mk20-agent-deck.plist
 ```
@@ -39,11 +42,59 @@ Golden frames: `tools/golden_gen.cpp` reproduces the vendor `packet_cmd_ack`
 with the vendor `CRC32.cpp`; output is `tests/fixtures/golden_frames.txt`.
 
 ## Codex hook probe (optional, reversible)
-`tools/hooks/hooks-install.sh` writes a logging-only `~/.codex/hooks.json`
-(refuses if one exists); the hook logs metadata only (no prompt/tool input) to
-`~/.config/mk20-agent-deck/hooks.log` and never returns a decision.
+`tools/hooks/hooks-install.sh` writes `~/.codex/hooks.json` (refuses if one exists;
+`--dry-run` prints it); the hook logs metadata only (no prompt/tool input) to
+`~/.config/mk20-agent-deck/hooks.log` (rotated at 8 MiB), writes the deck state record
+(see below) and never returns a decision.
 `tools/hooks/hooks-uninstall.sh` removes it if unchanged. Codex requires hooks to
 be trusted (App: Settings → Hooks) before they run in Desktop sessions.
+
+## 需要我的 agent（hooks）
+tmux 模式靠 agent 自己的 hooks 知道「哪个 agent 在等我」。hook 脚本
+`tools/hooks/mk20-agent-state-hook.py`（只用 stdlib、<100 ms、不联网、不输出、永远 exit 0，
+不替你做任何审批决定）把事件写成 `~/.config/mk20-agent-deck/agent-state/<tool>-<session>.json`
+（目录 0700、文件 0600、tmp+rename；`MK20DECK_HOME` 可改目录），只含
+`tool, session_id, tmux_pane, tmux_socket, cwd, state, ts, ppid`——**不存** prompt、工具参数、
+通知正文、transcript 路径；超过 24 h 的记录自动清理，最多 256 个。
+
+| 事件（Claude Code，[hooks 文档](https://code.claude.com/docs/en/hooks)） | 状态 |
+|---|---|
+| `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PostToolUseFailure` / `ElicitationResult` | running |
+| `PermissionRequest`（立即）、`Notification` `permission_prompt`（约 6 s 后）、`PreToolUse` `ExitPlanMode` | needs_approval |
+| `Notification` `idle_prompt`（完成后约 60 s 未输入；已是 done 时不重复提醒）/ `elicitation_dialog` / `elicitation_url_dialog` / `agent_needs_input`，`Elicitation`，`PreToolUse` `AskUserQuestion` | needs_input |
+| `Stop` | done → 键面「完成未读」，聚焦后本地清除 |
+| `StopFailure`（API 错误） | error |
+| `SessionStart` | idle（`compact` 不改状态） |
+| `SessionEnd` | removed |
+
+codex CLI 0.163（无 Notification 事件）：`UserPromptSubmit`/`PreToolUse`/`PostToolUse` → running，
+`PreToolUse` `request_user_input` → needs_input，`PermissionRequest` → needs_approval，`Stop` → done，
+`Interrupt` → idle，`SessionEnd` → removed。kimi 没有 hooks：窗格按 `pane_current_command=kimi` 列出，状态 unknown。
+
+安装（集成方执行；不要在没看 diff 的情况下改真实配置）：
+```bash
+# Claude Code（ccai 启动时会把 settings-clean/-glm 拷成 settings.json，所以三个都要装）
+tools/hooks/claude-hooks-install.sh --dry-run ~/.claude/settings.json ~/.claude/settings-clean.json ~/.claude/settings-glm.json
+tools/hooks/claude-hooks-install.sh           ~/.claude/settings.json ~/.claude/settings-clean.json ~/.claude/settings-glm.json
+tools/hooks/claude-hooks-uninstall.sh [--dry-run] <同样的文件>     # 只删 mk20 条目
+# codex CLI（旧的 mk20 探针要先卸再装；装后需在 codex 里重新信任 hooks）
+tools/hooks/hooks-uninstall.sh && tools/hooks/hooks-install.sh
+python3 -m mk20deck probe-tmux        # 只读：列出窗格 id / 命令 / hook 状态（不读屏幕内容）
+```
+安装器幂等（重复执行显示 unchanged）、保留已有 hooks、改动前备份 `<file>.bak-mk20-<ts>`、
+JSON 损坏则整体拒绝且不写任何文件。hook 命令用 `exec python3 -I -S …`，使记录里的 `ppid`
+就是 claude 进程本身。
+
+deck 侧（`[tmux]`，见 `config.example.toml`）：窗格按命名（`ag-ccai-*`/`ag-codex-*`/`ag-kimi-*`）、
+显式登记、`pane_current_command`（claude/codex/kimi）或**有 hook 记录**发现（ccai 窗格的命令是
+`bash` 包装脚本，只能靠 hook 记录关联）。记录须同一 tmux socket、窗格仍在、`ppid` 存活且在该窗格的
+进程树内（同窗格里由 Claude 启动的 `codex exec` 不会盖掉 Claude 本身）、未超过 `hook_max_age_s`；
+`running` 超过 `running_stale_s` 无事件 → unknown（Esc 中断不触发 Stop）。标题用 worktree 名/cwd 末级。
+
+K1：**转 = 按「待审批 > 待输入 > 出错 > 完成未读 > 其余按槽位」顺序移动选中**；**按 = 聚焦选中会话**
+（同双击/聚焦键）；长按仍进 L4。effort 不再映射到 K1（各模式本来都「此会话不支持」）。
+其他模式每 10 s 后台轮询一次（`[deck] background_poll_s`，不阻塞帧循环），副屏顶部显示
+「tmux 2 待处理」，L4 模式键与 L1 模式键带琥珀角标。
 
 ## P0 deviations / known limits
 - Canvas geometry is a guess until `getInfo`; firmware 0/1-based coords are inferred from getInfo rects (`fw_coord_base = "auto"`).

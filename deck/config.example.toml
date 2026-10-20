@@ -7,6 +7,7 @@ max_fps = 8                      # global ceiling (PRD §7.4); clamped to <= 8
 animations = true
 jpeg_quality = 85
 poll_interval_s = 2.0
+background_poll_s = 10           # other modes are polled in the background for "tmux 2 待处理"; 0 = off
 heartbeat_s = 2.0
 backlight = 80                   # sent after every handshake (host mode starts at 0 = dark); false = leave alone
 web_url = "http://172.30.250.2:8780/"  # opened on the Mac by the 网页设置 key (device event ui.openSettings);
@@ -20,8 +21,13 @@ max_candidates = 24
 max_prompt_chars = 2000          # skill prefill: fail (never truncate) beyond this
 
 [tmux]
-patterns = ["ag-ccai-*", "ag-codex-*"]
+patterns = ["ag-ccai-*", "ag-codex-*", "ag-kimi-*"]
 registered_panes = []
+agent_commands = ["claude", "codex", "kimi"]  # pane_current_command values listed as agent panes
+use_hooks = true                 # state from tools/hooks/mk20-agent-state-hook.py records (README「需要我的 agent」)
+state_dir = ""                   # "" = $MK20DECK_HOME/agent-state (~/.config/mk20-agent-deck/agent-state)
+hook_max_age_s = 43200           # ignore hook records older than this
+running_stale_s = 900            # "running" without any hook event for this long -> unknown
 terminal_app = ""                # e.g. "Ghostty"; empty -> focus disabled ("请绑定终端 App")
 new_session_cmd = ""             # e.g. "ccai sg"; empty -> new-session key disabled
 

@@ -1,22 +1,111 @@
 [
  {
-  "name": "k1_rotate_effort",
+  "name": "k1_rotate_attention_order",
   "group": "knobs",
-  "desc": "K1 旋转 3 格 → 对选中会话调 effort 3 次（码 102）",
+  "desc": "K1 旋转按「待审批>待输入>出错>完成未读>其余按槽位」移动选中（码 102/101），不调 effort",
   "steps": [
    {
-    "press": "A1"
+    "knob": "K1",
+    "action": "cw"
+   },
+   {
+    "expect": {
+     "selected_title": "OTA发布"
+    }
    },
    {
     "knob": "K1",
-    "action": "cw",
+    "action": "cw"
+   },
+   {
+    "expect": {
+     "selected_title": "NAS部署"
+    }
+   },
+   {
+    "knob": "K1",
+    "action": "cw"
+   },
+   {
+    "expect": {
+     "selected_title": "TF卡固件"
+    }
+   },
+   {
+    "knob": "K1",
+    "action": "cw"
+   },
+   {
+    "expect": {
+     "selected_title": "评审R2"
+    }
+   },
+   {
+    "knob": "K1",
+    "action": "ccw",
     "n": 3
    },
    {
     "expect": {
+     "selected_title": "OTA发布"
+    }
+   },
+   {
+    "knob": "K1",
+    "action": "ccw"
+   },
+   {
+    "expect": {
+     "selected": true,
      "agent_calls": {
-      "set_effort": 3
+      "set_effort": 0,
+      "*": 0
      }
+    }
+   }
+  ]
+ },
+ {
+  "name": "k1_press_focuses_selected",
+  "group": "knobs",
+  "desc": "K1 短按 = 聚焦选中会话（同双击/聚焦键，码 100）；未选中只提示",
+  "steps": [
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "expect": {
+     "toast_contains": "未选中",
+     "agent_calls": {
+      "*": 0
+     }
+    }
+   },
+   {
+    "wait": 1600
+   },
+   {
+    "knob": "K1",
+    "action": "cw"
+   },
+   {
+    "mark": "t"
+   },
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "expect": {
+     "agent_calls": {
+      "focus": 1
+     },
+     "agent_call_within_ms": {
+      "name": "focus",
+      "ms": 350
+     },
+     "page": "L1"
     }
    }
   ]

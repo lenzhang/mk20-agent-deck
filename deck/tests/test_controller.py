@@ -234,11 +234,10 @@ def test_skill_degrades_to_new_thread_with_badge(env):
 
 def test_knobs(env):
     c, clk, ads, _ = env
-    c.on_knob(1, "cw")
-    assert "未选中" in c.log[-1]
+    c.on_knob(1, "down")
+    c.on_knob(1, "up")
+    assert "未选中" in c.log[-1] and ads[Mode.DESKTOP].actions == []
     tap(c, clk, 1, 1)
-    c.on_knob(1, "cw")
-    assert c.log[-1] == "此会话不支持"
     c.on_knob(2, "down")
     clk.advance(0.1)
     c.on_knob(2, "up")
@@ -272,3 +271,129 @@ def test_selected_disappears_clears_and_grays(env):
     assert c.mgr.selected is None and c.view().sub.selection_lost
     tap(c, clk, 4, 4)
     assert "未选中" in c.log[-1]
+
+
+K1_FIRST = [State.NEEDS_APPROVAL, State.NEEDS_INPUT, State.ERROR, State.DONE_UNREAD]
+
+
+def test_k1_rotation_walks_attention_order_then_slots(env):
+    c, clk, ads, saved = env
+    order = c.k1_order()
+    states = [c.mgr.session_at(i).state for i in order]
+    assert states[:4] == K1_FIRST
+    rest = order[4:]
+    assert rest == sorted(rest) and len(order) == 8  # others by slot order
+    seen = []
+    for _ in range(9):
+        c.on_knob(1, "cw")
+        seen.append(c.mgr.selected)
+    keys = [c.mgr.slots[i].key for i in order]
+    assert seen == keys + keys[:1]  # wraps around
+    c.on_knob(1, "ccw")
+    assert c.mgr.selected == keys[-1]
+    assert saved and saved[-1]["modes"]["codex_desktop"]["selected"] == keys[-1]  # persisted like a key select
+    assert ads[Mode.DESKTOP].actions == []  # rotation never acts on the agent
+    assert not any("effort" in m or "此会话不支持" in m for m in c.log)
+
+
+def test_k1_order_follows_state_changes(env):
+    c, clk, ads, _ = env
+    c.on_knob(1, "cw")
+    first = c.mgr.selected_session()
+    assert first.state == State.NEEDS_APPROVAL
+    first.state = State.RUNNING  # handled in the App
+    c.refresh()
+    keys = [c.mgr.slots[i].key for i in c.k1_order()]
+    pos = keys.index(first.sid.key())
+    assert pos >= 3  # it left the attention block
+    c.on_knob(1, "ccw")  # one step back in the re-sorted ring
+    assert c.mgr.selected == keys[pos - 1]
+    c.mgr.selected = None
+    c.on_knob(1, "cw")
+    assert c.mgr.selected_session().state == State.NEEDS_INPUT  # now the most urgent one
+
+
+def test_k1_press_focuses_selected_and_clears_done(env):
+    c, clk, ads, _ = env
+    for _ in range(4):
+        c.on_knob(1, "cw")
+    s = c.mgr.selected_session()
+    assert s.state == State.DONE_UNREAD
+    c.on_knob(1, "down")
+    clk.advance(0.1)
+    c.on_knob(1, "up")
+    assert ads[Mode.DESKTOP].actions == [("focus", s.sid.key())]
+    assert s.state == State.IDLE and c.page == "L1"
+    c.on_key(1, 4, True)  # PTT held: never bring a window forward
+    c.on_knob(1, "down")
+    c.on_knob(1, "up")
+    assert "PTT" in c.log[-1] and len(ads[Mode.DESKTOP].actions) == 1
+    c.on_key(1, 4, False)
+
+
+def test_k1_long_press_still_l4_and_l4_press_settings(env):
+    c, clk, ads, _ = env
+    c.on_knob(1, "down")
+    clk.advance(0.7)
+    c.tick()
+    c.on_knob(1, "up")
+    assert c.page == "L4" and ads[Mode.DESKTOP].actions == []
+    c.on_knob(1, "down")
+    c.on_knob(1, "up")
+    assert c.page == "LS"
+
+
+def test_k1_rotation_without_sessions(env):
+    c, clk, ads, _ = env
+    c.switch_mode(Mode.HERDR)  # herdr not installed → no sessions
+    c.on_knob(1, "cw")
+    assert c.log[-1] == "无会话可选" and c.mgr.selected is None
+
+
+def test_cross_mode_attention_counts(env):
+    c, clk, ads, _ = env
+    tm = ads[Mode.TMUX].sessions
+    tm[0].state, tm[1].state, tm[2].state = State.NEEDS_APPROVAL, State.DONE_UNREAD, State.RUNNING
+    v0 = c.version
+    c.apply_background(Mode.TMUX, list(tm))
+    c.apply_background(Mode.HERDR, None, "herdr 未安装")
+    assert c.version > v0
+    v = c.view()
+    assert v.sub.other_modes == "tmux 2 待处理"
+    mode_key = next(k for k in v.keys if k.role == Role.MODE)
+    assert mode_key.badge == "2" and mode_key.badge_alert
+    v1 = c.version
+    c.apply_background(Mode.TMUX, list(tm))  # same result: no redraw
+    assert c.version == v1
+    c.apply_background(Mode.DESKTOP, [])  # the current mode is owned by refresh(), never by a late bg result
+    assert Mode.DESKTOP not in c.bg
+    c.page = "L4"
+    keys = {k.mode: k for k in c.view().keys if k.role == Role.MODE_SELECT}
+    assert keys[Mode.TMUX].badge == "2" and keys[Mode.TMUX].badge_alert
+    assert keys[Mode.HERDR].badge == "" and keys[Mode.DESKTOP].badge == ""
+
+
+def test_cross_mode_respects_local_clear_and_switch_snapshot(env):
+    c, clk, ads, _ = env
+    done = next(s for s in c.mgr.sessions.values() if s.state == State.DONE_UNREAD)
+    c._focus(done)  # local clear in Desktop
+    c.switch_mode(Mode.TMUX)
+    # leaving Desktop: its count is known immediately (needs_approval + needs_input + error; done was cleared)
+    assert c.bg[Mode.DESKTOP].attention == 3 and c.bg[Mode.DESKTOP].urgent == 3
+    assert c.view().sub.other_modes == "桌面 3 待处理"
+    done.state = State.DONE_UNREAD  # the backend still reports the same completion
+    c.apply_background(Mode.DESKTOP, ads[Mode.DESKTOP].poll())
+    assert c.bg[Mode.DESKTOP].attention == 3  # the locally cleared done_unread is not counted again
+    c.switch_mode(Mode.DESKTOP)
+    assert Mode.DESKTOP not in c.bg and c.view().sub.other_modes == ""
+
+
+def test_background_results_out_of_order_dropped(env):
+    c, clk, ads, _ = env
+    tm = ads[Mode.TMUX].sessions
+    tm[0].state = State.NEEDS_APPROVAL
+    c.apply_background(Mode.TMUX, list(tm), t=5.0)
+    c.apply_background(Mode.TMUX, [], t=4.0)  # a poll that started earlier but finished later
+    assert c.bg[Mode.TMUX].attention == 1
+    c.apply_background(Mode.TMUX, [], t=6.0)
+    assert c.bg[Mode.TMUX].attention == 0 and c.view().sub.other_modes == ""

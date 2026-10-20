@@ -52,13 +52,14 @@ def cmd_run(args) -> int:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     Supervisor(ctl, find_ports, open_transport, default_renderer_factory(cfg), cfg,
-               power=PowerMonitor.default()).run(stop)
+               power=PowerMonitor.default(), bg_adapters=build_adapters(cfg)).run(stop)
     return 0
 
 
 def cmd_shots(args) -> int:
-    from .sim import shots
-    made = shots(args.out, animations=not args.static)
+    from .sim import attention_shots, shots
+    fn = attention_shots if getattr(args, "scenario", "default") == "attention" else shots
+    made = fn(args.out, animations=not args.static)
     for n, cap in made:
         print(f"{os.path.join(args.out, n)}  {cap}")
     return 0
@@ -69,13 +70,15 @@ def cmd_serve(args) -> int:
     from .render.canvas import Renderer
     from .sim import demo_adapters, serve
     cfg = load_config(args.config)
+    bg = None
     if args.source == "real":
         adapters = build_adapters(cfg)
         ctl = build_controller(cfg, adapters)
+        bg = build_adapters(cfg)
     else:
         ctl = Controller(cfg, demo_adapters(), sim=True)
     d = Daemon(ctl, Renderer(DeviceLayout.default(), animations=cfg.animations), None,
-               cfg.poll_interval_s, cfg.heartbeat_s)
+               cfg.poll_interval_s, cfg.heartbeat_s, bg_poll_s=cfg.background_poll_s, bg_adapters=bg)
     serve(d, args.host, args.http_port, args.source)
     return 0
 
@@ -95,6 +98,23 @@ def cmd_probe(args) -> int:
         print(f"poll {dt:.1f} ms · {ad.status_limited()}")
         for r in rows:
             print(f"{r['state']:12} {r['id'][:8]} {r['effort'] or '-':6} {r['title']:24} {r['why']}")
+    return 0
+
+
+def cmd_probe_tmux(args) -> int:
+    """Read-only (display-message / list-panes / ps): never sends keys, never reads pane contents."""
+    cfg = load_config(args.config)
+    ad = TmuxAdapter(cfg.tmux)
+    sessions = ad.poll()
+    rows = [{"pane": s.sid.native, "tool": s.tool.value, "title": s.title, "state": s.state.value,
+             "why": s.state_reason, "src": s.source_note, "where": s.summary} for s in sessions]
+    if args.json:
+        print(json.dumps({"generation": ad.generation, "socket": ad.socket_path, "limited": ad.status_limited(),
+                          "panes": rows}, ensure_ascii=False, indent=1))
+    else:
+        print(f"tmux {ad.generation} {ad.socket_path} · {ad.status_limited()}")
+        for r in rows:
+            print(f"{r['pane']:5} {r['tool']:6} {r['state']:14} {r['title'][:20]:20} {r['src']} · {r['where']}")
     return 0
 
 
@@ -264,7 +284,11 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("sim-shots", help="render simulator screenshots")
     s.add_argument("--out", default="artifacts")
     s.add_argument("--static", action="store_true")
+    s.add_argument("--scenario", choices=("default", "attention"), default="default")
     s.set_defaults(fn=cmd_shots)
+    pt = sub.add_parser("probe-tmux", help="read-only tmux discovery: pane ids, commands, hook-derived states")
+    pt.add_argument("--json", action="store_true")
+    pt.set_defaults(fn=cmd_probe_tmux)
     w = sub.add_parser("sim-serve", help="interactive web simulator")
     w.add_argument("--source", choices=("demo", "real"), default="demo")
     w.add_argument("--host", default="127.0.0.1")
