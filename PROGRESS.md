@@ -1,22 +1,23 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-20 22:10 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-20 22:12 SGT
 
 ## 1. 当前状态
 
 | 工作线 | 分支 | 提交 | 状态 |
 |---|---|---|---|
 | hidfix（HID 模块修复） | feature/hidfix | 5452175（证据 4eb0bf4） | 第 11 次通过（20:50）：T4 50/50 + T7×3，解绑 57 次，0 Oops；codex 第 3 轮复审由用户豁免（Kimi GO + 离线 58/58） |
-| K4 rc（替换原厂 KD） | feature/kd-replace-k4 | 3302eb2 | 未过：current=B 18 1.3.1 good=1.3.1 pending= attempts= active=1.3.1 last_rollback=1.3. |
+| K4 rc（替换原厂 KD） | feature/kd-replace-k4 | 3302eb2 | rc3（1.3.1）已安装并通过验收（22:10）：good=1.3.1；剩 24 h soak、强制回滚、按键/旋钮目检 |
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
 | UVC 采集卡 | feature/uvc | 02f1d41 | UHC07P = MS2130，USB 2.0 下仅 MJPEG；待上机 |
-| 设备 | — | — | current=B 18 1.3.1 good=1.3.1 pending= attempts= active=1.3. |
+| 设备 | — | — | fw 1.3.1（good，slot B）；1.2.1 为回退 |
 
 rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191afadab6c26644d30a2e870a46b06dc92a9b5c73bad0a4e9019e4f4f`。
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-20 22:12** K4 rc3（1.3.1）安装通过：loader confirmed good，验收 12/12（K4 规则 kd=0 + mk20-kbd normal），KD 未运行，21/21 屏、旋钮 6/6、0 内核告警；1.2.1 保留为回退。此前唯一的 FAIL 是判定脚本把 post-kbd.txt 里前一段 kbd.status JSON 当 state.json 解析（已修，重判 PASS）。证据 deck/reviews/k4-install/k4-rc3-install-20261020-220751/
 - **10-20 22:10** K4 rc3（1.3.1）：安装/验收未过：FAIL 1 K4: maint state.json normal, 0 restarts（证据 deck/reviews/k4-install/k4-rc3-install-20261020-220751/）
 - **10-20 22:08** K4 rc3（1.3.1）：安装前验收 1.2.1 通过（12 项），槽位已备份；开始安装 + 重启（watcher cmd-reboot）
 - **10-20 22:07** K4 rc3（1.3.1）：开始安装（sha bdd51ce3…）；先做安装前验收和槽位备份
@@ -51,7 +52,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 - [ ] 排查 usb-storage（usb 1-1）每约 23.4 秒一次的复位：mk20-router 用户态（或其子进程）引起，quiesce 停掉 router 后立即停止；每次运行约 53–59 次；会打断该存储的读写（证据见 hidfix/LOG-ERRORS-RCA.md）
 - [ ] hidfix：第 11 次已过；可选：补 codex 复审、在测试里加 clear_warn_once
 - [ ] USB 麦克风测试：Mac 音响 `say` 播放 + ASR 比对（阻塞：第 9 次占用键盘）
-- [ ] 安装 K4：1.3.1 未过，见 RCA
+- [ ] 安装 K4：rc3 已完成；剩手动按键/旋钮/屏幕检查、强制失败回滚、24 h soak
 - [ ] UVC 采集卡上机测试（UHC07P）
 - [ ] 仅充电器供电、Mac 重启测试
 - [ ] 键盘上的 agent 测试：MCP 注册、急停、校准、GLM 实时循环
