@@ -17,6 +17,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-20 20:35** hidfix 第 11 次：补记 20:26：codex 第 3 轮复审第 2 次（gpt-6-luna）立即报满载。诊断：今天 15:17 以后所有 codex exec 都报满载（CLI 0.162.1 和 app 0.163，high/xhigh，fast→priority，显式代理和 TUN 都试过，模型 gpt-6.1-sol/luna/astra/sol），13:27–14:59 同样设置正常；本机今天没有交互会话记录（最近一次是 10-19 22:37），所以是服务端满载，不是调用参数问题
 - **10-20 20:33** hidfix 第 11 次：codex 第 3 轮复审第 3 次（gpt-6.1-sol，设置与交互一致：app 0.163、xhigh、TUN）仍报满载，停止（不算 NO-GO）
 - **10-20 20:17** hidfix 第 11 次：codex 第 3 轮复审第 1 次（gpt-6.1-sol，20:14）审到一半报模型满载，没有结论（重记：上一条进度提交把 PROGRESS 清空了，已恢复）
 - **10-20 16:10** hidfix 第 11 次仍停在第 3 轮评审：codex 又试了 3 次（15:48 gpt-6.1-sol、15:59 gpt-6-astra（审到一半中断）、16:09 gpt-6-sol），全部报模型满载，没有结论（不算 NO-GO，也没有换别的评审）。Kimi 已 GO，离线全套 58 项 PASS（fix3 5775714）。dry11-2 和第 11 次都没跑，设备没动。两项分析结论：① refcount 下溢告警来自原厂内置 f_hid：开机重绑时 cdev_init 把 mk20-router 持有的 /dev/hidg0 引用计数清零，之后在切换步骤（hidg_unbind）或 router 退出（cdev_put）时下溢；不是 usb_f_hidfix。因为用的是 WARN_ONCE，同一次开机里之后的引用计数告警不会再打印（文档里给了 clear_warn_once 的建议，规格冻结所以没改）。② 第 5–10 次和 dry11-1 的全部报错清单里，只有第 5 次的 Oops 属于我们（已在 17081b2 修复）；其余是原厂噪声或原厂问题（sunxi_udc 稳压器计数下溢、-108 竞态、开机 alloc_fd 告警）；另外每约 23 秒一次的 usb-storage 复位由 mk20-router 用户态引起。详见 hidfix/REFCOUNT-RCA.md、hidfix/LOG-ERRORS-RCA.md。
@@ -35,7 +36,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 ## 3. 接下来要做
 
 - [ ] 排查 usb-storage（usb 1-1）每约 23.4 秒一次的复位：mk20-router 用户态（或其子进程）引起，quiesce 停掉 router 后立即停止；每次运行约 53–59 次；会打断该存储的读写（证据见 hidfix/LOG-ERRORS-RCA.md）
-- [ ] hidfix：codex 仍满载：等你安排每小时重试第 3 轮复审（Kimi 已 GO）
+- [ ] hidfix：codex 仍满载：等你安排每小时重试第 3 轮复审（Kimi 已 GO）；GO 就跑 dry11-2 → 第 11 次
 - [ ] USB 麦克风测试：Mac 音响 `say` 播放 + ASR 比对（阻塞：第 9 次占用键盘）
 - [ ] 安装 K4 rc2（阻塞：hidfix 通过）。风险：rescue-hardreset.sh 须先放到键盘上；glm-coding 需单独的 key 文件
 - [ ] UVC 采集卡上机测试（UHC07P）
