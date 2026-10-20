@@ -7,16 +7,17 @@
 | 工作线 | 分支 | 提交 | 状态 |
 |---|---|---|---|
 | hidfix（HID 模块修复） | feature/hidfix | 5452175（证据 4eb0bf4） | 第 11 次通过（20:50）：T4 50/50 + T7×3，解绑 57 次，0 Oops；codex 第 3 轮复审由用户豁免（Kimi GO + 离线 58/58） |
-| K4 rc2（替换原厂 KD，fw 1.3.0） | feature/kd-replace-k4 | 6f2788b | 安装中：安装前验收 |
+| K4 rc2（替换原厂 KD，fw 1.3.0） | feature/kd-replace-k4 | 6f2788b | 安装中：已推送，等待试用期结果 |
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
 | UVC 采集卡 | feature/uvc | 02f1d41 | UHC07P = MS2130，USB 2.0 下仅 MJPEG；待上机 |
-| 设备 | — | — | 当前 fw 1.2.1，slot A（正在装 1.3.0） |
+| 设备 | — | — | fw 1.2.1 → 1.3.0 试用期 |
 
 rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191afadab6c26644d30a2e870a46b06dc92a9b5c73bad0a4e9019e4f4f`。
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-20 21:07** K4 rc2：安装前验收 1.2.1 通过（12 项），槽位已备份；开始安装 + 重启（watcher cmd-reboot）
 - **10-20 21:07** K4 rc2：开始安装（sha 已核对 49284d19…）；先做安装前验收和槽位备份
 - **10-20 21:04** 文档修正：表头时间和状态表改为每次里程碑自动更新；~/mk20-full 根目录的 PROGRESS.md 是散放副本（不在 git 里），之前同步只更新了里面的仓库 mk20-agent-deck/，现在每次都从 origin 复制并核对 sha（见 ~/mk20-full/SYNC.txt）。K4 rc2 开始安装
 - **10-20 20:58** hidfix 第 11 次：第 11 次通过（完整规格，20:42–20:50）：T1–T7 全过；T4 对照 20 轮 + 真实 50/50 轮，T7 3 次，解绑/绑定 57 次（=周期数+7），引用计数/UAF 门槛无告警；不可回收内存斜率 实测 1.34、对照 2.32、差 −0.98 kB/轮（上限 4），总增 100 kB（上限 1024）；sunxi 报错对豁免 16 次（上限 29，都在 3 秒内恢复），新开设备重试 0 次；0 Oops，0 条 hidfix/hidg 行；唯一的 WARN 是切换时原厂 f_hid 的 refcount（见 REFCOUNT-RCA；因为只打一次，之后的引用计数告警看不到）；键盘复位后恢复到 1.2.1。dry11-2 也通过（8 次解绑）。codex 第 3 轮复审已由用户豁免（Kimi GO + 离线 58/58）。证据 4eb0bf4
