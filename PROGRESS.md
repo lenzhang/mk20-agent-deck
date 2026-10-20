@@ -31,7 +31,8 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 3. 接下来要做
 
-- [ ] hidfix：等 codex 模型恢复后只补跑第 3 轮 codex 复审（Kimi 已 GO），两边都 GO 后跑 dry11-2 → 第 11 次（需你点头：本轮规定已用完）；另查 usb-storage 每约 23 秒复位、开机 alloc_fd 告警
+- [ ] 排查 usb-storage（usb 1-1）每约 23.4 秒一次的复位：mk20-router 用户态（或其子进程）引起，quiesce 停掉 router 后立即停止；每次运行约 53–59 次；会打断该存储的读写（证据见 hidfix/LOG-ERRORS-RCA.md）
+- [ ] hidfix：等 codex 模型恢复后只补跑第 3 轮 codex 复审（Kimi 已 GO），两边都 GO 后跑 dry11-2 → 第 11 次（需你点头：本轮规定已用完）；另查开机 alloc_fd 告警（原厂驱动）
 - [ ] USB 麦克风测试：Mac 音响 `say` 播放 + ASR 比对（阻塞：第 9 次占用键盘）
 - [ ] 安装 K4 rc2（阻塞：hidfix 通过）。风险：rescue-hardreset.sh 须先放到键盘上；glm-coding 需单独的 key 文件
 - [ ] UVC 采集卡上机测试（UHC07P）
