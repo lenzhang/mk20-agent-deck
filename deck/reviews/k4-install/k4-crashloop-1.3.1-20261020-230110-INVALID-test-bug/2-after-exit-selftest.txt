@@ -1,0 +1,14 @@
+PASS kd=0 (mk20-kbd mode)
+PASS mk20-kbd running
+PASS kbd status fresh (1s)
+PASS kbd gd32 knob_ok=6 frames=0
+PASS kbd panels 21/21
+INFO mk20-kbd restarted 2 times
+PASS udc bound
+PASS ttyGS0
+PASS watchdog armed
+PASS bridge 172.30.250.2:17890
+PASS bridge link-local
+PASS hid
+INFO router not running
+INFO agent disabled

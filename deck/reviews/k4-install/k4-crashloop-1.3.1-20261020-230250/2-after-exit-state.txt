@@ -1,0 +1,6 @@
+{"mode":"normal","restarts":5,"recent_crashes":0,"last_rc":137,"reason":"normal","version":"1.3.1"}
+
+{"version":"mk20-kbd-0.3","mode":"normal","estopped":0,"gd32_rw":1,"knob_init":"ok","knob_ok":6,"knob_timeouts":0,"knob_tx_errors":0,"panels_written":21,"panels_dirty":0,"write_errors":0,"key_events":0,"knob_events":0,"echo_frames":0,"other_frames":0,"jpg_ok":0,"jpg_bad":0,"jpg_size":0,"json_in":0,"host":1,"host_tx_errors":0,"host_tx_timeouts":0,"backlight":-1,"hid_open":1,"hid_reopens":0,"hid_replaced":0}
+
+17955
+3293.64 5038.27

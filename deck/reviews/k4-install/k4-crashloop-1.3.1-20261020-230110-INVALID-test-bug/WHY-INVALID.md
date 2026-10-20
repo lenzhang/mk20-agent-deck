@@ -1,0 +1,1 @@
+First run invalid: test script's pgrep -f matched the adb sh -c running it (transient pid during backoff), so kill 3 hit a dead pid; only 2/3 exits counted. Fixed with pidof; rerun k4-crashloop-1.3.1-20261020-230250 PASS.
