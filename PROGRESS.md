@@ -17,6 +17,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-20 20:58** hidfix 第 11 次：第 11 次通过（完整规格，20:42–20:50）：T1–T7 全过；T4 对照 20 轮 + 真实 50/50 轮，T7 3 次，解绑/绑定 57 次（=周期数+7），引用计数/UAF 门槛无告警；不可回收内存斜率 实测 1.34、对照 2.32、差 −0.98 kB/轮（上限 4），总增 100 kB（上限 1024）；sunxi 报错对豁免 16 次（上限 29，都在 3 秒内恢复），新开设备重试 0 次；0 Oops，0 条 hidfix/hidg 行；唯一的 WARN 是切换时原厂 f_hid 的 refcount（见 REFCOUNT-RCA；因为只打一次，之后的引用计数告警看不到）；键盘复位后恢复到 1.2.1。dry11-2 也通过（8 次解绑）。codex 第 3 轮复审已由用户豁免（Kimi GO + 离线 58/58）。证据 4eb0bf4
 - **10-20 20:50** hidfix 第 11 次：run11 结束 exit=0：# hidfix run11 — PASS
 - **10-20 20:42** hidfix 第 11 次：run11 开始（profile=full，HEAD 8ab7c44）
 - **10-20 20:42** hidfix 第 11 次：dry11-2 结束 exit=0：# hidfix dry11-2 — PASS
@@ -41,7 +42,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 ## 3. 接下来要做
 
 - [ ] 排查 usb-storage（usb 1-1）每约 23.4 秒一次的复位：mk20-router 用户态（或其子进程）引起，quiesce 停掉 router 后立即停止；每次运行约 53–59 次；会打断该存储的读写（证据见 hidfix/LOG-ERRORS-RCA.md）
-- [ ] hidfix：第 11 次已过；下一步安装 K4 rc2（需你同意）
+- [ ] hidfix：第 11 次已过；下一步：安装 K4 rc2（需你同意）；可选：补 codex 复审、在测试里加 clear_warn_once
 - [ ] USB 麦克风测试：Mac 音响 `say` 播放 + ASR 比对（阻塞：第 9 次占用键盘）
 - [ ] 安装 K4 rc2（阻塞：hidfix 通过）。风险：rescue-hardreset.sh 须先放到键盘上；glm-coding 需单独的 key 文件
 - [ ] UVC 采集卡上机测试（UHC07P）
