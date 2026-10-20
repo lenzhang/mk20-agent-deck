@@ -17,6 +17,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-20 20:42** hidfix 第 11 次：run11 开始（profile=full，HEAD 8ab7c44）
 - **10-20 20:42** hidfix 第 11 次：dry11-2 结束 exit=0：# hidfix dry11-2 — PASS
 - **10-20 20:38** hidfix 第 11 次：dry11-2 开始（profile=dry，HEAD f1e469e）
 - **10-20 20:38** hidfix 第 11 次：codex review3 waived by user 20:36, Kimi GO + 58/58 offline（最后一次 codex：gpt-6.1-sol、effort high，仍无结论，满载报错 2 次）；开始 dry11-2
@@ -39,7 +40,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 ## 3. 接下来要做
 
 - [ ] 排查 usb-storage（usb 1-1）每约 23.4 秒一次的复位：mk20-router 用户态（或其子进程）引起，quiesce 停掉 router 后立即停止；每次运行约 53–59 次；会打断该存储的读写（证据见 hidfix/LOG-ERRORS-RCA.md）
-- [ ] hidfix：dry11-2 已过，第 11 次即将开始
+- [ ] hidfix：run11 进行中（结果出来会自动更新）
 - [ ] USB 麦克风测试：Mac 音响 `say` 播放 + ASR 比对（阻塞：第 9 次占用键盘）
 - [ ] 安装 K4 rc2（阻塞：hidfix 通过）。风险：rescue-hardreset.sh 须先放到键盘上；glm-coding 需单独的 key 文件
 - [ ] UVC 采集卡上机测试（UHC07P）
