@@ -9,7 +9,7 @@
 | hidfix（HID 模块修复） | feature/hidfix | 8e645d5（过滤修复）/ 7db8f6e（最新） | 第 9 次上机进行中（09:50 开跑） |
 | K4 rc2（替换原厂 KD，fw 1.3.0） | feature/kd-replace-k4 | 6f2788b | 测试全过，未安装；等 hidfix 通过 |
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
-| 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成，U3–U7 待做 |
+| 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
 | UVC 采集卡 | feature/uvc | 02f1d41 | UHC07P = MS2130，USB 2.0 下仅 MJPEG；待上机 |
 | 设备 | — | — | 当前 fw 1.2.1，slot A |
 
@@ -18,7 +18,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 ## 2. 关键进展日志（新的在上）
 
 - **10-20 09:50** hidfix 第 9 次开跑（codex、Kimi 复审均 GO），过滤修复 8e645d5：只在重新绑定时放过相邻的 sunxi_udc -108 报错对，且 3 秒内 UDC/usb0 必须恢复。
-- **10-20** 编译测试主机迁到 iMac build-imac.local（colima/Debian 容器，见 docs/BUILD-HOST-IMAC.md）；助手电脑上的副本已删除；完整副本在 dev-mbp.lan `~/mk20-full`；未推改动在 `wip/box-*` 分支，归档在 `docs/box-archive-imac`。
+- **10-20** 编译测试主机迁到 iMac build-imac.local（colima/Debian 容器，见 `docs/box-archive-imac:docs/BUILD-HOST-IMAC.md`）；助手电脑上的副本已删除；完整副本在 dev-mbp.lan `~/mk20-full`；未推改动在 `wip/box-*` 分支，归档在 `docs/box-archive-imac`。
 - **10-20** 第 6–8 次未过，均只因测试判定：dmesg 环形缓冲回卷（16 KiB）、Slab 总量噪声、重新绑定时良性的 sunxi_udc 报错对。HID 模块本身无崩溃、无告警。
 - **10-20** 修复：每次绑定新建带引用计数的设备对象，解绑时删除并释放；QEMU（KASAN/kmemleak）100 轮干净、无泄漏。
 - **10-20** 第 5 次找到根因 H4：`usb_f_hidfix` 每次绑定重复注册同一设备对象 → 第二次解绑时重复删除 → Oops。原厂 sunxi_udc 无需打二进制补丁（可行性见 hidfix/PATCH-FEASIBILITY.md）。
@@ -59,6 +59,6 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 - Gitea：ssh://git@192.168.88.6:2222/leo/mk20-agent-deck.git
 - 完整副本：dev-mbp.lan `~/mk20-full/mk20-agent-deck`，交接 `~/mk20-full/HANDOFF.md`，归档 `~/mk20-backup/box-archive/`
 - hidfix：feature/hidfix 的 hidfix/RESUME.md、hidfix/PATCH-FEASIBILITY.md、hidfix/reviews/
-- 迁出资料：分支 docs/box-archive-imac 的 docs/box-archive/（QEMU 环境、评审、续接说明）
-- 编译主机：iMac build-imac.local，docs/BUILD-HOST-IMAC.md
+- 迁出资料：`docs/box-archive-imac:docs/box-archive/`（QEMU 环境、评审、续接说明）
+- 编译主机：iMac build-imac.local，`docs/box-archive-imac:docs/BUILD-HOST-IMAC.md`；仓库交接文档 `docs/box-archive-imac:docs/HANDOFF.md`
 - rc2 包：Mac `~/worktrees/k4-rc2/`
