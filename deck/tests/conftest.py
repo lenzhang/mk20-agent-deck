@@ -17,9 +17,15 @@ DEVICE_CMDS = {l for l in (pathlib.Path(__file__).parent / "fixtures/device-comm
                if l and not l.startswith("#")}
 
 
+# Device commands that are NOT BusyBox applets and may run as the host binary in tests. Explicit on purpose: a silent
+# host fallback is how a missing `stat` stayed hidden until the field install. Anything else the device has but the
+# test BusyBox lacks is simply absent in tests (fails visibly).
+HOST_FALLBACK = frozenset({"curl"})
+
+
 def _bbdir(tmp):
-    """PATH dir with only the device's commands: busybox applets where the device has that command, else the host
-    binary (non-busybox device tools such as curl). Nothing else: a command the device lacks is "not found"."""
+    """PATH dir with only the device's commands: busybox applets where the device has that command, plus the explicit
+    HOST_FALLBACK tools. Nothing else: a command the device lacks is "not found"."""
     d = tmp / "bb"
     d.mkdir()
     bb = BB
@@ -28,7 +34,7 @@ def _bbdir(tmp):
     for a in sorted(DEVICE_CMDS - {"flock", "mount", "pgrep", "ubus", "busybox"}):
         if a in applets:
             (d / a).symlink_to(bb)
-        elif shutil.which(a):
+        elif a in HOST_FALLBACK and shutil.which(a):
             (d / a).symlink_to(shutil.which(a))
     return d
 

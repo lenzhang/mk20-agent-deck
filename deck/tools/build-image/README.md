@@ -17,3 +17,6 @@ cd deck && docker run --rm -v "$PWD":/work/wt/deck -v ~/mk20-tools:/bb127:ro -w 
 - Release tarballs: `sh tools/mk20-release-build.sh firmware out <build-id>` inside the image (needs GNU stat/tar).
 
 Verified 2026-10-20 on dev-mbp (arm64, colima): `tests/` 715 passed / 1 skipped with BusyBox 1.27.2.
+
+Pinned: base image `debian:trixie@sha256:913f6706…` (multi-arch index, 2026-10-20) and uv 0.13.3 (versioned installer URL).
+Apt packages are not pinned (Debian stable updates); rebuild deliberately and re-run `make test` after a bump.
