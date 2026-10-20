@@ -1,0 +1,31 @@
+[   52.645753] VE: disable hw clock
+[   52.645868] disable_cedar_hw_clk,592
+[   55.799922] regulator-dummy: Underflow of regulator enable count
+[   55.800779] android_work: sent uevent USB_STATE=DISCONNECTED
+[   56.146974] usb_f_ecm: loading out-of-tree module taints kernel.
+[   56.154602] using random self ethernet address
+[   56.154623] using random host ethernet address
+[   56.178657] file system registered
+[   56.231547] read descriptors
+[   56.231575] read strings
+[   56.234136] usb0: HOST MAC 02:11:22:33:44:56
+[   56.234465] usb0: MAC 02:11:22:33:44:55
+[   56.452116] sunxi_set_cur_vol_work()397 WARN: get power supply failed
+[   56.495623] android_work: sent uevent USB_STATE=CONNECTED
+[   56.502063] configfs-gadget gadget: high-speed config #1: c
+[   56.502328] android_work: sent uevent USB_STATE=CONFIGURED
+[   56.523352] ERR: Operation not supported
+[   56.523676] handle_ep0: ep0 setup end
+[   56.535908] handle_ep0: ep0 setup end
+[   56.596034] handle_ep0: ep0 setup end
+[   56.597062] handle_ep0: ep0 setup end
+[   56.597606] handle_ep0: ep0 setup end
+[   57.509659] handle_ep0: ep0 setup end
+[   59.053005] sunxi_i2c_do_xfer()1816 - [i2c2] incomplete xfer (status: 0x20, dev addr: 0x64)
+[   59.053273] sunxi_i2c_do_xfer()1816 - [i2c2] incomplete xfer (status: 0x20, dev addr: 0x0)
+[   59.135637] handle_ep0: ep0 setup end
+[   59.142401] sunxi_i2c_do_xfer()1816 - [i2c2] incomplete xfer (status: 0x20, dev addr: 0x0)
+[   59.211883] --atsha204a-- Key(11) verify OK
+[   59.239015] handle_ep0: ep0 setup end
+[   59.239197] handle_ep0: ep0 setup end
+[   59.479169] sh (2853): drop_caches: 3

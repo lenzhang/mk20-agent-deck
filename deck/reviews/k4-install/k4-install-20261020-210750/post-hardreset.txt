@@ -1,0 +1,2 @@
+uptime=605.83 by=loader-deadline fat_ro=y mount_hung=n
+66.50 49.68

@@ -1,0 +1,8 @@
+PASS kd=1
+PASS udc bound
+PASS ttyGS0
+PASS watchdog armed
+PASS bridge 172.30.250.2:17890
+PASS bridge link-local
+PASS hid
+INFO router not running

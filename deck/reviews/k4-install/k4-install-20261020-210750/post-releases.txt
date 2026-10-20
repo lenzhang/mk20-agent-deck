@@ -1,0 +1,12 @@
+/data/mk20/releases:
+drwxrwxrwx    5 root     root          4096 Jan  1 18:42 [1;34m.[0m
+drwxr-xr-x   11 root     root          4096 Jan  2  1970 [1;34m..[0m
+drwxr-xr-x    6 root     root          4096 Jan  1  1970 [1;34m1.2.0[0m
+drwxr-xr-x    6 root     root          4096 Jan  1  1970 [1;34m1.2.1[0m
+drwxr-xr-x    6 root     root          4096 Jan  1 18:42 [1;34m1.3.0[0m
+
+/data/mk20/slots:
+drwxrwxrwx    2 root     root          4096 Jan  1 18:49 [1;34m.[0m
+drwxr-xr-x   11 root     root          4096 Jan  2  1970 [1;34m..[0m
+-rw-r--r--    1 root     root           168 Jan  1 18:49 [0;0mA[0m
+-rw-rw-rw-    1 root     root           168 Jan  1 18:42 [0;0mB[0m

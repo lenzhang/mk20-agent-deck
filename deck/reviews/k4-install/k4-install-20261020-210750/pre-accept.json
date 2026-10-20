@@ -1,0 +1,118 @@
+{
+ "time": "2026-10-20 21:07:54 +08",
+ "pass": true,
+ "results": [
+  {
+   "check": "adb shell",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "loader: good release current, none pending",
+   "pass": true,
+   "detail": "current=A 15 1.2.1 good=1.2.1 pending= attempts= active=1.2.1 last_rollback=1.0.3->1.0.2 not confirmed after 1 attempt(s)"
+  },
+  {
+   "check": "health: status ok",
+   "pass": true,
+   "detail": "v=1.2.1 status=ok"
+  },
+  {
+   "check": "health: composite + kd=1 + watchdog + selftest",
+   "pass": true,
+   "detail": "PASS kd=1 PASS udc bound PASS ttyGS0 PASS watchdog armed PASS bridge 172.30.250.2:17890 PASS bridge link-local PASS hid INFO router running"
+  },
+  {
+   "check": "health: headroom (FAT >= 1024 KiB, mem >= 20 MiB)",
+   "pass": true,
+   "detail": "fat=1218 mem=49360"
+  },
+  {
+   "check": "mac: MK20 interface present",
+   "pass": true,
+   "detail": "en13"
+  },
+  {
+   "check": "mac: route to device via MK20 interface (not TUN)",
+   "pass": true,
+   "detail": "172.30.250.2 -> en13"
+  },
+  {
+   "check": "ping device (primary)",
+   "pass": true,
+   "detail": "loss=0.0% avg=0.905ms"
+  },
+  {
+   "check": "bridge listening on primary + link-local (device netstat)",
+   "pass": true,
+   "detail": "primary=True ll=True"
+  },
+  {
+   "check": "ping link-local 169.254.7.2 (bound)",
+   "pass": true,
+   "detail": "0.0% packet loss"
+  },
+  {
+   "check": "tcp bridge: active connects skipped (use --tcp when no other client uses the bridge)",
+   "pass": true,
+   "detail": "passive"
+  },
+  {
+   "check": "hid: Mac enumerates 1d6b:0104 keyboard",
+   "pass": true,
+   "detail": ""
+  }
+ ],
+ "health": {
+  "version": "1.2.1",
+  "uptime_s": 1129,
+  "kernel": {
+   "p4": "7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc",
+   "name": "ep5out",
+   "features": "acm,adb,ecm,hid"
+  },
+  "vendor": "ok",
+  "usb": {
+   "udc": "4100000.udc-controller",
+   "state": "configured",
+   "functions": "ecm.usb0 hid.usb0 ffs.adb ",
+   "composite": true
+  },
+  "net": {
+   "usb0": "172.30.250.2",
+   "mtu": 478,
+   "subnet": "172.30.250.0/24",
+   "bridge": true,
+   "hidg0_writable": true
+  },
+  "kd": 1,
+  "adbd": true,
+  "flapmon": true,
+  "maint": true,
+  "shim_mounts": 2,
+  "router": {
+   "enabled": true,
+   "running": true,
+   "loop": true,
+   "tap": true
+  },
+  "watchdog": true,
+  "mem_avail_kb": 49360,
+  "fat_free_kb": 1218,
+  "data_free_kb": 2466572,
+  "release": {
+   "good": "1.2.1",
+   "pending": "",
+   "last_rollback": "1.0.3->1.0.2 not confirmed after 1 attempt(s)"
+  },
+  "config": {
+   "src": "defaults",
+   "warnings": ""
+  },
+  "selftest": {
+   "pass": true,
+   "detail": "PASS kd=1 PASS udc bound PASS ttyGS0 PASS watchdog armed PASS bridge 172.30.250.2:17890 PASS bridge link-local PASS hid INFO router running"
+  },
+  "status": "ok"
+ }
+}
