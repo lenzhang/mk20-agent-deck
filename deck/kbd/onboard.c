@@ -1,6 +1,7 @@
 #include "onboard.h"
 #include "kbd.h"
 #include "ctl.h"
+#include "devstat.h"
 #include "jpeg.h"
 #include "ui_font.h"
 #include <stdlib.h>
@@ -12,6 +13,11 @@
 #define RESERVED ((1u << 19) | (1u << 20))
 #define FRAME_MAX (1u << 20)
 #define HOST_TAPS 16
+#define GRACE_MS 2000        /* ONLINE host page switch: no navigation until a fresh frame */
+#define STOP_BANNER_MS 10000 /* host pages keep the host footer after this */
+#define OPEN_SETTINGS_MS 3000
+#define RESTORE_FB20 1u
+#define RESTORE_FOOTER 2u
 struct onboard_s {
     ui_t ui;
     enum onboard_route route, back, host_page;
@@ -33,7 +39,12 @@ struct onboard_s {
     long tile_generation;
     int64_t budget_at, panel_at[PANEL_COUNT]; size_t bus_left[2];
     int64_t knob_at[2];
-    int last_page, last_stop, confirm_pending, incompatible; long confirm_id;
+    int last_page, last_stop, confirm_pending, incompatible; long confirm_id; unsigned estops_seen;
+    /* 2026-10-20 UX: boot auto-L1, host-owned fb20/footer, grace window, status probes */
+    int auto_l1, grace_shown, stop_banner, opened, face20, footer_host, agent_was, footer_sig;
+    uint32_t restore;
+    int64_t switch_at, stop_at, open_at;
+    devstat_t ds; int ds_kick;
     pthread_t decoder;
     pthread_mutex_t mu; pthread_cond_t cv;
     int stop, job, ready, result; uint8_t *jpg, *next_jpg; size_t jpg_size, next_size; uint64_t next_epoch;
@@ -43,6 +54,24 @@ static void host_tap(kbd_t *k, int slot);
 static int host_route(const onboard_t *o) { return o->route == ONBOARD_L1 || o->route == ONBOARD_L4; }
 static int safety_footer(const onboard_t *o) { return host_route(o) && (o->fresh || o->health==HOST_SUSPECT); }
 static int page_id(enum onboard_route r) { return r == ONBOARD_L5 ? 1 : r == ONBOARD_L1 || r == ONBOARD_L4 ? 2 : 0; }
+/* Keyboard agent active = allowed (a lease implies allowed: ctl revokes it on disable/stop). */
+static int agent_active(const kbd_t *k) { return k->ctl && (k->ctl->allowed || k->ctl->token); }
+/* On L1/L4 the Mac host owns fb20 (its mode key) unless the keyboard agent is active. */
+static int fb20_host(const kbd_t *k) { return host_route(k->onboard) && !agent_active(k); }
+static int grace(const onboard_t *o, int64_t now)
+{ return host_route(o) && o->health == HOST_ONLINE && !o->fresh && now - o->switch_at < GRACE_MS; }
+/* Same legacy-host liveness as an explicitly entered host page, only until the first ONLINE. */
+static int legacy_probe(const onboard_t *o) { return o->auto_l1 && !o->negotiated && o->route == ONBOARD_HOME; }
+static void footer_ctx(kbd_t *k)
+{
+    onboard_t *o = k->onboard; ui_t *u = &o->ui; int ptt = 0;
+    for (int i = 0; i < 20; i++) ptt |= o->key_owner[i] == 2;
+    u->ctx = o->route == ONBOARD_HOME ? UI_CTX_HOME : o->route == ONBOARD_LS ? UI_CTX_LS :
+        o->route == ONBOARD_L5 ? UI_CTX_L5 : host_route(o) ? UI_CTX_HOST : UI_CTX_AGENT;
+    u->health_stale = o->health == HOST_SUSPECT; u->ptt_held = ptt;
+    u->incompatible = o->incompatible; u->stop_banner = o->stop_banner;
+}
+static int attention(kbd_t *k) { footer_ctx(k); return ui_footer_attention(&k->onboard->ui); }
 int onboard_host_flush(kbd_t *k)
 {
     onboard_t *o=k->onboard;
@@ -101,9 +130,10 @@ static void boundary(kbd_t *k, int redraw)
     onboard_t *o = k->onboard;
     for (int i=0;i<20;i++) release_key(k,i);
     if (k->ctl) { k->ctl->confirm.shown=0; k->ctl->confirm.shown_ms=0; }
-    o->tile_fb=0;
+    o->tile_fb=0; o->restore=0;
     free(o->next_jpg); o->next_jpg=NULL;
     o->epoch++; o->fresh = o->publishing = 0;
+    o->switch_at = kbd_now(k);
     /* Preserve framing and acknowledgements for even a partial old frame; poison its origin. */
     k->hp.barrier = k->hp.len;
     int queued=0;
@@ -120,6 +150,8 @@ void onboard_route(kbd_t *k, enum onboard_route r)
     if (!o || o->route == r) return;
     if (r == ONBOARD_LS) o->back = o->route;
     o->route = r; o->ui.route = r == ONBOARD_LS ? UI_LS : UI_HOME;
+    if (r != ONBOARD_LS) o->ui.toast = UI_NONE;
+    if (r == ONBOARD_HOME || r == ONBOARD_LS) o->ds_kick = 1; /* fresh status on entry */
     boundary(k,1);
     if (k->ctl && r != ONBOARD_AGENT) k->ctl->screen.current = page_id(r);
     if (k->ctl) o->last_page = k->ctl->screen.current;
@@ -142,8 +174,6 @@ static void *decode(void *ctx)
     pthread_mutex_unlock(&o->mu);
     return NULL;
 }
-/* U3 owns durable config/test workers; never pretend an in-memory Apply was durable. */
-static int unavailable_apply(void *ctx, const uicfg_t *cfg) { (void)ctx; (void)cfg; return -1; }
 int onboard_enable(kbd_t *k)
 {
     onboard_t *o = calloc(1, sizeof *o);
@@ -152,14 +182,21 @@ int onboard_enable(kbd_t *k)
     if (!o->scratch) { free(o); return -1; }
     o->tile_px = malloc(428 * 142 * 2);
     if (!o->tile_px) { free(o->scratch); free(o); return -1; }
-    ui_init(&o->ui, NULL, unavailable_apply, NULL);
-    o->kbd = k; o->host_page=ONBOARD_L1; o->render = ALL_PANELS; o->epoch = 1;
+    /* LS is read-only: no Apply/Test consumer is reachable from keys (web is the editor). */
+    ui_init(&o->ui);
+    devstat_init_env(&o->ds); o->ds_kick = 1;
+    o->kbd = k; o->host_page=ONBOARD_L1; o->render = ALL_PANELS; o->epoch = 1; o->auto_l1 = 1;
     pthread_mutex_init(&o->mu, NULL); pthread_cond_init(&o->cv, NULL);
     if (pthread_create(&o->decoder, NULL, decode, o)) {
         pthread_mutex_destroy(&o->mu); pthread_cond_destroy(&o->cv); free(o->tile_px); free(o->scratch); free(o); return -1;
     }
     k->onboard = o; k->local_ui = 0;
     return 0;
+}
+void onboard_status_root(kbd_t *k, const char *root, const char *pair_path, const char *version, const char *rel)
+{
+    onboard_t *o = k->onboard; if (!o) return;
+    devstat_init(&o->ds, root, pair_path, version, rel); o->ds_kick = 1;
 }
 void onboard_free(kbd_t *k)
 {
@@ -188,6 +225,12 @@ static void sample(kbd_t *k, int64_t now)
     o->seen = o->last_beat = now;
     if (o->health == HOST_PROBING && o->beats >= 3 && now - o->first >= 2000) {
         o->health = HOST_ONLINE; o->render |= RESERVED;
+        /* First ONLINE since process start: follow the Mac to L1 once, but only from the
+         * boot HOME and only if nobody touched a key/knob yet. Never again afterwards. */
+        if (o->auto_l1) {
+            o->auto_l1 = 0;
+            if (o->route == ONBOARD_HOME) { onboard_route(k,ONBOARD_L1); return; }
+        }
         if (host_route(o) && o->host_page != o->route) {
             o->host_page=o->route; boundary(k,1); host_tap(k,103);
         }
@@ -235,7 +278,7 @@ int onboard_json(kbd_t *k, const char *m, const char *s, size_t n, char *r, size
 void onboard_jpeg(kbd_t *k, const uint8_t *data, size_t n)
 {
     onboard_t *o = k->onboard;
-    if (!host_route(o) || o->handshake_required || o->health == HOST_SUSPECT || n > FRAME_MAX || !n || kbd_now(k) < o->next_decode) return;
+    if ((!host_route(o) && !legacy_probe(o)) || o->handshake_required || o->health == HOST_SUSPECT || n > FRAME_MAX || !n || kbd_now(k) < o->next_decode) return;
     pthread_mutex_lock(&o->mu);
     if ((o->job || o->ready) && o->decode_epoch != o->epoch) {
         uint8_t *next=malloc(n);
@@ -256,8 +299,10 @@ void onboard_jpeg(kbd_t *k, const uint8_t *data, size_t n)
 int onboard_tile_allowed(kbd_t *k, int fb, int y, int h)
 {
     onboard_t *o = k->onboard;
-    return host_route(o) && o->health == HOST_ONLINE && o->fresh && !o->publishing &&
-        fb >= 1 && fb <= 21 && fb != 20 && (fb != 21 || (y >= 0 && h > 0 && y <= 112-h));
+    if (!(host_route(o) && o->health == HOST_ONLINE && o->fresh && !o->publishing && fb >= 1 && fb <= 21)) return 0;
+    if (fb == 20) return fb20_host(k);
+    /* The footer belongs to the host unless a safety/attention line is shown there. */
+    return fb != 21 || (y >= 0 && h > 0 && y <= 142-h && (y <= 112-h || !attention(k)));
 }
 int onboard_tile(kbd_t *k, int fb, int x, int y, int w, int h, const uint16_t *px)
 {
@@ -287,8 +332,51 @@ static void stop(kbd_t *k, const char *reason, int64_t now)
 {
     onboard_t *o = k->onboard;
     if (k->ctl && !k->ctl->estopped) ctl_estop(k->ctl, reason, now);
-    ui_key(&o->ui,20); /* disarm draft confirmations through the accepted U1 transition */
-    if (o->route == ONBOARD_HOME) boundary(k,1); else onboard_route(k,ONBOARD_HOME);
+    ui_key(&o->ui,20); /* the accepted U1 stop transition */
+    if (host_route(o)) {
+        /* Stay on the Mac page: ctl_estop() already revoked the lease and sent all-up;
+         * release a held Mac PTT too and show a bounded stop banner in the footer. */
+        release_mac(k);
+        if (k->ctl) { k->ctl->screen.current = page_id(o->route); o->last_page = k->ctl->screen.current; }
+        o->stop_banner = 1; o->stop_at = now; o->render |= RESERVED;
+    } else if (o->route == ONBOARD_HOME) boundary(k,1);
+    else onboard_route(k,ONBOARD_HOME);
+}
+static void status_sync(kbd_t *k)
+{
+    onboard_t *o = k->onboard; const ds_result_t *r = &o->ds.r; const ctl_t *c = k->ctl;
+    ui_status_t s; ui_status_defaults(&s);
+    s.link = o->health == HOST_ONLINE ? UI_LINK_ONLINE : o->health == HOST_SUSPECT ? UI_LINK_STALE :
+        o->health == HOST_PROBING ? UI_LINK_PROBING : r->udc == DS_UDC_UP ? UI_LINK_NOAPP :
+        r->udc == DS_UDC_DOWN ? UI_LINK_USB_DOWN : r->udc == DS_UDC_SUSPENDED ? UI_LINK_USB_SLEEP : UI_LINK_UNSEEN;
+    if (c) {
+        int client = 0;
+        for (int i = 0; i < CTL_MAX_CLIENTS; i++) client |= c->cfd[i] >= 0;
+        s.agent = c->estopped ? UI_AGENT_STOPPED : c->allowed ? (c->token ? UI_AGENT_LEASED : UI_AGENT_ALLOWED) :
+            client ? UI_AGENT_DISABLED : UI_AGENT_OFF;
+        static const char *const states[] = {"idle", "observing", "planning", "acting", "awaiting_confirm", "done", "stopped", "error"};
+        for (int i = 0; i < 8; i++) if (!strcmp(c->ui.state, states[i])) s.task = i;
+        s.confirm = c->confirm.pending;
+    }
+    s.cfg = r->marker == 1 ? UI_CONF_APPLYING : r->marker == 2 ? UI_CONF_INVALID :
+        r->net == DS_ABSENT && r->prov == DS_ABSENT ? UI_CONF_DEFAULT : r->net == DS_OK && r->prov == DS_OK ? UI_CONF_OK : UI_CONF_INVALID;
+    s.key = r->key == DS_KEY_SET ? UI_KEYST_SET : r->key == DS_KEY_MISSING ? UI_KEYST_MISSING :
+        r->key == DS_KEY_INSECURE ? UI_KEYST_INSECURE : UI_KEYST_UNKNOWN;
+    s.wlan = r->wlan; s.profile = r->profile; s.provider = r->provider; s.model = r->model;
+    s.ip_default = !r->ip_known;
+    snprintf(s.ip, sizeof s.ip, "%s", r->ip);
+    snprintf(s.fw, sizeof s.fw, "%s", r->version);
+    snprintf(s.kbd, sizeof s.kbd, "%s", k->version ? k->version : "");
+    snprintf(s.proxy, sizeof s.proxy, "%s", r->proxy);
+    snprintf(s.pair, sizeof s.pair, "%s", r->pair);
+    snprintf(s.route_dom, sizeof s.route_dom, "%s", r->route_dom);
+    snprintf(s.route_for, sizeof s.route_for, "%s", r->route_for);
+    if (memcmp(&s, &o->ui.st, sizeof s)) {
+        int pair_changed = strcmp(s.pair, o->ui.st.pair) || s.confirm != o->ui.st.confirm;
+        memcpy(&o->ui.st, &s, sizeof s);
+        if (o->route <= ONBOARD_LS) o->render = ALL_PANELS;
+        else if (pair_changed) o->render |= 1u << 20;
+    }
 }
 void onboard_tick(kbd_t *k, int64_t now)
 {
@@ -296,36 +384,45 @@ void onboard_tick(kbd_t *k, int64_t now)
     if ((o->health == HOST_ONLINE || o->health == HOST_PROBING || o->health == HOST_SUSPECT) && now-o->seen >= 5000) onboard_loss(k);
     else if ((o->health == HOST_ONLINE || o->health == HOST_PROBING) && now-o->seen >= 3000) {
         o->health = HOST_SUSPECT; release_mac(k); o->epoch++; o->fresh = o->publishing = 0;
-        o->tile_fb=0;
+        o->tile_fb=0; o->restore=0;
         free(o->next_jpg); o->next_jpg=NULL;
         k->hp.barrier = k->hp.len; o->render |= 1u << 20;
     }
     int online = o->health == HOST_ONLINE;
-    if (o->ui.host_online != online) o->render |= (o->route == ONBOARD_HOME ? 1u : 0u) | (1u << 20);
+    if (o->ui.host_online != online) o->render |= (o->route <= ONBOARD_LS ? ALL_PANELS : 0u) | (1u << 20);
     o->ui.host_online = online;
     if (k->ctl) {
-        int pid = k->ctl->screen.current;
-        if (k->ctl->estopped && !o->last_stop) { o->last_stop = 1; stop(k,"socket",now); }
+        /* Every e-stop (also a repeated one while latched: ctl_screen_reset() runs again). */
+        if (k->ctl->st.estops != o->estops_seen) { o->estops_seen = k->ctl->st.estops; o->last_stop = 1; stop(k,"socket",now); }
+        int pid = k->ctl->screen.current; /* after stop(): host pages keep their ctl page */
         o->last_stop = k->ctl->estopped; o->ui.stopped = k->ctl->estopped;
+        if (!k->ctl->estopped) o->stop_banner = 0;
         if (pid != o->last_page) {
             enum onboard_route r=pid == 1 ? ONBOARD_L5 : pid >= 3 ? ONBOARD_AGENT : pid == 2 ? ONBOARD_L1 : ONBOARD_HOME;
             if (r==o->route) boundary(k,1); else onboard_route(k,r);
             o->last_page = pid;
         }
+        /* A confirmation request never navigates: HOME/LS/footers show a badge and the
+         * user enters L5 explicitly. On L5 itself, re-present for the new request. */
         if (k->ctl->confirm.pending && (!o->confirm_pending || o->confirm_id != k->ctl->confirm.cid)) {
-            onboard_route(k, ONBOARD_L5); boundary(k,1); o->confirm_id = k->ctl->confirm.cid;
+            if (o->route == ONBOARD_L5) boundary(k,1);
+            o->confirm_id = k->ctl->confirm.cid;
         }
         if (o->confirm_pending != k->ctl->confirm.pending) o->render = ALL_PANELS;
         o->confirm_pending = k->ctl->confirm.pending;
         if (ctl_ui_dirty(k->ctl)) o->render = ALL_PANELS;
     }
+    if (o->stop_banner && now - o->stop_at >= STOP_BANNER_MS) o->stop_banner = 0;
+    int active = agent_active(k);
+    if (active != o->agent_was) { o->agent_was = active; o->render |= 1u << 19; }
+    if (o->grace_shown && !grace(o,now)) { o->grace_shown = 0; o->render = ALL_PANELS; }
+    status_sync(k);
+    footer_ctx(k); /* other callers may refresh ctx too; only this signature triggers redraws */
+    int sig = (int)o->ui.ctx | o->ui.health_stale << 4 | o->ui.ptt_held << 5 | o->ui.incompatible << 6 | o->ui.stop_banner << 7;
+    if (sig != o->footer_sig) { o->footer_sig = sig; o->render |= 1u << 20; }
     for (int i = 0; i < 2; i++) if (o->knob_down[i] && !o->knob_long[i] && now-o->knob_at[i] >= 1000) {
         o->knob_long[i] = 1;
-        if (i == 0) {
-            if (o->route == ONBOARD_LS) { ui_knob(&o->ui,1,UI_DOWN,o->knob_at[i]); ui_tick(&o->ui,now); if (o->ui.route == UI_HOME) onboard_route(k,ONBOARD_HOME); }
-            else onboard_route(k,ONBOARD_HOME);
-            o->render = ALL_PANELS;
-        }
+        if (i == 0) { onboard_route(k,ONBOARD_HOME); o->render = ALL_PANELS; }
         /* K2 uses k2estop.c capability detection, never a speculative first hold. */
     }
 }
@@ -338,12 +435,22 @@ static void host_tap(kbd_t *k, int slot)
     o->taps[(o->tap_head+o->tap_count)%HOST_TAPS]=slot; o->tap_count++;
     kbd_host_drain(k);
 }
+/* One device-initiated cmd101 event, exactly {"method":"ui.openSettings"}: the Mac builds
+ * the URL from its own configuration. Only while ONLINE, at most once per 3 s. */
+static void open_settings(kbd_t *k, int64_t now)
+{
+    static const char j[] = "{\"method\":\"ui.openSettings\"}";
+    onboard_t *o = k->onboard;
+    if (o->health != HOST_ONLINE || k->host_fd < 0 || (o->opened && now - o->open_at < OPEN_SETTINGS_MS)) return;
+    if (!kbd_host_send(k,KBD_EVENT_ID,HOST_CMD_JSON,j,sizeof j - 1)) { o->opened = 1; o->open_at = now; }
+}
 static void short_knob(kbd_t *k, int knob, int64_t now)
 {
     onboard_t *o = k->onboard;
     if (knob == 2 && o->route == ONBOARD_HOME) {
         int fb=o->ui.home_focus+1;
         onboard_input(k,(fb-1)/5,(fb-1)%5,0,1,0,now);
+        o->pressed &= ~(1u << (fb-1)); /* synthetic tap: no physical release follows */
     }
     else if (knob == 2 && host_route(o)) {
         onboard_route(k,o->route == ONBOARD_L1 ? ONBOARD_L4 : ONBOARD_L1);
@@ -358,6 +465,7 @@ static void short_knob(kbd_t *k, int knob, int64_t now)
 int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, int64_t now)
 {
     onboard_t *o = k->onboard;
+    o->auto_l1 = 0; /* any physical key/knob event: the user drives navigation from now on */
     if (keycode) { o->incompatible=1; o->render |= 1u << 20; }
     if (knob) {
         int i = knob-1, slot = 100 + i*3;
@@ -383,7 +491,9 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
         if (!host_route(o)) o->render |= 1u << (fb-1);
         return 1; /* release_key delivers to the press-time owner */
     }
-    if (fb == 20) { stop(k,"page_key",now); return 1; }
+    /* fb20 is e-stop on every on-board page and whenever the keyboard agent is active.
+     * On L1/L4 with the agent inactive it is the Mac host's mode key (PRD §6.2). */
+    if (fb == 20 && !fb20_host(k)) { stop(k,"page_key",now); return 1; }
     /* Do not overwrite a still-owned host press with a new press while its up
      * is backpressured. Safety keys and deadlines have already been handled. */
     if (o->pending_up & (1u<<(fb-1))) {
@@ -403,13 +513,22 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
         return 0;
     }
     o->key_owner[fb-1] = 0;
+    if (fb == 20) return 1; /* host mode key while the Mac page is not live: inert */
+    /* Page-switch grace: the old page's labels may still be under the user's finger.
+     * Swallow everything (no navigation, no host event) until a fresh frame or 2 s. */
+    if (grace(o,now)) return 1;
     if (o->route == ONBOARD_HOME) {
         if (fb == 6) onboard_route(k,ONBOARD_L5);
         else if (fb == 7 || fb == 8) onboard_route(k,fb == 7 ? ONBOARD_L1 : ONBOARD_L4);
-        else { ui_key(&o->ui,fb); if (o->ui.route == UI_LS) onboard_route(k,ONBOARD_LS); }
+        else {
+            ui_key(&o->ui,fb);
+            if (fb == 19) open_settings(k,now);
+            if (o->ui.route == UI_LS) onboard_route(k,ONBOARD_LS);
+        }
     } else if (o->route == ONBOARD_LS) {
         ui_key(&o->ui,fb);
-        if (o->ui.route == UI_HOME) onboard_route(k,o->back);
+        if (fb == 19) open_settings(k,now);
+        if (o->ui.route == UI_HOME) onboard_route(k,o->ui.back_home ? ONBOARD_HOME : o->back);
     } else if (o->route == ONBOARD_L5) {
         if (fb == 1 && k->ctl) ctl_set_allowed(k->ctl,!k->ctl->allowed);
         else if ((fb == 11 || fb == 12) && k->ctl) ctl_confirm_key(k->ctl,fb == 11,now);
@@ -435,65 +554,136 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
     o->render = ALL_PANELS;
     return 1;
 }
+#define PH_BG 0x1082
+#define PH_FG 0xef7d
+#define PH_DIM 0x9492
 static void label(uint16_t *p, int w, int h, int y, const char *s, uint16_t color)
 { ui_font_draw(p,w,h,8,y,s,color,w-16); }
+#define LB(id) UI_LABELS[UI_##id]
+/* Placeholder L1/L4 page while no fresh host frame is shown. Navigation labels appear
+ * only when those keys act (never during the post-switch grace window). */
+static void host_placeholder(kbd_t *k, int fb, const char **s, char *detail, size_t cap, int64_t now)
+{
+    onboard_t *o = k->onboard; const ds_result_t *r = &o->ds.r; int nav = !grace(o,now);
+    const char *mac = o->health == HOST_PROBING ? LB(MAC_PROBING) : o->health == HOST_ONLINE ? LB(PH_WAIT_FRAME) :
+        o->health == HOST_SUSPECT ? LB(MAC_STALE) : r->udc == DS_UDC_DOWN ? LB(USB_DOWN) : r->udc == DS_UDC_UP ? LB(MAC_NOAPP) : LB(MAC_UNSEEN);
+    if (fb == 21) {
+        *s = o->health == HOST_PROBING ? LB(SUB_PROBING) : o->health == HOST_ONLINE ? LB(SUB_WAIT_FRAME) :
+            o->health == HOST_SUSPECT ? LB(SUB_STALE) : r->udc == DS_UDC_DOWN || r->udc == DS_UDC_SUSPENDED ? LB(SUB_USB_DOWN) : LB(SUB_NOAPP);
+        snprintf(detail,cap,"%s",o->route == ONBOARD_L1 ? LB(SESSIONS) : LB(MODES));
+    } else if (fb == 1) { *s = LB(PH_MAC); snprintf(detail,cap,"%s",mac); }
+    else if (fb == 2) {
+        *s = LB(PH_USB);
+        snprintf(detail,cap,"%s",r->udc == DS_UDC_UP ? LB(USB_UP) : r->udc == DS_UDC_DOWN ? LB(USB_DOWN) : r->udc == DS_UDC_SUSPENDED ? LB(USB_SLEEP) : LB(DASH));
+    } else if (fb == 3) {
+        *s = LB(PH_SEEN);
+        if (o->seen) snprintf(detail,cap,"%lld%s",(long long)((now-o->seen)/1000),LB(SECONDS_AGO));
+        else snprintf(detail,cap,"%s",LB(DASH));
+    } else if (fb == 4) {
+        *s = LB(PH_PHASE);
+        snprintf(detail,cap,"%s",o->health == HOST_OFFLINE && o->handshake_required ? LB(PH_HANDSHAKE) : o->health == HOST_OFFLINE ? LB(DASH) : mac);
+    } else if (fb == 5 && nav) *s = LB(SETTINGS);
+    else if ((fb == 6 || fb == 18) && nav) *s = LB(HOME_TITLE);
+    else if (fb == 7 && nav) *s = LB(AGENTPAGE);
+    else if (fb == 16) { *s = LB(PH_PTT); snprintf(detail,cap,"%s",mac); } /* no Mac PTT until the page is live */
+    else if (fb == 19) { *s = LB(WEB); snprintf(detail,cap,"%s",r->ip); }
+    else if (fb == 20) { *s = LB(PH_MODEKEY); snprintf(detail,cap,"%s",mac); }
+    if (fb == 21 || fb == 5 || fb == 6 || fb == 7 || fb == 18) o->grace_shown |= !nav;
+}
+static void l5_text(kbd_t *k, int fb, const char **s, char *detail, size_t cap)
+{
+    static const enum ui_label names[] = {UI_L5_ALLOW, UI_L5_STATE, UI_L5_GOAL, UI_L5_STEP, UI_L5_INPUT,
+        UI_L5_PAUSE, UI_TASK, UI_PROVIDER, UI_MODEL, UI_NETWORK, UI_L5_CONFIRM, UI_L5_CANCEL, UI_HOME_TITLE,
+        UI_SETTINGS, UI_L5_SOURCE, UI_L5_PTT, UI_L5_REC, UI_L5_NEWGOAL, UI_L5_WEBTASK};
+    static const enum ui_label task[] = {UI_TASK_NONE, UI_TASK_OBSERVING, UI_TASK_PLANNING, UI_TASK_ACTING,
+        UI_TASK_CONFIRM, UI_TASK_DONE, UI_TASK_STOPPED, UI_TASK_ERROR};
+    const ctl_t *c = k->ctl; const ui_status_t *st = &k->onboard->ui.st;
+    *s = fb == 21 ? LB(L5_TITLE) : UI_LABELS[names[fb-1]];
+    if (!c) return;
+    if (fb == 1) snprintf(detail,cap,"%s",c->allowed ? LB(AG_ALLOWED) : LB(AG_DISABLED));
+    if (fb == 2) snprintf(detail,cap,"%s",c->estopped ? LB(AG_STOPPED) : !c->allowed ? LB(AG_DISABLED) :
+        UI_LABELS[task[st->task >= 0 && st->task < 8 ? st->task : 0]]);
+    if (fb == 4) {
+        if (c->confirm.pending) { *s = LB(L5_RISK); snprintf(detail,cap,"%s",c->confirm.risk); }
+        else snprintf(detail,cap,"%d%%",c->ui.progress);
+    }
+    if (fb == 5) snprintf(detail,cap,"%s",c->ui.input);
+    if (fb == 8 || fb == 9) {
+        const ui_provider_t *p = &UI_PROVIDERS[st->provider >= 0 ? st->provider : 0];
+        int m = st->model >= 0 ? st->model : 0;
+        snprintf(detail,cap,"%s",st->provider == -2 ? LB(DASH) : fb == 8 ? p->id : p->models[m].id);
+    }
+    if (fb == 10) snprintf(detail,cap,"%s",st->profile == 1 ? LB(PROF_WIFI) : st->profile == -2 ? LB(DASH) : LB(PROF_MAC));
+    if (fb == 3 || fb == 21) snprintf(detail,cap,"%s",c->confirm.pending ? c->confirm.summary : c->ui.summary);
+    if (fb == 11) snprintf(detail,cap,"%s",c->confirm.shown ? LB(L5_GUARD) : LB(L5_AWAIT));
+}
 static void render(kbd_t *k, int fb)
 {
     onboard_t *o = k->onboard; const panel_t *p = &PANELS[fb-1];
-    uint16_t *px = o->scratch; int w = p->w, h = p->h;
-    ui_render_panel(&o->ui,fb,px,(size_t)w*h);
-    if (fb != 20 && o->route > ONBOARD_LS) {
-        for (int i = 0; i < w*h; i++) px[i] = 0x1082;
-        const char *s = ""; char detail[512] = "";
-        if (host_route(o)) {
-            if (fb == 21) s = o->health == HOST_SUSPECT ? "Mac stale / actions frozen" : "Mac offline / waiting for full frame";
-            else if (fb == 1) s = "Mac offline";
-            else if (fb == 2) s = "USB link: unknown";
-            else if (fb == 3) { s = "Last seen"; snprintf(detail,sizeof detail,"%lld ms",(long long)(kbd_now(k)-o->seen)); }
-            else if (fb == 4) s = o->health == HOST_PROBING ? "Probing" : "Reconnect required";
-            else if (fb == 5) s = "Settings";
-            else if (fb == 6 || fb == 18) s = "Home";
-            else if (fb == 7) s = "Agent L5";
-            else if (fb == 16) s = "Mac PTT unavailable";
-            else if (fb == 19) s = "Web setup";
-        } else if (o->route == ONBOARD_L5) {
-            static const char *const names[] = {"Allow / disable", "Agent state", "Goal", "Step / budget", "Input", "Pause unavailable", "Task", "Provider", "Model", "Network", "Confirm", "Cancel", "Home", "Settings", "Screen source", "PTT: ASR unavailable", "Recording: false", "New goal", "Web tasks"};
-            s = fb == 21 ? "Keyboard agent (L5)" : names[fb-1];
-            if (k->ctl) {
-                if (fb == 1) snprintf(detail,sizeof detail,"%s",k->ctl->allowed ? "allowed" : "disabled");
-                if (fb == 2) snprintf(detail,sizeof detail,"%s",k->ctl->estopped ? "stopped" : !k->ctl->allowed ? "disabled" : k->ctl->ui.state);
-                if (fb == 4) {
-                    if (k->ctl->confirm.pending) { s="Risk"; snprintf(detail,sizeof detail,"%s",k->ctl->confirm.risk); }
-                    else snprintf(detail,sizeof detail,"%d%%",k->ctl->ui.progress);
-                }
-                if (fb == 3 || fb == 21) snprintf(detail,sizeof detail,"%s",k->ctl->confirm.pending ? k->ctl->confirm.summary : k->ctl->ui.summary);
-                if (fb == 11) snprintf(detail,sizeof detail,"%s",k->ctl->confirm.shown ? "300 ms guard" : "await presentation");
-            }
-        } else { s = fb == 21 ? "Agent page / keyboard safety" : fb == 16 ? "PTT: ASR unavailable" : ""; }
-        label(px,w,h,8,s,0xef7d); label(px,w,h,40,detail,0x9492);
+    uint16_t *px = o->scratch; int w = p->w, h = p->h; int64_t now = kbd_now(k);
+    footer_ctx(k);
+    if (fb == 20 && fb20_host(k) && (o->fresh || (o->health == HOST_SUSPECT && o->face20))) {
+        if (!o->face20 && o->fresh) o->restore |= RESTORE_FB20; /* host content, not a local face */
+        return;
     }
-    if (fb == 21) {
-        for (int y = 112; y < h; y++) for (int x = 0; x < w; x++) px[y*w+x] = 0x18e4;
-        label(px,w,h,112,host_route(o) ? "Voice: Mac / Right Option" : "Voice: keyboard agent (L5)",0xef7d);
-        label(px,w,h,126,o->incompatible ? (o->ui.stopped ? "STOPPED / GD32 mapping incompatible" : "GD32 mapping incompatible") : o->ui.stopped ? "STOPPED / K1 hold: Home" : o->health == HOST_SUSPECT && host_route(o) ? "Mac stale / actions frozen" : host_route(o) ? "K1: settings (L4) / K2: L1-L4" : "K1 hold: Home / K2 hold: E-STOP",0xef7d);
+    if (fb == 21 && safety_footer(o)) {
+        /* Live/stale host page: only the footer band is ours, and only for attention. */
+        if (ui_footer_attention(&o->ui)) {
+            ui_render_footer(&o->ui,px,w,h);
+            screen_set_tile565(&k->scr,fb,0,112,w,30,px+112*w); o->footer_host = 0;
+        } else if (!o->footer_host && o->fresh) o->restore |= RESTORE_FOOTER;
+        return;
+    }
+    ui_render_panel(&o->ui,fb,px,(size_t)w*h);
+    if ((fb != 20 || fb20_host(k)) && o->route > ONBOARD_LS) {
+        for (int i = 0; i < w*h; i++) px[i] = PH_BG;
+        const char *s = ""; char detail[512] = "";
+        if (host_route(o)) host_placeholder(k,fb,&s,detail,sizeof detail,now);
+        else if (o->route == ONBOARD_L5) l5_text(k,fb,&s,detail,sizeof detail);
+        else { s = fb == 21 ? LB(AGENT_PAGE_TITLE) : fb == 16 ? LB(L5_PTT) : ""; }
+        label(px,w,h,8,s,PH_FG); label(px,w,h,40,detail,PH_DIM);
+        if (host_route(o) && fb == 19) label(px,w,h,60,":8780",PH_DIM);
+        if (fb == 21) ui_render_footer(&o->ui,px,w,h);
     }
     /* Local pressed feedback keeps labels and the reserved safety faces intact. */
     if (fb<20 && !host_route(o) && (o->pressed & (1u << (fb-1))))
         for (int x=0;x<w;x++) px[x]=0xffff;
-    /* On live host pages only reserved pixels may be refreshed by local status. */
-    if (fb == 21 && host_route(o) && (o->fresh || o->health == HOST_SUSPECT)) screen_set_tile565(&k->scr,fb,0,112,w,30,px+112*w);
-    else screen_set_tile565(&k->scr,fb,0,0,w,h,px);
+    if (fb == 20) o->face20 = 0;
+    if (fb == 21) o->footer_host = 0;
+    screen_set_tile565(&k->scr,fb,0,0,w,h,px);
+}
+/* Put host pixels back on fb20/footer from the last fresh canvas (decoder idle only). */
+static int restore_host(kbd_t *k)
+{
+    onboard_t *o = k->onboard;
+    if (!o->restore) return 0;
+    if (!host_route(o) || !o->fresh || o->publishing) { o->restore = 0; return 0; }
+    pthread_mutex_lock(&o->mu); int idle = !o->job && !o->ready; pthread_mutex_unlock(&o->mu);
+    if (!idle) return 0;
+    int fb = o->restore & RESTORE_FB20 ? 20 : 21; const panel_t *p = &PANELS[fb-1];
+    int y0 = fb == 21 ? 112 : 0;
+    o->restore &= fb == 20 ? ~RESTORE_FB20 : ~RESTORE_FOOTER;
+    if (fb == 20 ? !fb20_host(k) : attention(k)) return 1;
+    for (int y = y0; y < p->h; y++) memcpy(o->scratch+(y-y0)*p->w,k->canvas+(p->y+y)*CANVAS_W+p->x,(size_t)p->w*2);
+    screen_set_tile565(&k->scr,fb,0,y0,p->w,p->h-y0,o->scratch);
+    if (fb == 20) o->face20 = 1; else o->footer_host = 1;
+    return 1;
 }
 void onboard_service(kbd_t *k, int64_t now)
 {
     onboard_t *o = k->onboard; if (!o) return;
+    /* Status files: bounded and after HID service; one probe per call unless entering a page. */
+    if (devstat_poll(&o->ds,now,o->ds_kick)) status_sync(k);
+    o->ds_kick = 0;
     pthread_mutex_lock(&o->mu);
     if (o->ready) {
         int rc = o->result; o->ready = 0;
         if (!rc) k->st.jpg_ok++; else if (rc == -2) k->st.jpg_size++; else k->st.jpg_bad++;
-        if (!rc && o->decode_epoch == o->epoch && host_route(o) && !o->handshake_required) {
-            onboard_valid_frame(k,now);
-            if (o->decode_epoch == o->epoch && o->health == HOST_ONLINE && now >= o->next_full) { o->next_full=now+250; o->publishing = 1; o->panel = 1; o->render = RESERVED; }
+        if (!rc && o->decode_epoch == o->epoch && (host_route(o) || legacy_probe(o)) && !o->handshake_required) {
+            pthread_mutex_unlock(&o->mu);
+            onboard_valid_frame(k,now); /* may route HOME -> L1 once (boot auto-L1) */
+            pthread_mutex_lock(&o->mu);
+            if (host_route(o) && o->decode_epoch == o->epoch && o->health == HOST_ONLINE && now >= o->next_full) { o->next_full=now+250; o->publishing = 1; o->panel = 1; o->render = RESERVED; o->restore = 0; }
         }
     }
     if (!o->job && !o->ready && !o->publishing && o->next_jpg) {
@@ -513,14 +703,18 @@ void onboard_service(kbd_t *k, int64_t now)
     if ((o->render & (1u<<20)) && safety_footer(o)) {
         render(k,21); o->render &= ~(1u<<20); return;
     }
+    if (restore_host(k)) return;
     if (o->publishing) {
         int fb = o->panel; const panel_t *p = &PANELS[fb-1];
         if (!budget(o,fb,now)) return;
         o->panel++;
-        int h = fb == 21 ? 112 : p->h;
-        if (fb != 20) {
+        /* The whole 142-px sub-screen is the host's unless an attention footer is due. */
+        int h = fb == 21 && attention(k) ? 112 : p->h;
+        if (fb != 20 || fb20_host(k)) {
             for (int y = 0; y < h; y++) memcpy(o->scratch+y*p->w,k->canvas+(p->y+y)*CANVAS_W+p->x,(size_t)p->w*2);
             screen_set_tile565(&k->scr,fb,0,0,p->w,h,o->scratch);
+            if (fb == 20) o->face20 = 1;
+            if (fb == 21) o->footer_host = h == p->h;
         }
         if (o->panel > 21) { o->publishing = 0; o->fresh = 1; o->render |= RESERVED; }
     } else if (o->tile_fb && budget(o,o->tile_fb,now)) {
@@ -549,6 +743,7 @@ int onboard_timeout(kbd_t *k, int64_t now, int dflt)
     pthread_mutex_lock(&o->mu); int active = o->job || o->ready; pthread_mutex_unlock(&o->mu);
     if (active && dflt > 10) dflt = 10;
     if ((o->render & (1u<<19)) || ((o->render & (1u<<20)) && safety_footer(o))) return 0;
+    if (o->restore && dflt > 10) dflt = 10;
     int producing=o->publishing || o->tile_fb || (o->render && now >= o->next_render);
     if (producing) {
         /* Budget exhaustion must sleep, not spin while waiting for fake/real time. */

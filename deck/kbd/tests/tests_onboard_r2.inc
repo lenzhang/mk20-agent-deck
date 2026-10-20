@@ -37,7 +37,7 @@ static void r2_host_backpressure(void)
             knob(&k,103,1); now+=200; kbd_service(&k,now);
             CHECK(!c.token && c.st.expiries==1);
             now+=800; kbd_service(&k,now);
-            CHECK(c.estopped && onboard_current(&k)==ONBOARD_HOME);
+            CHECK(c.estopped && onboard_current(&k)==ONBOARD_L4); /* e-stop stays on the host page */
             knob(&k,103,0);
         }
         host_events(p[0],&downs,&ups); /* discard only pipe filler */
@@ -99,13 +99,20 @@ static void r2_staged_tile_invalidation(void)
         case 2: json(&k,"{\"method\":\"ui.page\",\"page\":\"L1\",\"generation\":1}"); break;
         case 3: hello(&k); break;
         case 4: onboard_loss(&k); break;
-        case 5: key(&k,20,1); break;
+        case 5: ctl_set_allowed(&c,1); key(&k,20,1); break; /* e-stop with the agent active */
         case 6: onboard_route(&k,ONBOARD_L4); break;
         }
         for(int i=0;i<64;i++) kbd_service(&k,now);
-        CHECK(k.scr.pending[0][0]!=0x1234);
-        if(!mode) { CHECK(onboard_health(&k)==HOST_SUSPECT); CHECK(k.scr.pending[0][0]==before); }
-        CHECK(!onboard_tile_allowed(&k,1,0,1));
+        if(mode==5) {
+            /* E-stop no longer leaves L1/L4 or invalidates the host's own page content. */
+            CHECK(c.estopped && onboard_current(&k)==ONBOARD_L1); now+=250;
+            for(int i=0;i<64;i++) kbd_service(&k,now);
+            CHECK(k.scr.pending[0][0]==0x1234 && onboard_tile_allowed(&k,1,0,1));
+        } else {
+            CHECK(k.scr.pending[0][0]!=0x1234);
+            if(!mode) { CHECK(onboard_health(&k)==HOST_SUSPECT); CHECK(k.scr.pending[0][0]==before); }
+            CHECK(!onboard_tile_allowed(&k,1,0,1));
+        }
         /* A handled tile keeps exactly its original success ack even if discarded. */
         fflush(acks); rewind(acks); uint8_t bytes[2048]; size_t n=fread(bytes,1,sizeof bytes,acks);
         host_parser parser; host_parser_init(&parser,sizeof bytes); host_push(&parser,bytes,n); int count=0;

@@ -33,9 +33,18 @@ static void tile(kbd_t *k,int fb,int y,int height) {
     p[0]=fb; p[3]=(uint8_t)y; p[4]=(uint8_t)(y>>8); p[5]=1; p[7]=(uint8_t)height;
     memset(p+9,0xff,n-9); host_frame f={77,200,(uint32_t)n,p}; kbd_on_host_frame(k,&f); free(p);
 }
-static void init(kbd_t *k,ctl_t *c) {
+static void init_boot(kbd_t *k,ctl_t *c) {
     now=10000; CHECK(!kbd_init(k,"/nonexistent-u2","","test")); CHECK(!onboard_enable(k));
+    onboard_status_root(k,"/nonexistent-u2-status",NULL,NULL,NULL);
     ctl_init(c,NULL); k->ctl=c; k->clock_ms=clock_ms; k->k2_estop=1; k2_estop_init(&k->k2,1); pump(k);
+}
+/* Any physical input disarms the boot auto-L1; K1 ccw+cw leaves HOME focus unchanged. */
+static void init(kbd_t *k,ctl_t *c) { init_boot(k,c); knob(k,101,1); knob(k,102,1); pump(k); }
+/* Host owns the whole 142-px sub-screen (no attention footer): pending == canvas. */
+static int host_rows(kbd_t *k,int fb,int y0,int y1) {
+    const panel_t *p=&PANELS[fb-1];
+    for (int y=y0;y<y1;y++) if (memcmp(k->scr.pending[fb-1]+y*p->w,k->canvas+(p->y+y)*CANVAS_W+p->x,(size_t)p->w*2)) return 0;
+    return 1;
 }
 static void offline_and_ownership(void) {
     kbd_t k; ctl_t c; init(&k,&c);
@@ -45,7 +54,7 @@ static void offline_and_ownership(void) {
     json(&k,"{\"method\":\"ui.heartbeat\"}garbage"); CHECK(onboard_health(&k)==HOST_OFFLINE);
     key(&k,5,1); key(&k,5,0); now+=200; pump(&k);
     CHECK(onboard_current(&k)==ONBOARD_LS && c.screen.current==0);
-    key(&k,7,1); CHECK(ui_pending(onboard_ui(&k))); /* draft preserved across helper flap */
+    key(&k,7,1); CHECK(onboard_ui(&k)->focus==1); /* LS view preserved across helper flap */
     for (int route=0;route<3;route++) {
         onboard_route(&k,(enum onboard_route)route); now+=200; pump(&k);
         uint64_t h[21]; for (int fb=1;fb<=21;fb++) h[fb-1]=hash(&k,fb);
@@ -53,7 +62,7 @@ static void offline_and_ownership(void) {
         CHECK(onboard_current(&k)==(enum onboard_route)route); CHECK(k.st.jpg_ok==0);
         for (int fb=1;fb<=20;fb++) if (route || fb != 1) CHECK(h[fb-1]==hash(&k,fb));
     }
-    CHECK(ui_pending(onboard_ui(&k)));
+    CHECK(onboard_ui(&k)->focus==1);
     onboard_route(&k,ONBOARD_LS); now+=300; pump(&k);
     uint64_t stable=hash(&k,1); hello(&k); CHECK(hash(&k,1)==stable);
     onboard_loss(&k); CHECK(hash(&k,1)==stable);
@@ -64,19 +73,19 @@ static void offline_and_ownership(void) {
     kbd_free(&k);
 }
 static void health_and_stale(void) {
-    kbd_t k; ctl_t c; init(&k,&c); uint64_t reserved_before=hash(&k,20); onboard_route(&k,ONBOARD_L1);
+    /* Keyboard agent active: fb20 stays the reserved e-stop face on the host page. */
+    kbd_t k; ctl_t c; init(&k,&c); ctl_set_allowed(&c,1); pump(&k); uint64_t reserved_before=hash(&k,20); onboard_route(&k,ONBOARD_L1);
     hello(&k); beat(&k); now+=1000; beat(&k); CHECK(onboard_health(&k)==HOST_PROBING);
     now+=1000; beat(&k); CHECK(onboard_health(&k)==HOST_ONLINE);
     CHECK(!onboard_tile_allowed(&k,1,0,1)); pump(&k);
-    uint16_t footer[428*30]; memcpy(footer,k.scr.pending[20]+428*112,sizeof footer);
     jpeg(&k); finish_decode(&k);
-    CHECK(hash(&k,20)==reserved_before); CHECK(!memcmp(footer,k.scr.pending[20]+428*112,sizeof footer));
+    CHECK(hash(&k,20)==reserved_before); CHECK(host_rows(&k,21,0,142)); /* no attention: full host sub-screen */
     CHECK(k.st.jpg_ok==1 && onboard_tile_allowed(&k,1,0,1));
-    ctl_set_allowed(&c,1); uint64_t host_face=hash(&k,1);
+    uint64_t host_face=hash(&k,1);
     req(&c,"{\"op\":\"ui.agent\",\"state\":\"acting\",\"input\":\"hid\",\"summary\":\"test\",\"progress\":1}","true");
     pump(&k); CHECK(hash(&k,1)==host_face);
     uint64_t e=hash(&k,20), strip=0; for(int i=112*428;i<142*428;i++) strip+=k.scr.pending[20][i];
-    CHECK(!onboard_tile_allowed(&k,20,0,1)); CHECK(!onboard_tile_allowed(&k,21,111,2));
+    CHECK(!onboard_tile_allowed(&k,20,0,1)); CHECK(onboard_tile_allowed(&k,21,111,2)); CHECK(!onboard_tile_allowed(&k,21,141,2));
     tile(&k,1,0,1); pump(&k); CHECK(k.scr.pending[0][0]==0xffff);
     CHECK(hash(&k,20)==e); uint64_t after=0; for(int i=112*428;i<142*428;i++) after+=k.scr.pending[20][i]; CHECK(strip==after);
     json(&k,"{\"method\":\"ui.page\",\"page\":\"L4\",\"generation\":5}"); CHECK(onboard_current(&k)==ONBOARD_L4);
@@ -96,8 +105,8 @@ static void health_and_stale(void) {
 static void safety(void) {
     kbd_t k; ctl_t c; init(&k,&c); onboard_route(&k,ONBOARD_L1);
     knob(&k,103,1); now+=999; kbd_service(&k,now); CHECK(!c.estopped);
-    now++; kbd_service(&k,now); CHECK(c.estopped && onboard_current(&k)==ONBOARD_HOME);
-    knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_HOME); /* no short toggle */
+    now++; kbd_service(&k,now); CHECK(c.estopped && onboard_current(&k)==ONBOARD_L1 && c.screen.current==2); /* stays */
+    knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L1); /* no short toggle */
     ctl_set_allowed(&c,1); kbd_service(&k,now); onboard_route(&k,ONBOARD_L1);
     knob(&k,103,1); now+=20; knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L4);
     knob(&k,100,1); now+=1000; kbd_service(&k,now); knob(&k,100,0); CHECK(onboard_current(&k)==ONBOARD_HOME);
@@ -159,7 +168,9 @@ static void legacy_and_ptt(void) {
     onboard_loss(&k); onboard_route(&k,ONBOARD_L1); key(&k,16,1); CHECK(!h.mods);
     jpeg(&k); pump(&k); CHECK(onboard_health(&k)==HOST_OFFLINE);
     json(&k,"{\"method\":\"getInfo\"}"); CHECK(onboard_health(&k)==HOST_PROBING);
-    key(&k,20,1); CHECK(c.estopped && onboard_current(&k)==ONBOARD_HOME);
+    /* Agent inactive: fb20 is the Mac mode key; with the page not live it is inert. */
+    key(&k,20,1); key(&k,20,0); CHECK(!c.estopped && onboard_current(&k)==ONBOARD_L1);
+    ctl_set_allowed(&c,1); key(&k,20,1); CHECK(c.estopped && onboard_current(&k)==ONBOARD_L1 && c.screen.current==2);
     k.hid=NULL; close(p[0]); close(p[1]); kbd_free(&k);
 }
 static void init_tick(void *ctx) { now+=100; kbd_service(ctx,now); }
@@ -239,9 +250,11 @@ static void in_flight_replacement(void) {
 #include "tests_onboard_r1.inc"
 #include "tests_onboard_r2.inc"
 #include "tests_onboard_r3.inc"
+#include "tests_onboard_r4.inc"
 int main(void) {
+    setenv("MK20_ROOT","/nonexistent-u2-status",1); unsetenv("MK20_KBD_PAIR_CODE"); unsetenv("MK20_VERSION"); unsetenv("MK20_REL");
     FILE *f=fopen("tests/data/canvas.jpg","rb"); if(!f) return 2;
     fseek(f,0,SEEK_END); jpg_size=(size_t)ftell(f); rewind(f); jpg=malloc(jpg_size); CHECK(fread(jpg,1,jpg_size,f)==jpg_size); fclose(f);
-    offline_and_ownership(); health_and_stale(); safety(); acknowledgements(); reservations(); legacy_and_ptt(); initialization_deadline(); pixels_and_regions(); unread_receive_work(); in_flight_replacement(); round1_regressions(); round2_regressions(); round3_regressions(); free(jpg);
+    offline_and_ownership(); health_and_stale(); safety(); acknowledgements(); reservations(); legacy_and_ptt(); initialization_deadline(); pixels_and_regions(); unread_receive_work(); in_flight_replacement(); round1_regressions(); round2_regressions(); round3_regressions(); round4_regressions(); free(jpg);
     printf("U2 onboard: %d checks, %d failures\n",checks,fails); return !!fails;
 }

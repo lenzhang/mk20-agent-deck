@@ -24,4 +24,6 @@ void onboard_valid_frame(struct kbd_s *k, int64_t now);
 const ui_t *onboard_ui(const struct kbd_s *k);
 enum onboard_route onboard_current(const struct kbd_s *k);
 enum onboard_health onboard_health(const struct kbd_s *k);
+/* Status probe roots (tests/simulator); production uses devstat_init_env(). */
+void onboard_status_root(struct kbd_s *k, const char *root, const char *pair_path, const char *version, const char *rel);
 #endif

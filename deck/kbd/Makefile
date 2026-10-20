@@ -1,5 +1,5 @@
 CFLAGS ?= -Wall -Wextra -Werror -O2 -std=c99 -D_DEFAULT_SOURCE
-SRC = gd32.c gd32io.c host.c panels.c screen.c jpeg.c kbd.c hid.c ctl.c ctlscr.c k2estop.c onboard.c ui.c ui_font.c ui_font_render.c uicfg.c
+SRC = gd32.c gd32io.c host.c panels.c screen.c jpeg.c kbd.c hid.c ctl.c ctlscr.c k2estop.c onboard.c devstat.c ui.c ui_font.c ui_font_render.c uicfg.c
 host: mk20-kbd
 mk20-kbd: mk20_kbd.c $(SRC) *.h vendor/stb_image.h
 	$(CC) $(CFLAGS) -o $@ mk20_kbd.c $(SRC) -pthread
@@ -55,7 +55,7 @@ ui-test: tests/ui_load
 # U2 uses the real compositor with fake clock/fds and buffers only.
 tests/onboard_headless: tests/onboard_headless.c $(SRC) *.h
 	$(CC) $(CFLAGS) $(UI_SAN) -g -I. -o $@ tests/onboard_headless.c $(SRC) -pthread
-tests/onboard_test: tests/onboard_test.c tests/tests_onboard_r1.inc tests/tests_onboard_r2.inc tests/tests_onboard_r3.inc $(SRC) *.h
+tests/onboard_test: tests/onboard_test.c tests/tests_onboard_r1.inc tests/tests_onboard_r2.inc tests/tests_onboard_r3.inc tests/tests_onboard_r4.inc $(SRC) *.h
 	$(CC) $(CFLAGS) $(UI_SAN) -g -I. -o $@ tests/onboard_test.c $(SRC) -pthread
 onboard-test: tests/onboard_test tests/onboard_headless
 	./tests/onboard_test
@@ -63,7 +63,7 @@ ui-test: onboard-test
 test: onboard-test
 .PHONY: onboard-test
 
-tests/onboard_test_tsan: tests/onboard_test.c tests/tests_onboard_r1.inc tests/tests_onboard_r2.inc tests/tests_onboard_r3.inc $(SRC) *.h
+tests/onboard_test_tsan: tests/onboard_test.c tests/tests_onboard_r1.inc tests/tests_onboard_r2.inc tests/tests_onboard_r3.inc tests/tests_onboard_r4.inc $(SRC) *.h
 	$(CC) $(CFLAGS) -fsanitize=thread -g -I. -o $@ tests/onboard_test.c $(SRC) -pthread
 
 # Portable K4 executable regression; no /proc, PIL, agent or live hardware required.

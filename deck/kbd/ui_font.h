@@ -10,4 +10,7 @@ uint32_t ui_font_next(const char **s);
 int ui_font_has(uint32_t cp);
 int ui_font_coverage(const char *s);
 void ui_font_draw(uint16_t *p, int w, int h, int x, int y, const char *s, uint16_t color, int max_width);
+/* Same glyphs at an integer scale (2 = 16x32/32x32 cells); clipped, ellipsis on overflow. */
+void ui_font_draw_scaled(uint16_t *p, int w, int h, int x, int y, const char *s, uint16_t color, int max_width, int scale);
+int ui_font_width(const char *s); /* unscaled pixel width */
 #endif

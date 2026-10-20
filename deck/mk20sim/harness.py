@@ -439,7 +439,7 @@ class CSim(Sim):
         self._command("loss" if request is None else "host " + json.dumps(request, separators=(",", ":")))
 
     def inject_config_fault(self) -> None:
-        self._command("fault")
+        raise ValueError("C backend: LS is read-only (settings are edited on the usb0 web page)")
 
     def inject_test(self, result: int, key_present: bool) -> None:
-        self._command(f"test {result} {int(key_present)}")
+        raise ValueError("C backend: no on-keyboard connection test (run it on the usb0 web page)")

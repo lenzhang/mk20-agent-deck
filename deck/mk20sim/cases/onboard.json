@@ -3,13 +3,15 @@
   "name": "home_without_mac",
   "group": "onboard",
   "backend": "c",
-  "desc": "Offline C compositor and HOME/LS renderer",
+  "desc": "Offline C compositor, read-only HOME/LS renderer",
   "steps": [
    {
     "expect": {
      "page": "HOME",
      "host_health": "offline",
-     "ctl_page": 0
+     "ctl_page": 0,
+     "settings.link": "unseen",
+     "settings.cfg": "default"
     }
    },
    {
@@ -47,10 +49,10 @@
   ]
  },
  {
-  "name": "glm_model",
+  "name": "ls_read_only",
   "group": "onboard",
   "backend": "c",
-  "desc": "Offline C compositor and HOME/LS renderer",
+  "desc": "LS shows values only: former Apply/Undo/edit keys and knobs never change configuration",
   "steps": [
    {
     "press": "5,1"
@@ -59,136 +61,48 @@
     "press": "2,1"
    },
    {
-    "press": "2,2"
-   },
-   {
     "expect": {
-     "settings.provider": "glm-coding",
-     "settings.model": "glm-5.3"
+     "page": "LS",
+     "settings.tab": 1
     }
    },
    {
-    "press": "3,1"
-   },
-   {
     "press": "2,2"
    },
    {
     "expect": {
-     "settings.model": "glm-5.3-flash"
+     "settings.focus": 1
     }
    },
    {
     "press": "2,4"
-   },
-   {
-    "expect": {
-     "settings.pending": 0
-    }
-   }
-  ]
- },
- {
-  "name": "network_double_apply",
-  "group": "onboard",
-  "backend": "c",
-  "desc": "Offline C compositor and HOME/LS renderer",
-  "steps": [
-   {
-    "press": "5,1"
-   },
-   {
-    "press": "2,2"
-   },
-   {
-    "press": "2,4"
-   },
-   {
-    "expect": {
-     "settings.confirm_net": 1,
-     "settings.pending": 1
-    }
-   },
-   {
-    "press": "2,4"
-   },
-   {
-    "expect": {
-     "settings.confirm_net": 0,
-     "settings.pending": 0,
-     "settings.profile": "board_wifi"
-    }
-   }
-  ]
- },
- {
-  "name": "discard_and_knobs",
-  "group": "onboard",
-  "backend": "c",
-  "desc": "Offline C compositor and HOME/LS renderer",
-  "steps": [
-   {
-    "press": "5,1"
-   },
-   {
-    "press": "2,2"
-   },
-   {
-    "press": "1,4"
    },
    {
     "expect": {
      "page": "LS",
-     "settings.confirm_back": 1
+     "settings.provider": "qwen",
+     "settings.model": "qwen3-max",
+     "settings.cfg": "default"
     }
-   },
-   {
-    "knob": "K2",
-    "action": "cw"
-   },
-   {
-    "expect": {
-     "settings.confirm_back": 0
-    }
-   },
-   {
-    "press": "1,4"
-   },
-   {
-    "press": "1,4"
-   },
-   {
-    "expect": {
-     "page": "HOME",
-     "settings.pending": 0
-    }
-   }
-  ]
- },
- {
-  "name": "host_editor",
-  "group": "onboard",
-  "backend": "c",
-  "desc": "Offline C compositor and HOME/LS renderer",
-  "steps": [
-   {
-    "press": "5,1"
-   },
-   {
-    "press": "3,2"
-   },
-   {
-    "expect": {
-     "settings.editor": 1
-    }
-   },
-   {
-    "knob": "K2",
-    "action": "cw"
    },
    {
     "knob": "K1",
+    "action": "cw"
+   },
+   {
+    "expect": {
+     "settings.tab": 2,
+     "settings.focus": 0
+    }
+   },
+   {
+    "knob": "K2",
     "action": "ccw"
+   },
+   {
+    "expect": {
+     "settings.focus": 3
+    }
    },
    {
     "knob": "K2",
@@ -196,8 +110,46 @@
    },
    {
     "expect": {
-     "settings.editor": 0,
-     "settings.pending": 1
+     "page": "LS",
+     "settings.tab": 2
+    }
+   },
+   {
+    "press": "1,4"
+   },
+   {
+    "expect": {
+     "page": "HOME",
+     "settings.active": false
+    }
+   }
+  ]
+ },
+ {
+  "name": "web_key_without_mac",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "网页设置 shows the usb0 URL; nothing is sent while the Mac is not ONLINE",
+  "steps": [
+   {
+    "press": "4,4"
+   },
+   {
+    "expect": {
+     "page": "HOME",
+     "toast_contains": "Mac 端未运行"
+    }
+   },
+   {
+    "press": "5,1"
+   },
+   {
+    "press": "4,4"
+   },
+   {
+    "expect": {
+     "page": "LS",
+     "toast_contains": "浏览器"
     }
    },
    {
@@ -205,16 +157,16 @@
    },
    {
     "expect": {
-     "settings.pending": 0
+     "page": "HOME"
     }
    }
   ]
  },
  {
-  "name": "k2_hold_no_toggle",
+  "name": "k2_hold_stays_on_host_page",
   "group": "onboard",
   "backend": "c",
-  "desc": "Offline C compositor and HOME/LS renderer",
+  "desc": "K2 hold e-stop latches without leaving L1/L4",
   "steps": [
    {
     "press": "3,2"
@@ -244,7 +196,8 @@
    {
     "expect": {
      "stopped": true,
-     "page": "HOME"
+     "page": "L4",
+     "ctl_page": 2
     }
    },
    {
@@ -254,7 +207,7 @@
    {
     "expect": {
      "stopped": true,
-     "page": "HOME"
+     "page": "L4"
     }
    }
   ]
@@ -263,7 +216,7 @@
   "name": "host_hysteresis_no_navigation",
   "group": "onboard",
   "backend": "c",
-  "desc": "Offline C compositor and HOME/LS renderer",
+  "desc": "Offline C compositor, read-only HOME/LS renderer",
   "steps": [
    {
     "press": "5,1"
@@ -308,7 +261,8 @@
     "expect": {
      "host_health": "online",
      "page": "LS",
-     "settings.pending": 1
+     "settings.focus": 1,
+     "settings.link": "online"
     }
    },
    {
@@ -326,81 +280,197 @@
     "expect": {
      "host_health": "offline",
      "page": "LS",
-     "settings.pending": 1
+     "settings.focus": 1
     }
    }
   ]
  },
  {
-  "name": "missing_key_fake_auth",
+  "name": "boot_auto_l1_once",
   "group": "onboard",
   "backend": "c",
-  "desc": "Offline C compositor and HOME/LS renderer",
+  "desc": "First ONLINE after boot follows the Mac to L1 once; never again after navigation or loss",
   "steps": [
    {
-    "press": "5,1"
-   },
-   {
-    "press": "4,1"
-   },
-   {
-    "press": "1,2"
-   },
-   {
     "expect": {
-     "toast_contains": "Key"
+     "page": "HOME"
     }
    },
    {
-    "test_result": 4,
-    "key_present": true
-   },
-   {
-    "press": "1,2"
-   },
-   {
-    "expect": {
-     "settings.test_result": 4
+    "host": {
+     "method": "ui.hello",
+     "version": 1
     }
    },
    {
-    "wait": 150
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "wait": 1000
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "wait": 1000
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
    },
    {
     "expect": {
-     "sub_image_size": [
-      428,
-      142
-     ]
+     "page": "L1",
+     "host_health": "online",
+     "ctl_page": 2
+    }
+   },
+   {
+    "knob": "K1",
+    "action": "down"
+   },
+   {
+    "wait": 1000
+   },
+   {
+    "knob": "K1",
+    "action": "up"
+   },
+   {
+    "expect": {
+     "page": "HOME"
+    }
+   },
+   {
+    "host": null
+   },
+   {
+    "host": {
+     "method": "ui.hello",
+     "version": 1
+    }
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "wait": 1000
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "wait": 1000
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "expect": {
+     "page": "HOME",
+     "host_health": "online"
     }
    }
   ]
  },
  {
-  "name": "config_fault_retains_draft",
+  "name": "no_auto_l1_after_input",
   "group": "onboard",
   "backend": "c",
-  "desc": "Injected fake Apply failure leaves draft and displays error",
+  "desc": "Any key before the Mac is ONLINE keeps the user on HOME",
   "steps": [
    {
-    "press": "5,1"
+    "press": "1,1"
    },
+   {
+    "host": {
+     "method": "ui.hello",
+     "version": 1
+    }
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "wait": 1000
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "wait": 1000
+   },
+   {
+    "host": {
+     "method": "ui.heartbeat"
+    }
+   },
+   {
+    "expect": {
+     "page": "HOME",
+     "host_health": "online",
+     "settings.link": "online"
+    }
+   }
+  ]
+ },
+ {
+  "name": "fb20_estop_vs_mode_key",
+  "group": "onboard",
+  "backend": "c",
+  "desc": "fb20 is the Mac mode key on L1/L4 with the agent inactive, e-stop on on-board pages",
+  "steps": [
    {
     "press": "2,2"
    },
    {
-    "config_fault": true
+    "expect": {
+     "page": "L1",
+     "host_health": "offline"
+    }
    },
    {
-    "press": "2,4"
-   },
-   {
-    "press": "2,4"
+    "press": "5,4"
    },
    {
     "expect": {
-     "settings.pending": 1,
-     "toast_contains": "失败"
+     "page": "L1",
+     "stopped": false
+    }
+   },
+   {
+    "press": "1,4"
+   },
+   {
+    "press": "3,4"
+   },
+   {
+    "expect": {
+     "page": "HOME"
+    }
+   },
+   {
+    "press": "5,4"
+   },
+   {
+    "expect": {
+     "page": "HOME",
+     "stopped": true
     }
    }
   ]

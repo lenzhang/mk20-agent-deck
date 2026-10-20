@@ -1,4 +1,77 @@
-# On-board UI: U2 host integration
+# On-board UI
+
+## On-device UX revision (2026-10-20, branch feature/fw-ux; supersedes U2 text below where they differ)
+
+Host-validated only (Docker, fake clock/files); **no device acceptance claimed**.
+
+- **HOME status is real, not "unknown".** `devstat.c` probes, from the main loop after
+  HID service and never from the safety tick, at most one small file per call (every
+  2 s, the pairing code every 1 s, all at once on HOME/LS entry): `MK20_VERSION`
+  (mk20d) or `version=` in `$MK20_REL/MANIFEST` (fb4); `MK20_ECM_IP` in
+  `/tmp/mk20/gadget.env`, default 172.30.250.2 marked "默认地址" (fb11, fb19, URLs);
+  UDC state via configfs `g1/UDC` + `/sys/class/udc/<udc>/state` (fb1);
+  `/sys/class/net/wlan0` existence only (fb12 "无网卡"/"未启用"; no WiFi stack is claimed);
+  `/data/mk20/agent/{net,provider}.json` (fb9/fb10, default marked "默认") and
+  `.apply-in-progress` (fb13 默认配置/已配置/配置无效/应用中); and **only lstat** of
+  `/data/mk20/secrets/<selected provider>.key` (fb14: regular, not a symlink, 0600/0400 as
+  accepted by `net_read_key()`, our uid, 1..4096 bytes, under a 0700 non-symlink directory).
+  Key content is never opened, read or logged. Reads are `O_NOFOLLOW|O_NONBLOCK`, regular
+  files only, size-capped (16 KiB config, 64 B pairing, 1 KiB gadget.env), with a strict
+  bounded JSON walk (duplicate keys, escapes in captured ids and unknown catalogue ids are
+  invalid). No allocation after the first UDC lookup. `MK20_ROOT` prefixes every probe
+  path (tests); `ui.c` remains I/O-free and receives a `ui_status_t` snapshot.
+- fb3 智能体 shows 未启用/已禁用/已允许/急停中 from ctl; fb17 the ctl `ui.state` (无任务 when
+  idle/disabled); fb2 代理状态 "未测试" (there is no device probe); fb16 语音目标 "Mac 输入法 /
+  会话页按住" (on L1/L4 the PTT key sends Right Option; agent ASR is unavailable).
+  fb1 distinguishes Mac 已连接 (ONLINE) / Mac 未运行 (USB configured, no host app) /
+  USB 未连接 / 正在连接 / Mac 无响应. Values that do not exist show a dim "—".
+- Navigation tiles (fb5 设置, fb6 智能体页, fb7 Agent 会话, fb8 模式切换, fb15 设备信息) have
+  no value line, only a blue chevron; fb18 主页 shows ✓. Positions are unchanged. Normal
+  "not configured" states use plain colours; amber is reserved for invalid config,
+  insecure keys, e-stop and confirmation badges. The `NONE` toast sentinel is never drawn.
+- Sub-screen: title, one status line, one instruction line (e.g. "Mac 端未运行：在 Mac 上启动
+  mk20deck", "Mac 已就绪：按「Agent 会话」进入"), the settings URL, and a two-line device
+  footer (knob hint + one Chinese voice line).
+- **LS is read-only.** The usb0 admin web `http://<usb0 IP>:8780` is the only place to
+  change settings. LS tabs 网络/模型/密钥/连接测试/设备信息 show the same status data; keys and
+  knobs only choose what to look at (fb16 返回, fb18 主页, fb19 网页设置, K1 ⟲⟳ tab,
+  K2 ⟲⟳ item). There is no draft, Apply, Undo, editor or on-key Test. `uicfg.c`
+  (serializer/validator/writer) stays for its conformance tests but is unreachable from keys.
+- **fb19 网页设置** shows the URL (large on the sub-screen). On HOME and LS a press sends,
+  only while the host is ONLINE and at most once per 3 s, exactly one device-initiated
+  cmd101 event `{"method":"ui.openSettings"}` (frame id 0xFFFFFFFF like keyStateChanged,
+  no URL or payload: the Mac builds the URL itself) and toasts "已在 Mac 上打开设置网页";
+  otherwise nothing is sent and the toast says "Mac 端未运行：在 Mac 浏览器打开" + URL.
+- **Boot -> L1 once.** If the first ONLINE after process start (ui.hello + heartbeats, or a
+  legacy host's full frames, decoded on the boot HOME only for this purpose) happens on
+  HOME and no key/knob event has arrived since boot, the route changes to L1 once. Any
+  physical input, any later loss/e-stop/reconnect, or ONLINE on another page consumes it.
+- **fb20.** On L1/L4 with the keyboard agent inactive (not allowed, no lease), fb20 is the
+  Mac's mode key: its face is host content and presses are forwarded like any host key
+  (inert while the host page is not live). With the agent allowed or leased, and on
+  HOME/LS/L5/agent pages always, fb20 is the e-stop. K2 hold (or the press-only triple
+  fallback) is always the e-stop. An e-stop on L1/L4 stays on the page: ctl revokes the
+  lease and sends all-up, a held Mac PTT is released, the ctl page stays 2, and a stop
+  line is shown in the footer for 10 s (HOME keeps showing 急停中 until re-allowed on L5).
+- **Grace window.** After a host-page switch while ONLINE, until a fresh full frame or 2 s,
+  every key is swallowed (no navigation, no host event); the placeholder hides its
+  navigation labels. Offline placeholders keep their labelled navigation keys.
+- **No auto-L5.** A confirmation request never changes the page or releases a held Mac
+  PTT. HOME fb6 shows "待确认", HOME/LS show "智能体请求确认 → 进入智能体页", host/agent
+  pages get a footer line; the user enters L5. Deadlines/guards are unchanged.
+- **Host footer.** On a live L1/L4 the host's full 142-px sub-screen is published (and
+  host tiles may touch rows 112..141). The device footer replaces rows 112..141 only for
+  attention: pairing code, stop banner, confirmation, SUSPECT, held PTT or GD32 mapping
+  warning; afterwards the host rows are restored from the last fresh canvas.
+- **Pairing code.** The web process writes `/run/mk20/pair-code` (root, 0600, atomic,
+  <=64 bytes, `code=NNNNNN\nexpires_uptime=<s>\n`). mk20-kbd polls it every <=1 s and
+  shows "网页配对码 NNNNNN" in the device footer on every page while `expires_uptime` is
+  in the future (and at most 600 s ahead of `/proc/uptime`); symlinks, other modes/owners,
+  oversize or malformed text are ignored. `MK20_KBD_PAIR_CODE` overrides the path.
+
+Validation (Docker `mk20-build:trixie`, gcc 14): see the report in RELEASE.md "Unreleased".
+
+# U2 host integration (historical; see the revision above)
 
 U2 is implemented for host validation. **no device acceptance claimed**. The shipped
 `mk20-kbd --run` now boots on-board HOME with allowed=0, including `--no-host`.
@@ -13,14 +86,16 @@ release-capable firmware; otherwise the existing three-press fallback applies.
 HOME/LS renderer. HOME/LS/offline use ctl page 0, L5 uses 1, L1/L4 use 2, and
 connection-owned agent pages retain ids >=3. Internal routes never renumber ctl ids.
 HOME buttons enter LS/L5/L1/L4; short K2 toggles L1/L4, short K1 on L4 enters LS,
-and K1 hold returns HOME (LS draft discard requires explicit confirmation). LS Back
+and K1 hold returns HOME (2026-10-20: LS is read-only, no drafts). LS Back
 returns to its prior route. Knob short actions happen only on release below 1 s.
 K2 long/triple stops, and its release cannot perform a short action. Nonzero GD32
 keycodes display an incompatible-mapping warning and never synthesize duplicate HID. E-stop is
-available on every route, independent of a Mac or listening control socket.
+available on every route, independent of a Mac or listening control socket (2026-10-20:
+via K2 everywhere; via fb20 except on L1/L4 while the keyboard agent is inactive).
 
 The compositor preserves fb20 on every page, fb16 on L5/agent pages, and fb21
-rows112..141. Host JPEGs only copy host-owned faces and the sub-screen body.
+rows112..141 (2026-10-20: on live L1/L4, fb20 and the footer belong to the host unless
+the agent is active / an attention footer is due). Host JPEGs only copy host-owned faces and the sub-screen body.
 Tiles overlapping owned regions return cmd200 `E` without mutation. Entire ctl pages
 0/1 are reserved even during a grant; agent fb16/fb20 binds/draws and any fb21 draw
 intersecting the footer are reserved. fb21 `screen.text` implicitly addresses only the y0..111 body viewport;
@@ -34,7 +109,8 @@ marked stale, including partial frames and a snapshot of unread fd bytes. Their 
 cmd200 returns `E`. A decoder result carries its original epoch and cannot publish
 on a later route. A fresh full JPEG is required after every host-route switch/loss;
 tiles cannot initialize a page. One in-flight writer may finish, then its replacement
-follows. Host handshakes/loss never blank or navigate local pages or discard drafts.
+follows. Host handshakes/loss never blank or navigate local pages (2026-10-20 exception:
+the one-time boot auto-L1).
 Press-time routing consumes local releases; leaving Mac PTT sends modifier-up.
 Every outstanding host press receives an up before navigation taps. Agent page-id
 changes are boundaries even within the AGENT route; releases go to the original
@@ -54,7 +130,8 @@ Optional cmd101 **flat JSON** methods (<=1023 JSON bytes, strict duplicate/type 
   establish ONLINE. Samples closer than 1 s do not advance the count; a gap >1500 ms
   restarts the probing count. At 3 s silence, SUSPECT freezes host input/content and
   adds a footer badge; at 5 s, OFFLINE replaces visible host content with a placeholder.
-  EOF/link-down is immediate OFFLINE. A new hello restarts negotiation, never navigation.
+  EOF/link-down is immediate OFFLINE. A new hello restarts negotiation, never navigation
+  (except the one-time boot auto-L1 on the first ONLINE).
 - `{"method":"ui.page","page":"L4","generation":7}` is accepted only while
   ONLINE and already in an explicitly entered L1/L4 route. Page is L1 or L4;
   generation is 1..999999999 and strictly increases across hello/loss until process
@@ -62,6 +139,9 @@ Optional cmd101 **flat JSON** methods (<=1023 JSON bytes, strict duplicate/type 
   invalidates prior content and requires a fresh full frame. Home/LS/L5/agent routes
   cannot be claimed. cmd201 remains reserved/unimplemented; no widget generation
   transport is claimed yet.
+- Device -> host event `{"method":"ui.openSettings"}` (2026-10-20): exactly this payload,
+  frame id 0xFFFFFFFF, sent only while ONLINE when fb19 网页设置 is pressed on HOME/LS, at
+  most once per 3 s. The host opens its own settings URL; the device never sends a URL.
 
 Replies retain the KD `ack_method`/`success`/`result` envelope and frame id. `getInfo`
 and backlight work on all routes and grant no ownership. Legacy hosts need no new
@@ -105,12 +185,10 @@ unbounded noncompliant floods may exhaust the
 fixed buffer. Ack means handled, never physically displayed.
 
 The L5 scaffold provides physical allow/disable, guarded confirm/cancel, HOME/LS,
-fixed safety/PTT faces and ctl state/summary/risk. Durable Apply/device Test consumers
-remain U3: production Apply fails visibly and retains its draft, never falsely
-reports an in-memory change as durable. Full pause/voice behavior remains U4/U6;
+fixed safety/PTT faces and ctl state/summary/risk. (2026-10-20: LS is read-only; settings,
+keys and the connection test live on the usb0 web page, so no Apply/Test is reachable.) Full pause/voice behavior remains U4/U6;
 PTT/ASR and pause are visibly unavailable, with no transcript or paused wire enum.
-The simulator explicitly uses injected in-memory Apply/test results, not production
-I/O. Real status probes, device timing/RSS/SPI budgets and physical acceptance remain U7.
+The simulator has no Apply/test injection any more (read-only LS). Real status probes, device timing/RSS/SPI budgets and physical acceptance remain U7.
 
 `mk20sim.harness.CSim` / cases with `"backend":"c"` use the sanitized
 `tests/onboard_headless` process, fake monotonic time, input packets and the real

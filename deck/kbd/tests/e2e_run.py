@@ -174,7 +174,7 @@ def main():
             from mk20deck.layout import DeviceLayout
             lay = DeviceLayout.from_get_info(gi[0].json()["result"])
             check(len(lay.keys) == 20, "console layout parses getInfo")
-        # U2: boot is HOME, attach cannot navigate. Enter host L1 physically,
+        # U2: boot is HOME; a key press before the Mac is ONLINE disables the boot auto-L1. Enter L1 physically,
         # negotiate three heartbeats spanning two seconds, then provide a fresh frame.
         os.write(gm, gd32_frame([0x16, 1, 1, 1, 0, 0]) + gd32_frame([0x16, 0, 1, 1, 0, 0]))
         os.write(hm, P.encode_frame(P.CMD_JSON, b'{"method":"ui.hello","version":1}', 6))
@@ -203,7 +203,10 @@ def main():
         check(len(acks) == 1 and acks[0].frame_id == 9 and acks[0].data == b"", "jpeg ack")
         px = open(os.path.join(fb, "fb20"), "rb").read()
         v = px[2 * (64 * 128 + 64)] | px[2 * (64 * 128 + 64) + 1] << 8
-        check(len(px) == 32768 and px == reserved_before, f"fb20 reserved face survives poisoned JPEG {v:#06x}")
+        # 2026-10-20: with the keyboard agent inactive, fb20 on L1/L4 is the Mac's mode key and
+        # shows host pixels; with the agent allowed it stays the reserved e-stop (C unit tests).
+        check(len(px) == 32768 and px != reserved_before and (v >> 11) >= 28 and ((v >> 5) & 63) < 8,
+              f"fb20 shows the host mode key (agent inactive) {v:#06x}")
         # setBacklight (bl disabled -> success, no files)
         os.write(hm, P.encode_frame(P.CMD_JSON, json.dumps(P.set_backlight(80)).encode(), 11))
         a = [f.json() for f in par.feed(read_for(hm, 0.5)) if f.cmd == P.CMD_JSON and f.json().get("ack_method") == "setBacklight"]

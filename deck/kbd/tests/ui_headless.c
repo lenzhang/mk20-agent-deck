@@ -14,23 +14,37 @@ static void ppm(const char *path,const uint16_t *p,int w,int h)
         if (fwrite(rgb,1,3,f)!=3) exit(1); }
     if (fclose(f)) exit(1);
 }
+static void online(ui_t *u)
+{
+    u->host_online=1; u->st.link=UI_LINK_ONLINE; u->st.ip_default=0;
+    strcpy(u->st.fw,"1.3.1"); strcpy(u->st.kbd,"mk20-kbd-0.3");
+}
 static void scene(ui_t *u,int i)
 {
-    ui_init(u,NULL,NULL,NULL);
-    if (i==0) return;
-    if (i==1) { u->host_online=1; u->key_present=1; return; }
-    ui_key(u,5);
-    if (i<=6) { ui_key(u,i-1); if (i==3) ui_key(u,7); if (i==4) { u->draft.provider=1; ui_key(u,7); } return; }
-    if (i==7) { ui_key(u,7); ui_key(u,17); }
-    if (i==8) { ui_key(u,7); ui_key(u,16); }
-    if (i==9) { ui_key(u,4); ui_key(u,6); }
-    if (i==10) { ui_key(u,4); u->key_present=1; u->injected_result=UI_RESULT_AUTH; u->latency_ms=180; ui_key(u,6); }
-    if (i==11) { ui_key(u,8); strcpy(u->edit,"a-very-long-explicit-proxy-hostname.example.invalid"); u->cursor=20; }
-    if (i==12) { ui_key(u,20); }
+    ui_init(u);
+    switch (i) {
+    case 0: return;
+    case 1: online(u); return;
+    case 2: online(u); u->st.cfg=UI_CONF_OK; u->st.profile=1; strcpy(u->st.proxy,"http://proxy.lan:7890");
+        strcpy(u->st.route_dom,"direct"); strcpy(u->st.route_for,"proxy"); u->st.provider=1; u->st.model=1;
+        u->st.key=UI_KEYST_SET; u->st.wlan=1; u->st.agent=UI_AGENT_ALLOWED; u->st.task=3; return;
+    case 3: u->st.link=UI_LINK_USB_DOWN; return;
+    case 4: online(u); u->st.agent=UI_AGENT_LEASED; u->st.task=4; u->st.confirm=1; return;
+    case 5: u->st.link=UI_LINK_NOAPP; ui_key(u,19); return;
+    case 6: online(u); ui_key(u,19); return;
+    case 7: u->st.link=UI_LINK_NOAPP; strcpy(u->st.pair,"482916"); return;
+    case 8: online(u); ui_key(u,5); return;
+    case 9: online(u); u->st.provider=1; u->st.model=1; u->st.cfg=UI_CONF_OK; ui_key(u,5); ui_key(u,2); ui_key(u,7); return;
+    case 10: u->st.key=UI_KEYST_INSECURE; ui_key(u,5); ui_key(u,3); return;
+    case 11: ui_key(u,5); ui_key(u,4); return;
+    case 12: online(u); ui_key(u,15); return;
+    case 13: u->st.agent=UI_AGENT_STOPPED; ui_key(u,20); return;
+    case 14: u->st.cfg=UI_CONF_INVALID; u->st.profile=-2; u->st.provider=-2; u->st.model=-2; u->st.key=UI_KEYST_UNKNOWN; return;
+    }
 }
 int main(int argc,char **argv)
 {
-    static const char *names[]={"home-offline","home-online","network","provider-draft","model-vision","test","info","network-confirm","discard-confirm","missing-key","test-auth","host-editor","stopped"};
+    static const char *names[]={"home-offline","home-online","home-configured","home-usb-down","home-confirm","home-web-offline","home-web-opened","home-pair","ls-network","ls-model","ls-key","ls-test","ls-info","stopped","home-invalid"};
     if (argc!=2) return 2;
     uint16_t *p=malloc(428*142*2),*canvas=malloc(CANVAS_W*CANVAS_H*2); if (!p||!canvas) return 1;
     for (size_t s=0;s<sizeof names/sizeof names[0];s++) {
@@ -44,5 +58,5 @@ int main(int argc,char **argv)
         }
         snprintf(path,sizeof path,"%s/canvas.ppm",dir); ppm(path,canvas,CANVAS_W,CANVAS_H);
     }
-    free(p); free(canvas); puts("ui headless: 13 scenes, 286 P6 PPMs"); return 0;
+    free(p); free(canvas); printf("ui headless: %zu scenes, %zu P6 PPMs\n",sizeof names/sizeof names[0],sizeof names/sizeof names[0]*22); return 0;
 }

@@ -13,40 +13,71 @@
 #include <unistd.h>
 static unsigned checks;
 #define CHECK(x) do { checks++; if (!(x)) { fprintf(stderr,"line %d: %s\n",__LINE__,#x); abort(); } } while (0)
-static int applied, fail_apply;
-static int apply(void *ctx,const uicfg_t *c) { (void)ctx; CHECK(uicfg_valid(c)); applied++; return fail_apply; }
 static void state_tests(void)
 {
-    ui_t u; ui_init(&u,NULL,apply,NULL); CHECK(u.route==UI_HOME); CHECK(!ui_pending(&u));
-    ui_key(&u,5); CHECK(u.route==UI_LS); ui_key(&u,7); CHECK(ui_pending(&u));
-    ui_key(&u,17); CHECK(u.confirm_net && !applied); ui_knob(&u,2,UI_CW,0); CHECK(!u.confirm_net);
-    ui_key(&u,17); CHECK(u.confirm_net); ui_key(&u,17); CHECK(applied==1 && u.saved.wifi && !ui_pending(&u));
-    ui_key(&u,2); ui_key(&u,7); CHECK(u.draft.provider==1 && u.draft.model==0); ui_key(&u,17); CHECK(applied==2 && !ui_pending(&u));
-    ui_key(&u,3); ui_key(&u,7); CHECK(u.draft.model==1); ui_key(&u,16); CHECK(u.confirm_back && u.route==UI_LS);
-    ui_knob(&u,1,UI_PRESS,0); CHECK(!u.confirm_back); ui_key(&u,16); CHECK(u.confirm_back); ui_key(&u,16); CHECK(u.route==UI_HOME && !ui_pending(&u));
-    ui_key(&u,15); CHECK(u.tab==UI_DEVICE); ui_knob(&u,1,UI_CW,0); CHECK(u.draft.brightness==90);
-    fail_apply=1; ui_key(&u,17); CHECK(ui_pending(&u) && u.toast==UI_FAILED); fail_apply=0;
-    ui_key(&u,18); CHECK(!ui_pending(&u));
-    ui_key(&u,1); ui_key(&u,8); CHECK(u.editor==1); ui_knob(&u,2,UI_CW,0); CHECK(u.cursor==1);
-    ui_knob(&u,1,UI_CW,0); CHECK(strcmp(u.edit,u.saved.proxy_host)); ui_key(&u,16); CHECK(!u.editor && !ui_pending(&u));
-    ui_key(&u,8); strcpy(u.edit,"proxy.example"); ui_knob(&u,2,UI_PRESS,0); CHECK(!u.editor && !strcmp(u.draft.proxy_host,"proxy.example"));
-    ui_key(&u,17); CHECK(u.confirm_net); ui_key(&u,18); CHECK(!u.confirm_net && !ui_pending(&u));
-    ui_key(&u,4); ui_key(&u,6); CHECK(u.toast==UI_MISSING);
-    u.key_present=1; u.injected_result=UI_RESULT_AUTH; ui_key(&u,6); CHECK(u.shown_result==UI_RESULT_AUTH);
-    ui_key(&u,2); ui_key(&u,6); ui_key(&u,4); ui_key(&u,6); CHECK(u.toast==UI_FIRSTAPPLY && ui_pending(&u));
-    ui_key(&u,18); ui_knob(&u,1,UI_DOWN,5000); ui_tick(&u,5999); CHECK(u.route==UI_LS); ui_tick(&u,6000); CHECK(u.route==UI_HOME);
-    ui_knob(&u,1,UI_UP,6001); CHECK(u.toast!=UI_SUMMARY);
+    ui_t u; ui_init(&u); CHECK(u.route==UI_HOME && u.toast==UI_NONE && u.st.link==UI_LINK_UNSEEN);
+    ui_key(&u,5); CHECK(u.route==UI_LS && u.tab==UI_NET && u.focus==0);
+    for (int t=0;t<UI_TAB_COUNT;t++) { ui_key(&u,t+1); CHECK((int)u.tab==t && u.focus==0); }
+    ui_key(&u,1); ui_key(&u,8); CHECK(u.focus==2);
+    ui_key(&u,15); CHECK(u.focus==2); /* network shows eight items: fb14/fb15 are blank */
+    ui_knob(&u,2,UI_CW,0); CHECK(u.focus==3);
+    for (int n=0;n<4;n++) ui_knob(&u,2,UI_CCW,0);
+    CHECK(u.focus==ui_item_count(UI_NET)-1);
+    ui_knob(&u,1,UI_CW,0); CHECK(u.tab==UI_MODELS && u.focus==0);
+    ui_knob(&u,1,UI_CCW,0); ui_knob(&u,1,UI_CCW,0); CHECK(u.tab==UI_DEVICE);
+    ui_key(&u,17); CHECK(u.route==UI_LS && u.toast==UI_NONE); /* former Apply is inert */
+    ui_key(&u,16); CHECK(u.route==UI_HOME && !u.back_home);
+    ui_key(&u,15); CHECK(u.route==UI_LS && u.tab==UI_DEVICE);
+    ui_key(&u,18); CHECK(u.route==UI_HOME && u.back_home);
+    u.host_online=0; ui_key(&u,19); CHECK(u.toast==UI_SUB_WEB_OFFLINE && u.route==UI_HOME);
+    u.host_online=1; ui_key(&u,19); CHECK(u.toast==UI_SUB_WEB_OPENED);
+    ui_key(&u,1); CHECK(u.toast==UI_NONE);
+    ui_key(&u,5); u.host_online=0; ui_key(&u,19); CHECK(u.toast==UI_SUB_WEB_OFFLINE && u.route==UI_LS);
+    ui_knob(&u,1,UI_PRESS,0); CHECK(u.toast==UI_SUB_SUMMARY); ui_knob(&u,1,UI_PRESS,0); CHECK(u.toast==UI_NONE);
+    ui_knob(&u,1,UI_DOWN,5000); ui_tick(&u,5999); CHECK(u.route==UI_LS); ui_tick(&u,6000); CHECK(u.route==UI_HOME && u.back_home);
+    ui_knob(&u,1,UI_UP,6001); CHECK(u.toast!=UI_SUB_SUMMARY);
     ui_knob(&u,2,UI_DOWN,7000); ui_tick(&u,7999); CHECK(!u.stopped); ui_tick(&u,8000); CHECK(u.stopped); ui_knob(&u,2,UI_UP,8001); CHECK(u.route==UI_HOME);
-    ui_init(&u,NULL,NULL,NULL); ui_key(&u,5); ui_key(&u,7);
-    ui_knob(&u,1,UI_DOWN,((int64_t)1<<34)); ui_tick(&u,((int64_t)1<<34)+1000); CHECK(u.route==UI_LS && u.confirm_back);
-    ui_knob(&u,1,UI_UP,((int64_t)1<<34)+1001); ui_knob(&u,1,UI_DOWN,((int64_t)1<<34)+2000); ui_tick(&u,((int64_t)1<<34)+3000); CHECK(u.route==UI_HOME);
-    ui_init(&u,NULL,NULL,NULL); ui_key(&u,20); CHECK(u.stopped);
-    for (int t=0;t<5;t++) { ui_init(&u,NULL,NULL,NULL); ui_key(&u,5); ui_key(&u,t+1); ui_key(&u,20); CHECK(u.stopped); }
-    ui_init(&u,NULL,NULL,NULL); ui_key(&u,5); ui_key(&u,5);
-    for (int n=0;n<30;n++) ui_knob(&u,1,UI_CCW,0);
-    CHECK(u.draft.brightness==10); ui_knob(&u,2,UI_CW,0);
-    for (int n=0;n<30;n++) ui_knob(&u,1,UI_CW,0);
-    CHECK(u.draft.volume==100);
+    ui_init(&u); ui_key(&u,20); CHECK(u.stopped);
+    for (int t=0;t<5;t++) { ui_init(&u); ui_key(&u,5); ui_key(&u,t+1); ui_key(&u,20); CHECK(u.stopped && u.route==UI_LS); }
+    ui_init(&u); ui_knob(&u,2,UI_CCW,0); CHECK(u.home_focus==18); ui_knob(&u,2,UI_PRESS,0); CHECK(u.toast==UI_SUB_WEB_OFFLINE);
+    ui_init(&u); for (int n=0;n<4;n++) ui_knob(&u,2,UI_CW,0);
+    CHECK(u.home_focus==4); ui_knob(&u,2,UI_PRESS,0); CHECK(u.route==UI_LS && u.tab==UI_NET);
+    /* Read-only: no key/knob sequence can change the configuration snapshot. */
+    unsigned seed=1; ui_init(&u); u.st.provider=1; u.st.model=1; u.st.profile=1; ui_status_t want; memcpy(&want,&u.st,sizeof want);
+    for (int n=0;n<20000;n++) {
+        seed=seed*1103515245u+12345u; int r=(int)((seed>>16)%26);
+        if (r<20) ui_key(&u,r+1); else ui_knob(&u,1+(r&1),(enum ui_action)((r-20)%5),n);
+        ui_tick(&u,n);
+        CHECK(!memcmp(&want,&u.st,sizeof want)); CHECK((int)u.tab>=0 && u.tab<UI_TAB_COUNT && u.focus>=0 && u.focus<ui_item_count(u.tab));
+    }
+}
+static void footer_tests(void)
+{
+    ui_t u; ui_init(&u);
+    for (int i=0;i<UI_LABEL_COUNT;i++) CHECK(!strstr(UI_LABELS[i],"unknown"));
+    CHECK(!*UI_LABELS[UI_NONE]);
+    for (int c=UI_CTX_HOME;c<=UI_CTX_AGENT;c++) { u.ctx=(enum ui_context)c; CHECK(!ui_footer_attention(&u)); }
+    strcpy(u.st.pair,"123456");
+    for (int c=UI_CTX_HOME;c<=UI_CTX_AGENT;c++) { u.ctx=(enum ui_context)c; CHECK(ui_footer_attention(&u)); }
+    u.st.pair[0]=0; u.stop_banner=1;
+    u.ctx=UI_CTX_HOST; CHECK(ui_footer_attention(&u)); u.ctx=UI_CTX_HOME; CHECK(!ui_footer_attention(&u));
+    u.stop_banner=0; u.st.confirm=1;
+    u.ctx=UI_CTX_HOST; CHECK(ui_footer_attention(&u)); u.ctx=UI_CTX_AGENT; CHECK(ui_footer_attention(&u));
+    u.ctx=UI_CTX_L5; CHECK(!ui_footer_attention(&u)); u.ctx=UI_CTX_HOME; CHECK(!ui_footer_attention(&u));
+    u.st.confirm=0; u.health_stale=1; u.ctx=UI_CTX_HOST; CHECK(ui_footer_attention(&u));
+    u.health_stale=0; u.ptt_held=1; CHECK(ui_footer_attention(&u)); u.ctx=UI_CTX_LS; CHECK(!ui_footer_attention(&u));
+    u.ptt_held=0; u.incompatible=1; CHECK(ui_footer_attention(&u)); u.incompatible=0;
+    char url[64]; ui_web_url(&u,url,sizeof url); CHECK(!strcmp(url,"http://172.30.250.2:8780"));
+    strcpy(u.st.ip,"10.1.2.3"); ui_web_url(&u,url,sizeof url); CHECK(!strcmp(url,"http://10.1.2.3:8780"));
+    /* The footer band differs with and without a pairing code; the body never changes. */
+    uint16_t *a=malloc(428*142*2), *b=malloc(428*142*2); CHECK(a && b);
+    u.ctx=UI_CTX_HOME; CHECK(!ui_render_panel(&u,21,a,428*142));
+    strcpy(u.st.pair,"654321"); CHECK(!ui_render_panel(&u,21,b,428*142));
+    CHECK(!memcmp(a,b,428*112*2) && memcmp(a+428*112,b+428*112,428*30*2));
+    /* Missing status never renders as an alarm: a default HOME and a configured one differ. */
+    ui_init(&u); CHECK(!ui_render_panel(&u,14,a,128*128));
+    u.st.key=UI_KEYST_SET; CHECK(!ui_render_panel(&u,14,b,128*128)); CHECK(memcmp(a,b,128*128*2));
+    free(a); free(b);
 }
 static void font_tests(void)
 {
@@ -62,7 +93,7 @@ static void font_tests(void)
     ui_font_draw(buf+1,16,16,0,0,"\xf4\x8f\xbf\xbf",0xffff,16);
     int n=0; for (int i=1;i<=256;i++) n+=buf[i]!=0; CHECK(n>0 && buf[0]==0x1234 && buf[259]==0x5678);
     ui_font_draw(buf+1,16,16,-2,-2,"abcdefghijklmnopqrstuvwxyz",3,100); CHECK(buf[0]==0x1234 && buf[259]==0x5678);
-    ui_t u; ui_init(&u,NULL,NULL,NULL); uint16_t *pixels=malloc(428*142*2+4); CHECK(pixels!=NULL);
+    ui_t u; ui_init(&u); uint16_t *pixels=malloc(428*142*2+4); CHECK(pixels!=NULL);
     for (int route=0;route<2;route++) for (int t=0;t<5;t++) {
         u.route=(enum ui_route)route; u.tab=(enum ui_tab)t;
         for (int fb=1;fb<=21;fb++) {
@@ -215,4 +246,4 @@ static void writer_tests(void)
     while ((e=readdir(d))) if (strcmp(e->d_name,".") && strcmp(e->d_name,"..")) { snprintf(path,sizeof path,"%s/%s",root,e->d_name); CHECK(!unlink(path)); }
     closedir(d); CHECK(!rmdir(root)); CHECK(!rmdir(temp));
 }
-int main(void) { state_tests(); font_tests(); writer_parent_fsync_retry_tests(); writer_parent_fsync_errno_tests(); writer_tests(); printf("ui: %u checks passed (ASan/UBSan)\n",checks); return 0; }
+int main(void) { state_tests(); footer_tests(); font_tests(); writer_parent_fsync_retry_tests(); writer_parent_fsync_errno_tests(); writer_tests(); printf("ui: %u checks passed (ASan/UBSan)\n",checks); return 0; }
