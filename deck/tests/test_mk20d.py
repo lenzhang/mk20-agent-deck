@@ -376,6 +376,91 @@ def test_health_status_field(dev, rel, g1):
     assert h["status"] == "fail"
 
 
+# ---- rc2: /run/mk20 on its own small tmpfs (kbd.status is rewritten every second; rootfs /run is the TF overlay) ----
+RUN_MOUNT = "-t tmpfs -o size=512k,mode=0755,nosuid,nodev,noexec tmpfs {}"
+
+
+def run_canon(dev):
+    return os.path.realpath(dev.root) + "/run/mk20"   # mount points are listed as canonical paths
+
+
+def run_tmpfs_line(dev, where="run/mk20"):
+    d = dev.p(where); d.mkdir(parents=True, exist_ok=True)
+    return f"tmpfs {os.path.realpath(d)} tmpfs rw,nosuid,nodev,noexec,relatime,size=512k,mode=755 0 0\n"
+
+
+def booted_run_tmpfs(dev):
+    """/run/mk20 as boot leaves it on the device: its own tmpfs in the test's /proc/mounts."""
+    with open(dev.mounts, "a") as f:
+        f.write(run_tmpfs_line(dev))
+
+
+def tmpfs_calls(dev):
+    f = dev.mock / "mount.calls"
+    return [l for l in f.read_text().splitlines() if "-t tmpfs" in l] if f.exists() else []
+
+
+def test_boot_mounts_run_tmpfs_once_before_any_writer(dev, rel, g1):
+    dev.mounts.write_text("overlay / overlay rw,noatime 0 0\n")
+    old = dev.p("run/mk20/kbd.status"); old.parent.mkdir(parents=True); old.write_text("{}\n")   # previous boot: hidden
+    r, log = run_boot(dev, rel)
+    assert tmpfs_calls(dev) == [RUN_MOUNT.format(run_canon(dev))], log
+    assert f"INFO mk20d boot v=9.9.9 run tmpfs: mounted on {run_canon(dev)} (was overlay)" in log
+    i = log.index("run tmpfs: mounted")
+    assert i < log.index("INFO mk20d gadget") and i < log.index("INFO mk20d router")   # before gadget/supervisors
+    h = json.loads(dev.read("data/mk20/state/selftest-last.json"))
+    assert h["run_tmpfs"] is True and "INFO /run/mk20 on tmpfs" in h["selftest"]["detail"]
+    r, log = run_boot(dev, rel)                    # mk20d boot again without a reboot: never stacked
+    assert len(tmpfs_calls(dev)) == 1 and f"run tmpfs: already (tmpfs {run_canon(dev)})" in log
+
+
+@pytest.mark.parametrize("where", ["run/mk20", "run"])
+def test_boot_run_already_tmpfs_not_mounted(dev, rel, g1, where):
+    dev.mounts.write_text("overlay / overlay rw 0 0\n" + run_tmpfs_line(dev, where))
+    r, log = run_boot(dev, rel)
+    assert tmpfs_calls(dev) == [] and "INFO mk20d boot v=9.9.9 run tmpfs: already (tmpfs " in log
+    assert json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)["run_tmpfs"] is True
+
+
+def test_boot_run_tmpfs_failure_is_warn_and_still_confirms(dev, rel, g1):
+    ld = dev.p("tmp/mk20/rescue-loader.sh"); ld.write_text('echo "$*" >> "$MK20_ROOT/tmp/mk20/loader.calls"\n')
+    dev.p("mnt/SDCARD/mk20-no-composite").write_text("")
+    dev.mounts.write_text("overlay / overlay rw 0 0\n")
+    st = dev.p("data/mk20/state"); st.mkdir(parents=True, exist_ok=True); (st / "pending").write_text("9.9.9\n")
+    dev.run(rel / "sbin/mk20d", "boot", env={"MOCK_MOUNT_RC": "32"}, timeout=120)
+    log = dev.read("data/mk20/logs/mk20d.log")
+    assert len(tmpfs_calls(dev)) == 1
+    assert "WARN mk20d boot v=9.9.9 run tmpfs: mount rc=32 (mount: mounting failed (mock rc=32)); stays on overlay" in log
+    assert dev.read("tmp/mk20/loader.calls") == "confirm 9.9.9"      # WARN only: probation still confirms
+    h = json.loads(dev.read("data/mk20/state/selftest-last.json"))
+    assert h["run_tmpfs"] is False and h["selftest"]["pass"] is True and h["status"] == "degraded"
+    assert "WARN /run/mk20 not on tmpfs (overlay)" in h["selftest"]["detail"]
+    assert dev.p("run/mk20").is_dir()                                   # writers keep working on the overlay
+    r = dev.run(rel / "sbin/mk20d", "selftest")
+    assert "WARN /run/mk20 not on tmpfs (overlay)" in r.stdout.splitlines() and "FAIL" not in r.stdout
+
+
+@pytest.mark.parametrize("case,why", [("symlink", "is a symlink, not mounted"),
+                                      ("foreign", "already has a ext4 mount, left alone"),
+                                      ("kbd-live", "mk20-kbd/web already running, not mounted"),
+                                      ("web-live", "mk20-kbd/web already running, not mounted")])
+def test_boot_run_tmpfs_never_over_a_symlink_mount_or_live_writer(dev, rel, g1, tmp_path, case, why):
+    run = dev.p("run"); run.mkdir()
+    if case == "symlink":
+        (tmp_path / "elsewhere").mkdir(); (run / "mk20").symlink_to(tmp_path / "elsewhere")
+    else:
+        (run / "mk20").mkdir()
+    if case == "foreign":
+        dev.mounts.write_text(f"/dev/mmcblk0p9 {run_canon(dev)} ext4 rw 0 0\n")
+    if case.endswith("-live"):   # a bound kbd.sock / open status would be hidden under the new mount
+        (dev.mock / "pgrep.keyed").touch(); (dev.mock / "pgrep.kd").write_text("")
+        (dev.mock / "pgrep.kbd").write_text("456\n" if case == "kbd-live" else "")
+        (dev.mock / "pgrep.agent").write_text("789\n" if case == "web-live" else "")
+    r, log = run_boot(dev, rel)
+    assert tmpfs_calls(dev) == [] and f"WARN mk20d boot v=9.9.9 run tmpfs: " in log and why in log
+    assert "INFO mk20d gadget" in log                                   # boot carries on
+
+
 def test_kd_count_pattern_matches_device_cmdline():
     """1.0.3 field failure: `pgrep -x KeyboardDevice` never matches on BusyBox 1.27 (cmdline /data/KeyboardDevice)."""
     import re

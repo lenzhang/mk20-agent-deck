@@ -8,6 +8,7 @@
 # http://<gadget.env MK20_ECM_IP>:8780) once composite is up and no gadget transition runs; the
 # optional agent runtime joins that process only with FEATURE_AGENT=1 + kbd.sock. Run-level
 # permission stays off; web/agent health is INFO/WARN only. Log /tmp/mk20/agent.log.
+# Boot first puts /run/mk20 on a 512 KiB tmpfs (rootfs /run is the TF-card overlay); a failure is WARN only.
 R=${MK20_ROOT:-}
 REL=${MK20_REL:-$(cd "$(dirname "$0")/.." && pwd)}
 V=${MK20_VERSION:-$(sed -n 's/^version=//p' "$REL/MANIFEST" 2>/dev/null)}
@@ -26,6 +27,31 @@ kernel_has() { case ",$(kernel_line | cut -d' ' -f3)," in *",$1,"*) return 0;; e
 shim_mounted() { # $1=path: our KD shim (a tmpfs file bind-mounted exactly on a known vendor path)
   case "$1" in /data/appLunch.sh|/data/setusbconfig) ;; *) return 1;; esac
   awk -v f="$1" '$2==f && $3=="tmpfs" {ok=1} END{exit !ok}' "$MOUNTS" 2>/dev/null; }
+# /run/mk20 (kbd.status rewritten 1/s by mk20-kbd's main loop, kbd.sock, pair-code, agent.status) sits on the TF-card
+# overlay unless boot mounts a small tmpfs there: no TF wear, no TF stall in the e-stop/HID loop, nothing survives reboot.
+RUNDIR=$R/run/mk20
+fs_at() { # $1=canonical path -> "<fstype> <mountpoint>" holding it (longest mountpoint prefix; a later stacked entry wins)
+  awk -v p="$1" 'BEGIN{n=-1} {m=$2; if (m=="/" || p==m || index(p, m "/")==1) if (length(m) >= n) {n=length(m); r=$3 " " m}}
+    END{if (r!="") print r}' "$MOUNTS" 2>/dev/null; }
+run_fs() { local c; c=$(cd "$RUNDIR" 2>/dev/null && pwd -P) && fs_at "$c"; }   # mount points are canonical paths
+run_tmpfs() { [ "$(run_fs | cut -d' ' -f1)" = tmpfs ]; }
+run_report() { # INFO/WARN only, never part of the confirm decision
+  local t; t=$(run_fs | cut -d' ' -f1)
+  if [ "$t" = tmpfs ]; then echo "INFO /run/mk20 on tmpfs"; else echo "WARN /run/mk20 not on tmpfs (${t:-unknown})"; fi; }
+run_mount() { # boot only, before any writer starts. Every refusal/failure is WARN + continue (status works on the overlay).
+  local c fs t out rc
+  [ -L "$RUNDIR" ] && { log WARN boot "run tmpfs: $RUNDIR is a symlink, not mounted"; return 0; }
+  mkdir -p "$RUNDIR" 2>/dev/null
+  c=$(cd "$RUNDIR" 2>/dev/null && pwd -P) || { log WARN boot "run tmpfs: no $RUNDIR"; return 0; }
+  fs=$(fs_at "$c"); t=${fs%% *}; t=${t:-unknown}
+  [ "$t" = tmpfs ] && { log INFO boot "run tmpfs: already ($fs)"; return 0; }   # mk20d re-run, or a tmpfs /run: never stack
+  [ "${fs#* }" = "$c" ] && { log WARN boot "run tmpfs: $c already has a $t mount, left alone"; return 0; }
+  # stale files from earlier boots are simply hidden; a live writer (bound kbd.sock) must never be hidden
+  if kbd_running || agent_running; then log WARN boot "run tmpfs: mk20-kbd/web already running, not mounted"; return 0; fi
+  out=$(mount -t tmpfs -o size=512k,mode=0755,nosuid,nodev,noexec tmpfs "$c" 2>&1); rc=$?
+  if [ $rc = 0 ]; then log INFO boot "run tmpfs: mounted on $c (was $t)"
+  else log WARN boot "run tmpfs: mount rc=$rc ($(echo "$out" | head -n 1 | cut -c1-120)); stays on $t"; fi
+  return 0; }
 vendor_check() { # prints "ok" or the first mismatch; all 4 vendor entries must be present and checked
   local h f n; n=0
   while read -r h f || [ -n "$h" ]; do
@@ -115,7 +141,9 @@ kbd_status_check() { # PASS/FAIL|WARN lines for the mk20-kbd status file; rc 0 =
   local age kn fr pw rc; rc=0
   [ -f "$KST" ] || { kbd_bad "kbd status missing ($KST)"; return 1; }
   age=$(( $(date +%s) - $(num "$(mtime "$KST")") ))
-  [ $age -ge 0 ] && [ $age -le "${MK20_KBD_STATUS_MAX_AGE:-10}" ] && echo "PASS kbd status fresh (${age}s)" || { kbd_bad "kbd status stale (${age}s)"; rc=1; }
+  # age is wall clock (mtime), which jumps with clock sets (no RTC): the uptime lets a stale sample be lined up with mk20d.log
+  [ $age -ge 0 ] && [ $age -le "${MK20_KBD_STATUS_MAX_AGE:-10}" ] && echo "PASS kbd status fresh (${age}s)" ||
+    { kbd_bad "kbd status stale (${age}s, up $(cut -d. -f1 /proc/uptime)s)"; rc=1; }
   kn=$(jnum knob_ok); fr=$(( $(jnum key_events) + $(jnum knob_events) + $(jnum echo_frames) + $(jnum other_frames) ))
   if [ "$kn" = 6 ] || [ $fr -gt 0 ]; then echo "PASS kbd gd32 knob_ok=$kn frames=$fr"; else kbd_bad "kbd gd32 silent (knob_ok=$kn frames=$fr)"; rc=1; fi
   pw=$(jnum panels_written)
@@ -242,6 +270,7 @@ selftest() { # FAIL = host-independent breakage. KD is forbidden in every mode. 
   else echo "WARN composite down (ACM$([ -e "$C/ffs.adb" ] && echo +adb))"
     for n in /data/appLunch.sh /data/setusbconfig; do shim_mounted "$n" && { echo "FAIL shim still mounted on $n with composite down"; f=1; }; done; fi
   n=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); case "$n" in ''|*[!0-9]*) ;; *) [ "$n" -lt 1024 ] && echo "WARN FAT free ${n} KiB";; esac
+  run_report
   # on-board router (1.2.0): reported only (INFO), never FAIL/WARN, so it can neither block confirm nor degrade status
   if [ "${FEATURE_ROUTER:-1}" != 1 ]; then echo "INFO router disabled"
   elif composite_up; then router_running && echo "INFO router running" || echo "INFO router not running"; fi
@@ -274,8 +303,8 @@ health() {
       "$(jstr "$(cat "$R"/sys/class/udc/*/state 2>/dev/null | head -n 1)")" "$(jstr "$links")" "$(jbool composite_up)"
     printf '"net":{"usb0":%s,"mtu":%s,"subnet":%s,"bridge":%s,"hidg0_writable":%s},' "$(jstr "$(ifconfig usb0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')")" \
       "$(num "$(cat "$R/sys/class/net/usb0/mtu" 2>/dev/null)")" "$(jstr "$ECM_SUBNET")" "$(jbool listening "$ECM_IP:$BRIDGE_PORT")" "$(jbool test -w "$R/dev/hidg0")"
-    printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,' "$(num "$(kd_count)")" "$(jbool pidof adbd)" \
-      "$(jbool pgrep -f mk20-flapmon.sh)" "$(jbool lock_held "$TM/mk20d-maint.lock")" "$mounts"
+    printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,"run_tmpfs":%s,' "$(num "$(kd_count)")" "$(jbool pidof adbd)" \
+      "$(jbool pgrep -f mk20-flapmon.sh)" "$(jbool lock_held "$TM/mk20d-maint.lock")" "$mounts" "$(jbool run_tmpfs)"
     printf '"router":{"enabled":%s,"running":%s,"loop":%s,"tap":%s},' "$([ "${FEATURE_ROUTER:-1}" = 1 ] && echo true || echo false)" \
       "$(jbool router_running)" "$(jbool lock_held "$TM/router.lock")" "$(jbool test -S "$TM/kd-tap.sock")"
     printf '"kbd":{"enabled":%s,"mode":%s,"running":%s,"restarts":%s,"recent_crashes":%s,"degraded":%s,"status":%s},' \
@@ -317,6 +346,7 @@ boot)
   cfg_load
   log_rotate "$LOGDIR/gadget.log"
   log INFO boot "rel=$REL cfg=$CFG_SRC subnet=$ECM_SUBNET composite=$FEATURE_COMPOSITE hid=$FEATURE_HID adb=$FEATURE_ADB warn=$CFG_WARN"
+  run_mount   # first: before mk20-kbd, the web or anything else writes /run/mk20
   i=0; until [ -n "$(cat "$G/UDC" 2>/dev/null)" ] && [ -e "$C/acm.usb0" ] && [ -e "$R/dev/ttyGS0" ]; do
     i=$((i+1)); [ $i -gt 120 ] && { log WARN boot "g1 not up after 120 s"; break; }; sleep 1; done
   kd_svc stop || log WARN kbd "leftover KD service stop failed"

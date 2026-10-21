@@ -3,7 +3,7 @@ selftest INFO-only reporting (never gates confirm), health.json "router"."""
 import json, os, shutil, socket, subprocess, threading, time
 import pytest
 from conftest import DECK
-from test_mk20d import rel, g1, conf, cfg, run_boot  # noqa: F401  (fixtures)
+from test_mk20d import rel, g1, conf, cfg, run_boot, booted_run_tmpfs  # noqa: F401  (fixtures)
 from mk20deck.protocol import CMD_JSON, encode_frame
 
 pytestmark = pytest.mark.skipif(not shutil.which("gcc"), reason="needs gcc")
@@ -135,13 +135,14 @@ def test_health_status_not_degraded_by_router(dev, rel, g1, kbd_enabled):
     (dev.mock / "pgrep.router").write_text("")
     (dev.mock / "pgrep.agent").write_text("789\n")   # default-on usb0 web (FEATURE_WEB=1) is part of a healthy device
     dev.p("tmp/mk20/gadget.env").write_text("MK20_ECM_IP=172.30.250.2\n")
+    booted_run_tmpfs(dev)   # rc2: boot's /run/mk20 tmpfs is part of a healthy device (else WARN -> degraded)
     if kbd_enabled:
         status = dev.p("run/mk20/kbd.status"); status.parent.mkdir(parents=True, exist_ok=True)
         status.write_text(json.dumps({"knob_ok": 6, "panels_written": 21, "write_errors": 0}))
     env = {"MK20_KBD": str(int(kbd_enabled))}
     h = json.loads(dev.run(rel / "sbin/mk20d", "health", env=env).stdout)
     st = h["status"]
-    assert st == "ok" and h["selftest"]["pass"] is True and h["kd"] == 0
+    assert st == "ok" and h["selftest"]["pass"] is True and h["kd"] == 0 and h["run_tmpfs"] is True
     assert h["kbd"]["enabled"] is kbd_enabled and h["kbd"]["running"] is kbd_enabled
     assert h["router"]["running"] is False
     (dev.mock / "pgrep.router").write_text("123\n")

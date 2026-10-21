@@ -10,8 +10,11 @@ Every --interval s it appends one JSON line to <out>/soak-<start>.jsonl:
 Every --deep-every samples (0 = never) also: a read-only HID check (Mac still enumerates the 1d6b:0104 keyboard).
 No TCP connects to the single-client KD bridge (they would evict the deck daemon).
 Never changes device state: no reboots, no USB changes, no HID writes, never kicks a connected bridge client.
+A sample whose health status is not "ok" also keeps the WARN/FAIL lines of health.selftest.detail
+("selftest_warn", at most 8 lines x 160 chars) so a transient degraded sample can be attributed later.
 On exit (incl. SIGTERM) writes <out>/soak-<start>.summary.json: pass/fail counts, reboots (uptime drops), KD
-restarts, rollbacks newer than the one present at start, composite losses, min memory, min FAT free.
+restarts, rollbacks newer than the one present at start, composite losses, min memory, min FAT free, and
+"selftest_warn": samples per distinct WARN/FAIL message (durations such as "12s" folded to "Ns").
 Stop early: kill the process (pid in <out>/soak.pid); the summary is still written.
 """
 from __future__ import annotations
@@ -32,11 +35,33 @@ import mk20_accept as acc  # noqa: E402
 import tcp_transport as tt  # noqa: E402
 
 STOP = False
+WARN_LINES, WARN_CHARS = 8, 160
+# mk20d joins its selftest lines with spaces (health JSON string): a line starts at each level keyword
+_LEVEL = re.compile(r"(?:^|(?<=\s))(?=(?:PASS|INFO|WARN|FAIL) )")
 
 
 def _stop(*_a):
     global STOP
     STOP = True
+
+
+def selftest_problems(detail) -> list:
+    """The WARN/FAIL lines of health.selftest.detail, bounded to WARN_LINES x WARN_CHARS."""
+    out: list = []
+    if not isinstance(detail, str):
+        return out
+    for part in _LEVEL.split(detail):
+        line = " ".join(part.split())
+        if line.startswith(("WARN ", "FAIL ")):
+            out.append(line[:WARN_CHARS])
+            if len(out) == WARN_LINES:
+                break
+    return out
+
+
+def problem_key(line: str) -> str:
+    """Summary bucket: ages/uptimes change every sample ("stale (12s, up 3600s)"), the message does not."""
+    return re.sub(r"\b\d+s\b", "Ns", line)
 
 
 def sample(deep: bool) -> dict:
@@ -54,6 +79,8 @@ def sample(deep: bool) -> dict:
         s["health"]["selftest"] = (h.get("selftest") or {}).get("pass")
         k = h.get("kbd") or {}   # mk20-kbd releases (K4, >= 1.3): mode/restarts from mk20d health
         s["health"]["kbd"] = {x: k.get(x) for x in ("enabled", "mode", "running", "restarts", "recent_crashes")}
+        if h and h.get("status") != "ok":   # degraded/fail: keep what selftest complained about
+            s["selftest_warn"] = selftest_problems((h.get("selftest") or {}).get("detail"))
         s["keyboard_ok"] = acc.keyboard_check(h)[1]   # stock: kd=1; mk20-kbd release: kd=0 + mk20-kbd normal
         _, o = acc.sh("echo kd=$(pgrep -f '^/data/KeyboardDevice' | head -n 1); "
                       # pidof (process name), not `pgrep -f "bin/mk20-kbd --run"`: that also matches this adb sh -c and,
@@ -131,6 +158,7 @@ def main() -> int:
     min_mem = min_fat = None
     first_fail = None
     comp_losses, last_comp = 0, None
+    warn_counts: dict = {}
     summary: dict = {"start": stamp, "samples": 0}
     try:
         while not STOP and time.time() < end:
@@ -175,6 +203,8 @@ def main() -> int:
                         min_mem = v if min_mem is None else min(min_mem, v)
                     else:
                         min_fat = v if min_fat is None else min(min_fat, v)
+            for key in {problem_key(x) for x in s.get("selftest_warn") or [] if isinstance(x, str)}:
+                warn_counts[key] = warn_counts.get(key, 0) + 1
             if not s.get("ok"):
                 bad += 1
                 first_fail = first_fail or s.get("time")
@@ -182,7 +212,8 @@ def main() -> int:
                 f.write(json.dumps(s) + "\n")
             summary = {"start": stamp, "samples": n, "failed": bad, "first_fail": first_fail, "reboots": reboots,
                        "kd_restarts": kd_restarts, "rollbacks": rollbacks, "composite_losses": comp_losses, "min_mem_kb": min_mem,
-                       "min_fat_free_kb": min_fat, "last": s.get("time"), "running": True, "pid": os.getpid()}
+                       "min_fat_free_kb": min_fat, "last": s.get("time"), "running": True, "pid": os.getpid(),
+                       "selftest_warn": dict(sorted(warn_counts.items(), key=lambda kv: (-kv[1], kv[0])))}
             _write_json(sm, summary)
             while not STOP and time.time() < min(end, t + a.interval):
                 time.sleep(1)

@@ -1,2 +1,14 @@
 #!/bin/sh
-echo "$*" >> "$MOCK_DIR/mount.calls"; exit "${MOCK_MOUNT_RC:-0}"
+# mock: every call is logged to $MOCK_DIR/mount.calls; MOCK_MOUNT_RC makes it fail. A successful `-t tmpfs ... DIR`
+# is also published in $MK20_MOUNTS (the test's /proc/mounts) under DIR's canonical path, as the kernel lists it.
+echo "$*" >> "$MOCK_DIR/mount.calls"
+rc=${MOCK_MOUNT_RC:-0}
+if [ "$rc" = 0 ] && [ -n "${MK20_MOUNTS:-}" ]; then
+  for a in "$@"; do d=$a; done
+  case " $* " in
+    *" -t tmpfs "*) d=$(cd "$d" 2>/dev/null && pwd -P) &&
+      echo "tmpfs $d tmpfs rw,nosuid,nodev,noexec,relatime,size=512k,mode=755 0 0" >> "$MK20_MOUNTS";;
+  esac
+fi
+[ "$rc" = 0 ] || echo "mount: mounting failed (mock rc=$rc)" >&2
+exit "$rc"

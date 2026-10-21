@@ -13,6 +13,35 @@ it; see deck/SETTINGS.md), and the Mac side (mk20deck `ui.hello`/`ui.heartbeat`,
 "which agent needs me" hook states, K1 = next agent that needs me). Cross-reviews: Kimi K3 GO on all
 three (deck/reviews/1.4.0/). PRD v1.4 §15 lists the interaction changes.
 
+### rc2: `/run/mk20` on tmpfs (soak follow-up)
+
+Build id **rc2**: `sh tools/mk20-release-build.sh firmware out rc2` (`firmware/VERSION` stays 1.4.0). Only
+`sbin/mk20d` changed in the release; binaries are byte-identical to rc1. The rc1 soak patrol found that `/run` is not tmpfs
+on the MK20 (rootfs = overlay with its upper dir on the TF card; only `/tmp` is tmpfs). mk20-kbd rewrites
+`/run/mk20/kbd.status` (tmp + rename) every second from the main loop that also owns e-stop/HID all-up:
+~86 400 TF writes/day, a stalled card could stall that loop, and the files survived reboots (the old
+negative-age "stale").
+
+- `mk20d boot` mounts `tmpfs /run/mk20` (`size=512k,mode=0755,nosuid,nodev,noexec`) first, before gadget
+  setup, mk20-kbd or the web start. Decided from `/proc/mounts` (canonical path, longest mount prefix):
+  already tmpfs (mk20d re-run, or a tmpfs `/run`) -> never stacked; a symlink, another mount at that path,
+  or a running mk20-kbd/web (bound `kbd.sock`) -> not mounted. Every refusal and a failed mount are WARN in
+  mk20d.log and boot carries on with `/run/mk20` on the overlay as before. Files from earlier boots are hidden.
+- `mk20d health`: `"run_tmpfs": true|false`; selftest `INFO /run/mk20 on tmpfs` or
+  `WARN /run/mk20 not on tmpfs (<fstype>)` — never FAIL, never blocks confirm.
+- The selftest line `kbd status stale (<age>s, up <uptime>s)` now carries the uptime: the age is the
+  wall-clock mtime (no RTC, clock sets), the uptime lines a stale sample up with mk20d.log.
+- `tools/mk20_soak.py`: a sample whose health status is not `ok` keeps `selftest_warn` (the WARN/FAIL lines of
+  `selftest.detail`, <= 8 x 160 chars); the summary counts samples per message (durations folded to `Ns`).
+- mk20-kbd's main loop has no other periodic file writes: panel `fsync` goes to `/dev/fb*`, backlight to
+  debugfs, the lock to `/tmp`, `kbd.sock` is bound once, its log is `/tmp/mk20/kbd.log`; HOME status probes
+  only read, on a worker thread.
+
+Host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 875 passed /
+1 skipped, agent 398, onboard 11348, kbd 4018 ASan + 4018 TSan, ui 41396, sim 35, tools 64 passed / 1 skipped,
+shellcheck clean; a real BusyBox 1.27.2 `mount -t tmpfs -o size=512k,mode=0755,nosuid,nodev,noexec` was
+checked in a container. **No device acceptance claimed.**
+
 ### On-device UX (`bin/mk20-kbd`)
 
 On-device UX revision of `bin/mk20-kbd` (rebuilt static armhf; other binaries byte-identical).
@@ -141,7 +170,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
-| 1.4.0 | 2026-10-21 | **1.4.0-rc1**: on-device UX revision (real HOME status, read-only LS, fb19 opens the web on the Mac, boot follows the Mac to L1, fb20 = Mac mode key on L1/L4 unless the keyboard agent is active, e-stop host pause with bounded resync, status probes on a worker thread, full host sub-screen, pairing code incl. safe mode); usb0 settings web default-on as the only settings entry (pairing via /run/mk20/pair-code, maintenance page, catalogue-driven provider/model); Mac mk20deck heartbeat + needs-me hook states. |
+| 1.4.0 | 2026-10-21 | **1.4.0-rc1**: on-device UX revision (real HOME status, read-only LS, fb19 opens the web on the Mac, boot follows the Mac to L1, fb20 = Mac mode key on L1/L4 unless the keyboard agent is active, e-stop host pause with bounded resync, status probes on a worker thread, full host sub-screen, pairing code incl. safe mode); usb0 settings web default-on as the only settings entry (pairing via /run/mk20/pair-code, maintenance page, catalogue-driven provider/model); Mac mk20deck heartbeat + needs-me hook states. **rc2**: `/run/mk20` on a 512 KiB tmpfs mounted first by `mk20d boot` (kbd.status no longer rewritten on the TF card every second; WARN + overlay fallback), health `run_tmpfs` + INFO/WARN selftest line, stale line carries the uptime, soak `selftest_warn`. Release: only `sbin/mk20d` changed. |
 | 1.3.1 | 2026-10-20 | **1.3.1-rc3**, build id `rc3`: K4 field fix — device BusyBox has no `stat`: kbd status age and maintenance hook link-count checks used `stat -c` and always failed on hardware (rc2 never confirmed, rolled back to 1.2.1); now `date -r` / `ls -ld`, negative age is stale, test shim removes `stat`. Binaries unchanged. |
 | 1.3.0 | 2026-10-20 | **1.3.0-rc1**, build id `rc1`: K4 default mk20-kbd, no stock-KD starts/overrides, crash-loop safe mode, maintenance file hooks, unchanged verified one-switch A/B installer; no rootfs writes. Web handlers/device acceptance separate. |
 | 1.0.0 | 2026-10-18 | M1: first release layout (A/B slots, MANIFEST, loader, rescue tier) |

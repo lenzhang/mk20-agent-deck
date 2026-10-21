@@ -315,6 +315,15 @@ def test_selftest_kbd_mode_fail(kmode, rel, bad, line):
         assert r.returncode != 0 and line in ls
 
 
+def test_selftest_kbd_stale_line_has_age_and_uptime(kmode, rel):
+    """rc2: a transient soak `degraded` must be attributable: the stale line carries the age and the uptime."""
+    status(kmode, age=30)
+    _, ls = st(kmode, rel)
+    m = [re.fullmatch(r"WARN kbd status stale \((\d+)s, up (\d+)s\)", l) for l in ls if "status stale" in l]
+    assert len(m) == 1 and m[0], ls
+    assert 30 <= int(m[0][1]) <= 40 and abs(int(m[0][2]) - uptime()) <= 5
+
+
 def test_selftest_kbd_not_running_fails_on_probation(kb, rel):
     kb.p("tmp/mk20/kbd.mode").write_text(""); os.unlink(kb.mock / "pgrep.kd"); status(kb)
     kb.p("data/mk20/state/pending").write_text("9.9.9\n")
