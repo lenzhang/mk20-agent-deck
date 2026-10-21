@@ -227,9 +227,10 @@ def render_command(kv: KeyView, t: float, animations: bool) -> Image.Image:
         d.text((S / 2, 117), fit(d, short, font(11), S - 10), font=font(11), fill=(150, 130, 90), anchor="mm")
     if kv.badge:
         f2 = font(13, bold=True)
-        w = d.textbbox((0, 0), kv.badge, font=f2)[2] + 10
-        d.rounded_rectangle([S - w - 4, 4, S - 4, 22], radius=8, fill=(90, 96, 110))
-        d.text((S - 4 - w / 2, 13), kv.badge, font=f2, fill=WHITE, anchor="mm")
+        w = max(20, d.textbbox((0, 0), kv.badge, font=f2)[2] + 10)
+        fill, ink = ((245, 158, 11), BLACK) if kv.badge_alert else ((90, 96, 110), WHITE)
+        d.rounded_rectangle([S - w - 4, 4, S - 4, 22], radius=8, fill=fill)
+        d.text((S - 4 - w / 2, 13), kv.badge, font=f2, fill=ink, anchor="mm")
     return img
 
 

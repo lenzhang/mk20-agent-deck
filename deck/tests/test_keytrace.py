@@ -47,13 +47,18 @@ def test_stages_and_outcomes(tmp_path):
     d.step()
     d.on_device_key(KeyEvent(0, 0, True))    # A1 select → local
     d.step()
-    d.on_device_key(KeyEvent(102, 102, True))  # K1 cw → effort adapter call → agent
+    d.on_device_key(KeyEvent(102, 102, True))  # K1 cw → move the selection → local
+    d.step()
+    d.on_device_key(KeyEvent(100, 100, True))  # K1 press (down) → local
+    d.step()
+    d.on_device_key(KeyEvent(100, 100, False))  # K1 press (up) → focus the selection → agent
     d.step()
     tr.close()
     rows = keytrace.parse((tmp_path / "k.log").read_text())
     stages = [r[1] for r in rows]
-    assert stages == ["recv", "routed", "hid_written"] * 2 + ["recv", "routed", "local", "recv", "routed", "agent"]
-    assert rows[0][2] == "0,3" and rows[0][3] == 1 and rows[-1][2] == "102,102"
+    assert stages == ["recv", "routed", "hid_written"] * 2 + ["recv", "routed", "local"] * 3 + \
+        ["recv", "routed", "agent"]
+    assert rows[0][2] == "0,3" and rows[0][3] == 1 and rows[-1][2] == "100,100" and rows[-7][2] == "102,102"
     assert all(a[0] < b[0] for a, b in zip(rows, rows[1:]))
 
 

@@ -18,6 +18,7 @@ listed in the UI but skipped by pytest/CLI unless asked for)::
 Expectations (all keys optional, all must hold):
   page, mode, ptt, scroll, toast_contains        – exact / substring
   selected: true|false                           – a session is / isn't selected
+  selected_title: "OTA发布"                       – title of the selected session
   mode_changed / selected_changed / page_changed: true|false  – vs the last "mark"
   agent_calls: {name: n}  (n exact; "*" for any name; {"min": n} also accepted)
   agent_call_within_ms: {"name": "focus", "ms": 350}  – first call ≤ ms after last mark
@@ -138,6 +139,8 @@ def _check(sim: Sim, exp: dict, mark: dict, idx: int, src: dict) -> None:
             need(k, v, st["toast"], v in (st["toast"] or ""))
         elif k == "selected":
             need(k, bool(v), bool(st["selected"]))
+        elif k == "selected_title":
+            need(k, v, st["selected"])
         elif k in ("mode_changed", "selected_changed", "page_changed"):
             f = k.split("_")[0]
             need(k, bool(v), st[f] != mark.get(f))

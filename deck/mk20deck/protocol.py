@@ -44,7 +44,8 @@ KNOWN_METHODS = (
 # through the device HID and therefore violates the P0 "no side-effect input"
 # rule (PRD §4/§6.5, G20); file management methods are not needed in P0.
 ALLOWED_METHODS = frozenset({"getInfo", "setBacklight", "setVolume", "playAudio", "stopAudio",
-                             "getFilesBySuffix"})  # read-only listing (devtest inventory)
+                             "getFilesBySuffix",  # read-only listing (devtest inventory)
+                             "ui.hello", "ui.heartbeat"})  # mk20-kbd (fw >= 1.3) host liveness, no content
 # Methods that change device state (need explicit opt-in in tools); getInfo/getFilesBySuffix are reads.
 WRITE_METHODS = frozenset({"setBacklight", "setVolume", "playAudio", "stopAudio"})
 
@@ -178,6 +179,16 @@ def unknown_method_probe() -> dict[str, Any]:
     """Deliberately unknown method: firmware answers 'Unknown method: … Available methods: […]'.
     Built by hand (bypasses the allow-list) because it cannot have side effects."""
     return {"method": "mk20deckProbe"}
+
+
+def ui_hello() -> dict[str, Any]:
+    """mk20-kbd host handshake (kbd/UI.md): flat JSON, no "parameters" object."""
+    return {**request("ui.hello"), "version": 1}
+
+
+def ui_heartbeat() -> dict[str, Any]:
+    """mk20-kbd host liveness sample; keeps the host ONLINE on every device page."""
+    return request("ui.heartbeat")
 
 
 def play_audio(file_path: str) -> dict[str, Any]:

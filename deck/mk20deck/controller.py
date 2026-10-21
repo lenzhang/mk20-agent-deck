@@ -31,6 +31,9 @@ DOUBLE_TAP = 0.350   # §6.3
 TOAST_S = 1.5
 SWITCH_TOAST_S = 1.2
 STOP_SEGMENTS = 4
+# K1 rotation order (PRD delta 2026-10-20): who needs me first, then the rest by slot order.
+K1_RANK = {State.NEEDS_APPROVAL: 0, State.NEEDS_INPUT: 1, State.ERROR: 2, State.DONE_UNREAD: 3}
+MODE_SHORT = {Mode.DESKTOP: "桌面", Mode.HERDR: "herdr", Mode.TMUX: "tmux"}
 
 
 class Role(str, enum.Enum):
@@ -95,6 +98,7 @@ class KeyView:
     active: bool = False  # PTT held / current mode in L4
     mode: Mode | None = None
     attention: bool = False
+    badge_alert: bool = False  # badge is an attention count (other modes)
 
 
 @dataclass
@@ -115,6 +119,17 @@ class SubView:
     sim: bool = False
     pin_info: str = ""
     selection_lost: bool = False
+    other_modes: str = ""  # e.g. "tmux 2 待处理" (background poll of non-current modes)
+
+
+@dataclass
+class ModeSummary:
+    """Background view of a non-current mode: only availability + attention counts."""
+    ok: bool
+    reason: str = ""
+    attention: int = 0  # needs_approval / needs_input / error / done_unread (local clears respected)
+    urgent: int = 0     # needs_approval / needs_input / error
+    t: float = 0.0
 
 
 @dataclass
@@ -157,6 +172,7 @@ class Controller:
         self.backend: dict[Mode, tuple[bool, str]] = {m: (True, "") for m in MODE_CYCLE}
         self.local_cleared: dict[str, str] = {}
         self.last_poll_wall: dict[Mode, float] = {}
+        self.bg: dict[Mode, ModeSummary] = {}  # non-current modes, from Daemon background polls
         self.toast: tuple[str, float] | None = None
         self.ptt_held = False
         self.ptt_observed = False
@@ -238,6 +254,41 @@ class Controller:
             self.persist()
         self._touch()
 
+    def _summarise(self, sessions) -> tuple[int, int]:
+        att = urg = 0
+        for s in sessions:
+            st = s.state
+            if st == State.DONE_UNREAD and self.local_cleared.get(s.sid.key()) == s.done_marker:
+                continue  # focused here earlier: the reminder stays cleared
+            if st in ATTENTION_STATES:
+                att += 1
+                urg += st != State.DONE_UNREAD
+        return att, urg
+
+    def apply_background(self, mode: Mode, sessions=None, error: str = "", t: float | None = None) -> None:
+        """Result of a background poll of a non-current mode (called on the loop thread).
+        ``t`` = wall time the poll started; results older than what we already know are dropped."""
+        if mode == self.mode:
+            return  # the current mode is owned by refresh(); a late result must not override it
+        t = self.wall() if t is None else t
+        old = self.bg.get(mode)
+        if old is not None and t < old.t:
+            return  # e.g. polled before we left that mode; the switch snapshot is newer
+        if sessions is None:
+            new = ModeSummary(False, error or "不可用", t=t)
+        else:
+            excluded = self.managers[mode].excluded
+            att, urg = self._summarise(s for s in sessions if s.sid.key() not in excluded)
+            new = ModeSummary(True, "", att, urg, t)
+        self.bg[mode] = new
+        if old is None or (old.ok, old.reason, old.attention, old.urgent) != (new.ok, new.reason, new.attention,
+                                                                               new.urgent):
+            self._touch()
+
+    def other_attention(self) -> list[tuple[Mode, int]]:
+        return [(m, self.bg[m].attention) for m in MODE_CYCLE
+                if m != self.mode and m in self.bg and self.bg[m].ok and self.bg[m].attention > 0]
+
     # ------------------------------------------------------------------ input
     # ------------------------------------------------------------------ settings page (LS)
     def open_settings(self) -> None:
@@ -295,19 +346,17 @@ class Controller:
                     self.open_settings()  # SETTINGS.md: short K1 press on L4 opens settings
                     return
                 if knob == 1:
-                    s = self.mgr.selected_session()
-                    self._say(f"effort：{s.effort or '未知'}（只读）· {self.adapter.capabilities().effort_set or '可调'}"
-                              if s else "未选中会话")
+                    s = self.mgr.selected_session()  # K1 press = focus (same as double tap / 聚焦键)
+                    if s is None:
+                        self._say("未选中会话 · 转 K1 选择")
+                    else:
+                        self._focus(s)
                 else:
                     self.page = "L4" if self.page == "L1" else "L1"
                     self._say(f"切到 {self.page}", 0.8)
         elif kind in ("cw", "ccw"):
             if knob == 1:
-                s = self.mgr.selected_session()
-                if s is None:
-                    self._say("未选中会话")
-                else:
-                    self._result(self.adapter.set_effort(s, "+" if kind == "cw" else "-"))
+                self._k1_step(1 if kind == "cw" else -1)
             else:
                 self.scroll = max(0, self.scroll + (1 if kind == "cw" else -1))
         self._touch()
@@ -334,6 +383,28 @@ class Controller:
                 continue
             self._on_long(p.role, p)
             self._touch()
+
+    def k1_order(self) -> list[int]:
+        """Slot indices K1 rotation walks: needs_approval > needs_input > error > done_unread, then slot order."""
+        mgr = self.mgr
+        live = [(i, s) for i in range(N_SLOTS) if (s := mgr.session_at(i)) is not None]
+        return [i for i, s in sorted(live, key=lambda t: (K1_RANK.get(t[1].state, len(K1_RANK)), t[0]))]
+
+    def _k1_step(self, direction: int) -> None:
+        """K1 rotation: move the selection one step through ``k1_order`` (wraps).  Effort stays unsupported."""
+        order = self.k1_order()
+        mgr = self.mgr
+        if not order:
+            self._say("无会话可选")
+            return
+        cur = next((n for n, i in enumerate(order) if mgr.slots[i] and mgr.slots[i].key == mgr.selected), None)
+        nxt = (0 if direction > 0 else len(order) - 1) if cur is None else (cur + direction) % len(order)
+        prev = mgr.selected
+        mgr.select(order[nxt])
+        if mgr.selected != prev:
+            self.last_agent_tap = None
+            self._cancel_target_presses()
+            self.persist()
 
     # ------------------------------------------------------------------ gestures
     def _on_down(self, kr: KeyRole, p: _Press, t: float) -> None:
@@ -503,6 +574,15 @@ class Controller:
             if p.role.role != Role.PTT:
                 p.cancelled = True  # G34: cancel pending long presses + old eligibility
         self.last_agent_tap = None
+        old = self.mode
+        if old != m:
+            ok_old, why_old = self.backend[old]
+            self.bg.pop(m, None)
+            if ok_old:
+                att, urg = self._summarise(self.managers[old].sessions.values())
+                self.bg[old] = ModeSummary(True, "", att, urg, self.wall())
+            else:
+                self.bg[old] = ModeSummary(False, why_old, t=self.wall())
         self.mode = m
         self.page = "L1"
         self.scroll = 0
@@ -524,6 +604,7 @@ class Controller:
         mgr, caps = self.mgr, self.adapter.capabilities()
         ok, reason = self.backend[self.mode]
         keys: list[KeyView] = []
+        others = self.other_attention()
         attention: tuple[int, int, str] | None = None  # (priority, -updated, key) best
         for row in range(1, 5):
             for col in range(1, 6):
@@ -574,11 +655,17 @@ class Controller:
                     kv.label, kv.disabled = "聚焦", caps.focus
                 elif kr.role == Role.MODE:
                     kv.label, kv.mode = self.mode.key_label, self.mode
+                    total = sum(n for _, n in others)
+                    if total:
+                        kv.badge, kv.badge_alert = str(total), True
                 elif kr.role == Role.MODE_SELECT:
                     kv.mode, kv.label = kr.mode, kr.mode.key_label
                     kv.active = kr.mode == self.mode
                     mok, mreason = self.backend[kr.mode]
                     kv.disabled = None if mok else mreason
+                    n = dict(others).get(kr.mode, 0)
+                    if n:
+                        kv.badge, kv.badge_alert = str(n), True
                 elif kr.role == Role.BACK_L1:
                     kv.label = "回 L1"
                 keys.append(kv)
@@ -604,5 +691,6 @@ class Controller:
             overflow=mgr.overflow, overflow_attention=mgr.overflow_attention,
             skill_note=skill_note, updated=upd, ptt=self.ptt_held, scroll=self.scroll, sim=self.sim,
             pin_info=pin_info, selection_lost=mgr.selection_lost and sel is None,
+            other_modes=(" · ".join(f"{MODE_SHORT[m]} {n}" for m, n in others) + " 待处理") if others else "",
         )
         return DeckView(keys, sub)

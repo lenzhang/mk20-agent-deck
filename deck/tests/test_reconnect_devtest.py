@@ -243,7 +243,8 @@ def test_devtest_auto_mode_skips_guided_and_gates_writes(tmp_path):
     st = {k: v["status"] for k, v in rep["sections"].items()}
     assert st["keys"] == st["knobs"] == st["timing"] == st["reconnect"] == "skip"
     assert st["backlight"] == "skip" and "allow-device-writes" in rep["sections"]["backlight"]["reason"]
-    assert {r["method"] for r in dev.json_requests} == {"getInfo", "getFilesBySuffix", "mk20deckProbe"}
+    # ui.hello: mk20-kbd liveness negotiation (no content, no write); the legacy mock answers "Unknown method"
+    assert {r["method"] for r in dev.json_requests} == {"getInfo", "ui.hello", "getFilesBySuffix", "mk20deckProbe"}
     opts.allow_device_writes = True
     dev2 = MockDevice()
     rep = DevTest(opts, ScriptedPrompter(), str(tmp_path / "w"), lambda: ["/dev/mock"], lambda p: dev2).run()

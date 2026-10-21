@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import protocol as P
+from .config import DEFAULT_WEB_URL
 from .controller import Controller
 from .daemon import Daemon, WakeReconnect
 from .layout import DeviceLayout
@@ -36,6 +37,7 @@ class Supervisor:
     make_renderer: Callable[[], Renderer]
     cfg: object
     power: object | None = None
+    bg_adapters: dict | None = None  # separate adapter instances for the background poll of other modes
     retry_s: float = 2.0
     wake_settle_s: float = 2.0
     stats: SupervisorStats = field(default_factory=SupervisorStats)
@@ -84,9 +86,11 @@ class Supervisor:
                 continue
             renderer = self.make_renderer()
             d = Daemon(self.controller, renderer, None, cfg.poll_interval_s, cfg.heartbeat_s, cfg.knob_map,
-                       keycode_map=getattr(cfg, "keycode_map", {}), power=self.power)
+                       keycode_map=getattr(cfg, "keycode_map", {}), power=self.power,
+                       web_url=getattr(cfg, "web_url", DEFAULT_WEB_URL),
+                       bg_poll_s=getattr(cfg, "background_poll_s", 10.0), bg_adapters=self.bg_adapters)
             link = DeviceLink(tr, on_key=d.on_device_key, ack_timeout=cfg.ack_timeout_s,
-                              preamble_flush=cfg.preamble_flush)
+                              preamble_flush=cfg.preamble_flush, on_event=d.on_device_event)
             d.link = link
             self.daemon = d
             settle = 0.0

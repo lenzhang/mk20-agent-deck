@@ -224,11 +224,32 @@ class MockDevice:
     * acks each ``SHOW_JPG`` with an empty frame carrying the same cmd/id after
       ``draw_delay`` seconds, rejecting frames whose JPEG size != canvas,
     * lets tests/simulator inject ``keyStateChanged`` events.
+
+    ``ui=True`` adds the mk20-kbd (fw >= 1.3) host-liveness methods of ``kbd/UI.md``: ``ui.hello`` answers
+    ``version``/``heartbeat_ms``/``capabilities``/``generation``; ``ui.heartbeat`` is accepted only after a hello
+    and until :meth:`lose`, its arrival times are recorded, and the device sample rules (gap < 1 period: not
+    counted, > 1.5 periods: count restarts, 3 samples spanning >= 2 periods: ONLINE) run scaled to
+    ``heartbeat_ms``.  Without ``ui`` the ``ui.*`` methods get "Unknown method" like stock KD.
     """
 
-    def __init__(self, layout: DeviceLayout | None = None, draw_delay: float = 0.0) -> None:
+    UI_REJECT = "unavailable or invalid UI request"
+
+    def __init__(self, layout: DeviceLayout | None = None, draw_delay: float = 0.0, ui: bool = False,
+                 heartbeat_ms: int = 1000) -> None:
         self.layout = layout or DeviceLayout.default()
         self.draw_delay = draw_delay
+        self.ui = ui
+        self.heartbeat_ms = heartbeat_ms
+        self.ui_generation = 0
+        self.ui_negotiated = False
+        self.ui_lost = False  # host declared lost: heartbeats rejected until the next hello
+        self.ui_online = False
+        self.hellos: list[float] = []  # accepted ui.hello arrival times (monotonic)
+        self.heartbeats: list[float] = []  # accepted ui.heartbeat arrival times (monotonic)
+        self.heartbeats_rejected = 0
+        self.beat_restarts = 0  # probing count restarted by a gap > 1.5 periods
+        self.beats_too_close = 0  # samples < 1 period after the last counted one (not counted)
+        self._beats, self._first, self._last_beat = 0, 0.0, 0.0
         self._parser = P.FrameParser()
         self._out: deque[bytes] = deque()
         self._cv = threading.Condition()
@@ -297,7 +318,13 @@ class MockDevice:
             return
         self.json_requests.append(obj)
         method = obj.get("method")
-        if method == "getInfo":
+        if self.ui and isinstance(method, str) and method.startswith("ui."):
+            res = self._ui(method, obj)
+            ack = ({"ack_method": method, "success": False, "errorString": self.UI_REJECT} if res is None else
+                   {"ack_method": method, "success": True, "result": res})
+        elif method == "getInfo":
+            if self.ui and self.ui_lost:  # legacy fresh handshake after loss: un-negotiates
+                self.ui_negotiated = self.ui_lost = False
             ack = {"ack_method": "getInfo", "success": True, "result": self.layout.to_get_info()}
         elif method == "getFilesBySuffix":
             ack = {"ack_method": method, "success": True, "result": {"filePaths": ["/data/theme/a.jpg"]}}
@@ -308,9 +335,49 @@ class MockDevice:
                    "errorString": f"Unknown method: {method}. Available methods: [{', '.join(P.KNOWN_METHODS)}]"}
         self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(ack), fr.frame_id))
 
-    def emit_json(self, obj: dict) -> None:
-        """Inject an arbitrary device JSON event (unknown knob formats etc.)."""
-        self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(obj), self._ids.next()))
+    def _ui(self, method: str, obj: dict) -> dict | None:
+        now = time.monotonic()
+        if method == "ui.hello":
+            v = obj.get("version")
+            if type(v) is not int or v != 1:
+                return None
+            self.hellos.append(now)
+            self.ui_negotiated, self.ui_lost, self.ui_online, self._beats = True, False, False, 0
+            return {"version": 1, "heartbeat_ms": self.heartbeat_ms, "capabilities": ["ui.page", "ui.heartbeat"],
+                    "generation": self.ui_generation}
+        if method == "ui.heartbeat":
+            if not self.ui_negotiated or self.ui_lost:
+                self.heartbeats_rejected += 1
+                return None
+            self.heartbeats.append(now)
+            self._sample(now)
+            return {}
+        return None  # ui.page etc.: not modelled
+
+    def _sample(self, now: float) -> None:
+        period = self.heartbeat_ms / 1000
+        if not self._beats or now - self._last_beat > 1.5 * period:
+            if self._beats:
+                self.beat_restarts += 1
+            self._beats, self._first = 1, now
+        elif now - self._last_beat >= period:
+            self._beats += 1
+        else:
+            self.beats_too_close += 1
+            return
+        self._last_beat = now
+        if self._beats >= 3 and now - self._first >= 2 * period:
+            self.ui_online = True
+
+    def lose(self) -> None:
+        """Device-side host loss (5 s silence / SUSPECT): reject heartbeats until the next ui.hello."""
+        self.ui_lost, self.ui_online, self._beats = True, False, 0
+
+    EVENT_ID = 0xFFFFFFFF  # KD / mk20-kbd: device-originated events carry this frame id
+
+    def emit_json(self, obj: dict, frame_id: int | None = None) -> None:
+        """Inject an arbitrary device JSON event (unknown knob formats etc.); ``frame_id=EVENT_ID`` as on hardware."""
+        self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(obj), self._ids.next() if frame_id is None else frame_id))
 
     def press(self, col: int, row: int, pressed: bool) -> None:
         """Inject a firmware-coordinate key event."""

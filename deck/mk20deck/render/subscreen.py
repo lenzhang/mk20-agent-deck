@@ -19,12 +19,21 @@ def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
     d.rectangle([0, 0, 5, H], fill=MODE_STRIP[sv.mode])  # mode colour only as a thin strip (G8)
     f12, f14 = font(12), font(14)
     head = f"{sv.page} · {sv.mode.badge}"
-    d.text((12, 4), head, font=font(14, bold=True), fill=TEXT)
+    fh = font(14, bold=True)
+    d.text((12, 4), head, font=fh, fill=TEXT)
     right = f"更新 {sv.updated}"
     if sv.sim:
         right = "SIM · " + right
     rw = d.textbbox((0, 0), right, font=f12)[2]
     d.text((W - 10 - rw, 6), right, font=f12, fill=DIM)
+    if sv.other_modes:  # cross-mode attention (background poll), e.g. "tmux 2 待处理"
+        x0 = 12 + d.textbbox((0, 0), head, font=fh)[2] + 8
+        room = W - 10 - rw - 22 - x0
+        if room > 40:
+            txt = fit(d, sv.other_modes, font(12, bold=True), room - 12)
+            tw = d.textbbox((0, 0), txt, font=font(12, bold=True))[2]
+            d.rounded_rectangle([x0, 4, x0 + tw + 12, 21], radius=8, fill=AMBER)
+            d.text((x0 + 6, 12), txt, font=font(12, bold=True), fill=(0, 0, 0), anchor="lm")
     if heartbeat_on:
         d.ellipse([W - 18 - rw, 9, W - 13 - rw, 14], fill=(34, 197, 94) if sv.mode_ok else (120, 120, 120))
     if sv.ptt:

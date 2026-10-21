@@ -40,8 +40,11 @@ Every outstanding host press receives an up before navigation taps. Agent page-i
 changes are boundaries even within the AGENT route; releases go to the original
 page/connection, with disconnect generations preventing client-slot reuse leaks.
 HOME/LS pressed keys retain their labels and show a white top edge until release.
-Mac PTT edges are not also forwarded as host key events. Host K1 effort and short
-K2 toggle are forwarded as complete short taps only after the release decision.
+Mac PTT edges are not also forwarded as host key events. Short host K1 (on L1; the
+Mac deck focuses the selected session) and short K2 toggle are forwarded as complete
+short taps only after the release decision. Knob rotation on L1/L4 is forwarded per
+detent (press edge only) while ONLINE and fresh; the Mac deck uses K1 rotation to move
+the selection in attention order (effort is not adjustable from the device).
 Physical host-page navigation synchronizes the known host mode with a K2 tap; L4
 Back is decided locally on release. Accepted host ui.page requests do not synthesize
 a second navigation tap.

@@ -141,6 +141,97 @@ def shots(out_dir: str, animations: bool = True) -> list[tuple[str, str]]:
     return made
 
 
+TMUX_HOOK_CAPS = Capabilities(focus=None, new_session="未配置新会话命令", skill_current="投递语义未验证（P0 禁用）",
+                              skill_new_thread="tmux 无新线程预填", send="投递语义未验证（P0 禁用）",
+                              stop="中断能力未按工具版本验证", approve="P1：请在终端内处理", precise_state=None)
+_ATTN = [  # (worktree, tool, final state, reason)
+    ("mk20-deck-attn", Tool.CCAI, State.ERROR, "turn 失败（Claude hook：API 错误）"),
+    ("k4-install", Tool.CCAI, State.RUNNING, "运行中（Claude hook）"),
+    ("router-ota", Tool.CCAI, State.NEEDS_APPROVAL, "等待批准（Claude hook）"),
+    ("kbd-ui", Tool.CODEX, State.RUNNING, "运行中（codex hook）"),
+    ("prd-v14", Tool.CODEX, State.RUNNING, "运行中（codex hook）"),
+    ("nas-deploy", Tool.CODEX, State.NEEDS_APPROVAL, "等待批准（codex hook）"),
+    ("web-sim", Tool.CCAI, State.RUNNING, "运行中（Claude hook）"),
+    ("hooks-doc", Tool.CCAI, State.DONE_UNREAD, "已完成未查看（Claude hook）"),
+]
+
+
+def attention_adapters() -> dict[Mode, MockAdapter]:
+    """tmux with hook-derived states (all running first, so slots are sticky), Desktop with 1 done_unread."""
+    tm = []
+    for i, (wt, tool, _st, _why) in enumerate(_ATTN):
+        tm.append(Session(SessionId(Mode.TMUX, f"%{i + 3}", "4242-1700000000"), tool, wt, state=State.RUNNING,
+                          cwd=f"/Users/dev/worktrees/{wt}/deck", summary=f"ag:{i} {tool.value} %{i + 3} · bash",
+                          source_note="hook 关联", state_reason="运行中（Claude hook）",
+                          updated_ms=1_792_244_000_000 - i * 60_000))
+    desk = demo_sessions()
+    for s in desk:
+        if s.state != State.DONE_UNREAD:
+            s.state, s.state_reason = State.IDLE, "空闲"
+    return {
+        Mode.DESKTOP: MockAdapter(Mode.DESKTOP, desk, caps=DESKTOP_CAPS, limited="状态受限：粗状态，待审批请看 App"),
+        Mode.HERDR: MockAdapter(Mode.HERDR, unavailable="herdr 未安装", caps=HerdrAdapter().capabilities(),
+                                limited="状态受限：herdr 未联调（P0 stub）"),
+        Mode.TMUX: MockAdapter(Mode.TMUX, tm, caps=TMUX_HOOK_CAPS, limited="状态来自 Claude/codex hooks"),
+    }
+
+
+def attention_shots(out_dir: str, animations: bool = True) -> list[tuple[str, str]]:
+    """tmux L1 with 2 needs_approval, 1 error, 1 done, rest running; K1 rotation; cross-mode counts."""
+    os.makedirs(out_dir, exist_ok=True)
+    lay = DeviceLayout.default()
+    made: list[tuple[str, str]] = []
+
+    def save(c: Controller, clock: FakeClock, name: str, caption: str) -> None:
+        r = Renderer(lay, animations=animations)
+        view = c.view()
+        r.compose(view, clock.t - 0.25)
+        device_mockup(r.compose(view, clock.t), lay, title=f"MK20 Agent Deck · SIM · {caption}").save(
+            os.path.join(out_dir, name))
+        made.append((name, caption))
+
+    clk = FakeClock()
+    ads = attention_adapters()
+    cfg = DeckConfig(default_mode=Mode.TMUX)
+    c = Controller(cfg, ads, clock=clk, wall=lambda: 1792244000.0, sim=True)
+    c.refresh()  # all running: slots fill in recency order and then stay put
+    for s, (_wt, _tool, st, why) in zip(ads[Mode.TMUX].sessions, _ATTN):
+        s.state, s.state_reason = st, why
+        if st == State.DONE_UNREAD:
+            s.done_marker = "claude:demo:1792243990.000"
+    clk.advance(1.0)
+    c.refresh()
+    for m in (Mode.DESKTOP, Mode.HERDR):  # what the Daemon background poll delivers
+        try:
+            c.apply_background(m, ads[m].poll())
+        except Exception as e:  # noqa: BLE001
+            c.apply_background(m, None, str(e))
+    clk.advance(2.0)
+    save(c, clk, "attn-01-tmux-L1.png", "tmux L1：2 待审批 · 1 出错 · 1 完成 · 其余运行；副屏「桌面 1 待处理」")
+    c.on_knob(1, "cw")
+    clk.advance(0.5)
+    save(c, clk, "attn-02-k1-cw-first-approval.png", "K1 顺转 1 格 → 选中最急的「待审批」(A3)")
+    c.on_knob(1, "cw")
+    c.on_knob(1, "cw")
+    clk.advance(0.5)
+    save(c, clk, "attn-03-k1-cw-error.png", "再转 2 格：待审批 A6 → 出错 A1（顺序 审批>输入>出错>完成>槽位）")
+    c.on_knob(1, "cw")
+    clk.advance(0.5)
+    save(c, clk, "attn-04-k1-cw-done.png", "再转 1 格 → 完成未读 A8；按 K1 = 聚焦（同双击）")
+    c.on_knob(1, "down")
+    c.on_knob(1, "up")
+    clk.advance(0.3)
+    save(c, clk, "attn-05-k1-press-focus.png", "按 K1：聚焦选中会话（完成未读本地清除）")
+    clk.advance(2.0)
+    c.on_knob(2, "down")
+    c.on_knob(2, "up")
+    clk.advance(1.0)
+    c.toast = None
+    save(c, clk, "attn-06-L4-mode-badges.png", "L4：DESK 键角标 = 桌面待处理数（后台 10 s 轮询）")
+    write_index(out_dir, made)
+    return made
+
+
 def gallery(path: str) -> None:
     """All 10 base states × {codex, ccai} × {normal, selected} + overlays, animations off."""
     states = list(State)
