@@ -13,6 +13,39 @@ it; see deck/SETTINGS.md), and the Mac side (mk20deck `ui.hello`/`ui.heartbeat`,
 "which agent needs me" hook states, K1 = next agent that needs me). Cross-reviews: Kimi K3 GO on all
 three (deck/reviews/1.4.0/). PRD v1.4 §15 lists the interaction changes.
 
+### 1.4.3-rc4: physical LCD order
+
+Build id **rc4**: `sh tools/mk20-release-build.sh firmware out rc4`; `firmware/VERSION` is **1.4.3**. Only
+`bin/mk20-kbd` changed (rebuilt static armhf; the other binaries are byte-identical).
+
+Bug (every page since mk20-kbd replaced KD, 1.3.0, HOME included): `kbd/panels.c` wrote logical key L to `/dev/fbL`, assuming the key LCDs
+are numbered row-major like KD's getInfo rects. They are not. A photo of 1.4.2 L1 (2026-10-21 23:00, Mac canvas
+verified correct) shows all 20 keys, the 8 agent slots in their known order included, exactly where
+**/dev/fb(k) = column 4-(k-1)/4, row (k-1)%4** puts them (fb1..fb4 = rightmost column top->bottom, ...,
+fb17..fb20 = leftmost column). Display therefore did not match function: e.g. the physical bottom-right key is
+logical fb20 (e-stop, GD32 row 3 col 4) but showed logical fb4. K2's "fb mapping verified" checked orientation only
+(kbd/K2-RESULTS.md, corrected).
+
+- `panel_t` gains `dev`, the physical node, from one documented table in `kbd/panels.c`: logical key L
+  (col c, row r) -> `/dev/fb((4-c)*4+r+1)`; fb21 stays /dev/fb21. `dev` is used only to open the node
+  (`screen.c`); the SPI bus is derived from it (/dev/fb1-9 + fb21 = bus 0: 9 keys + sub-screen; /dev/fb10-20 =
+  bus 1: 11 keys), so writer threads, the onboard per-bus budget and ctl `screen.layout` `bus` follow the wiring.
+- Everything else stays logical and unchanged: key input (`fb = row*5+col+1`), UI tables, host protocol, getInfo
+  rects (byte-identical, KD V2.32 parity), canvas rects, cmd 200/ctl `fb`. Goldens/headless images are logical
+  canvases and did not change.
+- `mk20-kbd --pattern` draws per logical key "R<row> C<col>" (large), "fb<dev>" and "L<n> bus<b>", a TL square
+  and a bottom strip with <dev> white bars on the bus colour, and prints the map: one photo verifies it (labels
+  must read R1 C1 ... R4 C5 left->right, top->bottom).
+- New `test_panel_map` (permutation, uniqueness, inverse formula, bus split 9+1/11); screen, writer, onboard,
+  ctl-layout and e2e tests now read the physical node of a logical panel; e2e checks `--pattern` bar counts.
+
+Host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 877 passed /
+1 skipped, agent 398, onboard 11348, kbd 4173 ASan + 4173 TSan (was 4019: +test_panel_map/screen checks), safe mode
+2 scenarios, e2e OK (incl. `--pattern`), ui 41396, 330 byte-exact goldens unchanged, sim 35, tools 64 passed / 1
+skipped, shellcheck clean, release binaries match source. `bin/mk20-kbd` sha256
+`4a84bbd74cd976361f6701cdf574ab3562c1c3aed7574121e6746e62c4607ec3` (595288 B, static ARM EABI5).
+**No device acceptance claimed** (needs one photo of `--pattern` or of HOME on the device).
+
 ### 1.4.2-rc3: cap the debug adbd log (soak follow-up)
 
 Build id **rc3**; `firmware/VERSION` is **1.4.2**. The 1.4.1 soak patrol saw MemAvailable fall ~0.75 MB/h: the
@@ -177,6 +210,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
+| 1.4.3 | 2026-10-21 | **1.4.3-rc4**: physical key-LCD order. Logical key L (col c, row r) is `/dev/fb((4-c)*4+r+1)` (column-major from the top-right, photo of 1.4.2 L1), not /dev/fbL: every page was displayed permuted (display != function). `panel_t.dev` (one table in kbd/panels.c) is used only to open the node and to derive the SPI bus; input, UI, host protocol and getInfo stay logical. `--pattern` labels R/C + fbN. Only `bin/mk20-kbd` changed. |
 | 1.4.2 | 2026-10-21 | **1.4.2-rc3**: debug adbd log on tmpfs capped (append + mk20d maint trim, was unbounded ~1 MB/h under adb polling). |
 | 1.4.1 | 2026-10-21 | **1.4.1-rc2**: `/run/mk20` on a 512 KiB tmpfs mounted first thing in boot (mk20-kbd wrote kbd.status 1/s to the TF-card overlay from its e-stop/HID main loop: wear + stall risk; files no longer survive reboots); refuses when a writer or its supervisor lock is live; health `run_tmpfs`, selftest INFO/WARN only; stale-status line carries uptime; soak records selftest WARN lines. Only `sbin/mk20d` changed. |
 | 1.4.0 | 2026-10-21 | **1.4.0-rc1**: on-device UX revision (real HOME status, read-only LS, fb19 opens the web on the Mac, boot follows the Mac to L1, fb20 = Mac mode key on L1/L4 unless the keyboard agent is active, e-stop host pause with bounded resync, status probes on a worker thread, full host sub-screen, pairing code incl. safe mode); usb0 settings web default-on as the only settings entry (pairing via /run/mk20/pair-code, maintenance page, catalogue-driven provider/model); Mac mk20deck heartbeat + needs-me hook states. **rc2**: `/run/mk20` on a 512 KiB tmpfs mounted first by `mk20d boot` (kbd.status no longer rewritten on the TF card every second; WARN + overlay fallback), health `run_tmpfs` + INFO/WARN selftest line, stale line carries the uptime, soak `selftest_warn`. Release: only `sbin/mk20d` changed. |

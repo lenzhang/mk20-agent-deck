@@ -244,7 +244,7 @@ static void test_kbd_core(void)
     CHECK(rx.jpg == 1 && rx.lastid == 41 && k.st.jpg_ok == 1);
     int changed = 0; for (int i = 0; i < PANEL_COUNT; i++) changed += k.scr.writes[i] != w0[i];
     CHECK(changed == 21);
-    snprintf(path, sizeof path, "%s/fb20", dir);   /* key col 4,row 3 */
+    devpath(path, sizeof path, dir, 20);   /* key col 4,row 3 = logical fb20 -> /dev/fb4 */
     FILE *f = fopen(path, "rb"); uint16_t px[128 * 128]; CHECK(f && fread(px, 2, 128 * 128, f) == 128 * 128); if (f) fclose(f);
     int R = (px[64 * 128 + 64] >> 11) << 3; CHECK(abs(R - 240) <= 12);
     /* same JPEG again: nothing rewritten, still acked */
@@ -322,7 +322,7 @@ static void test_kbd_core(void)
 static long t_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
 static uint16_t file_px(const char *dir, int fb, int idx)
 {
-    char p[256]; snprintf(p, sizeof p, "%s/fb%d", dir, fb);
+    char p[256]; devpath(p, sizeof p, dir, fb);   /* fb is logical */
     FILE *f = fopen(p, "rb"); uint16_t v = 0xDEAD;
     if (f) { fseek(f, idx * 2, SEEK_SET); if (fread(&v, 2, 1, f) != 1) v = 0xDEAD; fclose(f); }
     return v;
@@ -386,8 +386,9 @@ static void test_writers(void)
     screen_stats(&s, w, &e, &d);
     CHECK(w[2] - before == 1 && file_px(dir, 3, 0) == 0x5555);
 
-    /* the two buses run in parallel: fb1 (bus0) + fb10 (bus1), 300 ms each (serial would be >= 600 ms;
-     * the margin absorbs fsync noise on a loaded disk) */
+    /* the two buses run in parallel: fb1 (/dev/fb17, bus 1) + fb10 (/dev/fb2, bus 0), 300 ms each
+     * (serial would be >= 600 ms; the margin absorbs fsync noise on a loaded disk) */
+    CHECK(PANELS[0].bus == 1 && PANELS[9].bus == 0);
     screen_set_write_delay(&s, 300000);
     t0 = t_ms(); fill_tile(&s, 1, 0x0A0A); fill_tile(&s, 10, 0x0B0B);
     CHECK(screen_wait_idle(&s, 3000) == 0);
@@ -397,7 +398,7 @@ static void test_writers(void)
 
     /* missing fb: retried with back-off, not idle; recovers when it reappears */
     screen_set_write_delay(&s, 0);
-    snprintf(path, sizeof path, "%s/fb5", dir); unlink(path);
+    devpath(path, sizeof path, dir, 5); unlink(path);   /* logical fb5 = /dev/fb1 */
     long tb = t_ms(); fill_tile(&s, 5, 0x5A5A);
     CHECK(screen_wait_idle(&s, 150) == -1);
     /* back-off: ~20 ms per retry, no spin. Under sanitizers on a loaded host the writer may get fewer slots in a fixed
@@ -428,7 +429,7 @@ static void test_writers(void)
     /* stop with a permanently failing fb + drain: bounded by the timeout */
     CHECK(screen_start_writers(&s) == 0);
     screen_set_write_delay(&s, 0);
-    snprintf(path, sizeof path, "%s/fb7", dir); unlink(path);
+    devpath(path, sizeof path, dir, 7); unlink(path);
     fill_tile(&s, 7, 0x1111);
     t0 = t_ms(); screen_stop_writers(&s, 1, 200); dt = t_ms() - t0;
     CHECK(dt < 600 && !s.threaded);

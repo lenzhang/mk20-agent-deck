@@ -210,6 +210,36 @@ static void test_host(void)
 }
 
 static long fsize(const char *p) { struct stat st; return stat(p, &st) ? -1 : st.st_size; }
+/* Path of the PHYSICAL node that shows LOGICAL panel fb (1..21): <dir>/fb<PANELS[fb-1].dev>. */
+static const char *devpath(char *buf, size_t n, const char *dir, int fb) { snprintf(buf, n, "%s/fb%d", dir, PANELS[fb - 1].dev); return buf; }
+
+/* Panel map (panels.c): logical key L (row-major, col (L-1)%5, row (L-1)/5) is /dev/fb((4-col)*4+row+1).
+ * Evidence: photo of 1.4.2 L1, 2026-10-21 (fb1..fb4 = rightmost column top->bottom, ...,
+ * fb17..fb20 = leftmost column). Bus: /dev/fb1..9 spi0.0..0.8, fb21 spi0.9, fb10..20 spi1.0..1.10. */
+static void test_panel_map(void)
+{
+    CHECK(PANELS[0].dev == 17 && PANELS[4].dev == 1 && PANELS[15].dev == 20 && PANELS[19].dev == 4 && PANELS[20].dev == 21);
+    static const int want[PANEL_COUNT] = {17, 13, 9, 5, 1, 18, 14, 10, 6, 2, 19, 15, 11, 7, 3, 20, 16, 12, 8, 4, 21};
+    int seen[PANEL_COUNT + 1] = {0}, keys[2] = {0, 0};
+    for (int i = 0; i < PANEL_COUNT; i++) {
+        const panel_t *p = &PANELS[i];
+        CHECK(p->fb == i + 1 && p->dev == want[i]);
+        CHECK(p->dev >= 1 && p->dev <= PANEL_COUNT && !seen[p->dev]++);
+        CHECK(p->bus == ((p->dev <= 9 || p->dev == 21) ? 0 : 1));
+        if (i < 20) {
+            int col = i % 5, row = i / 5;   /* logical geometry is unchanged (getInfo/canvas) */
+            CHECK(p->is_key && p->col == col && p->row == row && p->x == col * 128 && p->y == 144 + row * 128 && p->w == 128 && p->h == 128);
+            CHECK(p->dev == (4 - col) * 4 + row + 1);
+            CHECK(p->col == 4 - (p->dev - 1) / 4 && p->row == (p->dev - 1) % 4);   /* the photo's view */
+            keys[p->bus]++;
+        } else CHECK(!p->is_key && p->bus == 0 && p->x == 106 && p->y == 0 && p->w == 428 && p->h == 142);
+    }
+    for (int d = 1; d <= PANEL_COUNT; d++) CHECK(seen[d] == 1);
+    CHECK(keys[0] == 9 && keys[1] == 11);   /* spi0: 9 keys + sub-screen, spi1: 11 keys */
+    static const int bus0[] = {3, 4, 5, 9, 10, 14, 15, 19, 20, 21};   /* logical panels on spi0 */
+    unsigned m = 0; for (size_t i = 0; i < sizeof bus0 / sizeof *bus0; i++) m |= 1u << (bus0[i] - 1);
+    for (int i = 0; i < PANEL_COUNT; i++) CHECK(PANELS[i].bus == !(m & (1u << i)));
+}
 
 static void test_screen(void)
 {
@@ -225,31 +255,34 @@ static void test_screen(void)
     uint16_t *cv = calloc(CANVAS_W * CANVAS_H, 2);
     CHECK(screen_set_canvas565(&s, cv) == 0);
     CHECK(screen_flush_bus(&s, 0) == 0 && screen_flush_bus(&s, 1) == 0);
-    /* change one pixel inside key (col 2,row 1) = fb8 (bus 0) */
+    /* change one pixel inside key (col 2,row 1) = logical fb8 -> /dev/fb10 (bus 1) */
     cv[(144 + 128 + 5) * CANVAS_W + 256 + 7] = 0xF800;
     CHECK(screen_set_canvas565(&s, cv) == 1 && s.dirty[7]);
-    CHECK(screen_flush_bus(&s, 1) == 0 && screen_flush_bus(&s, 0) == 1 && s.writes[7] == 2);
-    snprintf(path, sizeof path, "%s/fb8", dir);
+    CHECK(screen_flush_bus(&s, 0) == 0 && screen_flush_bus(&s, 1) == 1 && s.writes[7] == 2);
+    char dp[200]; snprintf(path, sizeof path, "%s/fb10", dir); CHECK(!strcmp(path, devpath(dp, sizeof dp, dir, 8)));
     FILE *f = fopen(path, "rb"); uint16_t px[128 * 128]; CHECK(fread(px, 2, 128 * 128, f) == 128 * 128); fclose(f);
     CHECK(px[5 * 128 + 7] == 0xF800 && px[0] == 0);
+    snprintf(path, sizeof path, "%s/fb8", dir);   /* /dev/fb8 is logical fb19 (col 3,row 3): untouched */
+    f = fopen(path, "rb"); CHECK(fread(px, 2, 128 * 128, f) == 128 * 128); fclose(f);
+    CHECK(px[5 * 128 + 7] == 0);
     /* pixel in the gap between subscreen and keys (y=143) belongs to no panel */
     cv[143 * CANVAS_W + 10] = 0x1234; CHECK(screen_set_canvas565(&s, cv) == 0);
     /* subscreen pixel -> fb21 on bus 0 */
     cv[10 * CANVAS_W + 106 + 3] = 0x07E0; CHECK(screen_set_canvas565(&s, cv) == 1 && s.dirty[20] && PANELS[20].bus == 0);
-    /* tile API: fb15 (bus 1) */
+    /* tile API: logical fb15 -> /dev/fb3 (bus 0) */
     uint16_t t[4] = {1, 2, 3, 4};
     CHECK(screen_set_tile565(&s, 15, 126, 126, 2, 2, t) == 1);
     CHECK(screen_set_tile565(&s, 15, 126, 126, 2, 2, t) == 0 || s.dirty[14]);
     CHECK(screen_set_tile565(&s, 15, 127, 127, 2, 2, t) == -1);
     CHECK(screen_set_tile565(&s, 22, 0, 0, 1, 1, t) == -1);
-    CHECK(screen_flush_bus(&s, 1) == 1 && screen_flush_bus(&s, 0) == 1);
-    /* missing fb -> error, panel stays dirty */
-    snprintf(path, sizeof path, "%s/fb10", dir); unlink(path);
+    CHECK(screen_flush_bus(&s, 1) == 0 && screen_flush_bus(&s, 0) == 2);
+    snprintf(path, sizeof path, "%s/fb3", dir);
+    f = fopen(path, "rb"); CHECK(fread(px, 2, 128 * 128, f) == 128 * 128); fclose(f);
+    CHECK(px[126 * 128 + 126] == 1 && px[127 * 128 + 127] == 4);
+    /* missing fb -> error, panel stays dirty: logical fb10 is /dev/fb2 (bus 0) */
+    unlink(devpath(path, sizeof path, dir, 10));
     t[0] = 9; screen_set_tile565(&s, 10, 0, 0, 1, 1, t);
-    CHECK(screen_flush_bus(&s, 1) == -1 && s.dirty[9] && s.write_errors == 1);
-    /* bus map */
-    for (int i = 0; i < 9; i++) CHECK(PANELS[i].bus == 0);
-    for (int i = 9; i < 20; i++) CHECK(PANELS[i].bus == 1);
+    CHECK(screen_flush_bus(&s, 1) == 0 && screen_flush_bus(&s, 0) == -1 && s.dirty[9] && s.write_errors == 1);
     free(cv); screen_free(&s);
     for (int i = 1; i <= 21; i++) { snprintf(path, sizeof path, "%s/fb%d", dir, i); unlink(path); }
     rmdir(dir);
@@ -275,7 +308,7 @@ int main(int argc, char **argv)
         printf("%d checks, %d failures\n", checks, fails); return fails ? 1 : 0;
     }
     test_gd32_roundtrip(); test_gd32_corrupt(); test_gd32_fuzz(); test_gd32_allowlist(); test_knob_frames();
-    test_host(); test_screen();
+    test_host(); test_panel_map(); test_screen();
     test_knob_init(); test_jpeg(); test_kbd_core(); test_writers(); test_hid(); test_hid_replace();
     test_hid_scroll(); test_ctl_lease(); test_ctl_scroll_act(); test_ctl_socket(); test_ctl_confirm(); test_ctl_ui(); test_ctl_screen(); test_k2_estop(); test_ctl_edges();
     test_ctl_backpressure(); test_kbd_safety_backpressure(); test_kbd_safety_host(); test_ctl_screen_disconnect(); test_ctl_json_edges(); test_ctl_long_uptime(); test_ctl_malformed_seeded();

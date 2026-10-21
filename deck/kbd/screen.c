@@ -100,7 +100,7 @@ int screen_set_tile565(screen_t *s, int fb, int x, int y, int w, int h, const ui
 static int write_buf(screen_t *s, int i, const uint16_t *buf)
 {
     char path[160];
-    snprintf(path, sizeof path, "%s/fb%d", s->fbdir, PANELS[i].fb);
+    snprintf(path, sizeof path, "%s/fb%d", s->fbdir, PANELS[i].dev); /* physical node; i is logical */
     int fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     const uint8_t *b = (const uint8_t *)buf;

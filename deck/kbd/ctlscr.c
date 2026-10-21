@@ -1,4 +1,5 @@
 #include "ctl.h"
+#include "panels.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -56,8 +57,9 @@ static int layout(ctl_t *c, long id, char *r, size_t cap)
 #define ADD(...) do { k = snprintf(r + at, cap > at ? cap - at : 0, __VA_ARGS__); if (k < 0 || (size_t)k >= cap - at) return 0; at += (size_t)k; } while (0)
     ADD("{\"ok\":true,\"id\":%ld,\"current_page\":%d,\"control_page\":1,\"estop_key\":{\"row\":3,\"col\":4},\"screen_fields\":[\"fb\",\"w\",\"h\",\"bus\",\"row\",\"col\"],\"screens\":[", id, c->screen.current);
     for (int fb = 1; fb <= 21; fb++) {
-        ADD("%s[%d,%d,%d,%d", fb == 1 ? "" : ",", fb, fb == 21 ? 428 : 128, fb == 21 ? 142 : 128, fb >= 10 && fb <= 20);
-        if (fb <= 20) ADD(",%d,%d]", (fb - 1) / 5, (fb - 1) % 5);
+        /* fb is logical (row-major); bus is the SPI bus of its physical /dev/fbN (panels.h) */
+        ADD("%s[%d,%d,%d,%d", fb == 1 ? "" : ",", fb, PANELS[fb - 1].w, PANELS[fb - 1].h, PANELS[fb - 1].bus);
+        if (fb <= 20) ADD(",%d,%d]", PANELS[fb - 1].row, PANELS[fb - 1].col);
         else ADD(",null,null]");
     }
     ADD("],\"page_fields\":[\"page_id\",\"owner\"],\"pages\":["); int first = 1;

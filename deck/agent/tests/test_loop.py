@@ -233,7 +233,7 @@ def kbd_build(tmp_path_factory):
     port = build / "kbd-port"
     subprocess.run(["cc", "-std=c11", "-D_DEFAULT_SOURCE", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
         "-fsanitize=address,undefined", "-fno-sanitize-recover=undefined", "-I", str(root),
-        str(AGENT / "tests/kbd_port_server.c"), str(root / "ctl.c"), str(root / "ctlscr.c"), str(root / "hid.c"), "-o", str(port)], check=True)
+        str(AGENT / "tests/kbd_port_server.c"), str(root / "ctl.c"), str(root / "ctlscr.c"), str(root / "panels.c"), str(root / "hid.c"), "-o", str(port)], check=True)
     return root / "mk20-kbd", port
 
 

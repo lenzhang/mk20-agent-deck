@@ -3,7 +3,8 @@
  *               (A1A55A5E subset: getInfo, keyStateChanged, cmd100 JPEG, setBacklight, cmd200 tile),
  *               composited dirty-panel fb writes. HOME boots locally, including --no-host.
  *   --monitor   read /dev/ttyS1 RECEIVE-ONLY (O_RDONLY), log frames
- *   --pattern   write an id test pattern to <fbdir>/fb1..fb21 (needs KD stopped)
+ *   --pattern   write the panel-map test pattern (logical "R1 C1".."R4 C5" + physical fbN) to
+ *               <fbdir>/fb1..fb21 (needs KD stopped)
  *   --getinfo   print the getInfo JSON we answer with
  * The ONLY GD32 write path is gd32_tx() (gd32io.c) behind the strict allow-list. */
 #include "gd32.h"
@@ -14,6 +15,7 @@
 #include "ctl.h"
 #include "screen.h"
 #include "onboard.h"
+#include "ui_font.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -55,20 +57,52 @@ static int monitor(const char *dev)
     }
 }
 
+/* Panel-map test pattern, drawn per LOGICAL panel and written to its physical node, so one
+ * photo verifies the whole map (panels.h): a key reads "R<row> C<col>" (1-based logical
+ * position, natural orientation) in large type, then "fb<dev>" (the /dev node it went to) and
+ * "L<n> bus<b>". On a correct map the labels read R1 C1 .. R4 C5 left->right, top->bottom.
+ * Secondary cues: white TL square (orientation) and a bottom strip whose count of white bars
+ * == the /dev/fb number, on the bus colour (red bus 0, blue bus 1). */
+static void pattern_panel(int i, uint16_t *px)
+{
+    const panel_t *p = &PANELS[i];
+    int w = p->w, h = p->h, strip = p->is_key ? 20 : 30;
+    char a[32], b[32], c[32];
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        uint16_t v = 0x0000;
+        if (y >= h - strip) v = ((x * (p->dev * 2 + 1)) / w) & 1 ? 0xFFFF : (p->bus ? 0x001F : 0xF800);
+        else if (x < 8 && y < 8) v = 0xFFFF;
+        px[y * w + x] = v;
+    }
+    if (p->is_key) {
+        snprintf(a, sizeof a, "R%d C%d", p->row + 1, p->col + 1);
+        snprintf(b, sizeof b, "fb%d", p->dev);
+        snprintf(c, sizeof c, "L%d bus%d", p->fb, p->bus);
+        ui_font_draw_scaled(px, w, h, 4, 8, a, 0xFFFF, w - 8, 3);
+        ui_font_draw_scaled(px, w, h, 4, 56, b, 0xFFE0, w - 8, 2);
+        ui_font_draw(px, w, h, 4, 89, c, 0x07FF, w - 8);
+    } else {
+        snprintf(a, sizeof a, "SUB-SCREEN");
+        snprintf(b, sizeof b, "/dev/fb%d bus%d", p->dev, p->bus);
+        snprintf(c, sizeof c, "L%d", p->fb);
+        ui_font_draw_scaled(px, w, h, 12, 8, a, 0xFFFF, w - 16, 3);
+        ui_font_draw_scaled(px, w, h, 12, 58, b, 0xFFE0, w - 16, 2);
+        ui_font_draw(px, w, h, 12, 92, c, 0x07FF, w - 16);
+    }
+}
+
 static int pattern(const char *fbdir)
 {
     screen_t s;
     if (screen_init(&s, fbdir)) return 1;
     for (int i = 0; i < PANEL_COUNT; i++) {
-        int w = PANELS[i].w, h = PANELS[i].h;
-        uint16_t *px = malloc((size_t)w * h * 2);
-        /* stripes: count of white bars == fb number, on a bus-coloured background */
-        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
-            int bar = (x * (PANELS[i].fb * 2 + 1)) / w;
-            px[y * w + x] = (bar & 1) ? 0xFFFF : (PANELS[i].bus ? 0x001F : 0xF800);
-        }
-        screen_set_tile565(&s, PANELS[i].fb, 0, 0, w, h, px);
+        uint16_t *px = malloc((size_t)PANELS[i].w * PANELS[i].h * 2);
+        if (!px) { screen_free(&s); return 1; }
+        pattern_panel(i, px);
+        screen_set_tile565(&s, PANELS[i].fb, 0, 0, PANELS[i].w, PANELS[i].h, px);   /* logical index */
         free(px);
+        if (PANELS[i].is_key) printf("L%d R%d C%d -> %s/fb%d bus%d\n", PANELS[i].fb, PANELS[i].row + 1, PANELS[i].col + 1, fbdir, PANELS[i].dev, PANELS[i].bus);
+        else printf("L%d sub-screen -> %s/fb%d bus%d\n", PANELS[i].fb, fbdir, PANELS[i].dev, PANELS[i].bus);
     }
     int a = screen_flush_bus(&s, 0), b = screen_flush_bus(&s, 1);
     printf("pattern written bus0=%d bus1=%d errors=%u\n", a, b, s.write_errors);

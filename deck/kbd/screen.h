@@ -1,7 +1,8 @@
 /* Screen manager: RGB565 shadow per panel, dirty tracking, direct writes to
- * <fbdir>/fbN (fbdir = "/dev" on device, a temp dir in tests).
+ * <fbdir>/fb<dev> (fbdir = "/dev" on device, a temp dir in tests). All indices and the `fb`
+ * arguments are LOGICAL (panels.h); only the file name uses the physical PANELS[i].dev.
  * Threaded mode (screen_start_writers): one writer thread per SPI bus
- * (bus 0: fb1..9 + fb21, bus 1: fb10..20). Producers (key/host handling) only
+ * (bus 0: /dev/fb1..9 + fb21, bus 1: /dev/fb10..20; PANELS[i].bus). Producers (key/host handling) only
  * copy into `pending` under the bus mutex and signal; the writer copies the
  * panel out under the lock and does the slow write+fsync unlocked, so producers
  * never wait on SPI. Per panel the latest content wins (intermediate frames are
@@ -33,7 +34,7 @@ int screen_init(screen_t *s, const char *fbdir);
 void screen_free(screen_t *s);       /* stops writers (no drain) if running */
 /* Diff a full RGB565 canvas (CANVAS_W x CANVAS_H) into pending; marks changed panels dirty. Returns #dirty. */
 int screen_set_canvas565(screen_t *s, const uint16_t *canvas);
-/* Set a sub-rectangle of one panel (fb number 1..21). Returns 1 if changed, 0 unchanged, -1 bad args. */
+/* Set a sub-rectangle of one panel (logical fb number 1..21). Returns 1 if changed, 0 unchanged, -1 bad args. */
 int screen_set_tile565(screen_t *s, int fb, int x, int y, int w, int h, const uint16_t *px);
 /* Synchronous: write all dirty panels on one bus (0/1). Returns #written or -1. Not with writers running. */
 int screen_flush_bus(screen_t *s, int bus);

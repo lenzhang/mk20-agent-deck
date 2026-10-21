@@ -1,7 +1,8 @@
 """End-to-end: the real mk20-kbd binary (`--run`) against a fake GD32 and a fake Mac
 console on two ptys, using the console's own codec (deck/mk20deck/protocol.py).
 Checks: knob init frames on the wire + echo, key/knob events -> keyStateChanged,
-getInfo, ack-paced cmd-100 JPEG -> fb files, setBacklight ack, status file,
+getInfo, ack-paced cmd-100 JPEG -> fb files (logical panel -> physical /dev/fbN), --pattern,
+setBacklight ack, status file,
 --no-gd32-write and the kill file (tty opened O_RDONLY, nothing written)."""
 import io, json, os, pty, select, signal, subprocess, sys, tempfile, time, tty
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +34,37 @@ def check(cond, what):
 
 def gd32_frame(pl):
     return bytes([0xAA, 0x55, sum(pl) & 0xFF, len(pl), (~len(pl)) & 0xFF]) + bytes(pl) + b"\xF5\x5F"
+
+def dev(fb):
+    """Physical /dev/fb number of LOGICAL panel fb (deck/kbd/panels.c; asserted by test_panel_map):
+    key col (fb-1)%5, row (fb-1)//5 is /dev/fb((4-col)*4+row+1); the sub-screen stays fb21."""
+    return 21 if fb == 21 else (4 - (fb - 1) % 5) * 4 + (fb - 1) // 5 + 1
+
+def fbfile(d, fb):
+    return os.path.join(d, f"fb{dev(fb)}")
+
+def pattern_check(tmp):
+    """--pattern draws per LOGICAL panel into its physical node: white bar count == /dev/fb number,
+    bus colour background, TL square, label text above the strip; stdout lists the whole map."""
+    d = os.path.join(tmp, "pattern"); os.makedirs(d)
+    for i in range(1, 22): open(os.path.join(d, f"fb{i}"), "wb").close()
+    r = subprocess.run([BIN, "--pattern", d], capture_output=True, text=True, timeout=10)
+    check(r.returncode == 0 and "pattern written bus0=10 bus1=11 errors=0" in r.stdout, f"pattern rc/out {r.returncode} {r.stdout[-200:]}")
+    for fb in range(1, 22):
+        w, h = (428, 142) if fb == 21 else (128, 128)
+        n = dev(fb); bus = 0 if n <= 9 or n == 21 else 1
+        line = f"L{fb} sub-screen -> {d}/fb21 bus0" if fb == 21 else f"L{fb} R{(fb - 1) // 5 + 1} C{(fb - 1) % 5 + 1} -> {d}/fb{n} bus{bus}"
+        check(line in r.stdout.splitlines(), f"pattern map line {line!r}")
+        px = open(fbfile(d, fb), "rb").read()
+        if len(px) != w * h * 2:
+            check(False, f"pattern fb{n} size {len(px)}"); continue
+        at = lambda x, y: px[2 * (y * w + x)] | px[2 * (y * w + x) + 1] << 8
+        row = [at(x, h - 10) for x in range(w)]
+        bars = sum(1 for x in range(w) if row[x] == 0xFFFF and (x == 0 or row[x - 1] != 0xFFFF))
+        check(bars == n, f"logical fb{fb} -> /dev/fb{n}: {bars} bars")
+        check(row[0] == (0x001F if bus else 0xF800), f"fb{n} bus colour {row[0]:#06x}")
+        check(at(0, 0) == 0xFFFF and at(10, 0) == 0, f"fb{n} TL square")
+        check(any(at(x, y) == 0xFFFF for y in range(8, 56) for x in range(w)), f"fb{n} label drawn")
 
 def mkpty():
     m, s = pty.openpty()
@@ -205,6 +237,7 @@ def blocked_status_worker(tmp):
 def main():
     global heartbeat_fd, heartbeat_at
     with tempfile.TemporaryDirectory() as tmp:
+        pattern_check(tmp)
         hidp = os.path.join(tmp, "hidg0"); os.mkfifo(hidp)
         hr = os.open(hidp, os.O_RDONLY | os.O_NONBLOCK)
         p, gm, hm, fb, st, keep = start(tmp, [], hid=hidp)
@@ -248,7 +281,7 @@ def main():
         boot = io.BytesIO(); Image.new("RGB", (640, 656)).save(boot, "JPEG")
         os.write(hm, P.encode_frame(P.CMD_SHOW_JPG, boot.getvalue(), 8))
         par.feed(read_for(hm, 0.5))
-        reserved_before = open(os.path.join(fb, "fb20"), "rb").read()
+        reserved_before = open(fbfile(fb, 20), "rb").read()
         # key + K2 events
         os.write(gm, gd32_frame([0x16, 1, 0, 0, 0, 0]) + gd32_frame([0x16, 1, 0x69, 0x69, 0, 0]) + gd32_frame([5, 0, 0x67, 0x67, 0, 0]))
         evs = [P.classify_json(f.json()) for f in par.feed(read_for(hm, 0.5)) if f.cmd == P.CMD_JSON and f.json().get("method") == "keyStateChanged"]
@@ -258,12 +291,12 @@ def main():
             check((evs[1].col, evs[1].row) == (105, 105), f"K2 cw coords {evs[1]}")
         # JPEG canvas
         im = Image.new("RGB", (640, 656), (0, 0, 0))
-        im.paste((255, 0, 0), (512, 528, 640, 656))  # key col4,row3 -> fb20
+        im.paste((255, 0, 0), (512, 528, 640, 656))  # key col4,row3 -> logical fb20 = /dev/fb4
         b = io.BytesIO(); im.save(b, "JPEG", quality=90)
         os.write(hm, P.encode_frame(P.CMD_SHOW_JPG, b.getvalue(), 9))
         acks = [f for f in par.feed(read_for(hm, 1.0)) if f.cmd == P.CMD_SHOW_JPG]
         check(len(acks) == 1 and acks[0].frame_id == 9 and acks[0].data == b"", "jpeg ack")
-        px = open(os.path.join(fb, "fb20"), "rb").read()
+        px = open(fbfile(fb, 20), "rb").read()
         v = px[2 * (64 * 128 + 64)] | px[2 * (64 * 128 + 64) + 1] << 8
         # 2026-10-20: with the keyboard agent inactive, fb20 on L1/L4 is the Mac's mode key and
         # shows host pixels; with the agent allowed it stays the reserved e-stop (C unit tests).
@@ -460,7 +493,7 @@ def main():
             check(fd_mode(p.pid, os.ttyname(keep[0])) == 0, "gd32 opened O_RDONLY")
             os.write(gm, gd32_frame([0x16, 1, 0, 0, 0, 0]))   # local mode: fb1 turns white
             time.sleep(0.3)
-            px = open(os.path.join(fb, "fb1"), "rb").read()
+            px = open(fbfile(fb, 1), "rb").read()   # key (0,0) = logical fb1 = /dev/fb17
             check(px[:2] == b"\xff\xff", "local mode paints pressed key")
             time.sleep(1.0)
             s = json.load(open(st))

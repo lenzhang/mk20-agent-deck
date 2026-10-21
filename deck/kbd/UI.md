@@ -1,5 +1,11 @@
 # On-board UI
 
+`fbN` in this document is the **logical** panel: keys fb1..fb20 row-major in natural orientation
+(fb1 top-left, fb5 top-right, fb16 bottom-left, fb20 bottom-right = e-stop), fb21 the sub-screen; the
+same numbering as GD32 key events, the host canvas and ctl. It is not the `/dev/fbN` node: the key LCDs
+are wired column-major from the top-right (logical fb1 is /dev/fb17, fb20 is /dev/fb4); `kbd/panels.c`
+holds the only map (1.4.3-rc4; before that every page was displayed permuted, see kbd/K2-RESULTS.md).
+
 ## On-device UX revision (2026-10-20, branch feature/fw-ux; supersedes U2 text below where they differ)
 
 Host-validated only (Docker, fake clock/files); **no device acceptance claimed**.

@@ -126,8 +126,10 @@ slots but cannot inherit the departed page ids. Disable/e-stop keep pages as des
 
 Compact layout arrays keep replies inside 1024 bytes: each `screens` row follows
 `screen_fields:["fb","w","h","bus","row","col"]`; each `pages` row follows
-`page_fields:["page_id","owner"]`. fb1..20 are 128x128 keys, row-major 4x5;
-fb21 is 428x142, row/col null. Bus 0: fb1..9 and fb21. Bus 1: fb10..20.
+`page_fields:["page_id","owner"]`. fb1..20 are 128x128 keys, row-major 4x5 (logical: fb = row*5+col+1,
+the same numbering as key events and the canvas); fb21 is 428x142, row/col null. `bus` is the SPI bus of
+the panel's physical `/dev/fbN` (kbd/panels.c; keys are not wired row-major, 1.4.3): bus 0 = fb3, fb4, fb5,
+fb9, fb10, fb14, fb15, fb19, fb20 and fb21; bus 1 = fb1, fb2, fb6, fb7, fb8, fb11, fb12, fb13, fb16, fb17, fb18.
 
 Draw rectangles must fit the framebuffer, with nonnegative origin and positive dimensions.
 RGB565 `bytes` must equal w*h*2; JPEG declares its encoded size. There is no pixel data

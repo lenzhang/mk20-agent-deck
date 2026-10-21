@@ -240,7 +240,7 @@ static void in_flight_replacement(void) {
         CHECK(!screen_wait_idle(&k.scr,3000)); /* replacements must follow any in-flight write */
         for(int fb=1;fb<=21;fb++) {
             const panel_t *p=&PANELS[fb-1]; size_t count=(size_t)p->w*p->h;
-            snprintf(path,sizeof path,"%s/fb%d",root,fb); FILE *f=fopen(path,"rb"); CHECK(f!=NULL);
+            snprintf(path,sizeof path,"%s/fb%d",root,p->dev); FILE *f=fopen(path,"rb"); CHECK(f!=NULL); /* physical node of logical fb */
             if(f) { CHECK(fread(px,2,count,f)==count); fclose(f); CHECK(!memcmp(px,k.scr.pending[fb-1],count*2)); }
         }
     }

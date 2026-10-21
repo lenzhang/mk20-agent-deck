@@ -294,8 +294,9 @@ static void test_ctl_screen(void)
     screen_req(&c, 0, 0, "{\"op\":\"screen.page.create\",\"name\":\"x\"}", "disabled");
     ctl_set_allowed(&c, 1);
     CHECK(H(&c, 0, 0, "{\"op\":\"screen.layout\"}", r) > 0);
-    CHECK(has(r, "[9,128,128,0,1,3]") && has(r, "[10,128,128,1,1,4]"));
-    CHECK(has(r, "[20,128,128,1,3,4]") && has(r, "[21,428,142,0,null,null]"));
+    /* fb/row/col logical; bus = SPI bus of the physical /dev/fbN (fb1 -> /dev/fb17, fb10 -> fb2, fb20 -> fb4) */
+    CHECK(has(r, "[1,128,128,1,0,0]") && has(r, "[9,128,128,0,1,3]") && has(r, "[10,128,128,0,1,4]"));
+    CHECK(has(r, "[16,128,128,1,3,0]") && has(r, "[20,128,128,0,3,4]") && has(r, "[21,428,142,0,null,null]"));
     CHECK(has(r, "[0,\"system\"]") && has(r, "[2,\"user\"]"));
     for (int i = 0; i < 8; i++) screen_req(&c, i == 1 ? 1 : 0, 0, "{\"op\":\"screen.page.create\",\"name\":\"work\"}", "page_id");
     CHECK(H(&c, 0, 0, "{\"op\":\"screen.layout\"}", r) > 0 && strlen(r) < CTL_LINE_MAX);

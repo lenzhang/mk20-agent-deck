@@ -48,8 +48,30 @@ implied here; K0–K5 numbering stays intact.
 - **So host mode needs no init: mk20-kbd opens ttyS1 O_RDONLY.**
 
 **Panel map.**
-- KD writes getInfo rect *i* to `/dev/fb(i+1)`: fb1..fb20 are keys row-major ((0,0), (1,0), …, (4,3)) and fb21 is the subscreen.
-- From device sysfs: fb1–fb9 are on spi0.0–0.8; fb10–fb20 on spi1.0–1.10; fb21 (nv3007, 428×142) on spi0.9.
+- The getInfo rects (and our canvas, input and host protocol) are **logical** and row-major: rect *i* is logical key
+  fb(i+1) at (col, row) = (i%5, i/5) for i < 20, rect 20 = fb21 the subscreen. GD32 key events (row, col) are
+  physical row-major positions (K2, verified by pressing), so input `fb = row*5+col+1` is that logical index.
+- **The device nodes are NOT row-major** (corrected 2026-10-21, 1.4.3-rc4). The K0 note "KD writes rect *i* to
+  `/dev/fb(i+1)`" plus the assumed row-major wiring was never checked for order (K2 checked orientation only, see
+  K2-RESULTS.md). A photo of 1.4.2 L1 (logical key L drawn on /dev/fbL; Mac canvas verified correct) shows all 20
+  keys, the 8 agent slots in their known order included, exactly where **/dev/fb(k) = column 4-(k-1)/4,
+  row (k-1)%4** puts them: fb1..fb4 = rightmost column top->bottom, fb5..fb8 the next column to the left, ...,
+  fb17..fb20 the leftmost column. Logical key L (col c, row r) is therefore **/dev/fb((4-c)*4+r+1)**; fb21 stays
+  /dev/fb21. Single table: `kbd/panels.c` (`PANELS[].dev`, used only to open the node), asserted by
+  `test_panel_map`; `mk20-kbd --pattern` labels every key "R<row> C<col>" + "fb<dev>" so one photo re-verifies it.
+  (How stock KD reached the right panels is not re-derived; the photo is authoritative.)
+
+  | logical | col 0 | col 1 | col 2 | col 3 | col 4 |
+  |---|---|---|---|---|---|
+  | row 0 (fb1–5)   | fb17 | fb13 | fb9  | fb5 | fb1 |
+  | row 1 (fb6–10)  | fb18 | fb14 | fb10 | fb6 | fb2 |
+  | row 2 (fb11–15) | fb19 | fb15 | fb11 | fb7 | fb3 |
+  | row 3 (fb16–20) | fb20 | fb16 | fb12 | fb8 | fb4 |
+
+  (cells: the physical `/dev/fbN` of that logical key; sub-screen fb21 = /dev/fb21)
+- From device sysfs (by device node): /dev/fb1–fb9 are on spi0.0–0.8; /dev/fb10–fb20 on spi1.0–1.10; /dev/fb21
+  (nv3007, 428×142) on spi0.9. In logical terms bus 0 = keys fb3, fb4, fb5, fb9, fb10, fb14, fb15, fb19, fb20 + fb21,
+  bus 1 = fb1, fb2, fb6, fb7, fb8, fb11, fb12, fb13, fb16, fb17, fb18.
 - Bus 0 therefore carries 9 keys plus the subscreen (416 KB per full refresh); bus 1 carries 11 keys (360 KB).
 - fbtft: `write()` plus `fsync()` flushes the whole panel immediately (KD does the same). The mmap/defio path would give dirty-line updates at 60 fps; that is a later optimisation.
 
@@ -71,7 +93,7 @@ implied here; K0–K5 numbering stays intact.
             |       cmd201 widget/state (new)                                                                  |
             |        | cmd100 -> tiny static JPEG decoder (baseline, 4:2:0/4:4:4) -> RGB565 canvas -> diff       |
             |        v                                                                                         |
-            |  screen: shadow+pending per panel, dirty flags; writer thread bus0 (fb1-9,21), bus1 (fb10-20)   |-> /dev/fb1..21
+            |  screen: shadow+pending per panel, dirty; writer/bus by /dev node: bus0 fb1-9,21, bus1 fb10-20   |-> /dev/fb1..21
             |  backlight: dispdbg setbl                                                                        |-> debugfs
             |  status: /run/mk20/kbd.status (frames_ok, last_gd32_ts, panel writes, errors) for selftest       |
             +--------------------------------------------------------------------------------------------------+
@@ -122,7 +144,7 @@ implied here; K0–K5 numbering stays intact.
 |---|---|---|---|
 | **K0** (d2b966d, done) | gd32 codec, allow-list, panel map, screen writer, host codec (getInfo/keyStateChanged), `--monitor`/`--pattern`/`--getinfo`, static armhf build | `make -C deck/kbd test` (ASan/UBSan, corrupt + fuzz frames, allow-list 256-id sweep, fake fb dir) | none yet |
 | **K1** (folded into K2) | Read-only device verification | — | (a) with KD running, run `mk20-kbd --monitor` on a **copy** of the traffic. KD owns ttyS1, so first try a passive second reader (reads may steal bytes; check). If that isn't possible, do it in K2 with KD stopped. (b) Confirm bytes 4–5 and the knob codes |
-| **K2** (done 2026-10-19, K2-RESULTS.md / K2-KNOB-CONFIG.md) | KD stopped manually (one-shot, SSH, reversible by reboot): `--pattern` to verify the fbN ↔ physical key map and bus timing; `--monitor` for GD32 frames | timing script | photo of the pattern; event log for all 20 keys and both knobs |
+| **K2** (done 2026-10-19, K2-RESULTS.md / K2-KNOB-CONFIG.md) | KD stopped manually (one-shot, SSH, reversible by reboot): `--pattern` to verify the fbN ↔ physical key map and bus timing; `--monitor` for GD32 frames | timing script | photo of the pattern (verified orientation only; the order was wrong, fixed 1.4.3-rc4, see §2 Panel map); event log for all 20 keys and both knobs |
 | **K3** (in progress, see §8) | Host subset plus JPEG decoder plus per-bus threads; router merged; backlight | codec tests, JPEG conformance vs libjpeg on the box, Mac console e2e in simulator | Mac console works against mk20-kbd; latency press→HID and press→panel |
 | **K4** | Release integration (mk20d boots only mk20-kbd, selftest, crash-loop safe mode, maintenance entry via usb0 admin web) | mk20d tests with a fake mk20-kbd | install via the A/B loader, forced-fail rollback test, crash-loop → safe-mode test, 24 h soak |
 | **K5** | Remaining cmd201/binary widget fast path and audio follow-up (cmd200 already implemented). **Renderer pulled forward now to ONBOARD-UI-PLAN U1/U2**, not blocked on K5; L5/PTT U4, ASR U6 | U1 host C/glyph/config/golden/sim tests; U2 ownership/fallback tests; see U1–U7 | U7; no device integration in U1 |
@@ -138,7 +160,7 @@ helper, never required (2026-10-19), replaces the earlier no-helper decision.
 - **GD32 double input:** the GD32 sends HID itself for non-zero keycodes. Rule: only act on keycode==0 (as KD does), or later set the keymap to KC_NO under an explicit, separate step.
 - **"Offline typing stops in V2"** (earlier observation) may have been caused by the Mac app's keymap writes, not by KD mode. Recheck in K2.
 - **Bytes 4–5** are interpreted as a keycode (decompile evidence); verify in K1/K2.
-- **Physical fb ↔ key wiring** is assumed row-major like KD; verify in K2 with the stripe pattern (fbN draws N bars).
+- **Physical fb ↔ key wiring** was assumed row-major like KD and was wrong (1.4.2 showed every page permuted). Resolved 2026-10-21 (1.4.3-rc4): column-major from the top-right, table in `kbd/panels.c` (§2 Panel map). Re-verify on device with one photo of `mk20-kbd --pattern` (labels must read R1 C1 … R4 C5 left->right, top->bottom; the bar count = /dev/fb number).
 - **Kernel/fbtft:** the panels are initialised by the kernel driver at boot, so no panel init is needed from us. Backlight is a single global value.
 - **Losing KD's DE/G2D pipeline:** fb0 stays blank. Fine, nothing is attached to it.
 - **Parser re-scan** returns only the last frame if one replay contains two frames (rare; noted for K3).
