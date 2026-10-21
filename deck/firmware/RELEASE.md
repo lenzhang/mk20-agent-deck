@@ -4,7 +4,7 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
-## Unreleased: L1 option mode (feature/option-mode, for 1.5.1)
+## 1.5.1-rc1: L1 option mode (answer an agent's choice with 1–5)
 
 `firmware/VERSION` stays **1.5.0** on this branch (the integrator bumps it to 1.5.1). User decision 2026-10-22:
 tapping a needs_input / needs_approval session on L1 brings it to the front and turns row 1 into its numbered
@@ -299,6 +299,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
+| 1.5.1 | 2026-10-22 | **1.5.1-rc1**: option mode — tapping a hook-tracked session that waits for input/approval clears rows 1–3 and shows its options on the top row (labels from Claude AskUserQuestion / fixed permission labels / digits); host→device `ui.hidKeys` maps fb1..fb15 to momentary HID digits (allow-list 1–9, L1 only, cleared on page/host/e-stop, 30 s expiry); digits ignored while PTT is held. |
 | 1.5.0 | 2026-10-22 | **1.5.0-rc1**: user layout — L1 rows 1–3 = 15 sessions (tap = switch), bottom row 按住说话 / ⌫ 删除 (HID Backspace) / ⏎ 发送·可以 (Return) / ✗ 不行 (Escape) / 模式; L4 row1 DESK HERD TMUX ＋新会话 回L1 (local Back fb14 -> fb5); fb17–19 holds cut at 10 s. |
 | 1.4.3 | 2026-10-21 | **1.4.3-rc4**: physical key-LCD order. Logical key L (col c, row r) is `/dev/fb((4-c)*4+r+1)` (column-major from the top-right, photo of 1.4.2 L1), not /dev/fbL: every page was displayed permuted (display != function). `panel_t.dev` (one table in kbd/panels.c) is used only to open the node and to derive the SPI bus; input, UI, host protocol and getInfo stay logical. `--pattern` labels R/C + fbN. Only `bin/mk20-kbd` changed. |
 | 1.4.2 | 2026-10-21 | **1.4.2-rc3**: debug adbd log on tmpfs capped (append + mk20d maint trim, was unbounded ~1 MB/h under adb polling). |
