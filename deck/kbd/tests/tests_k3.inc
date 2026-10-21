@@ -398,10 +398,15 @@ static void test_writers(void)
     /* missing fb: retried with back-off, not idle; recovers when it reappears */
     screen_set_write_delay(&s, 0);
     snprintf(path, sizeof path, "%s/fb5", dir); unlink(path);
-    fill_tile(&s, 5, 0x5A5A);
+    long tb = t_ms(); fill_tile(&s, 5, 0x5A5A);
     CHECK(screen_wait_idle(&s, 150) == -1);
-    screen_stats(&s, w, &e, &d);
-    CHECK(e >= 2 && e < 40 && d == 1);   /* back-off: ~20 ms per retry, no spin */
+    /* back-off: ~20 ms per retry, no spin. Under sanitizers on a loaded host the writer may get fewer slots in a fixed
+     * window (was flaky: e=1 in 150 ms), so wait (bounded) for two retries and bound the rate by the elapsed time. */
+    do { screen_stats(&s, w, &e, &d); if (e >= 2) break; usleep(10000); } while (t_ms() - tb < 2000);
+    long el = t_ms() - tb;
+    CHECK(e >= 2 && d == 1);
+    CHECK((long)e <= el / 10 + 3);
+    if ((long)e > el / 10 + 3) fprintf(stderr, "  retry spin: %u retries in %ld ms\n", (unsigned)e, el);
     FILE *f = fopen(path, "w"); fclose(f);
     CHECK(screen_wait_idle(&s, 1000) == 0 && file_px(dir, 5, 0) == 0x5A5A);
 
