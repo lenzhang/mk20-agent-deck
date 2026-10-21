@@ -401,10 +401,10 @@ class FakeHid:
         return {"source": "fake"}
 
 
-def _headless(tmp_path, state, acts, hid, **kw):
-    opts = DevTestOptions(fps_seconds=0.2, ack_frames=2, step_timeout=0.6, quiet_s=0.2, headless=True,
-                          start_timeout=3.0, allow_device_writes=True, backlight_level=80, **kw)
-    return DevTest(opts, ScriptedPrompter(acts, delay=0.05), str(tmp_path),
+def _headless(tmp_path, state, acts, hid, delay=0.05, **kw):
+    o = {"fps_seconds": 0.2, "ack_frames": 2, "step_timeout": 0.6, "quiet_s": 0.2, "headless": True,
+         "start_timeout": 3.0, "allow_device_writes": True, "backlight_level": 80, **kw}
+    return DevTest(DevTestOptions(**o), ScriptedPrompter(acts, delay=delay), str(tmp_path),
                    find_ports=lambda: ["/dev/mock"] if state["present"] else [],
                    open_transport=lambda p: state["dev"], hid_monitor=hid)
 
@@ -570,9 +570,13 @@ def test_step_t0_taken_before_prompt_even_if_progress_is_slow(tmp_path, monkeypa
 # ------------------------------------------------------------------ HID rule since fw 1.5.0 (HID_RULE)
 # kbd/onboard.c HOST_HID_KEYS / kbd/UI.md: on the live L1/L4 page (host ONLINE via ui.hello + heartbeats, fresh
 # frame -- which devtest itself provides) the PTT (fb16, Right Option) and the bottom-row Mac keys fb17-19
-# (Backspace/Return/Escape) only type on the Mac: the keyboard consumes their edges, no keyStateChanged.
+# (Backspace/Return/Escape) only type on the Mac: the keyboard consumes their edges, no keyStateChanged.  Ordinary
+# grid keys are forwarded only from that page, so their presses before/after a step are the live-page evidence.
 # Option-mode digits exist only while the host grants a ui.hidKeys map, which devtest never does.
+# SLOW: the user reaches the next highlighted key >= 0.45 s after a step starts (leaks are attributed to any CDC
+# event within 0.35 s, across step boundaries).
 LIVE_KEYS = ("2,1", "1,4", "2,4", "3,4", "4,4", "5,4")
+SLOW = {"delay": 0.45, "step_timeout": 1.2}
 
 
 def _tap(state, c, r, hold=0.03):
@@ -581,8 +585,13 @@ def _tap(state, c, r, hold=0.03):
     state["dev"].press(c, r, False)
 
 
-def _fw15_walk(state, hid):
-    """Device-side behaviour of a live L1 page: rows 1-3 and fb20 are CDC presses, PTT/bottom row HID only."""
+def _fw15(hid_keys=True):
+    """mk20-kbd host-page firmware; ``hid_keys``: 1.5.1 (ui.hidKeys capability = the only proof of fw >= 1.5)."""
+    return {"dev": MockDevice(ui=True, hid_keys=hid_keys), "present": True}
+
+
+def _live_walk(state, hid):
+    """Device behaviour on a live L1 page: rows 1-3 and fb20 are CDC presses, PTT/bottom row HID only."""
     return {"start": lambda: _tap(state, 4, 3),
             "key:2,1": lambda: _tap(state, 1, 0),
             "key:1,4": lambda: (hid.add("flagsChanged"), time.sleep(0.05), hid.add("flagsChanged")),
@@ -592,64 +601,165 @@ def _fw15_walk(state, hid):
             "key:5,4": lambda: _tap(state, 4, 3)}
 
 
-def test_headless_leak_allows_ptt_and_bottom_row_hid_on_live_page(tmp_path):
+def _walk(tmp_path, state, acts, hid, keys=LIVE_KEYS, **kw):
+    return _headless(tmp_path, state, acts, hid, only=("keys", "hid_leak"), key_subset=keys, **SLOW, **kw).run()
+
+
+def test_hid_rule_live_page_allows_ptt_and_bottom_row(tmp_path):
     from mk20deck.hw.devtest import HID_RULE, LEAK_NOTE
-    state = {"dev": MockDevice(ui=True, hid_keys=True), "present": True}  # fw 1.5.1: ui.hello accepted
-    hid = FakeHid()
-    rep = _headless(tmp_path, state, _fw15_walk(state, hid), hid, only=("keys", "hid_leak"),
-                    key_subset=LIVE_KEYS).run()
+    state, hid = _fw15(), FakeHid()
+    rep = _walk(tmp_path, state, _live_walk(state, hid), hid)
     s = rep["sections"]
-    assert s["getinfo"]["ui_negotiated"] and "ui.hidKeys" in s["getinfo"]["ui_capabilities"]
+    assert s["getinfo"]["ui_negotiated"] and "ui.hidKeys" in s["getinfo"]["fw_bottom_row_hid"]
     leak, keys = s["hid_leak"], s["keys"]
     assert leak["status"] == "pass", leak
     assert leak["correlated"] == leak["uncorrelated"] == 0 and leak["hid_only_keys"] == []
     assert leak["expected_hid_by_key"] == {"1,4": 2, "2,4": 1, "3,4": 1, "4,4": 1} and leak["expected_hid"] == 5
+    assert leak["unconfirmed_hid_by_key"] == leak["wrong_type_by_key"] == {}
     assert set(leak["allowed_hid"]) == {"1,4", "2,4", "3,4", "4,4"} and leak["host_pages"] and leak["live_page_seen"]
     assert leak["rule"] == HID_RULE and leak["note"] == LEAK_NOTE and "19 个非 PTT" not in leak["note"]
     # explicit per-key expectation; the consumed (HID-only) keys are not "missing"
     r = keys["results"]
     assert [k for k in LIVE_KEYS if r[k]["hid_expected"]] == ["1,4", "2,4", "3,4", "4,4"]
     assert r["2,4"]["hid_allowed"] == ["keyDown"] and r["1,4"]["hid_allowed"] == ["flagsChanged"]
-    assert r["3,4"]["hid_as_expected"] and not r["3,4"]["ok"] and "Return" in r["3,4"]["hid_label"]
-    assert "hid_allowed" not in r["2,1"] and r["2,1"]["ok"]
-    assert keys["status"] == "pass" and keys["missing"] == [] and keys["hid_only_expected"] == ["1,4", "2,4", "3,4", "4,4"]
+    assert r["3,4"]["hid_as_expected"] and not r["3,4"]["ok"] and r["3,4"]["cdc_exempt"] == "allowed"
+    assert "Return" in r["3,4"]["hid_label"] and "hid_allowed" not in r["2,1"] and r["2,1"]["ok"]
+    assert keys["status"] == "pass" and keys["missing"] == keys["unconfirmed"] == []
+    assert keys["hid_only_expected"] == ["1,4", "2,4", "3,4", "4,4"]
     # guard: devtest never grants option-mode digits, so no digit key may type during a devtest run
     assert state["dev"].hid_requests == [] and not any(q["method"] == "ui.hidKeys" for q in state["dev"].json_requests)
 
 
-def test_headless_leak_non_allowed_key_hid_still_fails_on_live_page(tmp_path):
-    state = {"dev": MockDevice(ui=True, hid_keys=True), "present": True}
-    hid = FakeHid()
-    acts = _fw15_walk(state, hid)
-    acts["key:2,1"] = lambda: (_tap(state, 1, 0), hid.add("keyDown"))  # row-1 digit typed without a grant: leak
-    acts["key:3,4"] = lambda: hid.add("systemDefined")  # wrong HID type for Return (e.g. volume): not expected
-    rep = _headless(tmp_path, state, acts, hid, only=("keys", "hid_leak"), key_subset=LIVE_KEYS).run()
-    leak, keys = rep["sections"]["hid_leak"], rep["sections"]["keys"]
+def test_hid_rule_non_allowed_key_hid_fails(tmp_path):
+    state, hid = _fw15(), FakeHid()
+    acts = _live_walk(state, hid)
+    acts["key:2,1"] = lambda: (_tap(state, 1, 0), hid.add("keyDown"))  # e.g. a row-1 digit typed without a grant
+    leak = _walk(tmp_path, state, acts, hid)["sections"]["hid_leak"]
     assert leak["status"] == "fail" and leak["correlated"] == 1 and leak["correlated_by_type"] == {"keyDown": 1}
-    assert leak["uncorrelated_by_type"] == {"systemDefined": 1} and leak["hid_only_keys"] == ["3,4"]
-    assert leak["expected_hid_by_key"] == {"1,4": 2, "2,4": 1, "4,4": 1}
+    assert leak["expected_hid_by_key"] == {"1,4": 2, "2,4": 1, "3,4": 1, "4,4": 1}
+
+
+def test_hid_rule_wrong_type_on_bottom_row_fails(tmp_path):
+    state, hid = _fw15(), FakeHid()
+    acts = _live_walk(state, hid)
+    acts["key:3,4"] = lambda: hid.add("systemDefined")  # Return key producing e.g. a volume event: not allowed
+    rep = _walk(tmp_path, state, acts, hid)
+    leak, keys = rep["sections"]["hid_leak"], rep["sections"]["keys"]
+    assert leak["status"] == "fail" and leak["wrong_type_by_key"] == {"3,4": ["systemDefined"]}
+    assert leak["correlated"] == leak["uncorrelated"] == 0 and leak["hid_only_keys"] == ["3,4"]
     assert keys["missing"] == ["3,4"] and keys["results"]["3,4"]["hid_as_expected"] is False
 
 
-def test_headless_leak_option_digit_allowed_only_when_granted(tmp_path):
-    state = {"dev": MockDevice(ui=True, hid_keys=True), "present": True}
-    hid = FakeHid()
+def test_hid_rule_cross_step_leak_is_attributed_not_exempted(tmp_path):
+    """A non-allowed key's HID that arrives (delayed) inside the next, allowed key's step is still its leak."""
+    state, hid = _fw15(), FakeHid()
+    acts = _live_walk(state, hid)
+    acts["key:5,3"] = lambda: (_tap(state, 4, 2), time.sleep(0.25), hid.add("keyDown"))  # lands in step 2,4
+    rep = _walk(tmp_path, state, acts, hid, keys=("5,3", "2,4", "5,4"))
+    leak = rep["sections"]["hid_leak"]
+    r = rep["sections"]["keys"]["results"]
+    assert r["2,4"]["window"][0] < hid.samples[0][0] < r["2,4"]["window"][1]  # really inside the allowed step
+    assert leak["status"] == "fail" and leak["correlated"] == 1, leak
+    assert leak["expected_hid_by_key"] == {"2,4": 1}  # 2,4's own Backspace, 0.45 s after the 5,3 release
+
+
+def test_hid_rule_stock_ptt_release_just_after_its_step_is_its_own(tmp_path):
+    """Stock firmware PTT: CDC edges plus Right Option; the release's flagsChanged may land after the step ended."""
+    state, hid = {"dev": MockDevice(), "present": True}, FakeHid()
+    acts = {"start": lambda: _tap(state, 4, 3),
+            "key:1,4": lambda: (hid.add("flagsChanged"), _tap(state, 0, 3), time.sleep(0.05), hid.add("flagsChanged")),
+            "key:5,4": lambda: _tap(state, 4, 3)}
+    rep = _walk(tmp_path, state, acts, hid, keys=("1,4", "5,4"))
+    leak = rep["sections"]["hid_leak"]
+    assert hid.samples[1][0] > rep["sections"]["keys"]["results"]["1,4"]["window"][1]
+    assert leak["status"] == "pass" and leak["expected_hid_by_key"] == {"1,4": 2}, leak
+
+
+@pytest.mark.parametrize("extra", ["wrong_type", "other_key"])
+def test_hid_rule_ptt_window_only_exempts_its_right_option(tmp_path, extra):
+    state, hid = _fw15(), FakeHid()
+
+    def ptt():
+        hid.add("flagsChanged")  # Right Option down
+        if extra == "wrong_type":
+            hid.add("keyDown")  # the PTT typing a character: not Right Option
+            time.sleep(0.3)
+            hid.add("flagsChanged")
+        else:
+            time.sleep(0.4)
+            _tap(state, 4, 0)
+            hid.add("keyDown")  # another key leaking while the PTT is held (its CDC edges end the step)
+
+    acts = {"start": lambda: _tap(state, 4, 3), "ptt": ptt}
+    rep = _headless(tmp_path, state, acts, hid, only=("ptt", "hid_leak"), **SLOW).run()
+    leak = rep["sections"]["hid_leak"]
+    assert leak["status"] == "fail", leak
+    if extra == "wrong_type":
+        assert leak["wrong_type_by_key"] == {"1,4": ["keyDown"]} and leak["correlated"] == 0
+        assert leak["expected_hid_by_key"] == {"1,4": 2}
+    else:
+        assert leak["correlated"] == 1 and leak["wrong_type_by_key"] == {} and leak["expected_hid_by_key"] == {"1,4": 1}
+
+
+def test_hid_rule_full_live_run_with_ptt_passes(tmp_path):
+    """A complete 1.5.x headless run on the live page: the PTT gives Right Option and no CDC event -> pass."""
+    state, hid = _fw15(), FakeHid()
+    acts = _live_walk(state, hid)
+    acts["ptt"] = lambda: (hid.add("flagsChanged"), time.sleep(0.3), hid.add("flagsChanged"))
+    acts.update({k: v for k, v in _scripted(state, 0, FakePower()).actions.items() if k.startswith("timing:")})
+    rep = _headless(tmp_path, state, acts, hid, only=("keys", "ptt", "timing", "hid_leak"), key_subset=LIVE_KEYS,
+                    **SLOW).run()
+    s = rep["sections"]
+    assert s["ptt"]["status"] == "pass" and s["ptt"]["via"] == "hid" and not s["ptt"]["cdc_observed"], s["ptt"]
+    assert s["hid_leak"]["status"] == "pass" and s["hid_leak"]["expected_hid_by_key"]["1,4"] == 4
+    assert all(v["status"] in ("pass", "skip") for v in s.values()), {k: v["status"] for k, v in s.items()}
+
+
+def test_hid_rule_ptt_without_later_evidence_is_unconfirmed(tmp_path):
+    state, hid = _fw15(), FakeHid()
+    acts = {"start": lambda: _tap(state, 4, 3), "ptt": lambda: hid.add("flagsChanged")}
+    rep = _headless(tmp_path, state, acts, hid, only=("ptt", "hid_leak"), **SLOW).run()
+    assert rep["sections"]["ptt"]["status"] == "manual" and rep["sections"]["ptt"]["via"] == "hid"
+    assert rep["sections"]["hid_leak"]["status"] == "pass"  # Right Option from the PTT is always allowed
+
+
+def test_hid_rule_bottom_row_unconfirmed_without_fw_proof(tmp_path):
+    """ui.hello without ui.hidKeys (1.4.x has no bottom-row HID, 1.5.0 looks the same): never a pass."""
+    state, hid = _fw15(hid_keys=False), FakeHid()
+    rep = _walk(tmp_path, state, _live_walk(state, hid), hid)
+    leak, keys = rep["sections"]["hid_leak"], rep["sections"]["keys"]
+    assert rep["sections"]["getinfo"]["fw_bottom_row_hid"] is None
+    assert leak["status"] == "manual" and leak["needs_manual_confirmation"]
+    assert leak["unconfirmed_hid_by_key"] == {"2,4": 1, "3,4": 1, "4,4": 1} and leak["expected_hid_by_key"] == {"1,4": 2}
+    assert keys["status"] == "manual" and keys["unconfirmed"] == ["2,4", "3,4", "4,4"]
+    assert keys["hid_only_expected"] == ["1,4"]
+
+
+def test_hid_rule_bottom_row_unconfirmed_without_live_page_evidence(tmp_path):
+    """No ordinary key event after the step: the page may have left L1/L4 (non-live: keys act on-board)."""
+    state, hid = _fw15(), FakeHid()
+    rep = _walk(tmp_path, state, _live_walk(state, hid), hid, keys=("2,1", "2,4"))
+    leak, keys = rep["sections"]["hid_leak"], rep["sections"]["keys"]
+    assert leak["status"] == "manual" and leak["unconfirmed_hid_by_key"] == {"2,4": 1}
+    assert keys["status"] == "manual" and keys["unconfirmed"] == ["2,4"] and keys["results"]["2,4"]["cdc_exempt"] == "unconfirmed"
+
+
+def test_hid_rule_option_digit_allowed_only_when_granted(tmp_path):
+    state, hid = _fw15(), FakeHid()
     acts = {"start": lambda: _tap(state, 4, 3),
             "key:1,1": lambda: (state["dev"].press(0, 0, True, hid=0x1E), hid.add("keyDown"),
                                 time.sleep(0.03), state["dev"].press(0, 0, False)),
             "key:2,1": lambda: (_tap(state, 1, 0), hid.add("keyDown"))}
-    dt = _headless(tmp_path, state, acts, hid, only=("keys", "hid_leak"), key_subset=("1,1", "2,1"))
+    dt = _headless(tmp_path, state, acts, hid, only=("keys", "hid_leak"), key_subset=("1,1", "2,1"), **SLOW)
     dt.granted_option_keys = frozenset({(1, 1)})  # as if this host had mapped fb1 -> "1" via ui.hidKeys
-    rep = dt.run()
-    leak = rep["sections"]["hid_leak"]
+    leak = dt.run()["sections"]["hid_leak"]
     assert leak["allowed_hid"]["1,1"] == "主机授予的选项数字键" and "2,1" not in leak["allowed_hid"]
     assert leak["expected_hid_by_key"] == {"1,1": 1}
     assert leak["status"] == "fail" and leak["correlated"] == 1  # 2,1 was not granted
 
 
-def test_headless_leak_knob_hid_still_fails_on_live_page(tmp_path):
-    state = {"dev": MockDevice(ui=True, hid_keys=True), "present": True}
-    hid = FakeHid()
+def test_hid_rule_knob_hid_still_fails_on_live_page(tmp_path):
+    state, hid = _fw15(), FakeHid()
     acts = {"start": lambda: _tap(state, 1, 1),
             "knob:K1:cw": lambda: [(_tap(state, 7, 0, 0.01), hid.add("systemDefined")) for _ in range(3)]}
     rep = _headless(tmp_path, state, acts, hid, only=("knobs", "hid_leak")).run()
@@ -659,14 +769,13 @@ def test_headless_leak_knob_hid_still_fails_on_live_page(tmp_path):
     assert leak["knob_steps_with_hid"] == ["knob:K1:cw"]
 
 
-def test_headless_leak_bottom_row_hid_is_a_leak_without_host_pages(tmp_path):
+def test_hid_rule_bottom_row_is_a_leak_without_host_pages(tmp_path):
     """Stock KD / legacy firmware (no ui.hello, no live L1/L4 page): only the PTT may produce HID."""
-    state = {"dev": MockDevice(), "present": True}
-    hid = FakeHid()
+    state, hid = {"dev": MockDevice(), "present": True}, FakeHid()
     acts = {"start": lambda: _tap(state, 4, 3),
             "key:1,4": lambda: (_tap(state, 0, 3), hid.add("flagsChanged")),
             "key:2,4": lambda: (_tap(state, 1, 3), hid.add("keyDown"))}
-    rep = _headless(tmp_path, state, acts, hid, only=("keys", "hid_leak"), key_subset=("1,4", "2,4")).run()
+    rep = _walk(tmp_path, state, acts, hid, keys=("1,4", "2,4"))
     s = rep["sections"]
     leak = s["hid_leak"]
     assert not s["getinfo"]["ui_negotiated"] and not leak["host_pages"]
