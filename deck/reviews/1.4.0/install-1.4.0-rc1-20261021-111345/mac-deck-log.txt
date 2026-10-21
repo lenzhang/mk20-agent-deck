@@ -1,0 +1,7 @@
+2026-10-21 10:02:21,854 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 10:02:26,147 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 10:02:26,147 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 10:02:26,149 INFO mk20deck.supervisor: 背光 80
+2026-10-21 10:02:27,353 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 10:03:41,545 INFO mk20deck.daemon: power event: display_sleep
+2026-10-21 11:14:30,094 WARNING mk20deck.link: transport read failed: [Errno 49] Can't assign requested address

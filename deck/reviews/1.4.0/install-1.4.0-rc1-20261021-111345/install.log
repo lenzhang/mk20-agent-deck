@@ -1,0 +1,7 @@
+release 1.4.0 sha256 b3071a20001142c0f1dd0e04b361ea1b3cb5639897f7f466a67aacb2f71b1e04
+/Users/dev/mk20-backup/releases/mk20-fw-1.4.0.tar: 1 file pushed, 0 skipped. 10.0 MB/s (2713600 bytes in 0.258s)
+ok: 1.4.0 installed; ok: 1.4.0 pending; reboot to start probation
+rc=0
+reboot requested (watcher -> hardreset, WDT reset in ~30 s)
+current=A 19 1.4.0 good=1.4.0 pending= attempts= active=1.4.0 last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)
+OK: 1.4.0 confirmed good
