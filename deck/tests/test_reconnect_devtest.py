@@ -565,3 +565,137 @@ def test_step_t0_taken_before_prompt_even_if_progress_is_slow(tmp_path, monkeypa
     monkeypatch.setattr(dt, "_progress", lambda *a, **k: time.sleep(0.15))
     t0 = dt._step("key:2,1", "x")
     assert fired and t0 <= fired[0]
+
+
+# ------------------------------------------------------------------ HID rule since fw 1.5.0 (HID_RULE)
+# kbd/onboard.c HOST_HID_KEYS / kbd/UI.md: on the live L1/L4 page (host ONLINE via ui.hello + heartbeats, fresh
+# frame -- which devtest itself provides) the PTT (fb16, Right Option) and the bottom-row Mac keys fb17-19
+# (Backspace/Return/Escape) only type on the Mac: the keyboard consumes their edges, no keyStateChanged.
+# Option-mode digits exist only while the host grants a ui.hidKeys map, which devtest never does.
+LIVE_KEYS = ("2,1", "1,4", "2,4", "3,4", "4,4", "5,4")
+
+
+def _tap(state, c, r, hold=0.03):
+    state["dev"].press(c, r, True)
+    time.sleep(hold)
+    state["dev"].press(c, r, False)
+
+
+def _fw15_walk(state, hid):
+    """Device-side behaviour of a live L1 page: rows 1-3 and fb20 are CDC presses, PTT/bottom row HID only."""
+    return {"start": lambda: _tap(state, 4, 3),
+            "key:2,1": lambda: _tap(state, 1, 0),
+            "key:1,4": lambda: (hid.add("flagsChanged"), time.sleep(0.05), hid.add("flagsChanged")),
+            "key:2,4": lambda: hid.add("keyDown"),
+            "key:3,4": lambda: hid.add("keyDown"),
+            "key:4,4": lambda: hid.add("keyDown"),
+            "key:5,4": lambda: _tap(state, 4, 3)}
+
+
+def test_headless_leak_allows_ptt_and_bottom_row_hid_on_live_page(tmp_path):
+    from mk20deck.hw.devtest import HID_RULE, LEAK_NOTE
+    state = {"dev": MockDevice(ui=True, hid_keys=True), "present": True}  # fw 1.5.1: ui.hello accepted
+    hid = FakeHid()
+    rep = _headless(tmp_path, state, _fw15_walk(state, hid), hid, only=("keys", "hid_leak"),
+                    key_subset=LIVE_KEYS).run()
+    s = rep["sections"]
+    assert s["getinfo"]["ui_negotiated"] and "ui.hidKeys" in s["getinfo"]["ui_capabilities"]
+    leak, keys = s["hid_leak"], s["keys"]
+    assert leak["status"] == "pass", leak
+    assert leak["correlated"] == leak["uncorrelated"] == 0 and leak["hid_only_keys"] == []
+    assert leak["expected_hid_by_key"] == {"1,4": 2, "2,4": 1, "3,4": 1, "4,4": 1} and leak["expected_hid"] == 5
+    assert set(leak["allowed_hid"]) == {"1,4", "2,4", "3,4", "4,4"} and leak["host_pages"] and leak["live_page_seen"]
+    assert leak["rule"] == HID_RULE and leak["note"] == LEAK_NOTE and "19 个非 PTT" not in leak["note"]
+    # explicit per-key expectation; the consumed (HID-only) keys are not "missing"
+    r = keys["results"]
+    assert [k for k in LIVE_KEYS if r[k]["hid_expected"]] == ["1,4", "2,4", "3,4", "4,4"]
+    assert r["2,4"]["hid_allowed"] == ["keyDown"] and r["1,4"]["hid_allowed"] == ["flagsChanged"]
+    assert r["3,4"]["hid_as_expected"] and not r["3,4"]["ok"] and "Return" in r["3,4"]["hid_label"]
+    assert "hid_allowed" not in r["2,1"] and r["2,1"]["ok"]
+    assert keys["status"] == "pass" and keys["missing"] == [] and keys["hid_only_expected"] == ["1,4", "2,4", "3,4", "4,4"]
+    # guard: devtest never grants option-mode digits, so no digit key may type during a devtest run
+    assert state["dev"].hid_requests == [] and not any(q["method"] == "ui.hidKeys" for q in state["dev"].json_requests)
+
+
+def test_headless_leak_non_allowed_key_hid_still_fails_on_live_page(tmp_path):
+    state = {"dev": MockDevice(ui=True, hid_keys=True), "present": True}
+    hid = FakeHid()
+    acts = _fw15_walk(state, hid)
+    acts["key:2,1"] = lambda: (_tap(state, 1, 0), hid.add("keyDown"))  # row-1 digit typed without a grant: leak
+    acts["key:3,4"] = lambda: hid.add("systemDefined")  # wrong HID type for Return (e.g. volume): not expected
+    rep = _headless(tmp_path, state, acts, hid, only=("keys", "hid_leak"), key_subset=LIVE_KEYS).run()
+    leak, keys = rep["sections"]["hid_leak"], rep["sections"]["keys"]
+    assert leak["status"] == "fail" and leak["correlated"] == 1 and leak["correlated_by_type"] == {"keyDown": 1}
+    assert leak["uncorrelated_by_type"] == {"systemDefined": 1} and leak["hid_only_keys"] == ["3,4"]
+    assert leak["expected_hid_by_key"] == {"1,4": 2, "2,4": 1, "4,4": 1}
+    assert keys["missing"] == ["3,4"] and keys["results"]["3,4"]["hid_as_expected"] is False
+
+
+def test_headless_leak_option_digit_allowed_only_when_granted(tmp_path):
+    state = {"dev": MockDevice(ui=True, hid_keys=True), "present": True}
+    hid = FakeHid()
+    acts = {"start": lambda: _tap(state, 4, 3),
+            "key:1,1": lambda: (state["dev"].press(0, 0, True, hid=0x1E), hid.add("keyDown"),
+                                time.sleep(0.03), state["dev"].press(0, 0, False)),
+            "key:2,1": lambda: (_tap(state, 1, 0), hid.add("keyDown"))}
+    dt = _headless(tmp_path, state, acts, hid, only=("keys", "hid_leak"), key_subset=("1,1", "2,1"))
+    dt.granted_option_keys = frozenset({(1, 1)})  # as if this host had mapped fb1 -> "1" via ui.hidKeys
+    rep = dt.run()
+    leak = rep["sections"]["hid_leak"]
+    assert leak["allowed_hid"]["1,1"] == "主机授予的选项数字键" and "2,1" not in leak["allowed_hid"]
+    assert leak["expected_hid_by_key"] == {"1,1": 1}
+    assert leak["status"] == "fail" and leak["correlated"] == 1  # 2,1 was not granted
+
+
+def test_headless_leak_knob_hid_still_fails_on_live_page(tmp_path):
+    state = {"dev": MockDevice(ui=True, hid_keys=True), "present": True}
+    hid = FakeHid()
+    acts = {"start": lambda: _tap(state, 1, 1),
+            "knob:K1:cw": lambda: [(_tap(state, 7, 0, 0.01), hid.add("systemDefined")) for _ in range(3)]}
+    rep = _headless(tmp_path, state, acts, hid, only=("knobs", "hid_leak")).run()
+    leak = rep["sections"]["hid_leak"]
+    assert leak["host_pages"] and "2,4" in leak["allowed_hid"]
+    assert leak["status"] == "fail" and leak["correlated"] == 3 and leak["expected_hid"] == 0
+    assert leak["knob_steps_with_hid"] == ["knob:K1:cw"]
+
+
+def test_headless_leak_bottom_row_hid_is_a_leak_without_host_pages(tmp_path):
+    """Stock KD / legacy firmware (no ui.hello, no live L1/L4 page): only the PTT may produce HID."""
+    state = {"dev": MockDevice(), "present": True}
+    hid = FakeHid()
+    acts = {"start": lambda: _tap(state, 4, 3),
+            "key:1,4": lambda: (_tap(state, 0, 3), hid.add("flagsChanged")),
+            "key:2,4": lambda: (_tap(state, 1, 3), hid.add("keyDown"))}
+    rep = _headless(tmp_path, state, acts, hid, only=("keys", "hid_leak"), key_subset=("1,4", "2,4")).run()
+    s = rep["sections"]
+    leak = s["hid_leak"]
+    assert not s["getinfo"]["ui_negotiated"] and not leak["host_pages"]
+    assert leak["allowed_hid"] == {"1,4": "PTT 右 Option"} and leak["expected_hid_by_key"] == {"1,4": 1}
+    assert leak["status"] == "fail" and leak["correlated"] == 1 and leak["correlated_by_type"] == {"keyDown": 1}
+    assert s["keys"]["results"]["2,4"]["hid_expected"] is False and s["keys"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("ui", [True, False])
+def test_interactive_leak_question_states_the_rule(tmp_path, ui):
+    from mk20deck.hw.devtest import LEAK_NOTE
+    asked = {}
+
+    class Ask(ScriptedPrompter):
+        def ask(self, step, question, choices="yn"):
+            asked[step] = question
+            return super().ask(step, question, choices)
+
+        def wait_enter(self, step, text):
+            asked[step] = text
+            return super().wait_enter(step, text)
+
+    state = {"dev": MockDevice(ui=ui, hid_keys=ui), "present": True}
+    opts = DevTestOptions(fps_seconds=0.2, ack_frames=2, step_timeout=0.3, only=("keys", "hid_leak"),
+                          key_subset=("2,4",))
+    rep = DevTest(opts, Ask({"key:2,4": lambda: _tap(state, 1, 3)}, answers={"hid_leak": "n"}), str(tmp_path),
+                  find_ports=lambda: ["/dev/mock"], open_transport=lambda p: state["dev"]).run()
+    leak = rep["sections"]["hid_leak"]
+    assert leak["status"] == "pass" and leak["note"] == LEAK_NOTE and leak["host_pages"] is ui
+    assert "PTT（右 Option）" in asked["hid_leak"]
+    assert ("底排 ⌫/⏎/Esc" in asked["hid_leak"]) is ui and ("底排 ⌫/⏎/Esc" in asked["keys_intro"]) is ui
+    assert ("2,4" in leak["allowed_hid"]) is ui and rep["sections"]["keys"]["results"]["2,4"]["hid_expected"] is ui

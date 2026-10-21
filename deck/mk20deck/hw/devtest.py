@@ -27,6 +27,13 @@ from ..transport import USB_IDS
 
 PTT_DOC = (1, 4)
 TIMING_DOC = (3, 2)
+# fw >= 1.5.0 (kbd/UI.md "L1/L4 bottom row", kbd/onboard.c HOST_HID_KEYS fb17-19): on the live L1/L4 page the
+# keyboard itself types these as USB HID while held; the edges are consumed (no keyStateChanged).  Only firmware
+# with host pages (accepted ui.hello) has that page; stock KD keeps the old rule (only the PTT may produce HID).
+# Labels are plain words: they go on the device sub-screen, whose CJK fonts have no ⌫/⏎/✗ glyphs.
+HOST_HID_DOCS = {(2, 4): "Backspace", (3, 4): "Return", (4, 4): "Escape"}
+HID_RULE = "PTT 与底排 ⌫/⏎/Esc（L1/L4）以及主机授予的选项数字键可产生 HID；其余键与两旋钮不得产生 HID"
+LEAK_NOTE = f"P0 硬门槛：{HID_RULE}；泄漏→按 VIA KC_NO→现有配置→hidutil 顺序处理"
 
 
 # ------------------------------------------------------------------ prompting
@@ -265,6 +272,10 @@ class DevTest:
     done_keys: set = field(default_factory=set)
     progress_path: str | None = None
     step_log: list = field(default_factory=list)
+    host_pages: bool = False  # ui.hello accepted (mk20-kbd): live L1/L4 page with its bottom-row Mac keys
+    # Option-mode digit keys (document col,row) this host granted via ui.hidKeys.  devtest itself never sends
+    # ui.hidKeys (and every ui.hello clears a map), so this stays empty: digit HID from those keys is a leak.
+    granted_option_keys: frozenset = frozenset()
 
     # -------------------------------------------------- plumbing
     def _sec(self, name: str, status: str, **kw) -> dict:
@@ -326,6 +337,31 @@ class DevTest:
         return [x for x in drop_mouse_aux(self.hid_monitor.between(t0, t1 if t1 is not None else self.clock() + 1))
                 if x[1] in LEAK_TYPES]
 
+    # -------------------------------------------------- HID rule (HID_RULE)
+    def hid_expectation(self, doc) -> tuple[tuple[str, ...], str] | None:
+        """(HID event types this key may produce, label) or None: any HID from it is a leak."""
+        doc = tuple(doc) if doc is not None else None
+        if doc == PTT_DOC:
+            return ("flagsChanged",), "PTT 右 Option"
+        if self.host_pages and doc in HOST_HID_DOCS:
+            return ("keyDown",), f"底排 {HOST_HID_DOCS[doc]}（L1/L4）"
+        if doc in self.granted_option_keys:
+            return ("keyDown",), "主机授予的选项数字键"
+        return None
+
+    def allowed_hid(self) -> dict:
+        """Document key -> label of every key that may produce HID in this run (report field)."""
+        docs = [PTT_DOC, *HOST_HID_DOCS, *sorted(self.granted_option_keys)]
+        return {f"{d[0]},{d[1]}": e[1] for d in docs if (e := self.hid_expectation(d))}
+
+    def _allowed_text(self) -> str:
+        parts = ["PTT（右 Option）"]
+        if self.host_pages:
+            parts.append("底排 ⌫/⏎/Esc（L1/L4 上输入 Backspace/Return/Escape）")
+        if self.granted_option_keys:
+            parts.append("主机授予的选项数字键")
+        return "、".join(parts)
+
     def connect(self) -> DeviceLayout:
         ports = [self.opts.port] if self.opts.port != "auto" else self.find_ports()
         if not ports:
@@ -335,6 +371,7 @@ class DevTest:
         self.link = DeviceLink(tr, on_json=self.rec.add)
         self.link.start()
         lay = self.link.handshake(None)
+        self.host_pages = bool(getattr(self.link, "ui_negotiated", False))
         # Host mode starts with backlight 0 (dark keys): re-apply on every (re)connect.
         if self.opts.backlight_level is not None and self.opts.allow_device_writes:
             ack = self.link.call(P.set_backlight(self.opts.backlight_level))
@@ -477,7 +514,9 @@ class DevTest:
                   key_rects=len(keys), fw_base_inferred=lay.extra.get("fw_base_inferred"),
                   cols=sorted({r.col for r in keys}), rows=sorted({r.row for r in keys}),
                   subscreen=[sub.x, sub.y, sub.w, sub.h] if sub else None, model=lay.model,
-                  version=lay.extra.get("deviceVersion"), problems=problems, raw=raw)
+                  version=lay.extra.get("deviceVersion"), problems=problems, raw=raw,
+                  ui_negotiated=self.host_pages,
+                  ui_capabilities=getattr(self.link, "ui_hello_result", {}).get("capabilities"))
 
     def t_methods(self) -> None:
         """Ask the firmware for its method list via a deliberately unknown method (no side effects)."""
@@ -571,8 +610,10 @@ class DevTest:
                   ack=asdict(ack) if ack else None, note="原背光值不可读，结束后请手动调回")
 
     def _press_release(self, step: str, text: str, highlight) -> dict:
+        exp = self.hid_expectation(highlight)
         if self.remaining() <= 0:
-            return {"ok": False, "fw": None, "hold_ms": None, "skipped": "overall timeout", "raw": []}
+            return {"ok": False, "fw": None, "hold_ms": None, "skipped": "overall timeout", "raw": [],
+                    "hid_expected": exp is not None}
         t0 = self._step(step, text, highlight)
 
         def done(xs):
@@ -591,14 +632,19 @@ class DevTest:
         hid = self._hid_since(t0)
         out = {"ok": got, "fw": list(down[1:3]) if down else None,
                "hold_ms": _ms(up[0] - down[0]) if down and up else None,
-               "raw": [o for _, o in _events(xs)][:6]}
+               "raw": [o for _, o in _events(xs)][:6], "hid_expected": exp is not None}
+        if exp is not None:
+            # This key may type on the Mac (HID_RULE): its own HID of these types in this step is not a leak.
+            out.update(hid_allowed=list(exp[0]), hid_label=exp[1], window=[t0, self.clock()])
         if self.opts.headless:
             out["hid_activity"] = sorted({n for _, n in hid})
+            if exp is not None and hid:
+                out["hid_as_expected"] = set(out["hid_activity"]) <= set(exp[0])
             if not got:
                 out["timed_out_s"] = round(tmo, 1)
                 if hid:
                     out["hid_only"] = True  # recorded, not used to advance
-        if got and highlight is not None:
+        if (got or out.get("hid_as_expected")) and highlight is not None:
             self.done_keys.add(tuple(highlight))
         return out
 
@@ -620,20 +666,27 @@ class DevTest:
             self._ensure_gate()
         else:
             self.prompter.wait_enter("keys_intro", "按键测试：请先打开并聚焦一个空白文本窗口（用于观察 HID 泄漏），"
-                                     "然后按设备副屏/黄色高亮提示逐个按键；无需回到终端")
+                                     f"然后按设备副屏/黄色高亮提示逐个按键；无需回到终端。可产生 HID（属预期）：{self._allowed_text()}；"
+                                     "其余键与两旋钮不得产生 HID")
         results = {}
         for row in range(1, 5):
             for col in range(1, 6):
                 if self.opts.key_subset and f"{col},{row}" not in self.opts.key_subset:
                     continue
+                exp = self.hid_expectation((col, row))
                 results[f"{col},{row}"] = self._press_release(
                     f"key:{col},{row}", f"按下并松开 黄色高亮键（第{row}行 第{col}列）"
+                    + (f"（预期 HID：{exp[1]}）" if exp else "")
                     + (f"；不按则 {self.opts.step_timeout:.0f} 秒后自动跳过" if self.opts.headless else ""), (col, row))
+        # On a live L1/L4 page the PTT and the bottom-row Mac keys only type (their edges are consumed, no CDC
+        # event): a step that saw just its own expected HID is that key working, not a missing key.
+        hid_keys = [k for k, r in results.items() if not r["ok"] and r.get("hid_as_expected")]
+        missing = [k for k, r in results.items() if not r["ok"] and k not in hid_keys]
         kc_form = {k: r["fw"][1] for k, r in results.items() if r["fw"] and r["fw"][0] == "kc"}
         if kc_form:
-            missing = [k for k, r in results.items() if not r["ok"]]
             dup = len(set(kc_form.values())) != len(kc_form)
             self._sec("keys", "warn" if missing or dup else "pass", event_form="keycode", missing=missing,
+                      hid_only_expected=hid_keys,
                       duplicate_keycodes=dup, getinfo_fw_base=self.link.layout.fw_base,
                       suggested_keycode_map={f"0x{v:04x}": k for k, v in kc_form.items()},
                       note="键事件只带 keyCode：同 keycode 的键无法区分（KC_NO 净化会让所有键变 0）" if dup else "",
@@ -641,7 +694,6 @@ class DevTest:
             return
         offs = {(r["fw"][0] - (int(k.split(',')[0]) - 1), r["fw"][1] - (int(k.split(',')[1]) - 1))
                 for k, r in results.items() if r["fw"]}
-        missing = [k for k, r in results.items() if not r["ok"]]
         swapped = all(r["fw"] and r["fw"][0] - int(k.split(',')[1]) == r["fw"][1] - int(k.split(',')[0])
                       for k, r in results.items() if r["fw"]) and len(offs) > 1
         base = None
@@ -651,7 +703,7 @@ class DevTest:
         lb = self.link.layout.fw_base
         st = "pass" if not missing and base is not None and base == lb else ("fail" if missing else "warn")
         self._sec("keys", st, event_fw_base=base, getinfo_fw_base=lb, offsets=sorted(offs), missing=missing,
-                  transposed_suspect=swapped, results=results)
+                  hid_only_expected=hid_keys, transposed_suspect=swapped, results=results)
 
     def t_knobs(self) -> None:
         if not self.opts.knobs or not self._guided("knobs"):
@@ -693,9 +745,10 @@ class DevTest:
         if self.opts.headless:
             self._leak_auto()
             return
-        a = self.prompter.ask("hid_leak", "刚才按键/转旋钮时，Mac 上是否出现了输入字符、音量变化或快捷键？(y=有泄漏)")
-        self._sec("hid_leak", {"y": "fail", "n": "pass"}.get(a, "skip"), answer=a,
-                  note="P0 硬门槛：19 个非 PTT 键与两旋钮不得产生副作用 HID；泄漏→按 VIA KC_NO→现有配置→hidutil 顺序处理")
+        a = self.prompter.ask("hid_leak", f"刚才按键/转旋钮时，除{self._allowed_text()}外，"
+                                          "Mac 上是否出现了输入字符、音量变化或快捷键？(y=有泄漏)")
+        self._sec("hid_leak", {"y": "fail", "n": "pass"}.get(a, "skip"), answer=a, rule=HID_RULE,
+                  allowed_hid=self.allowed_hid(), host_pages=self.host_pages, note=LEAK_NOTE)
 
     def _guided_window(self) -> tuple[float, float] | None:
         g = self.report.get("start_gate")
@@ -704,26 +757,64 @@ class DevTest:
         ts = [t for t, _ in _events(self.rec.items)]
         return (min(ts) - 1.0, self.clock()) if ts else None
 
+    def _doc_key(self, a, b) -> str:
+        if a == "kc" or self.link is None:
+            return f"fw:{a},{b}"  # not mappable to a document key: never one of the allowed keys
+        d = self.link.layout.fw_to_doc(a, b)
+        return f"{d[0]},{d[1]}"
+
+    def _split_expected(self, samples: list, key_evs: list) -> tuple[dict, list]:
+        """HID_RULE: split HID samples into allowed keys' own HID and the rest (leak candidates).
+
+        A sample of a type in key k's ``hid_allowed`` is k's own when it falls in k's guided step and no other key
+        was pressed in that step within ±0.35 s of it (on a live L1/L4 page k sends no CDC event at all), or when it
+        is within ±0.35 s of one of k's own CDC events in that step and closer to it than to any other key's press
+        (stock-firmware PTT, option-mode digit).  Returns ({key: n expected}, remaining samples)."""
+        wins = [(r["window"][0], r["window"][1], set(r["hid_allowed"]), k)
+                for k, r in self.report["sections"].get("keys", {}).get("results", {}).items()
+                if r.get("hid_expected") and r.get("window")]
+        evs = [(t, self._doc_key(a, b), p) for t, a, b, p in key_evs]
+
+        def owns(t: float, k: str, t0: float, t1: float, w: float = 0.35) -> bool:
+            others = [te for te, d, p in evs if p and d != k]
+            if t0 <= t <= t1 and not any(t0 <= te <= t1 and abs(t - te) <= w for te in others):
+                return True
+            own = min((abs(t - te) for te, d, _ in evs if d == k and t0 <= te <= t1), default=None)
+            return own is not None and own <= w and all(abs(t - te) > own for te in others)
+
+        expected: dict = {}
+        rest = []
+        for t, n in samples:
+            k = next((k for t0, t1, types, k in wins if n in types and owns(t, k, t0, t1)), None)
+            if k is None:
+                rest.append((t, n))
+            else:
+                expected[k] = expected.get(k, 0) + 1
+        return expected, rest
+
     def _leak_auto(self) -> None:
-        note = "P0 硬门槛：19 个非 PTT 键与两旋钮不得产生副作用 HID；泄漏→按 VIA KC_NO→现有配置→hidutil 顺序处理"
+        note = LEAK_NOTE
         if self.hid_monitor is None:
             self._sec("hid_leak", "manual", needs_manual_confirmation=True, reason="无 HID 监视器（非 macOS？）",
-                      note=note)
+                      rule=HID_RULE, allowed_hid=self.allowed_hid(), note=note)
             return
         from .hidwatch import correlate
         win = self._guided_window()
         if win is None:
             self._sec("hid_leak", "manual", needs_manual_confirmation=True, monitor=self.hid_monitor.info(),
-                      reason="引导期间没有收到任何设备按键事件，无法关联", note=note)
+                      reason="引导期间没有收到任何设备按键事件，无法关联", rule=HID_RULE,
+                      allowed_hid=self.allowed_hid(), note=note)
             return
         ptt = self.report["sections"].get("ptt", {}).get("window")
-        key_times = [t for t, *_ in _keys(self.rec.since(win[0]))]
+        key_evs = _keys(self.rec.since(win[0]))
+        key_times = [t for t, *_ in key_evs]
         from .hidwatch import drop_mouse_aux
         samples = [x for x in drop_mouse_aux(self.hid_monitor.between(*win)) if x[1] in LEAK_TYPES]
         non_ptt = [x for x in samples if not (ptt and ptt[0] - 0.3 <= x[0] <= ptt[1] + 0.3)]
-        c = correlate(non_ptt, key_times)
+        expected, rest = self._split_expected(non_ptt, key_evs)
+        c = correlate(rest, key_times)
         hid_only = [k for k, r in self.report["sections"].get("keys", {}).get("results", {}).items()
-                    if r.get("hid_only")]
+                    if r.get("hid_only") and not r.get("hid_as_expected")]
         knob_hid = [k for k, r in self.report["sections"].get("knobs", {}).get("results", {}).items()
                     if r.get("hid_activity")]
         if c["correlated"]:
@@ -732,9 +823,15 @@ class DevTest:
             st = "warn"  # activity not tied to an MK20 press (Mac keyboard/mouse?) — check samples
         else:
             st = "pass"
+        # With host pages, grid key CDC events are only forwarded from the live L1/L4 page (kbd/onboard.c).
+        grid = {f"{x},{y}" for x in range(1, 6) for y in range(1, 5)}
+        live = self.host_pages and bool(grid & {self._doc_key(a, b) for _, a, b, _ in key_evs})
         self._sec("hid_leak", st, auto=True, monitor=self.hid_monitor.info(), guided_window_s=round(win[1] - win[0], 1),
                   **c, hid_only_keys=hid_only, knob_steps_with_hid=knob_hid,
-                  limitation="只能看到“有无 HID 事件及类型”，看不到字符与来源设备；与 MK20 键事件时间相关(±0.35 s)即判泄漏；"
+                  expected_hid=sum(expected.values()), expected_hid_by_key=expected,
+                  rule=HID_RULE, allowed_hid=self.allowed_hid(), host_pages=self.host_pages, live_page_seen=live,
+                  limitation="只能看到“有无 HID 事件及类型”，看不到字符与来源设备；允许键（allowed_hid）在自己的引导步骤内"
+                             "产生的预期类型 HID 不计；其余与 MK20 键事件时间相关(±0.35 s)即判泄漏；"
                              "期间若有人用 Mac 键盘会产生不相关样本(→warn)",
                   note=note)
 
@@ -991,7 +1088,7 @@ def _brief(name: str, s: dict) -> str:
         if name == "via":
             return f"VIA v{s['protocol_version']} {s['layers']} 层 {s['matrix']['rows']}×{s['matrix']['cols']}，备份 {s['backup']}"
         if name == "hid_leak":
-            return s.get("note", "")[:60]
+            return s.get("note", "")[:80]
     except (KeyError, TypeError, ValueError):
         pass
     return ""
