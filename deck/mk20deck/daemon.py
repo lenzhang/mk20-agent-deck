@@ -29,18 +29,24 @@ _BG_POLL_LOCK = threading.Lock()
 OPEN_SETTINGS_EVENT = {"method": "ui.openSettings"}  # mk20-kbd 网页设置 key, exactly this (no payload)
 
 
+def _shown(url: str) -> str:
+    """For logs: never the one-time token of an arrange link (everything after ``/auth?`` is dropped)."""
+    return url.split("/auth?", 1)[0] + "/auth?…" if "/auth?" in url else url
+
+
 def open_url(url: str) -> bool:
-    """Open ``url`` in the Mac's default browser (``open``); elsewhere only log. Never raises."""
+    """Open ``url`` (or a file such as a ``.webloc``) in the Mac's default browser (``open``); elsewhere only
+    log. Never raises."""
     if sys.platform != "darwin":
-        log.info("web settings %s: not on macOS, not opening", url)
+        log.info("web settings %s: not on macOS, not opening", _shown(url))
         return False
     try:
         r = subprocess.run(["open", url], timeout=5, capture_output=True)
     except Exception as e:  # noqa: BLE001 — timeout / missing binary: the deck keeps running
-        log.warning("open %s failed: %s", url, e)
+        log.warning("open %s failed: %s", _shown(url), type(e).__name__)
         return False
     if r.returncode != 0:
-        log.warning("open %s exited %s", url, r.returncode)
+        log.warning("open %s exited %s", _shown(url), r.returncode)
     return r.returncode == 0
 
 

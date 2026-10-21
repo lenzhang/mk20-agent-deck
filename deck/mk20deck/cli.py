@@ -81,16 +81,24 @@ def cmd_run(args) -> int:
 
 def cmd_arrange(args, opener=None) -> int:
     """Open the 会话安排 page of the running daemon: a one-time link (60 s, single use) obtained over the
-    daemon's 0600 unix socket, so only this user's processes with filesystem access can open the page."""
-    from .webauth import default_socket_path, request_url
+    daemon's 0600 unix socket, so only this user's processes with filesystem access can open the page.
+
+    The token never goes into an argv (other users can read argv with ``ps``): the daemon writes the link to
+    a 0600 file in its 0700 run directory (``.webloc`` on macOS) and only that file path is handed to ``open``;
+    the daemon deletes the file once the token is redeemed or expires."""
+    from .webauth import default_socket_path, request_link_file, request_url
     from .webui import probe
     cfg = load_config(args.config)
     port = cfg.arrange_port
     if not port:
         print("会话安排网页已关闭：config.toml 里 [web] arrange_port = 0")
         return 1
+    sock = getattr(args, "socket", None) or default_socket_path()
     try:
-        url = request_url(getattr(args, "socket", None) or default_socket_path())
+        if args.print_only:
+            url = request_url(sock)
+        else:
+            link, page = request_link_file(sock)
     except (OSError, ValueError) as e:
         st = probe(port)
         why = ("端口被其他程序占用（改 [web] arrange_port）" if st == "other"
@@ -100,16 +108,16 @@ def cmd_arrange(args, opener=None) -> int:
         log.debug("arrange: %s", e)
         return 1
     if args.print_only:
-        print(url)  # one-time link: valid for 60 s, works once
+        print(url)  # one-time link on this terminal only: valid for 60 s, works once
         return 0
-    print(url.split("/auth?", 1)[0] + "/  （已用一次性链接在浏览器打开）")
+    print(f"{page or 'http://127.0.0.1:%d/' % port}  （已在浏览器打开；一次性授权链接只经过本机 0600 文件）")
     if opener is None:
         if sys.platform == "darwin":
-            from .daemon import open_url as opener
+            from .daemon import open_url as opener  # `open <file>.webloc`: argv holds the path only
         else:
             import webbrowser
-            opener = webbrowser.open
-    opener(url)
+            opener = lambda p: webbrowser.open("file://" + p)  # noqa: E731
+    opener(link)
     return 0
 
 
