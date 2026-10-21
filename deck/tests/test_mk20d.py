@@ -443,7 +443,9 @@ def test_boot_run_tmpfs_failure_is_warn_and_still_confirms(dev, rel, g1):
 @pytest.mark.parametrize("case,why", [("symlink", "is a symlink, not mounted"),
                                       ("foreign", "already has a ext4 mount, left alone"),
                                       ("kbd-live", "mk20-kbd/web already running, not mounted"),
-                                      ("web-live", "mk20-kbd/web already running, not mounted")])
+                                      ("web-live", "mk20-kbd/web already running, not mounted"),
+                                      ("kbd-lock", "mk20-kbd/web already running, not mounted"),
+                                      ("web-lock", "mk20-kbd/web already running, not mounted")])
 def test_boot_run_tmpfs_never_over_a_symlink_mount_or_live_writer(dev, rel, g1, tmp_path, case, why):
     run = dev.p("run"); run.mkdir()
     if case == "symlink":
@@ -456,7 +458,16 @@ def test_boot_run_tmpfs_never_over_a_symlink_mount_or_live_writer(dev, rel, g1, 
         (dev.mock / "pgrep.keyed").touch(); (dev.mock / "pgrep.kd").write_text("")
         (dev.mock / "pgrep.kbd").write_text("456\n" if case == "kbd-live" else "")
         (dev.mock / "pgrep.agent").write_text("789\n" if case == "web-live" else "")
-    r, log = run_boot(dev, rel)
+    held = None
+    if case.endswith("-lock"):   # supervisor alive in backoff (no child yet): its lock is held -> never mount (TOCTOU)
+        import fcntl
+        lp = dev.p("tmp/mk20/" + ("kbd.lock" if case == "kbd-lock" else "agent.lock")); lp.parent.mkdir(parents=True, exist_ok=True)
+        held = open(lp, "w"); fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        r, log = run_boot(dev, rel)
+    finally:
+        if held:
+            held.close()
     assert tmpfs_calls(dev) == [] and f"WARN mk20d boot v=9.9.9 run tmpfs: " in log and why in log
     assert "INFO mk20d gadget" in log                                   # boot carries on
 

@@ -31,6 +31,7 @@ shim_mounted() { # $1=path: our KD shim (a tmpfs file bind-mounted exactly on a 
 # overlay unless boot mounts a small tmpfs there: no TF wear, no TF stall in the e-stop/HID loop, nothing survives reboot.
 RUNDIR=$R/run/mk20
 fs_at() { # $1=canonical path -> "<fstype> <mountpoint>" holding it (longest mountpoint prefix; a later stacked entry wins)
+  # /proc/mounts octal-escapes spaces (\040); fine here: only the fixed path $R/run/mk20 is ever looked up.
   awk -v p="$1" 'BEGIN{n=-1} {m=$2; if (m=="/" || p==m || index(p, m "/")==1) if (length(m) >= n) {n=length(m); r=$3 " " m}}
     END{if (r!="") print r}' "$MOUNTS" 2>/dev/null; }
 run_fs() { local c; c=$(cd "$RUNDIR" 2>/dev/null && pwd -P) && fs_at "$c"; }   # mount points are canonical paths
@@ -47,10 +48,12 @@ run_mount() { # boot only, before any writer starts. Every refusal/failure is WA
   [ "$t" = tmpfs ] && { log INFO boot "run tmpfs: already ($fs)"; return 0; }   # mk20d re-run, or a tmpfs /run: never stack
   [ "${fs#* }" = "$c" ] && { log WARN boot "run tmpfs: $c already has a $t mount, left alone"; return 0; }
   # stale files from earlier boots are simply hidden; a live writer (bound kbd.sock) must never be hidden
-  if kbd_running || agent_running; then log WARN boot "run tmpfs: mk20-kbd/web already running, not mounted"; return 0; fi
+  # a supervisor in backoff holds its lock and may start its child right after a pgrep: check the locks too (TOCTOU)
+  if kbd_running || agent_running || lock_held "$TM/kbd.lock" || lock_held "$TM/agent.lock"; then
+    log WARN boot "run tmpfs: mk20-kbd/web already running, not mounted"; return 0; fi
   out=$(mount -t tmpfs -o size=512k,mode=0755,nosuid,nodev,noexec tmpfs "$c" 2>&1); rc=$?
   if [ $rc = 0 ]; then log INFO boot "run tmpfs: mounted on $c (was $t)"
-  else log WARN boot "run tmpfs: mount rc=$rc ($(echo "$out" | head -n 1 | cut -c1-120)); stays on $t"; fi
+  else log WARN boot "run tmpfs: mount rc=$rc ($(printf '%s\n' "$out" | head -n 1 | cut -c1-120)); stays on $t"; fi
   return 0; }
 vendor_check() { # prints "ok" or the first mismatch; all 4 vendor entries must be present and checked
   local h f n; n=0
