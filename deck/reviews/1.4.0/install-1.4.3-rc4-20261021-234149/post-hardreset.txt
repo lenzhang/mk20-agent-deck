@@ -1,0 +1,2 @@
+uptime=8033.43 by=watcher fat_ro=y mount_hung=n
+97.32 110.89
