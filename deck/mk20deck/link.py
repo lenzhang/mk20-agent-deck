@@ -164,7 +164,7 @@ class DeviceLink:
         except Exception:  # noqa: BLE001
             log.exception("device event hook failed for %r", str(obj.get("method"))[:64])
 
-    def _send(self, cmd: int, data: bytes, wait: bool) -> P.Frame | None:
+    def _send(self, cmd: int, data: bytes, wait: bool, sent_at: list | None = None) -> P.Frame | None:
         q: "queue.Queue[P.Frame]" = queue.Queue(maxsize=1)
         with self._lock:  # ids are allocated from two threads (pushes + heartbeat): a duplicate would misroute acks
             fid = self.ids.next()
@@ -173,6 +173,8 @@ class DeviceLink:
         try:
             with self._wlock:
                 self.t.write(P.encode_frame(cmd, data, fid))
+                if sent_at is not None:
+                    sent_at.append(time.monotonic())  # when the frame actually left (after any queued push)
         except Exception as e:  # noqa: BLE001 — serial write error == unplugged
             with self._lock:
                 self._pending.pop(fid, None)
@@ -242,15 +244,17 @@ class DeviceLink:
             if self._stop.wait(max(0.0, nxt - time.monotonic())) or not self.connected:
                 return
             sent = time.monotonic()
+            wrote: list = []
             try:
-                ack = self.call(P.ui_heartbeat())
+                ack = self.call(P.ui_heartbeat(), sent_at=wrote)
             except ConnectionError:
                 return
             if self._stop.is_set() or not self.connected:  # closed / lost (_lost woke us): this link is done
                 return
-            # Next sample one period after this one reached the device (its ack is proof): a beat delayed behind a
-            # JPEG write or a slow ack never makes the following gap shorter than the period (< 1 s is not counted).
-            nxt = (time.monotonic() if ack is not None else sent) + self.ui_beat_s
+            # Next sample one period after this one actually left (write completed): the device-side gap is then
+            # >= the period (never in the < 1 s "not counted" zone) and only grows by write queueing, not by the
+            # ack round trip (ack-based scheduling left 0.3 s of margin to the 1.5 s "restart count" rule).
+            nxt = (wrote[0] if wrote else sent) + self.ui_beat_s
             if ack is None:
                 self.ui_beat_timeouts += 1  # busy or gone: SHOW_JPG ack misses decide about the link
                 continue
@@ -270,8 +274,8 @@ class DeviceLink:
                 if self.ui_hello():
                     nxt = time.monotonic() + self.ui_beat_s
 
-    def call(self, req: dict) -> P.Ack | None:
-        fr = self._send(P.CMD_JSON, P.json_bytes(req), wait=True)
+    def call(self, req: dict, sent_at: list | None = None) -> P.Ack | None:
+        fr = self._send(P.CMD_JSON, P.json_bytes(req), wait=True, sent_at=sent_at)
         if fr is None:
             return None
         item = P.classify_json(fr.json() or {})

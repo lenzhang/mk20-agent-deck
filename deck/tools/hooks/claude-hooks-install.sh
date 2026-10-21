@@ -11,7 +11,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DECK_HOME="${MK20DECK_HOME:-$HOME/.config/mk20-agent-deck}"
 DEST="$DECK_HOME/hooks"
 PY="${MK20_HOOK_PYTHON:-/opt/homebrew/bin/python3}"
-[[ -x "$PY" ]] || PY="$(command -v python3)"
+[[ -x "$PY" ]] || PY="$(command -v python3 || true)"
+[[ -n "$PY" && -x "$PY" ]] || { echo "python3 not found (set MK20_HOOK_PYTHON)"; exit 2; }
 DRY=""   # plain string, not an array: macOS /bin/bash 3.2 + set -u rejects "${empty[@]}"
 if [[ "${1:-}" == "--dry-run" ]]; then DRY="--dry-run"; shift; fi
 [[ $# -gt 0 ]] || { echo "usage: $0 [--dry-run] <settings.json>..."; exit 2; }

@@ -91,6 +91,8 @@ class Daemon:
     # separate instances (cli.build_adapters) so a poll never races the foreground refresh.
     bg_poll_s: float = 10.0
     bg_adapters: dict | None = None
+    sleep_frame_s: float = 10.0  # re-send "Mac 已休眠" this often while paused (device drops frames off L1/L4)
+    _last_sleep_frame: float = float("-inf")
     bg_first_delay_s: float = 1.0
     bg_results: "queue.Queue[tuple]" = field(default_factory=queue.Queue)
     bg_polls: int = 0
@@ -336,9 +338,6 @@ class Daemon:
                 pass
             if self.link is not None and not self.link.connected:
                 raise ConnectionError(self.link.lost_reason or "device disconnected")
-
-    sleep_frame_s = 10.0
-    _last_sleep_frame = float("-inf")
 
     def offline_frame(self, reason: str) -> None:
         """Best effort on normal exit / sleep (PRD §7.5, AC12)."""
