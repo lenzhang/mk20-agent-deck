@@ -1,7 +1,8 @@
 /* 2026-10-22 L1 option mode (user decision): host ui.hidKeys maps up to 9 of fb1..fb15 to the Mac's
  * digits 1..9 on the live L1 page only. Same gate/ownership/release paths as fb17-19 (round 5), but a
- * mapped press (and fb17-19 while a map is active) is ALSO forwarded with "hid":usage. Fake clock,
- * nonblocking pipes; no device paths. */
+ * digit is momentary (down + up at the press: no auto-repeat), ignored while the Mac PTT is held, and the
+ * press (also of fb17-19 while a map is active) is forwarded marked ("hid":usage / "ignored":"ptt").
+ * Fake clock, nonblocking pipes; no device paths. */
 #define HK_MAP_MS 30000 /* onboard.c HID_MAP_MS */
 static long hk_gen = 100, hk_last; /* hk_last: the last generation the device accepted via hk_map */
 /* Fresh full frame (ends a grace window) while keeping the host's liveness (seen) current. */
@@ -36,16 +37,21 @@ static int hk_keys(int fd, int usage, int *hid, int *down)
     for (int i=0;i<n;i++) if (strstr(f[i],"keyStateChanged")) {
         c++; if (strstr(f[i],want)) (*hid)++;
         if (down && strstr(f[i],"\"pressed\":true")) (*down)++;
-        if (strstr(f[i],"\"hid\":")) CHECK(strstr(f[i],"\"pressed\":true")!=NULL); /* only presses carry it */
+        if (strstr(f[i],"\"hid\":") || strstr(f[i],"\"ignored\":"))
+            CHECK(strstr(f[i],"\"pressed\":true")!=NULL); /* only presses carry a mark */
     }
     return c;
 }
-/* One mapped press + release on a live L1: digit down then all up, one marked press + one plain up. */
+/* Exactly two new reports: a = (mod, a0..a2) then b = (mod, b0..b2) -- a momentary digit. */
+static int hk_two(int fd, int mod, int a0, int a1, int a2, int b0, int b1, int b2)
+{ uint8_t r[16][9]; int n=l1_reports(fd,r,16); return n==2 && l1_is(r[0],mod,a0,a1,a2) && l1_is(r[1],mod,b0,b1,b2); }
+/* One mapped press + release on a live L1: the press types the digit (down + up), the release sends no
+ * HID; the host gets one marked press + one plain up. */
 static int hk_digit_ok(kbd_t *k, int hp, int p, int fb, int usage)
 {
     int hid=0, down=0, ok=1;
-    key(k,fb,1); ok&=l1_one(hp,0,usage,0,0);
-    key(k,fb,0); ok&=l1_one(hp,0,0,0,0);
+    key(k,fb,1); ok&=hk_two(hp,0,usage,0,0,0,0,0);
+    key(k,fb,0); ok&=l1_none(hp);
     ok&=hk_keys(p,usage,&hid,&down)==2 && hid==1 && down==1;
     return ok;
 }
@@ -134,20 +140,25 @@ static void hk_reports(void)
         key(&k,l1_fb[i],0); CHECK(l1_one(hp[0],0,0,0,0));
         CHECK(hk_keys(p[0],l1_usage[i],&hid,&down)==2 && hid==1 && down==1);
     }
-    /* PTT held + digit: RAlt and the digit in one report; each release drops only its own part. */
+    /* A digit is momentary around a held key (Escape stays down); fb17-19 remain held keys. */
+    key(&k,19,1); CHECK(l1_one(hp[0],0,0x29,0,0));
+    key(&k,2,1); CHECK(hk_two(hp[0],0,0x29,0x1F,0,0x29,0,0));
+    key(&k,19,0); CHECK(l1_one(hp[0],0,0,0,0));
+    key(&k,2,0); CHECK(l1_none(hp[0]));
+    /* Mac PTT held: digits are ignored (Right Option + digit types a symbol) and forwarded as "ignored":"ptt";
+     * fb17-19 keep combining with RAlt. A digit pressed under the PTT types nothing later either. */
     key(&k,16,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0,0));
-    key(&k,2,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0x1F,0,0));
-    key(&k,19,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0x1F,0x29,0));
-    key(&k,16,0); CHECK(l1_one(hp[0],0,0x1F,0x29,0)); /* PTT up keeps the digit and Escape */
-    key(&k,1,1); CHECK(l1_one(hp[0],0,0x1F,0x29,0x1E));
-    key(&k,2,0); CHECK(l1_one(hp[0],0,0,0x29,0x1E));
-    key(&k,16,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0x29,0x1E));
-    { uint8_t rr[16][9]; key(&k,19,0); key(&k,1,0);
-      CHECK(l1_reports(hp[0],rr,16)==2 && l1_is(rr[1],HID_MOD_RALT,0,0,0) && !h.keys[0] && !h.keys[1] && !h.keys[2]); }
+    key(&k,1,1); key(&k,1,0); CHECK(l1_none(hp[0]));
+    key(&k,18,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0x28,0,0)); key(&k,18,0); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0,0));
+    key(&k,3,1); CHECK(l1_none(hp[0]));
     key(&k,16,0); CHECK(l1_one(hp[0],0,0,0,0));
+    key(&k,3,0); CHECK(l1_none(hp[0]));
+    key(&k,3,1); CHECK(hk_two(hp[0],0,0x20,0,0,0,0,0)); key(&k,3,0); CHECK(l1_none(hp[0])); /* PTT up: typed again */
+    CHECK(!h.mods && !h.keys[0] && !h.keys[1] && !h.keys[2]);
     { char f[64][192]; uint32_t ids[64]; int n=ux_frames(p[0],f,ids,64);
-      CHECK(ux_count(f,n,"keyStateChanged")==6 && ux_count(f,n,"\"hid\":30,")==1 && ux_count(f,n,"\"hid\":31,")==1 &&
-            ux_count(f,n,"\"hid\":41,")==1 && ux_count(f,n,"\"pressed\":false")==3); } /* the PTT itself never */
+      CHECK(ux_count(f,n,"keyStateChanged")==12 && ux_count(f,n,"\"ignored\":\"ptt\"")==2 &&
+            ux_count(f,n,"\"hid\":41,")==1 && ux_count(f,n,"\"hid\":31,")==1 && ux_count(f,n,"\"hid\":40,")==1 &&
+            ux_count(f,n,"\"hid\":32,")==1 && ux_count(f,n,"\"pressed\":false")==6); } /* the PTT itself never */
     /* --no-hid: a mapped press is still consumed and forwarded marked (the host sees what was asked). */
     k.hid=c.hid=NULL; key(&k,3,1); key(&k,3,0); k.hid=c.hid=&h;
     CHECK(l1_none(hp[0]) && hk_keys(p[0],0x20,&hid,&down)==2 && hid==1);
@@ -163,8 +174,10 @@ static void hk_reports(void)
     ctl_handle_line(&c,0,acq,strlen(acq),now,r,sizeof r); const char *t=strstr(r,"\"token\":"); CHECK(t!=NULL);
     char q[256]; snprintf(q,sizeof q,"{\"op\":\"act\",\"token\":%ld,\"seq\":1,\"kind\":\"key\",\"usage\":4,\"down\":1}",t ? strtol(t+8,NULL,10) : 0L);
     ctl_handle_line(&c,0,q,strlen(q),now,r,sizeof r); CHECK(l1_one(hp[0],0,4,0,0));
-    key(&k,1,1); { uint8_t rep[16][9]; int n=l1_reports(hp[0],rep,16); CHECK(n==2 && l1_is(rep[0],0,0,0,0) && l1_is(rep[1],0,0x1E,0,0)); }
-    CHECK(!c.token && !c.estopped); key(&k,1,0); CHECK(l1_one(hp[0],0,0,0,0));
+    key(&k,1,1);
+    { uint8_t rep[16][9]; int n=l1_reports(hp[0],rep,16);
+      CHECK(n==3 && l1_is(rep[0],0,0,0,0) && l1_is(rep[1],0,0x1E,0,0) && l1_is(rep[2],0,0,0,0)); }
+    CHECK(!c.token && !c.estopped); key(&k,1,0); CHECK(l1_none(hp[0]));
     l1_teardown(&k,&c,hp,p);
 }
 /* Gate: only the live L1 page (ONLINE + fresh frame); never L4/HOME/LS/L5/agent, offline, PROBING,
@@ -224,8 +237,9 @@ static void hk_gate(void)
     CHECK(hk_map(&k,p[0],HK3)==1 && hk_digit_ok(&k,hp[0],p[0],2,0x1F)); /* latched stop, pause over: like fb17-19 */
     l1_teardown(&k,&c,hp,p);
 }
-/* Every clear path ends option mode; a digit held at that moment is released (all-up) where a page
- * boundary/SUSPECT/e-stop releases fb17-19, and by its own up otherwise (press-time ownership). */
+/* Every clear path ends option mode. Held at that moment: fb17 (Backspace, a forwarded held key: all-up
+ * where a page boundary/SUSPECT/e-stop releases fb17-19, else its own up) and a digit (momentary: already
+ * up on the Mac, only its ownership remains; its late up never types anything). */
 static void hk_clear_paths(void)
 {
     char f[64][192]; uint32_t ids[64];
@@ -235,7 +249,7 @@ static void hk_clear_paths(void)
         if (mode==0) { ctl_set_allowed(&c,1); live(&k,0); ux_frames(p[0],f,ids,64); }
         CHECK(hk_map(&k,p[0],HK3)==1 && onboard_hid_keys(&k)==3);
         if (mode==13) { CHECK(hk_digit_ok(&k,hp[0],p[0],2,0x1F)); } /* expiry: nothing held (the 10 s cut is separate) */
-        else { key(&k,1,1); CHECK(l1_one(hp[0],0,0x1E,0,0)); }
+        else { key(&k,17,1); CHECK(l1_one(hp[0],0,0x2A,0,0)); key(&k,1,1); CHECK(hk_two(hp[0],0,0x2A,0x1E,0,0x2A,0,0)); }
         ux_frames(p[0],f,ids,64);
         int boundary_up=1;
         switch (mode) {
@@ -258,11 +272,12 @@ static void hk_clear_paths(void)
         CHECK(!onboard_hid_keys(&k));
         if (boundary_up == 1) {
             uint8_t r[16][9]; int n=l1_reports(hp[0],r,16);
-            CHECK(n>=1 && l1_is(r[n-1],0,0,0,0) && !h.keys[0]);
-            key(&k,1,0); CHECK(l1_none(hp[0])); /* late physical up: nothing */
+            CHECK(n>=1 && l1_is(r[n-1],0,0,0,0) && !h.keys[0] && !h.keys[1]);
+            key(&k,17,0); key(&k,1,0); CHECK(l1_none(hp[0])); /* late physical ups: nothing */
         } else if (!boundary_up) {
-            CHECK(l1_none(hp[0]) && h.keys[0]==0x1E); /* the press keeps its digit until its own up (or the 10 s cut) */
-            key(&k,1,0); CHECK(l1_one(hp[0],0,0,0,0));
+            CHECK(l1_none(hp[0]) && h.keys[0]==0x2A && !h.keys[1]); /* Backspace keeps its press-time owner */
+            key(&k,1,0); CHECK(l1_none(hp[0]));
+            key(&k,17,0); CHECK(l1_one(hp[0],0,0,0,0));
         }
         /* Map gone: once the page is live L1 again, fb1-fb3 are plain host keys (or nothing elsewhere). */
         if (mode==3 || mode==11) { hk_fresh(&k); knob(&k,103,1); now+=20; knob(&k,103,0); } /* no K2 during grace */
@@ -316,19 +331,20 @@ static void hk_hold(void)
 {
     kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p); int hid, down;
     CHECK(hk_map(&k,p[0],HK3)==1);
-    key(&k,2,1); CHECK(l1_one(hp[0],0,0x1F,0,0));
-    key(&k,2,1); CHECK(l1_none(hp[0])); /* repeated down (lost GD32 up): still one down, not forwarded again */
+    key(&k,2,1); CHECK(hk_two(hp[0],0,0x1F,0,0,0,0,0)); /* typed once, at the press: no auto-repeat */
+    key(&k,2,1); CHECK(l1_none(hp[0])); /* repeated down (lost GD32 up): the same press, not typed/forwarded again */
     CHECK(hk_keys(p[0],0x1F,&hid,&down)==1 && hid==1);
     pump(&k); int t=onboard_timeout(&k,now,60000); CHECK(t>0 && t<=L1_HOLD_MS-250);
-    live(&k,8000); CHECK(l1_none(hp[0])); /* 9 s: the map refresh is the host's job; the press keeps its digit */
-    live(&k,0); CHECK(l1_one(hp[0],0,0,0,0)); /* 10 s cut */
+    live(&k,8000); CHECK(l1_none(hp[0])); /* held 9 s: exactly one digit */
+    live(&k,0); CHECK(l1_none(hp[0])); /* 10 s: the ownership guard ends the press (nothing left to release) ... */
     CHECK(hk_keys(p[0],0x1F,&hid,&down)==1 && !hid && !down); /* ... and the host got the up */
     key(&k,2,0); CHECK(l1_none(hp[0]) && !l1_host_keys(p[0]));
+    CHECK(hk_digit_ok(&k,hp[0],p[0],2,0x1F)); /* press again: typed again */
     /* No host link at all (EOF): the digit still goes up on release, nothing is queued. */
     CHECK(hk_map(&k,p[0],HK3)==1);
-    key(&k,3,1); CHECK(l1_one(hp[0],0,0x20,0,0)); l1_host_keys(p[0]);
-    int saved=k.host_fd; k.host_fd=-1; key(&k,3,0); CHECK(l1_one(hp[0],0,0,0,0)); k.host_fd=saved;
-    CHECK(!l1_host_keys(p[0]));
+    key(&k,3,1); CHECK(hk_two(hp[0],0,0x20,0,0,0,0,0)); l1_host_keys(p[0]);
+    int saved=k.host_fd; k.host_fd=-1; key(&k,3,0); CHECK(l1_none(hp[0])); k.host_fd=saved;
+    CHECK(!l1_host_keys(p[0]) && hk_digit_ok(&k,hp[0],p[0],3,0x20)); /* ownership cleared without a host */
     l1_teardown(&k,&c,hp,p);
 }
 static void round6_regressions(void)

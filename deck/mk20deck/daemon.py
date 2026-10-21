@@ -49,6 +49,7 @@ class InputEvent:
     t: float = 0.0
     code: str = ""  # raw code for the key trace
     hid: int | None = None  # option mode: the keyboard typed this press itself (HID usage)
+    ignored: str = ""  # option mode: "ptt" = the keyboard ignored this digit press (Mac PTT held)
 
 
 class WakeReconnect(ConnectionError):
@@ -139,7 +140,8 @@ class Daemon:
             log.info("unmapped non-key event %d,%d (add it to [knobs])", ev.col, ev.row)
             return
         col, row = lay.fw_to_doc(ev.col, ev.row)
-        self.events.put(InputEvent("key", col, row, ev.pressed, t=now, code=code, hid=getattr(ev, "hid", None)))
+        self.events.put(InputEvent("key", col, row, ev.pressed, t=now, code=code, hid=getattr(ev, "hid", None),
+                                   ignored=getattr(ev, "ignored", None) or ""))
 
     def on_device_event(self, obj: dict) -> None:
         """Non-key device JSON event, called from the link reader thread: only queue, never block or raise."""
@@ -182,8 +184,8 @@ class Daemon:
         if tr:
             c = self.controller
             ptt0, acts0 = c.ptt_held, c.action_count
-        if ev.kind == "key" and ev.hid is not None:
-            self.controller.on_key(ev.a, int(ev.b), ev.pressed, hid=ev.hid)
+        if ev.kind == "key" and (ev.hid is not None or ev.ignored):
+            self.controller.on_key(ev.a, int(ev.b), ev.pressed, hid=ev.hid, ignored=ev.ignored)
         elif ev.kind == "key":
             self.controller.on_key(ev.a, int(ev.b), ev.pressed)
         else:

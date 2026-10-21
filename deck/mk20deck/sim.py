@@ -343,8 +343,8 @@ def option_adapters() -> dict[Mode, MockAdapter]:
     """tmux with a bound terminal (focus works) and three sessions waiting for a numbered choice."""
     ads = demo_adapters()
     ss = demo_sessions(Mode.TMUX, (Tool.CCAI, Tool.CODEX), n=12)
-    for s in ss:
-        s.state_reason = "Claude hook" if s.tool == Tool.CCAI else "codex hook"
+    for s in ss:  # states from hook records (the only prompts option mode answers)
+        s.state_reason, s.hooked = ("Claude hook" if s.tool == Tool.CCAI else "codex hook"), True
     for s in ss[3:]:  # exactly three sessions wait for a choice
         if s.state in (State.NEEDS_INPUT, State.NEEDS_APPROVAL):
             s.state = State.RUNNING

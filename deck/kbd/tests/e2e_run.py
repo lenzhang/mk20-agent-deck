@@ -339,9 +339,10 @@ def main():
         evs = [f.json() for f in par.feed(read_for(hm, 0.2)) if f.cmd == P.CMD_JSON and f.json().get("method") == "keyStateChanged"]
         check(not evs, f"L1 HID keys are not forwarded as keyStateChanged {evs}")
         print("e2e: L1 HID keys Backspace/Return/Escape (+RAlt) reports OK")
-        # 2026-10-22 L1 option mode (ui.hidKeys): fb1..fb3 (fw row 0, col 0..2) type the digits 1..3 (the PTT is still
-        # held: RAlt + digit in one report) and are ALSO forwarded with "hid":usage; fb19 too while a map is active;
-        # unmapped slots stay plain host keys; a stale generation is refused; {} clears.
+        # 2026-10-22 L1 option mode (ui.hidKeys): fb1..fb3 (fw row 0, col 0..2) type the digits 1..3 ONCE at the press
+        # (down + up: no macOS auto-repeat, the release sends nothing) and are ALSO forwarded with "hid":usage; fb19 too
+        # while a map is active; while the Mac PTT is held a digit is ignored (forwarded "ignored":"ptt"); unmapped
+        # slots stay plain host keys; a stale generation is refused; {} clears. The PTT is held on entry and on exit.
         def hk(gen, keys, fid):
             os.write(hm, P.encode_frame(P.CMD_JSON, json.dumps({"method": "ui.hidKeys", "generation": gen, "keys": keys}).encode(), fid))
             got = [f.json() for f in par.feed(read_for(hm, 0.3)) if f.cmd == P.CMD_JSON and (f.json() or {}).get("ack_method") == "ui.hidKeys"]
@@ -349,29 +350,40 @@ def main():
         def host_keys():
             return [P.classify_json(f.json()) for f in par.feed(read_for(hm, 0.2))
                     if f.cmd == P.CMD_JSON and (f.json() or {}).get("method") == "keyStateChanged"]
+        up = b"\x01" + bytes(8)
+        os.write(gm, gd32_frame([0x16, 0, 3, 0, 0, 0])); got = hid_reports()
+        check(got == [up], f"PTT up before option mode {got}")
         a = hk(1, {"1": "1", "2": "2", "3": "3"}, 20)
         check(a and a["success"] and a["result"] == {"generation": 1, "mapped": 3}, f"ui.hidKeys accepted {a}")
         for col in range(3):
             os.write(gm, gd32_frame([0x16, 1, 0, col, 0, 0])); got = hid_reports()
-            check(got == [b"\x01\x40\x00" + bytes([0x1E + col]) + bytes(5)], f"option digit {col + 1} down (+RAlt): {got}")
+            check(got == [b"\x01\x00\x00" + bytes([0x1E + col]) + bytes(5), up], f"option digit {col + 1} typed at the press: {got}")
             os.write(gm, gd32_frame([0x16, 0, 0, col, 0, 0])); got = hid_reports()
-            check(got == [b"\x01\x40" + bytes(7)], f"option digit {col + 1} up: {got}")
+            check(got == [], f"option digit {col + 1} release sends nothing: {got}")
+        os.write(gm, gd32_frame([0x16, 1, 0, 0, 0, 0])); held = read_for(hr, 1.5)   # held 1.5 s: still one digit
+        check(held == b"\x01\x00\x00\x1e" + bytes(5) + up, f"held digit: exactly one digit {held.hex()}")
+        os.write(gm, gd32_frame([0x16, 0, 0, 0, 0, 0])); check(hid_reports() == [], "held digit: release sends nothing")
         os.write(gm, gd32_frame([0x16, 1, 3, 3, 0, 0]) + gd32_frame([0x16, 0, 3, 3, 0, 0])); got = hid_reports()
-        check(got == [b"\x01\x40\x00\x29" + bytes(5), b"\x01\x40" + bytes(7)], f"Escape in option mode {got}")
-        evs = host_keys()
-        want = [(c, r, True, 0x1E + c if r == 0 else 0x29) for c, r in ((0, 0), (1, 0), (2, 0), (3, 3))]
-        got = [(e.col, e.row, e.pressed, e.hid) for e in evs if isinstance(e, P.KeyEvent) and e.pressed]
-        ups = [(e.col, e.row, e.hid) for e in evs if isinstance(e, P.KeyEvent) and not e.pressed]
-        check(got == want and ups == [(0, 0, None), (1, 0, None), (2, 0, None), (3, 3, None)], f"option keys forwarded {evs}")
+        check(got == [b"\x01\x00\x00\x29" + bytes(5), up], f"Escape in option mode {got}")
+        os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0])); got = hid_reports()
+        check(got == [b"\x01\x40" + bytes(7)], f"PTT down again {got}")
+        os.write(gm, gd32_frame([0x16, 1, 0, 1, 0, 0]) + gd32_frame([0x16, 0, 0, 1, 0, 0]))
+        check(hid_reports() == [], "digit ignored while the PTT is held")
+        evs = [e for e in host_keys() if isinstance(e, P.KeyEvent)]
+        downs = [(e.col, e.row, e.hid, e.ignored) for e in evs if e.pressed]
+        ups = [(e.col, e.row, e.hid, e.ignored) for e in evs if not e.pressed]
+        check(downs == [(0, 0, 0x1E, None), (1, 0, 0x1F, None), (2, 0, 0x20, None), (0, 0, 0x1E, None), (3, 3, 0x29, None),
+                        (1, 0, None, "ptt")] and ups == [(c, r, None, None) for c, r in ((0, 0), (1, 0), (2, 0), (0, 0), (3, 3), (1, 0))],
+              f"option keys forwarded {evs}")
         os.write(gm, gd32_frame([0x16, 1, 0, 3, 0, 0]) + gd32_frame([0x16, 0, 0, 3, 0, 0]))
         check(hid_reports() == [], "unmapped fb4: no HID")
-        evs = host_keys(); check(len(evs) == 2 and all(e.hid is None for e in evs), f"unmapped fb4: plain host key {evs}")
+        evs = host_keys(); check(len(evs) == 2 and all(e.hid is None and e.ignored is None for e in evs), f"unmapped fb4: plain host key {evs}")
         a = hk(1, {"1": "1"}, 21); check(a and a["success"] is False, f"stale ui.hidKeys generation refused {a}")
         a = hk(2, {}, 22); check(a and a["success"] and a["result"] == {"generation": 2, "mapped": 0}, f"ui.hidKeys clear {a}")
         os.write(gm, gd32_frame([0x16, 1, 0, 0, 0, 0]) + gd32_frame([0x16, 0, 0, 0, 0, 0]))
         check(hid_reports() == [], "cleared: fb1 no HID")
         evs = host_keys(); check(len(evs) == 2 and all(e.hid is None for e in evs), f"cleared: fb1 plain host key {evs}")
-        print("e2e: L1 option mode ui.hidKeys digits (+RAlt), forwarding, stale generation and clear OK")
+        print("e2e: L1 option mode ui.hidKeys: momentary digits, held = one digit, PTT ignore, forwarding, stale generation, clear OK")
         # stop file: hidg0 closed within the 100 ms tick (+ all-up since RAlt is held)
         open(hidp + ".stop", "w").close()
         time.sleep(0.4)

@@ -45,9 +45,9 @@ def test_stages_and_outcomes(tmp_path):
     d.step()
     d.on_device_key(KeyEvent(0, 3, False))   # PTT up    → hid_written
     d.step()
-    d.on_device_key(KeyEvent(4, 0, True))    # S5 down: select → local (S5 runs: no option mode)
+    d.on_device_key(KeyEvent(0, 0, True))    # S1 down: select → local
     d.step()
-    d.on_device_key(KeyEvent(4, 0, False))   # S5 up: the tap focuses the session → agent
+    d.on_device_key(KeyEvent(0, 0, False))   # S1 up: the tap focuses the session → agent
     d.step()
     d.on_device_key(KeyEvent(1, 3, True))    # DELETE (keyboard-side Backspace): ignored → local
     d.step()

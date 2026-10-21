@@ -64,20 +64,25 @@ their option menus.
 - **Cleared** on every page boundary (leaving L1: K2, HOME, K1 hold, ctl page; `ui.page` even to L1; `ui.hello`;
   host loss/EOF), on SUSPECT, on every e-stop (fb20/K2/socket), and 30 s (`HID_MAP_MS`) after the last accepted
   request (mk20deck refreshes it every 10 s while the choice is shown). `onboard_hid_keys()` reports the count.
-- **Mapped key** (only on the live L1 page: ONLINE + fresh frame, never grace/PROBING/SUSPECT/offline/e-stop
-  pause, keycode 0; a `--ptt` position wins): exactly the fb17–19 path of `HOST_HID_KEYS` — lease preemption
-  (`ctl_human_input`) first, usage down on press and up on release, press-time ownership (`key_owner` 6 = owner 5
-  plus forwarding), repeated GD32 down ignored, the 10 s hold cut, released on every boundary/SUSPECT/e-stop/hidg0
-  replacement/exit, combined with RAlt and fb17–19 in one boot report. Unmapped fb1..fb15 stay ordinary host keys.
-- **Also forwarded** (unlike fb17–19 normally): the press as `{"method":"keyStateChanged","parameters":{"col":C,
-  "hid":U,"pressed":true,"row":R}}` with U = the usage the device put down, the release as an ordinary up (also
-  after the 10 s cut). While a map is active fb17–19 are forwarded the same way (U = 0x2A/0x28/0x29), so the Mac
-  sees Escape/Return at once. Safe because only a host that itself requested the map in the last 30 s receives
-  them, and the mark says the keyboard already typed the key: mk20deck maps a marked press to an option role only
-  (toast "已选 k", leave option mode on Escape) and never to a slot select/focus/pick-up or any other Mac action,
-  even when its option mode ended a moment earlier. The HID path never waits for or depends on the host.
-- Caveat (as for Option+Backspace today): a digit pressed while the PTT is held is Right Option + digit, which
-  macOS types as a symbol (e.g. "¡"), not as the digit.
+- **Mapped digit** (only on the live L1 page: ONLINE + fresh frame, never grace/PROBING/SUSPECT/offline/e-stop
+  pause, keycode 0; a `--ptt` position wins): the fb17–19 gate of `HOST_HID_KEYS` (lease preemption via
+  `ctl_human_input` first), but **momentary** (integrator decision 2026-10-22): the press writes the digit down
+  and immediately up (two boot reports), so macOS can never auto-repeat it; the physical release sends no HID.
+  Ownership is still tracked from the press (`key_owner` 7, pressed at `hid_at`): a repeated GD32 down is the same
+  press (no second digit), the 10 s guard ends a press whose up was lost, every boundary/SUSPECT/e-stop releases
+  it, so nothing can stay stuck. A held fb17–19 keeps its digit-free slot: the digit is typed around it.
+- **Mac PTT held** (Right Option, `key_owner` 2): a mapped digit is ignored — nothing is typed (Option + digit
+  would be a symbol such as "¡") — and its press is forwarded as `{"method":"keyStateChanged","parameters":
+  {"col":C,"ignored":"ptt","pressed":true,"row":R}}` so mk20deck says "先松开按住说话"; its release is an ordinary
+  up. fb17–19 with the PTT are unchanged (combined with RAlt). Unmapped fb1..fb15 stay ordinary host keys.
+- **Also forwarded** (unlike fb17–19 normally): a typed digit's press as `{"method":"keyStateChanged","parameters":
+  {"col":C,"hid":U,"pressed":true,"row":R}}` with U = the usage the device typed, the release as an ordinary up
+  (also after the 10 s guard). While a map is active fb17–19 are forwarded the same way (U = 0x2A/0x28/0x29; they
+  stay held keys, `key_owner` 6), so the Mac sees Escape/Return at once. Safe because only a host that itself
+  requested the map in the last 30 s receives them, and the mark says what the keyboard did: mk20deck maps a
+  marked press to an option role only (toast "已选 k", leave option mode on Escape, "先松开按住说话") and never to a
+  slot select/focus/pick-up or any other Mac action, even when its option mode ended a moment earlier. The HID
+  path never waits for or depends on the host.
 
 ## On-device UX revision (2026-10-20, branch feature/fw-ux; supersedes U2 text below where they differ)
 

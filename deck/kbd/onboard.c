@@ -50,7 +50,9 @@ struct onboard_s {
     uint16_t *scratch;
     /* Press-time owner: 0 none, 1 host key event, 2 Mac PTT (Right Option), 3 agent page,
      * 4 L4 back, 5 Mac HID key (hid_usage, pressed at hid_at), 6 Mac HID key whose edges are also
-     * forwarded to the host (option mode; the up becomes an owner-1 host up after the HID up). */
+     * forwarded to the host (fb17-19 in option mode; the up becomes an owner-1 host up after the HID up),
+     * 7 option-mode digit: typed momentarily at the press (down + up), held only for ownership (pressed
+     * at hid_at): its release sends no HID, just the host up. */
     int key_owner[20], knob_down[2], knob_long[2];
     uint8_t hid_usage[20]; int64_t hid_at[20];
     uint8_t hid_map[20]; int hid_mapped; long hid_generation; int64_t hid_map_at; /* ui.hidKeys (fb1..fb15) */
@@ -78,6 +80,7 @@ struct onboard_s {
 };
 static void host_tap(kbd_t *k, int slot);
 static void hid_map_clear(onboard_t *o) { memset(o->hid_map,0,sizeof o->hid_map); o->hid_mapped = 0; }
+static int ptt_down(const onboard_t *o) { for (int i = 0; i < 20; i++) if (o->key_owner[i] == 2) return 1; return 0; }
 static int host_route(const onboard_t *o) { return o->route == ONBOARD_L1 || o->route == ONBOARD_L4; }
 static int safety_footer(const onboard_t *o) { return host_route(o) && (o->fresh || o->health==HOST_SUSPECT); }
 static int page_id(enum onboard_route r) { return r == ONBOARD_L5 ? 1 : r == ONBOARD_L1 || r == ONBOARD_L4 ? 2 : 0; }
@@ -144,9 +147,9 @@ static void mac_up(kbd_t *k, int i, int owner)
 static void release_mac(kbd_t *k)
 {
     onboard_t *o = k->onboard;
-    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 2 || o->key_owner[i] == 5 || o->key_owner[i] == 6) {
+    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 2 || o->key_owner[i] >= 5) {
         int owner = o->key_owner[i];
-        o->key_owner[i] = owner == 6 ? 1 : 0; /* a forwarded key keeps its host half: its up follows the release */
+        o->key_owner[i] = owner >= 6 ? 1 : 0; /* a forwarded key keeps its host half: its up follows the release */
         mac_up(k,i,owner);
     }
 }
@@ -154,6 +157,7 @@ static void release_key(kbd_t *k, int i)
 {
     onboard_t *o = k->onboard; int owner = o->key_owner[i];
     if (owner == 6) { mac_up(k,i,6); o->key_owner[i] = owner = 1; } /* HID up first, then the host up */
+    if (owner == 7) o->key_owner[i] = owner = 1; /* the digit went up at its press: only the host up is due */
     if (owner == 1) {
         o->pending_up |= 1u<<i;
         kbd_host_drain(k);
@@ -508,7 +512,7 @@ void onboard_tick(kbd_t *k, int64_t now)
         o->agent_was = agent_active(k); o->render |= 1u << 19;
     }
     if (o->hid_mapped && now - o->hid_map_at >= HID_MAP_MS) hid_map_clear(o); /* the Mac stopped refreshing it */
-    for (int i = 0; i < 20; i++) if ((o->key_owner[i] == 5 || o->key_owner[i] == 6) && now - o->hid_at[i] >= HID_KEY_HOLD_MS) {
+    for (int i = 0; i < 20; i++) if (o->key_owner[i] >= 5 && now - o->hid_at[i] >= HID_KEY_HOLD_MS) {
         fprintf(stderr, "mk20-kbd: Mac key held %d s: released (lost key-up guard)\n", HID_KEY_HOLD_MS / 1000);
         release_key(k,i);
     }
@@ -610,7 +614,7 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
      * On L1/L4 with the agent inactive it is the Mac host's mode key (PRD §6.2). */
     if (fb == 20 && !fb20_host(k)) { stop(k,"page_key",now); return 1; }
     /* Repeated down of a held Mac HID key (its GD32 up was lost): still one down; the next up releases. */
-    if (o->key_owner[fb-1] == 5 || o->key_owner[fb-1] == 6) return 1;
+    if (o->key_owner[fb-1] >= 5) return 1;
     /* Do not overwrite a still-owned host press with a new press while its up
      * is backpressured. Safety keys and deadlines have already been handled. */
     if (o->pending_up & (1u<<(fb-1))) {
@@ -630,9 +634,20 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
             return 1; /* physical PTT is consumed; no second Mac action */
         }
         uint8_t usage = host_hid_usage(fb);
-        /* L1 option mode (ui.hidKeys): a mapped fb1..fb15 is the Mac's digit; while a map is active these
-         * keys and fb17-19 are also forwarded (with "hid":usage) so the Mac can leave option mode. */
-        int fwd = o->route == ONBOARD_L1 && o->hid_mapped && (usage || (fb <= 15 && (usage = o->hid_map[fb-1])));
+        int option = o->route == ONBOARD_L1 && o->hid_mapped, fwd = option && usage;
+        if (option && fb <= 15 && o->hid_map[fb-1]) {
+            /* L1 option mode (ui.hidKeys): a mapped fb1..fb15 types its digit once, at the press (down + up,
+             * so no macOS auto-repeat). While the Mac PTT is held (Option + digit would be a symbol) it is
+             * ignored; either way the press is forwarded marked so the Mac only gives feedback. */
+            char j[160]; int n, ptt = ptt_down(o);
+            usage = o->hid_map[fb-1];
+            o->key_owner[fb-1] = ptt ? 1 : 7; o->hid_usage[fb-1] = usage; o->hid_at[fb-1] = now;
+            if (!ptt && k->hid) { hid_key(k->hid,usage,1); hid_key(k->hid,usage,0); }
+            n = ptt ? host_json_key_state_ptt(j,sizeof j,col,row) : host_json_key_state_hid(j,sizeof j,col,row,usage);
+            if (n > 0 && k->host_fd >= 0) kbd_host_send(k,KBD_EVENT_ID,HOST_CMD_JSON,j,(size_t)n);
+            return 1;
+        }
+        /* fb17-19: while a map is active also forwarded (with "hid":usage) so the Mac sees Escape/Return. */
         if (usage) {
             o->key_owner[fb-1] = fwd ? 6 : 5; o->hid_usage[fb-1] = usage; o->hid_at[fb-1] = now;
             if (k->hid) hid_key(k->hid,usage,1);
@@ -905,7 +920,7 @@ int onboard_timeout(kbd_t *k, int64_t now, int dflt)
     int64_t left = dflt;
     if (!producing && o->render && o->next_render-now < left) left = o->next_render-now;
     for (int i=0;i<2;i++) if (o->knob_down[i] && !o->knob_long[i] && o->knob_at[i]+1000-now < left) left=o->knob_at[i]+1000-now;
-    for (int i=0;i<20;i++) if ((o->key_owner[i]==5 || o->key_owner[i]==6) && o->hid_at[i]+HID_KEY_HOLD_MS-now < left) left=o->hid_at[i]+HID_KEY_HOLD_MS-now;
+    for (int i=0;i<20;i++) if (o->key_owner[i]>=5 && o->hid_at[i]+HID_KEY_HOLD_MS-now < left) left=o->hid_at[i]+HID_KEY_HOLD_MS-now;
     if (o->hid_mapped && o->hid_map_at+HID_MAP_MS-now < left) left=o->hid_map_at+HID_MAP_MS-now;
     return left < 0 ? 0 : (int)left;
 }

@@ -101,6 +101,7 @@ class Session:
     # options 1..N, or prompt_kind "permission" (fixed 是 / 是，且不再问 / 否).  Empty = unknown → digits 1..5.
     options: tuple[str, ...] = ()
     prompt_kind: str = ""
+    hooked: bool = False  # the state comes from a Claude/codex hook record (tmux): only such prompts enter option mode
 
 
 @dataclass

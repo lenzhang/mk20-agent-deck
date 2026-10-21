@@ -13,8 +13,8 @@ from mk20deck import agentstate
 from mk20deck import protocol as P
 from mk20deck.adapters.mock import MockAdapter
 from mk20deck.config import DeckConfig
-from mk20deck.controller import (OPTION_CHOSEN_S, OPTION_LEGACY, OPTION_PENDING, OPTION_TIMEOUT, PERMISSION_LABELS,
-                                 BOTTOM_ROW, Controller, KeyView, Role, option_labels, slot_pos)
+from mk20deck.controller import (OPTION_CHOSEN_S, OPTION_LEGACY, OPTION_PENDING, OPTION_PTT, OPTION_TIMEOUT,
+                                 PERMISSION_LABELS, BOTTOM_ROW, Controller, KeyView, Role, option_labels, slot_pos)
 from mk20deck.daemon import Daemon
 from mk20deck.layout import DeviceLayout
 from mk20deck.link import DeviceLink
@@ -22,7 +22,7 @@ from mk20deck.model import ActionResult, Capabilities, Mode, State
 from mk20deck.render.canvas import Renderer
 from mk20deck.render.keys import BLANK_BG, OPTION_AMBER, render_key
 from mk20deck.render.subscreen import render_sub
-from mk20deck.sim import FakeClock, option_adapters, option_shots
+from mk20deck.sim import FakeClock, demo_adapters, option_adapters, option_shots
 from mk20deck.slots import N_SLOTS
 from mk20deck.transport import MockDevice
 
@@ -159,7 +159,48 @@ def test_no_option_mode_without_a_confirmed_focus_on_l1(why):
     assert not any(k.option or k.blank for k in c.view().keys)
 
 
+def test_desktop_and_unhooked_waiting_sessions_never_enter_option_mode():
+    """Integrator 2026-10-22: only hook-reported prompts (tmux Claude/codex); Desktop/herdr taps stay plain focus."""
+    clk = FakeClock()
+    ads = demo_adapters()  # Codex Desktop demo: S1 needs_approval, S2 needs_input, focus supported
+    c = Controller(DeckConfig(), ads, clock=clk, wall=lambda: 1.0, sim=True)
+    c.refresh()
+    assert c.mode == Mode.DESKTOP and c.mgr.session_at(0).state == State.NEEDS_APPROVAL
+    for col in (1, 2, 1):
+        tap(c, clk, col, 1)
+        assert c.option is None and c.hid_keys_wanted() == {}
+    assert len([a for a in ads[Mode.DESKTOP].actions if a[0] == "focus"]) == 3  # each tap focused, no option keys
+    c.on_knob(1, "down")
+    clk.advance(0.1)
+    c.on_knob(1, "up")  # K1 press focuses the needs_* selection: still no option mode
+    assert c.option is None and not any(k.option or k.blank for k in c.view().keys)
+    # tmux pane in needs_input without a hook record behind the state: no option mode either
+    c2, clk2, ads2 = make()
+    s = session(ads2, Q)
+    s.hooked = False
+    c2.refresh()
+    tap(c2, clk2, *where(c2, Q))
+    assert c2.option is None and focus_calls(ads2)[-1][1] == s.sid.key()
+
+
 # ------------------------------------------------------------------ presses while shown
+def test_digit_while_ptt_held_only_hints(env):
+    c, clk, ads = env
+    enter(c, clk)
+    n, sel = len(focus_calls(ads)), c.mgr.selected
+    clk.advance(20)
+    c.on_key(2, 1, True, ignored="ptt")  # the keyboard typed nothing (Right Option held)
+    c.on_key(2, 1, False)
+    assert c.toast[0] == OPTION_PTT == "先松开按住说话" and c.option is not None and c.option.chosen is None
+    assert len(focus_calls(ads)) == n and c.mgr.selected == sel and not c.presses
+    assert c.option_deadline() == pytest.approx(clk.t + OPTION_TIMEOUT)  # counts as input
+    c.on_knob(1, "down")
+    c.on_knob(1, "up")
+    c.on_key(2, 1, True, ignored="ptt")  # after option mode: still only the hint
+    assert c.option is None and c.toast[0] == OPTION_PTT and len(focus_calls(ads)) == n
+
+
+
 def test_marked_digit_press_gives_feedback_then_exits_after_3s(env):
     c, clk, ads = env
     enter(c, clk)
@@ -378,8 +419,13 @@ def test_protocol_ui_hid_keys_builder_and_marker():
                       ({1: 1, 2: 1}, 1), ({i: i for i in range(1, 11)}, 1), ({True: 1}, 1), ({1: True}, 1)):
         with pytest.raises(ValueError):
             P.ui_hid_keys(keys, gen)
+    ev = {"method": "keyStateChanged", "parameters": {"col": 1, "ignored": "ptt", "pressed": True, "row": 0}}
+    assert P.classify_json(ev).ignored == "ptt" and P.classify_json(ev).hid is None
+    for bad in ("PTT", 1, True, ["ptt"], ""):
+        ev["parameters"]["ignored"] = bad
+        assert P.classify_json(ev).ignored is None
     ev = {"method": "keyStateChanged", "parameters": {"col": 1, "hid": 31, "pressed": True, "row": 0}}
-    assert P.classify_json(ev).hid == 31
+    assert P.classify_json(ev).hid == 31 and P.classify_json(ev).ignored is None
     for bad in ("31", 300, True, None, 3.0, 0):
         ev["parameters"]["hid"] = bad
         assert P.classify_json(ev).hid is None
@@ -474,6 +520,10 @@ def test_daemon_sends_map_before_the_frame_refreshes_and_clears():
         assert wait_for(lambda: not d.events.empty())
         d.step()
         assert c.toast[0] == "已选 2" and c.option.chosen
+        dev.press(2, 0, True, ignored="ptt")  # a digit the keyboard ignored under the PTT
+        assert wait_for(lambda: not d.events.empty())
+        d.step()
+        assert c.toast[0] == OPTION_PTT and c.option is not None
         clk.advance(OPTION_CHOSEN_S)
         d.step()
         assert c.option is None and dev.hid_map == {} and dev.hid_generation == gen + 2  # cleared on exit
@@ -568,6 +618,7 @@ def test_tmux_adapter_exposes_pending_choice(tmp_path):
     p.write_text(json.dumps({**d, "options": ["用 SQLite", "先不加"]}))
     ss = by_pane(adapter(sdir))
     assert ss["%0"].options == ("用 SQLite", "先不加") and ss["%0"].prompt_kind == ""
+    assert ss["%0"].hooked and not ss["%1"].hooked  # %1: codex found by its command, no record
     p.write_text(json.dumps({**d, "state": "needs_approval", "prompt_kind": "permission"}))
     ss = by_pane(adapter(sdir))
     assert ss["%0"].prompt_kind == "permission" and ss["%0"].options == ()

@@ -94,10 +94,17 @@ int host_json_key_state(char *out, size_t cap, int col, int row, int pressed)
                      col, pressed ? "true" : "false", row);
     return (r < 0 || (size_t)r >= cap) ? -1 : r;
 }
-/* Option-mode press (kbd/UI.md ui.hidKeys): the same event plus the HID usage the device put down. */
+/* Option-mode press (kbd/UI.md ui.hidKeys): the same event plus the HID usage the device typed. */
 int host_json_key_state_hid(char *out, size_t cap, int col, int row, int usage)
 {
     int r = snprintf(out, cap, "{\"method\":\"keyStateChanged\",\"parameters\":{\"col\":%d,\"hid\":%d,\"pressed\":true,\"row\":%d}}",
                      col, usage, row);
+    return (r < 0 || (size_t)r >= cap) ? -1 : r;
+}
+/* Option-mode digit press ignored because the Mac PTT (Right Option) is held: nothing was typed. */
+int host_json_key_state_ptt(char *out, size_t cap, int col, int row)
+{
+    int r = snprintf(out, cap, "{\"method\":\"keyStateChanged\",\"parameters\":{\"col\":%d,\"ignored\":\"ptt\",\"pressed\":true,\"row\":%d}}",
+                     col, row);
     return (r < 0 || (size_t)r >= cap) ? -1 : r;
 }

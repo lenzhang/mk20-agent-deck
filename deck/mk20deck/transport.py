@@ -416,9 +416,12 @@ class MockDevice:
         """Inject an arbitrary device JSON event (unknown knob formats etc.); ``frame_id=EVENT_ID`` as on hardware."""
         self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(obj), self._ids.next() if frame_id is None else frame_id))
 
-    def press(self, col: int, row: int, pressed: bool, hid: int | None = None) -> None:
-        """Inject a firmware-coordinate key event (``hid``: an option-mode press the device typed itself)."""
+    def press(self, col: int, row: int, pressed: bool, hid: int | None = None, ignored: str | None = None) -> None:
+        """Inject a firmware-coordinate key event (``hid``: an option-mode press the device typed itself;
+        ``ignored="ptt"``: a digit press the device ignored because the Mac PTT was held)."""
         ev = {"method": "keyStateChanged", "parameters": {"col": col, "row": row, "pressed": pressed}}
         if hid is not None:
             ev["parameters"]["hid"] = hid
+        if ignored is not None:
+            ev["parameters"]["ignored"] = ignored
         self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(ev), self._ids.next()))

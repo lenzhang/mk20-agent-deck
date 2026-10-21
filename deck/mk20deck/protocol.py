@@ -233,7 +233,8 @@ class KeyEvent:
     pressed: bool
     keycode: int | None = None
     request_id: Any = None
-    hid: int | None = None  # option mode: HID usage the keyboard itself put down for this press (kbd/UI.md)
+    hid: int | None = None  # option mode: HID usage the keyboard itself typed for this press (kbd/UI.md)
+    ignored: str | None = None  # option mode: "ptt" = a digit press the keyboard ignored (Mac PTT held)
 
 
 @dataclass(frozen=True)
@@ -263,7 +264,8 @@ def classify_json(obj: dict[str, Any]) -> KeyEvent | Ack | dict[str, Any]:
                     kc = (int(p["keyCodeH"]) << 8) | int(p.get("keyCodeL", 0))
                 hid = p.get("hid")
                 hid = hid if type(hid) is int and 0x04 <= hid <= 0x65 else None  # anything else: not trusted
-                return KeyEvent(int(p["col"]), int(p["row"]), bool(p.get("pressed")), kc, rid, hid)
+                ign = p.get("ignored") if p.get("ignored") in ("ptt",) else None
+                return KeyEvent(int(p["col"]), int(p["row"]), bool(p.get("pressed")), kc, rid, hid, ign)
             if "keyCodeH" in p or "keyCodeL" in p:
                 kc = (int(p.get("keyCodeH", 0)) << 8) | int(p.get("keyCodeL", 0))
                 return KeyEvent(-1, -1, bool(p.get("pressed")), kc, rid)

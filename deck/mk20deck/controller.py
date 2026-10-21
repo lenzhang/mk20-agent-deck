@@ -13,10 +13,10 @@ there and pin, swapping with an occupant; same slot → toggle the pin) and neve
 press, 8 s without key/knob input, a page/mode switch (K2, MODE, L4 row 1) or a reconnect cancels.
 
 Option mode (user decision 2026-10-22): a tap on L1 that focuses a needs_input / needs_approval session
-clears rows 1–3 down to the choice keys 1..N (AskUserQuestion labels from the hook record, the fixed
+whose state comes from a Claude/codex hook record (tmux) clears rows 1–3 down to the choice keys 1..N (AskUserQuestion labels from the hook record, the fixed
 permission labels, or bare digits 1..5).  The daemon asks the keyboard (``ui.hidKeys``) to make those
-keys type the digit into the frontmost window (the session just brought forward); presses come back
-marked with ``hid`` and only give feedback here.  Exit: the session leaves needs_*, ✗ Esc, a K1
+keys type the digit into the frontmost window (the session just brought forward; once per press, never
+while the Mac PTT is held); presses come back marked (``hid`` / ``ignored``) and only give feedback here.  Exit: the session leaves needs_*, ✗ Esc, a K1
 press, a blank key, a page/mode switch, 30 s without input, 3 s after a choice, or a reconnect.
 """
 from __future__ import annotations
@@ -55,6 +55,7 @@ OPTION_MAX = 5          # row 1 only
 PERMISSION_LABELS = ("是", "是，且不再问", "否")  # Claude Code / codex tool permission menus
 OPTION_LEGACY = "固件不支持数字键，请在 Mac 上按数字"
 OPTION_PENDING = "数字键暂未生效（键盘未确认），请在 Mac 上按数字"
+OPTION_PTT = "先松开按住说话"  # the keyboard ignores digits while the Mac PTT (Right Option) is held
 # K1 rotation order (PRD delta 2026-10-20): who needs me first, then the rest by slot order.
 K1_RANK = {State.NEEDS_APPROVAL: 0, State.NEEDS_INPUT: 1, State.ERROR: 2, State.DONE_UNREAD: 3}
 MODE_SHORT = {Mode.DESKTOP: "桌面", Mode.HERDR: "herdr", Mode.TMUX: "tmux"}
@@ -208,6 +209,11 @@ class _Option:
     kind: str  # "question" (AskUserQuestion labels) | "permission" | "digits" (unknown)
     last: float  # last key/knob input (OPTION_TIMEOUT)
     chosen: tuple[str, float] | None = None  # (what was typed, when): OPTION_CHOSEN_S grace
+
+
+def option_prompt(s: Session) -> bool:
+    """Only hook-reported prompts (tmux Claude/codex) are answered with digit keys; Desktop/herdr never are."""
+    return s.hooked and s.state in PROMPT_STATES
 
 
 def option_labels(s: Session) -> tuple[tuple[str, ...], str]:
@@ -389,7 +395,7 @@ class Controller:
             self._drop_option()
             return
         s = self.managers[op.mode].sessions.get(op.key)
-        if s is None or s.state not in PROMPT_STATES:
+        if s is None or not option_prompt(s):
             self._exit_option("已作答 · 回到会话列表" if op.chosen else "会话已不在等待选择 · 回到会话列表")
         elif op.chosen and t - op.chosen[1] >= OPTION_CHOSEN_S:
             self._exit_option("回到会话列表")
@@ -528,8 +534,9 @@ class Controller:
             self.page = st.exit_to or "L1"
         self._touch()
 
-    def on_key(self, col: int, row: int, pressed: bool, hid: int | None = None) -> None:
-        """1-based doc coordinates.  ``hid``: the keyboard typed this press itself (option mode)."""
+    def on_key(self, col: int, row: int, pressed: bool, hid: int | None = None, ignored: str = "") -> None:
+        """1-based doc coordinates.  ``hid``: the keyboard typed this press itself (option mode);
+        ``ignored="ptt"``: the keyboard ignored this digit press because the Mac PTT is held."""
         if self.page == "LS":
             if pressed:
                 self.settings.key(col, row)
@@ -538,6 +545,12 @@ class Controller:
         t = self.clock()
         kr = role_at(self.page, col, row)
         if kr is None:
+            return
+        if ignored:
+            if pressed:  # nothing was typed; its unmarked release finds no press here
+                if self.option is not None:
+                    self.option.last = t
+                self._say(OPTION_PTT)
             return
         if hid is not None:
             if pressed:  # its release carries no mark and finds no press here: nothing happens
@@ -600,7 +613,7 @@ class Controller:
                     s = self.mgr.selected_session()  # K1 press = focus the selection (same as a slot tap)
                     if s is None:
                         self._say("未选中会话 · 转 K1 选择")
-                    elif self._focus(s) and s.state in PROMPT_STATES and self.page == "L1":
+                    elif self._focus(s) and option_prompt(s) and self.page == "L1":
                         self._enter_option(s)
                 else:
                     page = "L4" if self.page == "L1" else "L1"
@@ -709,7 +722,7 @@ class Controller:
         if self.adapter.capabilities().focus is not None:
             return  # select only; the sub-screen note explains why (no toast on every tap)
         # Option mode only after the window really came forward: the keyboard types into the frontmost one.
-        if self._focus(s) and s.state in PROMPT_STATES and self.page == "L1":
+        if self._focus(s) and option_prompt(s) and self.page == "L1":
             self._enter_option(s)
 
     def _on_long(self, kr: KeyRole, p: _Press) -> None:

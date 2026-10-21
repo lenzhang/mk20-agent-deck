@@ -29,24 +29,24 @@
  {
   "name": "every_tap_focuses",
   "group": "gestures",
-  "desc": "再次单击同一会话或另一会话都会再置前一次（无双击手势；S5 运行中 / S3 出错：不进选项模式）",
+  "desc": "再次单击同一会话或另一会话都会再置前一次（无双击手势）",
   "steps": [
    {
-    "press": "S5",
+    "press": "S1",
     "hold": 40
    },
    {
     "wait": 100
    },
    {
-    "press": "S5",
+    "press": "S1",
     "hold": 40
    },
    {
     "wait": 400
    },
    {
-    "press": "S3",
+    "press": "S2",
     "hold": 40
    },
    {
@@ -59,10 +59,17 @@
   ]
  },
  {
-  "name": "option_mode_tap_waiting_session",
+  "name": "desktop_waiting_session_no_option_mode",
   "group": "gestures",
-  "desc": "点「待输入」会话 = 置前 + 选项模式（2026-10-22）：第 1 行变数字键，其余清空；SIM 无键盘数字映射 → 提示在 Mac 上按；点空白键 / K1 = 回到会话列表，都不再置前",
+  "desc": "选项模式只用于 hook 状态的会话（tmux Claude/codex，2026-10-22）：Codex 桌面的「待输入」会话单击两次 = 两次置前，不清空会话列表、不出数字键",
   "steps": [
+   {
+    "press": "S2",
+    "hold": 40
+   },
+   {
+    "wait": 100
+   },
    {
     "press": "S2",
     "hold": 40
@@ -71,8 +78,8 @@
     "expect": {
      "selected_title": "NAS部署",
      "agent_calls": {
-      "focus": 1,
-      "*": 1
+      "focus": 2,
+      "*": 2
      }
     }
    },
@@ -82,44 +89,9 @@
    },
    {
     "expect": {
-     "toast_contains": "数字键未生效，请在 Mac 上按 3",
      "agent_calls": {
-      "focus": 1,
-      "*": 1
-     }
-    }
-   },
-   {
-    "press": "S7",
-    "hold": 40
-   },
-   {
-    "expect": {
-     "toast_contains": "回到会话列表",
-     "agent_calls": {
-      "focus": 1,
-      "*": 1
-     }
-    }
-   },
-   {
-    "wait": 1600
-   },
-   {
-    "press": "S2",
-    "hold": 40
-   },
-   {
-    "knob": "K1",
-    "action": "press"
-   },
-   {
-    "expect": {
-     "toast_contains": "回到会话列表",
-     "page": "L1",
-     "agent_calls": {
-      "focus": 2,
-      "*": 2
+      "focus": 3,
+      "*": 3
      }
     }
    }
