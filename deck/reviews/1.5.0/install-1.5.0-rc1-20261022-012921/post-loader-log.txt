@@ -1,0 +1,80 @@
+17 loader pending 1.1.4 attempt 1
+19 loader launch 1.1.4 (ok 8 files)
+89 loader confirmed 1.1.4 (good)
+22040 loader install: 1.2.0 extracted and verified (tar 747ae0c0164bc78801b0ba85471a605072ada8ee6cab69b53ff1e382afb06dbd)
+22044 loader slot B <- 1.2.0 (gen 14)
+22045 loader prune: removed 1.1.2
+17 loader pending 1.2.0 attempt 1
+19 loader launch 1.2.0 (ok 9 files)
+89 loader confirmed 1.2.0 (good)
+19 loader launch 1.2.0 (ok 9 files)
+6213 loader install: 1.2.1 extracted and verified (tar c1daa40944500f202742466415757dc16dbf4466ce2a1dd93fc5d662a72eb74d)
+6217 loader slot A <- 1.2.1 (gen 15)
+6217 loader prune: removed 1.1.3
+17 loader pending 1.2.1 attempt 1
+19 loader launch 1.2.1 (ok 9 files)
+91 loader confirmed 1.2.1 (good)
+19 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+18 loader launch 1.2.1 (ok 9 files)
+18 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+18 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+20 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+20 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+19 loader launch 1.2.1 (ok 9 files)
+1139 loader install: 1.3.0 extracted and verified (tar 49284d191afadab6c26644d30a2e870a46b06dc92a9b5c73bad0a4e9019e4f4f)
+1144 loader slot B <- 1.3.0 (gen 16)
+1145 loader prune: removed 1.1.4
+18 loader pending 1.3.0 attempt 1
+20 loader launch 1.3.0 (ok 14 files)
+603 loader deadline 1.3.0: not confirmed by 600s -> one hard reset
+17 loader pending 1.3.0 attempt 2
+18 loader slot A <- 1.2.1 (gen 17)
+18 loader ROLLBACK 1.3.0 -> 1.2.1: not confirmed after 1 attempt(s)
+20 loader launch 1.2.1 (ok 9 files)
+2950 loader install: 1.3.1 extracted and verified (tar bdd51ce39cd1f98c1111448c0807b50407566931eecd368a9cdffdd322d721ec)
+2955 loader slot B <- 1.3.1 (gen 18)
+2956 loader prune: removed 1.2.0
+17 loader pending 1.3.1 attempt 1
+20 loader launch 1.3.1 (ok 14 files)
+89 loader confirmed 1.3.1 (good)
+47115 loader install: 1.4.0 extracted and verified (tar b3071a20001142c0f1dd0e04b361ea1b3cb5639897f7f466a67aacb2f71b1e04)
+47118 loader slot A <- 1.4.0 (gen 19)
+47118 loader prune: removed 1.2.1
+18 loader pending 1.4.0 attempt 1
+20 loader launch 1.4.0 (ok 14 files)
+89 loader confirmed 1.4.0 (good)
+25244 loader install: 1.4.1 extracted and verified (tar a996209adccf938e12a3ecf1f4ea9b5a34c9c54c052e74b2cc7ef7b236af7027)
+25246 loader slot B <- 1.4.1 (gen 20)
+25247 loader prune: removed 1.3.0
+18 loader pending 1.4.1 attempt 1
+21 loader launch 1.4.1 (ok 14 files)
+87 loader confirmed 1.4.1 (good)
+11534 loader install: 1.4.2 extracted and verified (tar 8cb854fb81564279bb4e5a10af35925fa22d724cec0abc6cde7e9a41af5599fa)
+11537 loader slot A <- 1.4.2 (gen 21)
+11537 loader prune: removed 1.3.1
+17 loader pending 1.4.2 attempt 1
+20 loader launch 1.4.2 (ok 14 files)
+88 loader confirmed 1.4.2 (good)
+8026 loader install: 1.4.3 extracted and verified (tar 39c1f1081b128e5c25623361bb390ca6f285a5edafeb1571062575d71873dcfe)
+8029 loader slot B <- 1.4.3 (gen 22)
+8029 loader prune: removed 1.4.0
+18 loader pending 1.4.3 attempt 1
+20 loader launch 1.4.3 (ok 14 files)
+88 loader confirmed 1.4.3 (good)
+6423 loader install: 1.5.0 extracted and verified (tar fd78912e27345cf6ced1b36536771cb1510c9b534a19ef34f04161a55ebbf0c7)
+6426 loader slot A <- 1.5.0 (gen 23)
+6427 loader prune: removed 1.4.1
+18 loader pending 1.5.0 attempt 1
+20 loader launch 1.5.0 (ok 14 files)
+90 loader confirmed 1.5.0 (good)

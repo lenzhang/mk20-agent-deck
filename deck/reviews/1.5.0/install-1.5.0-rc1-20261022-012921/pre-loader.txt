@@ -1,0 +1,1 @@
+current=B 22 1.4.3 good=1.4.3 pending= attempts= active=1.4.3 last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)
