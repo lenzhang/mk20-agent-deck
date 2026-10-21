@@ -56,7 +56,7 @@ def test_hello_negotiates_and_heartbeats_stay_inside_device_window(links):
     hello = [r for r in dev.json_requests if r["method"] == "ui.hello"]
     assert hello == [{"method": "ui.hello", "version": 1}]  # flat JSON, no "parameters"
     assert [r["method"] for r in dev.json_requests][:2] == ["getInfo", "ui.hello"]
-    assert wait_until(lambda: len(dev.heartbeats) >= 8)
+    assert wait_until(lambda: len(dev.heartbeats) >= 8 and link.ui_beats >= 8)  # device got it AND we saw the ack
     assert wait_until(lambda: dev.ui_online)  # 3 counted samples spanning >= 2 periods
     gaps = [b - a for a, b in zip(dev.heartbeats, dev.heartbeats[1:])]
     # Lower bound is by construction (next beat scheduled one period after the previous ack): never "too close".
