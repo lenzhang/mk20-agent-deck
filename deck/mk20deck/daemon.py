@@ -299,6 +299,11 @@ class Daemon:
                     raise WakeReconnect(ev)
 
     def run(self, stop: threading.Event) -> None:
+        # A connection made while the display already sleeps (e.g. the keyboard rebooted for an install while
+        # the user is away) gets no new display_sleep edge: start paused from the monitor's current state.
+        if self.power is not None and getattr(self.power, "display_asleep", False) and not self.paused:
+            self.offline_frame("Mac 已休眠")
+            self.paused = True
         done = threading.Event()
         if self.bg_poll_s > 0:
             threading.Thread(target=self._bg_loop, args=(stop, done), name="mk20-bg-poll", daemon=True).start()
@@ -311,6 +316,10 @@ class Daemon:
         while not stop.is_set():
             self.check_power()
             if self.paused:
+                # Still watch the link while paused: a device reboot during display sleep must reconnect (and
+                # show "Mac 已休眠" again) instead of leaving the keyboard with no host until the next wake.
+                if self.link is not None and not self.link.connected:
+                    raise ConnectionError(self.link.lost_reason or "device disconnected")
                 stop.wait(self.power_interval)
                 while not self.events.empty():  # drop input while the Mac sleeps
                     self.events.get_nowait()
