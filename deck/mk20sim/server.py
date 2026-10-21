@@ -46,7 +46,7 @@ button,select{background:#2a2e36;color:#ddd;border:1px solid #444;border-radius:
 </style>
 <div id=dev><canvas id=cv width=800 height=800></canvas></div>
 <div id=side><h3>MK20 交互模拟器 · SIM（不连设备）</h3>
-<div class=hint>鼠标按下/松开 = 键按下/抬起（单击会话 = 选中并置前，长按 ≥600 ms 钉扎，按真实时序判定；第 4 行删除/发送/Esc 是键盘直发 HID，只记录）· 旋钮：滚轮 = 旋转，点击 = 按下 ·
+<div class=hint>鼠标按下/松开 = 键按下/抬起（单击会话 = 选中并置前，长按 ≥600 ms 拿起（移动中）→ 点目标键放下并钉住、点自己 = 钉扎/解除、K1 取消，按真实时序判定；第 4 行删除/发送/Esc 是键盘直发 HID，只记录）· 旋钮：滚轮 = 旋转，点击 = 按下 ·
 键盘：1-5/q-t/a-g/z-b = 四行键，[ ] = K1 转，; ' = K2 转，Shift+[ / Shift+; = 按 K1/K2</div>
 <h3>状态</h3><div id=state></div>
 <div class=hint style="margin-top:6px">延迟注入 (ms，±抖动)：输入 GD32→T113 <input id=li size=3 value=0>±<input id=lij size=2 value=0>

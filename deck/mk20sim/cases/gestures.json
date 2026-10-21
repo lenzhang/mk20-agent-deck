@@ -59,9 +59,9 @@
   ]
  },
  {
-  "name": "long_press_pins_without_focus",
+  "name": "long_press_picks_up_tap_self_pins",
   "group": "gestures",
-  "desc": "长按会话键 ≥600 ms 钉扎/解除，只选中不置前",
+  "desc": "长按会话键 ≥600 ms = 拿起（移动中），再点同一键 = 钉扎/解除；全程只选中不置前（2026-10-22）",
   "steps": [
    {
     "press": "S2",
@@ -70,6 +70,18 @@
    {
     "expect": {
      "selected": true,
+     "toast_contains": "已拿起 S2",
+     "agent_calls": {
+      "*": 0
+     }
+    }
+   },
+   {
+    "press": "S2",
+    "hold": 40
+   },
+   {
+    "expect": {
      "toast_contains": "已钉扎",
      "agent_calls": {
       "*": 0
@@ -84,8 +96,77 @@
     "hold": 700
    },
    {
+    "press": "S2",
+    "hold": 40
+   },
+   {
     "expect": {
      "toast_contains": "已取消钉扎",
+     "agent_calls": {
+      "*": 0
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "pick_up_and_place_swaps_without_focus",
+  "group": "gestures",
+  "desc": "长按 S1 拿起，点 S7 放下：两会话交换、S7 钉住，不置前；K1 按下 = 取消移动",
+  "steps": [
+   {
+    "press": "S1",
+    "hold": 700
+   },
+   {
+    "mark": "t"
+   },
+   {
+    "press": "S7",
+    "hold": 40
+   },
+   {
+    "expect": {
+     "toast_contains": "已与 S7 交换 · 已钉扎",
+     "selected_changed": false,
+     "agent_calls": {
+      "*": 0
+     }
+    }
+   },
+   {
+    "wait": 1600
+   },
+   {
+    "press": "S3",
+    "hold": 700
+   },
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "expect": {
+     "toast_contains": "已取消移动",
+     "page": "L1",
+     "agent_calls": {
+      "*": 0
+     }
+    }
+   },
+   {
+    "wait": 1600
+   },
+   {
+    "press": "S3",
+    "hold": 700
+   },
+   {
+    "wait": 8100
+   },
+   {
+    "expect": {
+     "toast_contains": "已取消移动",
      "agent_calls": {
       "*": 0
      }

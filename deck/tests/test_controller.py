@@ -129,13 +129,17 @@ def test_tap_on_done_clears_local_reminder(env):
     assert c.mgr.session_at(idx).state == State.IDLE
 
 
-def test_long_press_pins_without_focus(env):
+def test_long_press_picks_up_and_tap_self_pins_without_focus(env):
+    """2026-10-22: long press = pick up (no pin by itself); pin toggle = long press + press the same slot."""
     c, clk, ads, saved = env
     hold(c, clk, 2, 1, 0.7)
-    assert c.mgr.slots[1].pinned and c.mgr.selected == c.mgr.slots[1].key
-    assert ads[Mode.DESKTOP].actions == []
+    assert c.moving is not None and c.moving.src == 1 and not c.mgr.slots[1].pinned
+    assert c.mgr.selected == c.mgr.slots[1].key and ads[Mode.DESKTOP].actions == []
+    tap(c, clk, 2, 1)
+    assert c.moving is None and c.mgr.slots[1].pinned and ads[Mode.DESKTOP].actions == []
     assert saved and saved[-1]["modes"]["codex_desktop"]["slots"][1]["pinned"]
     hold(c, clk, 2, 1, 0.7)
+    tap(c, clk, 2, 1)
     assert not c.mgr.slots[1].pinned and ads[Mode.DESKTOP].actions == []
 
 
@@ -165,13 +169,17 @@ def test_empty_slot_and_lost_pin_taps_do_nothing(env):
     c, clk, ads, _ = env
     tap(c, clk, 5, 3)  # S15: the default demo has 8 sessions
     assert c.log[-1] == "空槽" and c.mgr.selected is None and ads[Mode.DESKTOP].actions == []
-    hold(c, clk, 1, 1, 0.7)  # pin S1, then its session vanishes
+    hold(c, clk, 1, 1, 0.7)  # pick S1 up ...
+    tap(c, clk, 1, 1)  # ... press it again = pin; then its session vanishes
     gone = c.mgr.slots[0].key
     ads[Mode.DESKTOP].sessions = [s for s in ads[Mode.DESKTOP].sessions if s.sid.key() != gone]
     c.refresh()
     assert c.mgr.slots[0].lost
     tap(c, clk, 1, 1)
-    assert c.log[-1] == "失联钉扎 · 长按解除" and ads[Mode.DESKTOP].actions == []
+    assert c.log[-1] == "失联钉扎 · 长按后点自己解除" and ads[Mode.DESKTOP].actions == []
+    hold(c, clk, 1, 1, 0.7)
+    tap(c, clk, 1, 1)  # pick up + press itself releases the lost pin
+    assert c.log[-1] == "已解除失联钉扎" and ads[Mode.DESKTOP].actions == []
 
 
 def test_focus_unsupported_tap_only_selects_with_note(env):
@@ -288,9 +296,10 @@ def test_l4_slots_are_the_l1_slots(env):
     v = c.view()
     agents = [k for k in v.keys if k.role == Role.AGENT]
     assert len(agents) == 10 and {(k.col, k.row) for k in agents} == {slot_pos(i) for i in range(5, 15)}
-    assert v.sub.pin_info == "钉扎 0/15 · 长按槽位钉扎/解除 · S1–S5 在 L1"
+    assert v.sub.pin_info == "钉扎 0/15 · 长按拿起，点自己=钉扎/解除 · S1–S5 在 L1"
     n = len(focus_calls(ads))
-    hold(c, clk, 2, 2, 0.7)  # pin S7 from L4 (long press: no focus)
+    hold(c, clk, 2, 2, 0.7)  # pick S7 up on L4 and press it again: pinned, no focus
+    tap(c, clk, 2, 2)
     assert c.mgr.slots[6].pinned and len(focus_calls(ads)) == n
     assert c.view().sub.pin_info.startswith("钉扎 1/15")
 
@@ -310,6 +319,7 @@ def test_restart_restores_state(env):
     c, clk, ads, saved = env
     tap(c, clk, 2, 1)
     hold(c, clk, 3, 1, 0.7)
+    tap(c, clk, 3, 1)  # pin S3 (pick up + press itself)
     tap(c, clk, 5, 4)
     st = saved[-1]
     assert st["modes"]["codex_desktop"]["n_slots"] == 15 and len(st["modes"]["codex_desktop"]["slots"]) == 15

@@ -4,6 +4,7 @@ PRD 1.5 L1 layout (2026-10-21): slots S1..S15 fill rows 1-3 of the 5x4 key grid,
 ``i`` sits at document ``(col, row) = (i % 5 + 1, i // 5 + 1)``.  The old layout had 8 slots
 in a 4-column block (A1..A8 at ``(i % 4 + 1, i // 4 + 1)``); ``from_dict`` migrates such state
 files position-preserving (A1..A4 → S1..S4, A5..A8 → S6..S9) so pins keep their physical key.
+``move`` implements the user's pick-up-and-place gesture (2026-10-22): placed sessions are pinned.
 """
 from __future__ import annotations
 
@@ -147,6 +148,28 @@ class SlotManager:
         e.pinned = not e.pinned
         self._bump()
         return "已钉扎" if e.pinned else "已取消钉扎"
+
+    def move(self, src: int, dst: int) -> str:
+        """Pick-up-and-place (PRD 1.5 delta 2026-10-22): put the entry of ``src`` on ``dst`` and pin it.
+
+        * ``dst == src``: toggle the pin (the only way to pin / unpin; a lost pin is released).
+        * ``dst`` occupied: the two swap; the displaced entry keeps its own pin / lost flags.
+        * ``dst`` empty: ``src`` becomes empty (the normal fill rules may refill it later).
+
+        The placed entry is pinned, so ``update`` never moves or replaces it; the selection
+        follows the session (it is a key, not an index)."""
+        if not (0 <= src < N_SLOTS and 0 <= dst < N_SLOTS):
+            raise IndexError(f"slot index out of range: {src} -> {dst}")
+        if src == dst:
+            return self.toggle_pin(src)
+        e = self.slots[src]
+        if e is None:
+            return "空槽不可移动"
+        other = self.slots[dst]
+        self.slots[dst], self.slots[src] = e, other
+        e.pinned = True
+        self._bump()
+        return f"已移到 S{dst + 1} · 已钉扎" if other is None else f"已与 S{dst + 1} 交换 · 已钉扎"
 
     # ------------------------------------------------------------------
     def to_dict(self) -> dict:

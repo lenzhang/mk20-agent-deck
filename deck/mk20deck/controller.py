@@ -6,6 +6,11 @@ sends PTT (hold = Right Option), DELETE (Backspace), SEND/OK (Return) and NO (Es
 straight to the Mac's frontmost window.  The deck only renders those keys; it never
 acts on their key events (the device does not forward them; stray ones are ignored).
 PTT presses that *are* observed only drive the on-screen overlay.
+
+Session slots (PRD 1.5 delta 2026-10-22, "拿起 / 放下"): a tap selects + focuses; a long press
+picks the slot up ("移动中").  While picked up, the next slot press places it (other slot → move
+there and pin, swapping with an occupant; same slot → toggle the pin) and never focuses.  A K1
+press, 8 s without key/knob input, a page/mode switch (K2, MODE, L4 row 1) or a reconnect cancels.
 """
 from __future__ import annotations
 
@@ -29,6 +34,7 @@ log = logging.getLogger(__name__)
 PTT_UNAVAILABLE = "PTT 不可用，请使用 Mac 原语音键"
 
 LONG_PRESS = 0.600   # D14
+MOVE_TIMEOUT = 8.0   # a picked-up slot is dropped back after this long without key/knob input
 DOUBLE_TAP = 0.350   # devtest timing reference only: double-tap focus was removed (single tap focuses)
 TOAST_S = 1.5
 SWITCH_TOAST_S = 1.2
@@ -109,6 +115,7 @@ class KeyView:
     mode: Mode | None = None
     attention: bool = False
     badge_alert: bool = False  # badge is an attention count (other modes)
+    moving: bool = False  # this slot is picked up (pick-up-and-place gesture)
 
 
 @dataclass
@@ -130,6 +137,7 @@ class SubView:
     pin_info: str = ""
     selection_lost: bool = False
     other_modes: str = ""  # e.g. "tmux 2 待处理" (background poll of non-current modes)
+    moving: str = ""  # instruction line while a slot is picked up
 
 
 @dataclass
@@ -159,6 +167,20 @@ class _Press:
     cancelled: bool = False
 
 
+@dataclass
+class _Move:
+    """A picked-up slot (long press) waiting for the placing press."""
+    src: int
+    key: str
+    title: str
+    mode: Mode
+    last: float  # last key/knob input; MOVE_TIMEOUT after it the pick-up is cancelled
+
+
+def _short(title: str, n: int = 6) -> str:
+    return title if len(title) <= n else title[:n] + "…"
+
+
 class Controller:
     def __init__(self, cfg: DeckConfig, adapters: dict[Mode, ModeAdapter], state: dict | None = None,
                  clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
@@ -186,6 +208,7 @@ class Controller:
         self.ptt_held = False
         self.ptt_observed = False
         self.presses: dict[tuple, _Press] = {}
+        self.moving: _Move | None = None
         self.scroll = 0
         self.version = 0  # bumps whenever the view may have changed
         self.log: list[str] = []
@@ -209,9 +232,9 @@ class Controller:
         self.log.append(text)
         self._touch()
 
-    def _result(self, res: ActionResult) -> ActionResult:
+    def _result(self, res: ActionResult, pre: str = "") -> ActionResult:
         self.action_count += 1  # adapter (agent) action attempted — key trace outcome
-        self._say(res.message)
+        self._say(pre + res.message)
         return res
 
     def persist(self) -> dict:
@@ -219,6 +242,60 @@ class Controller:
         if self.on_state_change:
             self.on_state_change(st)
         return st
+
+    # ------------------------------------------------------------------ pick up / place (2026-10-22)
+    def _drop_move(self) -> str:
+        """Forget a picked-up slot without a toast; returns the prefix for the caller's own toast."""
+        if self.moving is None:
+            return ""
+        self.moving = None
+        self._touch()
+        return "已取消移动 · "
+
+    def _cancel_move(self, then: str = "") -> bool:
+        """Cancel a pick-up (the arrangement does not change); the toast says so, then ``then``."""
+        pre = self._drop_move()
+        if pre:
+            self._say(pre + then if then else "已取消移动")
+        return bool(pre)
+
+    def _goto(self, page: str, toast: str) -> None:
+        """Page switch (K2, K1/K2/MODE hold, 回 L1): also cancels a pick-up."""
+        self.page = page
+        if not self._cancel_move(toast):
+            self._say(toast, 0.8)
+
+    def drop_gestures(self) -> None:
+        """Reconnect / wake: presses in flight and a picked-up slot are never replayed."""
+        self.presses.clear()
+        self._cancel_move()
+
+    def move_deadline(self) -> float | None:
+        """Clock time at which the pick-up times out (the daemon wakes up for it)."""
+        return None if self.moving is None else self.moving.last + MOVE_TIMEOUT
+
+    def _pick_up(self, idx: int) -> None:
+        mgr = self.mgr
+        e = mgr.entry(idx)
+        if e is None:
+            self._say("空槽不可移动")
+            return
+        s = mgr.sessions.get(e.key)
+        title = "失联钉扎" if (e.lost or s is None) else (s.title or "?")
+        self.moving = _Move(idx, e.key, title, self.mode, self.clock())
+        self._say(f"已拿起 S{idx + 1}", 1.0)
+
+    def _place(self, dst: int) -> None:
+        """The press after a pick-up: move / swap + pin, or toggle the pin on the same slot.  Never focuses."""
+        mv, self.moving = self.moving, None
+        mgr = self.mgr
+        e = mgr.entry(mv.src)
+        if mv.mode != self.mode or e is None or e.key != mv.key:
+            self._say("已取消移动：会话已不在原槽")
+            return
+        msg = mgr.move(mv.src, dst)
+        self.persist()
+        self._say(msg)
 
     # ------------------------------------------------------------------ backend
     def refresh(self, mode: Mode | None = None) -> None:
@@ -258,6 +335,10 @@ class Controller:
         mgr.update(sessions)
         if sel_before and mgr.selected is None:
             self._cancel_target_presses()
+        mv = self.moving
+        if mv is not None and mv.mode == mode and (mgr.entry(mv.src) is None or mgr.entry(mv.src).key != mv.key):
+            self._drop_move()
+            self._say("已取消移动：会话已消失")
         if (mgr.mapping_version, self.backend[mode]) != before:
             self.persist()
         self._touch()
@@ -301,6 +382,7 @@ class Controller:
     # ------------------------------------------------------------------ settings page (LS)
     def open_settings(self) -> None:
         self.presses.clear()
+        self._drop_move()
         self.settings.open()
         self.page = "LS"
         self._touch()
@@ -327,12 +409,18 @@ class Controller:
             # window).  The device does not forward them; if one arrives anyway, never act on it.
             log.debug("ignored device-HID key %s %s", kr.role.value, "down" if pressed else "up")
             return
+        if self.moving is not None and kr.role != Role.PTT:
+            self.moving.last = t  # any Mac key event restarts the pick-up timeout (PTT is device-side)
         pk = ("key", col, row)
         if pressed:
             if pk in self.presses:  # duplicate down (bounce) — ignore
                 return
             self.presses[pk] = p = _Press(kr, t, self.mode)
-            self._on_down(kr, p, t)
+            if self.moving is not None and kr.role == Role.AGENT:
+                p.cancelled = True  # the placing press: no select, no focus on release, no long press
+                self._place(kr.index)
+            else:
+                self._on_down(kr, p, t)
         else:
             p = self.presses.pop(pk, None)
             if p is None:
@@ -350,8 +438,12 @@ class Controller:
             return
         t = self.clock()
         pk = ("knob", knob)
+        if self.moving is not None:
+            self.moving.last = t
         if kind == "down":
-            self.presses[pk] = _Press(KeyRole(Role.MODE), t, self.mode)
+            self.presses[pk] = p = _Press(KeyRole(Role.MODE), t, self.mode)
+            if knob == 1 and self._cancel_move():
+                p.cancelled = True  # K1 press = cancel the pick-up only (no focus, no L4 on hold)
         elif kind == "up":
             p = self.presses.pop(pk, None)
             if p and not p.long_fired and not p.cancelled and t - p.t0 < LONG_PRESS:
@@ -365,8 +457,8 @@ class Controller:
                     else:
                         self._focus(s)
                 else:
-                    self.page = "L4" if self.page == "L1" else "L1"
-                    self._say(f"切到 {self.page}", 0.8)
+                    page = "L4" if self.page == "L1" else "L1"
+                    self._goto(page, f"切到 {page}")
         elif kind in ("cw", "ccw"):
             if knob == 1:
                 self._k1_step(1 if kind == "cw" else -1)
@@ -377,17 +469,17 @@ class Controller:
     def tick(self) -> None:
         """Fire long-press thresholds (independent of rendering)."""
         t = self.clock()
+        if self.moving is not None and t - self.moving.last >= MOVE_TIMEOUT:
+            self._cancel_move()  # 8 s without key/knob input: nothing changes
         for pk, p in list(self.presses.items()):
             if p.long_fired or p.cancelled or t - p.t0 < LONG_PRESS:
                 continue
             p.long_fired = True
             if pk[0] == "knob":
                 if pk[1] == 1:
-                    self.page = "L4"
-                    self._say("L4 模式/设置", 0.8)
+                    self._goto("L4", "L4 模式/设置")
                 else:
-                    self.page = "L1"
-                    self._say("回到 L1", 0.8)
+                    self._goto("L1", "回到 L1")
                 continue
             self._on_long(p.role, p)
             self._touch()
@@ -424,11 +516,11 @@ class Controller:
             return
         if r == Role.AGENT:
             # Select on press (immediate sub-screen feedback); the focus half of a tap is decided on
-            # release so a long press (pin/unpin) never brings a window forward.
+            # release so a long press (pick up to move / pin) never brings a window forward.
             mgr = self.mgr
             entry = mgr.entry(kr.index)
             if entry is not None and entry.lost:
-                self._say("失联钉扎 · 长按解除")
+                self._say("失联钉扎 · 长按后点自己解除")
                 p.target = entry.key
                 return
             prev_sel = mgr.selected
@@ -472,12 +564,11 @@ class Controller:
     def _on_long(self, kr: KeyRole, p: _Press) -> None:
         r = kr.role
         if r == Role.AGENT:
-            msg = self.mgr.toggle_pin(kr.index)
-            self.persist()
-            self._say(msg)
+            # Pick up (移动中); the release does nothing else.  Pin toggle = pick up + press the same slot.
+            if p.mode == self.mode:
+                self._pick_up(kr.index)
         elif r == Role.MODE:
-            self.page = "L4"
-            self._say("L4 模式页：点选模式", 0.8)
+            self._goto("L4", "L4 模式页：点选模式")
 
     def _cancel_target_presses(self, exclude: "_Press | None" = None) -> None:
         for p in self.presses.values():
@@ -487,20 +578,20 @@ class Controller:
     def _click(self, kr: KeyRole) -> None:
         r = kr.role
         if r == Role.NEW:
+            pre = self._drop_move()  # an L4 row 1 key cancels a pick-up
             s = self.mgr.selected_session()
             caps = self.adapter.capabilities()
             if caps.new_session:
-                self._say(caps.new_session)
+                self._say(pre + caps.new_session)
             elif self.ptt_held:
-                self._say("按住说话中，暂不新建会话")
+                self._say(pre + "按住说话中，暂不新建会话")
             else:
                 cwd = s.cwd if (s and s.cwd_confirmed) else None
-                self._result(self.adapter.new_session(cwd))
+                self._result(self.adapter.new_session(cwd), pre)
         elif r == Role.MODE_SELECT and kr.mode is not None:
             self.switch_mode(kr.mode)
         elif r == Role.BACK_L1:
-            self.page = "L1"
-            self._say("回到 L1", 0.8)
+            self._goto("L1", "回到 L1")
 
     def _focus(self, s: Session) -> None:
         if self.ptt_held:
@@ -520,6 +611,7 @@ class Controller:
 
     # ------------------------------------------------------------------ modes
     def switch_mode(self, m: Mode) -> None:
+        pre = self._drop_move()  # a mode switch cancels a pick-up (nothing changes)
         for pk, p in self.presses.items():
             if p.role.role != Role.PTT:
                 p.cancelled = True  # G34: cancel pending long presses + old eligibility
@@ -539,7 +631,8 @@ class Controller:
         ok, reason = self.backend[m]
         n = sum(1 for e in self.mgr.slots if e and not e.lost) + self.mgr.overflow
         name = {"codex_desktop": "Codex 桌面", "herdr": "herdr", "tmux": "tmux"}[m.value]
-        self._say(f"已切换到 {name} · {n} 个会话" if ok else f"已切换到 {name} · 不可用：{reason}", SWITCH_TOAST_S)
+        self._say(pre + (f"已切换到 {name} · {n} 个会话" if ok else f"已切换到 {name} · 不可用：{reason}"),
+                  SWITCH_TOAST_S)
         self.persist()
 
     # ------------------------------------------------------------------ view
@@ -554,6 +647,7 @@ class Controller:
         ok, reason = self.backend[self.mode]
         keys: list[KeyView] = []
         others = self.other_attention()
+        mv = self.moving if (self.moving is not None and self.moving.mode == self.mode) else None
         attention: tuple[int, int, str] | None = None  # (priority, -updated, key) best
         for row in range(1, 5):
             for col in range(1, 6):
@@ -561,6 +655,7 @@ class Controller:
                 kv = KeyView(col, row, kr.role)
                 if kr.role == Role.AGENT:
                     e = mgr.entry(kr.index)
+                    kv.moving = mv is not None and mv.src == kr.index
                     if e is None:
                         kv.state = State.OFFLINE if not ok else State.UNASSIGNED
                         kv.label = "离线" if not ok else "空槽"
@@ -610,7 +705,7 @@ class Controller:
         pin_info = ""
         if self.page == "L4":
             pinned = sum(1 for e in mgr.slots if e and e.pinned)
-            pin_info = f"钉扎 {pinned}/{N_SLOTS} · 长按槽位钉扎/解除 · S1–S5 在 L1"
+            pin_info = f"钉扎 {pinned}/{N_SLOTS} · 长按拿起，点自己=钉扎/解除 · S1–S5 在 L1"
         note = f"单击只选中 · 置前不可用：{caps.focus.split('，')[0]}" if (ok and caps.focus) else None
         sub = SubView(
             page=self.page, mode=self.mode, mode_ok=ok, mode_reason=reason, session=sel,
@@ -620,5 +715,6 @@ class Controller:
             note=note, updated=upd, ptt=self.ptt_held, scroll=self.scroll, sim=self.sim,
             pin_info=pin_info, selection_lost=mgr.selection_lost and sel is None,
             other_modes=(" · ".join(f"{MODE_SHORT[m]} {n}" for m, n in others) + " 待处理") if others else "",
+            moving=f"移动『{_short(mv.title)}』：点目标键放下 · 点自己=切换钉住 · K1 取消" if mv else "",
         )
         return DeckView(keys, sub)

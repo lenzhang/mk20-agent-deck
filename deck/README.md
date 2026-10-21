@@ -36,9 +36,18 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
 | row 4 (L1 = L4) | PTT (fb16) | ⌫ 删除 (fb17) | ⏎ 发送 / 可以 (fb18) | ✗ 不行 Esc (fb19) | MODE (fb20) |
 
 - **Session slot (S1..S15)**: single tap = **select and focus** (window / tmux pane to the front, so dictation and
-  the device keys land there); the selection happens on press, the focus on release (< 600 ms). Long press
-  ≥600 ms = pin/unpin (no focus). No double-tap gesture any more. If the mode cannot focus (e.g. tmux without
-  `terminal_app`) a tap only selects and the sub-screen says why. Empty slot: "空槽"; lost pin: long press releases it.
+  the device keys land there); the selection happens on press, the focus on release (< 600 ms). No double-tap
+  gesture any more. If the mode cannot focus (e.g. tmux without `terminal_app`) a tap only selects and the
+  sub-screen says why. Empty slot: "空槽"; lost pin: pick it up and press it again to release it.
+- **Pick up and place (2026-10-22)**: long press ≥600 ms = **pick the slot up** ("移动中": pink dashed border +
+  「移动中」 chip on the key, sub-screen strip 「移动『<title>』：点目标键放下 · 点自己=切换钉住 · K1 取消」); the
+  release does nothing else. The next slot press (L1 S1..S15 or L4 S6..S15) places it, on press and never
+  focusing: another slot → move there and **pin** it (an occupant swaps into the source slot and keeps its own
+  pin flag; an empty target leaves the source empty for the normal fill rules); the same slot → toggle the pin
+  (this is now the only way to pin/unpin). Cancel, nothing changes, 「已取消移动」: K1 press, 8 s without any
+  key/knob event, a page/mode switch (K2, MODE short/long, any L4 row 1 key — the key still does its job),
+  the source session vanishing, reconnect / wake. Device-side keys (PTT/DELETE/SEND/NO) are ignored. Saved to
+  `state.json` at once; placements are pinned, so stickiness/overflow replacement never move them.
 - **fb16..fb19 are keyboard-side USB HID** to the Mac's frontmost window: PTT = Right Option (hold), 删除 =
   Backspace (hold repeats), 发送/可以 = Return, 不行 = Escape (also interrupts Claude/codex). mk20deck only draws
   these faces and ignores their key events (the firmware does not forward them; stray ones are dropped). A PTT
@@ -47,12 +56,13 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
   The firmware forwards fb20 on L1/L4 while the keyboard agent is inactive (otherwise it is the e-stop).
 - **L4** (K2 short press toggles L1↔L4): DESK/HERD/TMUX switch mode and return to L1, ＋新会话 = new session in
   the current mode (cwd of the confirmed selection), 回 L1. S1..S5 are not on L4 (use L1 or K1).
-- **K1**: rotate = move the selection in "needs me" order, press = focus the selection, hold = L4. **K2**: rotate
+- **K1**: rotate = move the selection in "needs me" order, press = focus the selection (while a slot is picked
+  up: cancel the move), hold = L4. **K2**: rotate
   scrolls the sub-screen summary, short = L1↔L4, hold = L1.
 - Slots: 15 per mode, sticky, strict-higher overflow replacement, pins/selection protected, `+N` overflow on the
   sub-screen. State files from the 8-slot layout (no `n_slots` field) migrate by physical key: A1..A4 → S1..S4,
   A5..A8 → S6..S9.
-- Screenshots: `python -m mk20deck sim-shots --scenario layout --out <dir>`.
+- Screenshots: `python -m mk20deck sim-shots --scenario layout --out <dir>` (pick up / place: `--scenario move`).
 
 ## Dev
 ```bash

@@ -114,7 +114,7 @@
  {
   "name": "tap_150ms_80ms_jitter_not_pin",
   "group": "latency",
-  "desc": "80±40 ms 延迟下会话键短按（150 ms）不会被误判为长按钉扎",
+  "desc": "80±40 ms 延迟下会话键短按（150 ms）不会被误判为长按拿起；长按 700 ms 拿起后再点 = 钉扎",
   "latency": {
    "input_ms": 80,
    "input_jitter_ms": 40,
@@ -142,6 +142,13 @@
    {
     "press": "S2",
     "hold": 700
+   },
+   {
+    "wait": 300
+   },
+   {
+    "press": "S2",
+    "hold": 60
    },
    {
     "wait": 300

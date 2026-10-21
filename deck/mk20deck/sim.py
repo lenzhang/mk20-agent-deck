@@ -77,6 +77,17 @@ def tap(c: Controller, clock: FakeClock, col: int, row: int, hold: float = 0.05)
     c.on_key(col, row, False)
 
 
+def long_press(c: Controller, clock: FakeClock, col: int, row: int, dur: float = 0.7) -> None:
+    """Hold with ticks so the 600 ms threshold fires while the key is down (slot: pick up)."""
+    c.on_key(col, row, True)
+    held = 0.0
+    while held < dur:
+        clock.advance(0.05)
+        held += 0.05
+        c.tick()
+    c.on_key(col, row, False)
+
+
 def shots(out_dir: str, animations: bool = True) -> list[tuple[str, str]]:
     """Render the scripted scenario set.  Returns [(filename, caption)]."""
     os.makedirs(out_dir, exist_ok=True)
@@ -130,10 +141,8 @@ def shots(out_dir: str, animations: bool = True) -> list[tuple[str, str]]:
     ads[Mode.DESKTOP].sessions = many + extra
     c2 = _ctl(clk2, ads)
     tap(c2, clk2, 1, 1)
-    c2.on_key(2, 1, True)
-    clk2.advance(0.65)
-    c2.tick()
-    c2.on_key(2, 1, False)  # pin S2
+    long_press(c2, clk2, 2, 1)  # pick S2 up ...
+    tap(c2, clk2, 2, 1)  # ... and press it again: pin
     clk2.advance(2)
     save(c2, clk2, "08-overflow-19-sessions.png", "19 个会话：副屏 +4，S2 钉扎")
 
@@ -277,11 +286,64 @@ def layout_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]
     return made
 
 
+def move_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]]:
+    """Pick-up-and-place (PRD 1.5 delta 2026-10-22): long press = pick up, next slot press = place + pin."""
+    os.makedirs(out_dir, exist_ok=True)
+    lay = DeviceLayout.default()
+    made: list[tuple[str, str]] = []
+
+    def save(c: Controller, clock: FakeClock, name: str, caption: str, clear_toast: bool = True) -> None:
+        if clear_toast:
+            c.toast = None
+        r = Renderer(lay, animations=animations)
+        view = c.view()
+        r.compose(view, clock.t - 0.25)
+        device_mockup(r.compose(view, clock.t), lay, title=f"MK20 Agent Deck · SIM · {caption}").save(
+            os.path.join(out_dir, name))
+        made.append((name, caption))
+
+    clk = FakeClock()
+    c = _ctl(clk, full_adapters())
+    tap(c, clk, 3, 1)  # S3: select + focus
+    clk.advance(2.0)
+    long_press(c, clk, 3, 1)  # S3: pick up
+    clk.advance(1.0)
+    save(c, clk, "move-01-L1-picked-up.png", "长按 S3 = 拿起：粉色虚线框 +「移动中」，副屏写明怎么放下")
+    tap(c, clk, 4, 2)  # S9: swap + pin, no focus
+    clk.advance(0.3)
+    save(c, clk, "move-02-L1-placed-swap.png", "点 S9 放下：S3↔S9 交换，S9 钉住（白钉），不置前", clear_toast=False)
+    clk.advance(2.0)
+    c.on_knob(2, "down")
+    c.on_knob(2, "up")  # L4
+    clk.advance(1.0)
+    long_press(c, clk, 2, 3)  # S12 on L4 (same key as on L1)
+    clk.advance(1.0)
+    save(c, clk, "move-03-L4-picked-up.png", "L4 第 2–3 行与 L1 同槽：长按 S12 拿起")
+    tap(c, clk, 2, 3)  # the same slot: toggle the pin
+    clk.advance(0.3)
+    save(c, clk, "move-04-L4-tap-self-pin.png", "点自己 = 切换钉住：S12 已钉扎（钉扎 2/15）", clear_toast=False)
+    clk.advance(2.0)
+    long_press(c, clk, 4, 2)  # S9 again
+    c.on_knob(1, "down")
+    c.on_knob(1, "up")  # K1 press = cancel
+    clk.advance(0.3)
+    save(c, clk, "move-05-K1-cancel.png", "按 K1 = 取消移动：什么都不变，副屏「已取消移动」", clear_toast=False)
+    clk2 = FakeClock()
+    c2 = _ctl(clk2)  # demo: 8 sessions, S9..S15 empty
+    long_press(c2, clk2, 2, 1)  # S2: pick up
+    tap(c2, clk2, 5, 3)  # S15 (empty): move there
+    clk2.advance(0.3)
+    save(c2, clk2, "move-06-L1-placed-empty.png", "放到空槽 S15：S2 变空（之后按补位规则可再填），S15 钉住",
+         clear_toast=False)
+    write_index(out_dir, made)
+    return made
+
+
 def gallery(path: str) -> None:
     """All 10 base states × {codex, ccai} × {normal, selected} + overlays, animations off."""
     states = list(State)
     cell, pad = 128, 12
-    cols = len(states)
+    cols = len(states) + 1  # the overlay row has one more face (picked-up slot)
     rows = 5
     W = pad + cols * (cell + pad)
     H = 40 + rows * (cell + pad + 18) + pad
@@ -310,9 +372,10 @@ def gallery(path: str) -> None:
         KeyView(5, 4, Role.MODE, label="DESK", mode=Mode.DESKTOP),
         KeyView(4, 1, Role.NEW, label="新会话", disabled="未配置新会话命令"),
         KeyView(5, 1, Role.BACK_L1, label="回 L1"),
+        KeyView(1, 1, Role.AGENT, state=State.RUNNING, tool=Tool.CCAI, title="移动中", selected=True, moving=True),
     ]
     names = ["PTT 按住", "PTT 静态", "删除", "发送/可以", "不行 Esc", "失联钉扎", "钉扎", "模式 DESK",
-             "新会话(禁用)", "回 L1"]
+             "新会话(禁用)", "回 L1", "拿起(移动中)"]
     for ci, kv in enumerate(extras):
         face = render_key(kv, 5.0, 0.0, animations=False)
         x, y = pad + ci * (cell + pad), 40 + 4 * (cell + pad + 18)

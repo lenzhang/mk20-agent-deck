@@ -2,6 +2,7 @@
 (colour + icon + short text + mascot, PRD §7.1/G22); animation only enhances."""
 from __future__ import annotations
 
+import functools
 import math
 
 from PIL import Image, ImageDraw
@@ -25,6 +26,8 @@ FPS = {
 DONE_POP_S = 1.0   # done_unread: 8 fps pop, then 2 fps glow
 ERROR_SHAKE_S = 1.5  # error: 8 fps shake, then static
 PTT_FPS = 8
+MOVE_FPS = 4  # picked-up slot: marching dashed border (static dashes when animations are off)
+MOVE_PINK = (244, 114, 182)  # distinct from every state colour
 
 
 def key_fps(kv: KeyView, age: float, animations: bool) -> float:
@@ -35,6 +38,11 @@ def key_fps(kv: KeyView, age: float, animations: bool) -> float:
         return PTT_FPS if kv.active else 0
     if kv.role != Role.AGENT or kv.state is None:
         return 0
+    base = _state_fps(kv, age)
+    return max(base, MOVE_FPS) if kv.moving else base
+
+
+def _state_fps(kv: KeyView, age: float) -> float:
     st = kv.state
     if st in ATTENTION_STATES and not kv.attention:
         return 0  # only one attention animation at a time (G26)
@@ -43,6 +51,54 @@ def key_fps(kv: KeyView, age: float, animations: bool) -> float:
     if st == State.ERROR:
         return 8 if age < ERROR_SHAKE_S else 0
     return FPS.get(st, 0)
+
+
+@functools.lru_cache(maxsize=4)
+def _rrect_points(x0: int, y0: int, x1: int, y1: int, r: int) -> tuple[tuple[float, float], ...]:
+    """Points ~1 px apart along a rounded rectangle (clockwise from the top-left straight edge)."""
+    pts: list[tuple[float, float]] = []
+
+    def seg(ax, ay, bx, by):
+        n = max(1, int(math.hypot(bx - ax, by - ay)))
+        pts.extend((ax + (bx - ax) * i / n, ay + (by - ay) * i / n) for i in range(n))
+
+    def arc(cx, cy, a0):
+        n = max(1, int(r * math.pi / 2))
+        pts.extend((cx + r * math.cos(a0 + math.pi / 2 * i / n), cy + r * math.sin(a0 + math.pi / 2 * i / n))
+                   for i in range(n))
+
+    seg(x0 + r, y0, x1 - r, y0)
+    arc(x1 - r, y0 + r, -math.pi / 2)
+    seg(x1, y0 + r, x1, y1 - r)
+    arc(x1 - r, y1 - r, 0.0)
+    seg(x1 - r, y1, x0 + r, y1)
+    arc(x0 + r, y1 - r, math.pi / 2)
+    seg(x0, y1 - r, x0, y0 + r)
+    arc(x0 + r, y0 + r, math.pi)
+    return tuple(pts)
+
+
+def _moving_overlay(d: ImageDraw.ImageDraw, t: float, animate: bool, chip_y: int) -> None:
+    """Picked-up slot: pink dashed border (marches at MOVE_FPS) + 「移动中」 chip instead of the state chip."""
+    d.rounded_rectangle([0, 0, S - 1, S - 1], radius=16, outline=BLACK, width=7)
+    dash, gap = 12, 8
+    off = (int(t * MOVE_FPS) * 4) % (dash + gap) if animate else 0
+    pts = _rrect_points(3, 3, S - 4, S - 4, 13)
+    run: list[tuple[float, float]] = []
+    for i, pt in enumerate(pts + pts[:1]):
+        if (i + (dash + gap) - off) % (dash + gap) < dash:
+            run.append(pt)
+        elif run:
+            if len(run) > 1:
+                d.line(run, fill=MOVE_PINK, width=5)
+            run = []
+    if len(run) > 1:
+        d.line(run, fill=MOVE_PINK, width=5)
+    f = font(14, bold=True)
+    tw = d.textbbox((0, 0), "移动中", font=f)[2] + 16
+    d.rounded_rectangle([S / 2 - tw / 2, chip_y, S / 2 + tw / 2, chip_y + 18], radius=9, fill=MOVE_PINK,
+                        outline=BLACK, width=1)
+    d.text((S / 2, chip_y + 9), "移动中", font=f, fill=BLACK, anchor="mm")
 
 
 def _state_badge(d: ImageDraw.ImageDraw, st: State, cx: float, cy: float, r: float, phase: float, animate: bool):
@@ -74,8 +130,8 @@ def _state_badge(d: ImageDraw.ImageDraw, st: State, cx: float, cy: float, r: flo
 def render_agent(kv: KeyView, age: float, t: float, animations: bool) -> Image.Image:
     st = kv.state or State.UNKNOWN
     col = STATE_COLOR[st]
-    fps = key_fps(kv, age, animations)
-    animate = fps > 0
+    # State animation only; a picked-up slot's marching border (MOVE_FPS) never animates the state itself.
+    animate = animations and _state_fps(kv, age) > 0
     phase = (t * 1.0) % 1.0 if animate else 0.0
     bg = KEY_BG
     if st == State.UNKNOWN:
@@ -98,8 +154,12 @@ def render_agent(kv: KeyView, age: float, t: float, animations: bool) -> Image.I
     if kv.lost:
         d.rounded_rectangle([3, 3, S - 4, S - 4], radius=14, outline=(150, 120, 60), width=2)
         icons.pin(d, 50, 28, 40, (200, 160, 80))
-        d.text((S / 2, 92), "失联钉扎", font=font(17, bold=True), fill=(220, 190, 120), anchor="mm")
-        d.text((S / 2, 113), "长按解除", font=font(12), fill=DIM, anchor="mm")
+        d.text((S / 2, 88 if kv.moving else 92), "失联钉扎", font=font(17, bold=True), fill=(220, 190, 120),
+               anchor="mm")
+        if kv.moving:
+            _moving_overlay(d, t, animations, 102)
+        else:
+            d.text((S / 2, 113), "长按后点自己解除", font=font(12), fill=DIM, anchor="mm")
         return img
 
     # --- border (state colour) + animation ----------------------------------
@@ -167,6 +227,9 @@ def render_agent(kv: KeyView, age: float, t: float, animations: bool) -> Image.I
     tw = d.textbbox((0, 0), label, font=f_st)[2] + 14
     cx = S / 2
     chip_fg = BLACK if st not in (State.ERROR, State.THINKING, State.OFFLINE, State.UNKNOWN) else WHITE
+    if kv.moving:
+        _moving_overlay(d, t, animations, chip_y)  # the state stays visible in the top-right badge
+        return img
     d.rounded_rectangle([cx - tw / 2, chip_y, cx + tw / 2, chip_y + 18], radius=9, fill=col)
     d.text((cx, chip_y + 9), label, font=f_st, fill=chip_fg, anchor="mm")
     return img

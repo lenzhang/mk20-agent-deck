@@ -103,7 +103,7 @@ class Supervisor:
                 self.stats.note(f"已连接 {ports[0]} 画布 {renderer.layout.width}x{renderer.layout.height}"
                                 f"{'（猜测）' if renderer.layout.guessed else ''}")
                 self.apply_backlight(link)
-                self.controller.presses.clear()  # never replay gestures across reconnects
+                self.controller.drop_gestures()  # never replay gestures (presses, pick-up) across reconnects
                 d.run(stop)
             except WakeReconnect as e:
                 self.stats.note(f"唤醒（{e}），重新握手")

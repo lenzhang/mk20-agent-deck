@@ -276,6 +276,9 @@ class Daemon:
             waits.append(self._last_frame + 1.0 / view_fps - now)
         if self.controller.presses:
             waits.append(LONG_PRESS / 8)
+        deadline = self.controller.move_deadline()
+        if deadline is not None:  # a picked-up slot times out even when nothing animates
+            waits.append(deadline - now)
         if self.power is not None:
             waits.append(self._next_power - now)
         return max(0.005, min(waits))
@@ -296,7 +299,7 @@ class Daemon:
                 self.paused = True
             elif ev in ("display_wake", "system_wake"):
                 was_paused, self.paused = self.paused, False
-                self.controller.presses.clear()  # never replay gestures across sleep
+                self.controller.drop_gestures()  # never replay gestures (presses, pick-up) across sleep
                 if ev == "system_wake" or was_paused:
                     raise WakeReconnect(ev)
 

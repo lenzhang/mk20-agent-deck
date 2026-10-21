@@ -154,3 +154,107 @@ def test_from_dict_tolerates_short_long_and_junk_entries():
     legacy_long = {"slots": [{"key": f"x:y:{i}"} for i in range(12)]}
     m = SlotManager.from_dict(legacy_long)  # a legacy file never had more than 8: extra entries dropped
     assert sum(1 for e in m.slots if e) == 8 and m.slots[4] is None
+
+
+# ------------------------------------------------------------------ pick up and place (2026-10-22)
+import pytest  # noqa: E402
+
+
+def _keys(m):
+    return [e.key.split(":")[-1] if e else None for e in m.slots]
+
+
+def _filled(n=5):
+    m = SlotManager()
+    ss = [S(i, rec=100 - i) for i in range(n)]
+    m.update(ss)
+    return m, ss
+
+
+def test_move_to_empty_slot_pins_and_empties_source():
+    m, ss = _filled(5)
+    v = m.mapping_version
+    assert m.move(1, 9) == "已移到 S10 · 已钉扎"
+    assert _keys(m)[:5] == ["%0", None, "%2", "%3", "%4"] and _keys(m)[9] == "%1"
+    assert m.slots[9].pinned and m.slots[1] is None and m.mapping_version == v + 1
+
+
+def test_move_to_occupied_slot_swaps_displaced_keeps_its_pin_flag():
+    m, ss = _filled(5)
+    assert m.move(0, 3) == "已与 S4 交换 · 已钉扎"
+    assert _keys(m)[:5] == ["%3", "%1", "%2", "%0", "%4"]
+    assert m.slots[3].pinned and not m.slots[0].pinned  # the displaced session was unpinned: stays unpinned
+    m.toggle_pin(4)  # %4 pinned
+    assert m.move(1, 4) == "已与 S5 交换 · 已钉扎"
+    assert _keys(m)[:5] == ["%3", "%4", "%2", "%0", "%1"]
+    assert m.slots[1].pinned and m.slots[4].pinned  # a pinned target keeps its pin at its new position
+
+
+def test_move_same_slot_toggles_pin_and_releases_lost_pin():
+    m, ss = _filled(3)
+    assert m.move(2, 2) == "已钉扎" and m.slots[2].pinned
+    assert m.move(2, 2) == "已取消钉扎" and not m.slots[2].pinned
+    m.move(1, 1)
+    m.update([ss[0], ss[2]])  # %1 vanished while pinned -> lost pin keeps its key
+    assert m.slots[1].lost
+    assert m.move(1, 1) == "已解除失联钉扎" and m.slots[1] is None
+
+
+def test_move_lost_pin_and_empty_source():
+    m, ss = _filled(3)
+    m.toggle_pin(0)
+    m.update(ss[1:])
+    assert m.slots[0].lost
+    m.move(0, 7)
+    assert m.slots[0] is None and m.slots[7].lost and m.slots[7].pinned
+    v = m.mapping_version
+    assert m.move(5, 6) == "空槽不可移动" and m.mapping_version == v
+    with pytest.raises(IndexError):
+        m.move(0, 15)
+
+
+def test_move_keeps_selection_on_the_session():
+    m, ss = _filled(4)
+    m.select(2)
+    m.move(2, 12)
+    assert m.selected == ss[2].sid.key() and m.selected_session() is ss[2]
+    assert m.session_at(12) is ss[2]
+
+
+def test_move_persistence_round_trip():
+    m, ss = _filled(5)
+    m.move(0, 14)
+    m.move(3, 1)  # swap %3 <-> %1, %3 pinned
+    d = m.to_dict()
+    m2 = SlotManager.from_dict(d)
+    assert _keys(m2) == _keys(m)
+    assert [bool(e and e.pinned) for e in m2.slots] == [bool(e and e.pinned) for e in m.slots]
+    m2.update(ss)
+    assert _keys(m2) == _keys(m)  # the restored placement survives the first poll
+
+
+def test_update_after_move_keeps_placement():
+    m = SlotManager()
+    ss = [S(i, State.IDLE, rec=100 - i) for i in range(17)]  # 15 slots + 2 overflow
+    m.update(ss)
+    m.move(14, 0)  # %14 to S1, %0 to S15
+    placed = _keys(m)
+    v = m.mapping_version
+    m.update(ss)
+    assert _keys(m) == placed and m.mapping_version == v  # sticky: nothing reorders
+    flipped = [replace(s, state=State.NEEDS_APPROVAL) if s.sid.native == "%16" else s for s in ss]
+    m.update(flipped)  # a strictly higher candidate replaces an unprotected slot, never the placed one
+    assert _keys(m)[0] == "%14" and m.slots[0].pinned and "%16" in _keys(m)
+    assert sum(1 for k in _keys(m) if k == "%14") == 1
+
+
+def test_move_to_empty_source_refilled_by_fill_rules():
+    m = SlotManager()
+    ss = [S(i, State.IDLE, rec=100 - i) for i in range(14)]  # S15 empty
+    m.update(ss)
+    m.move(3, 14)  # %3 moved to S15; S4 empty now
+    assert m.slots[3] is None
+    m.update(ss)
+    assert m.slots[3] is None  # nobody waiting: stays empty
+    m.update(ss + [S(99, State.IDLE, rec=1)])  # a new session: the normal fill rules use the empty S4
+    assert _keys(m)[3] == "%99" and _keys(m)[14] == "%3" and m.slots[14].pinned

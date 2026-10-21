@@ -11,6 +11,7 @@ from .palette import BG, DIM, MODE_NAME, MODE_STRIP, STATE_COLOR, STATE_TEXT, TE
 
 W, H = 428, 142
 AMBER = (245, 180, 60)
+MOVE_PINK = (244, 114, 182)  # same as the picked-up key's dashed border
 
 
 def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
@@ -57,13 +58,15 @@ def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
         summ = s.summary or ""
         if sv.scroll and summ:
             summ = summ[sv.scroll * 12:]
-        d.text((x, 92), fit(d, summ, f12, W - x - 10), font=f12, fill=(190, 194, 200))
+        if not sv.moving:
+            d.text((x, 92), fit(d, summ, f12, W - x - 10), font=f12, fill=(190, 194, 200))
     else:
         d.text((x - 90, 40), "未选中", font=font(24, bold=True), fill=TEXT)
-        hint = "选中项已消失，请重新选择" if sv.selection_lost else "单击会话键：选中并置前 · 长按钉扎 · 转 K1 挑待处理"
+        hint = ("选中项已消失，请重新选择" if sv.selection_lost
+                else "单击会话键：选中并置前 · 长按拿起移动/钉扎 · 转 K1 挑待处理")
         d.text((x - 90, 74), fit(d, hint, f12, W - 30), font=f12, fill=DIM)
         line2 = sv.pin_info if sv.page == "L4" else (sv.note or "")
-        if line2:
+        if line2 and not sv.moving:
             d.text((x - 90, 92), fit(d, line2, f12, W - 30), font=f12, fill=DIM)
 
     # bottom: status-limited reason (AC11) + overflow + note
@@ -76,9 +79,13 @@ def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
     d.text((12, yb), fit(d, lim, f12, W - 30 - ow), font=f12, fill=AMBER)
     if over:
         d.text((W - 10 - ow, yb - 1), over, font=font(13, bold=True), fill=TEXT)
-    if sv.note and s is not None and sv.page != "L4":
+    if sv.moving:  # picked-up slot: one prominent instruction line (replaces summary / note / pin info)
+        fm = font(13, bold=True)
+        d.rounded_rectangle([8, 93, W - 8, 115], radius=8, fill=MOVE_PINK)
+        d.text((W / 2, 104), fit(d, sv.moving, fm, W - 28), font=fm, fill=(0, 0, 0), anchor="mm")
+    elif sv.note and s is not None and sv.page != "L4":
         d.text((x, 106), fit(d, sv.note, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
-    if sv.page == "L4" and s is not None and sv.pin_info:
+    elif sv.page == "L4" and s is not None and sv.pin_info:
         d.text((x, 106), fit(d, sv.pin_info, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
 
     if sv.toast:
