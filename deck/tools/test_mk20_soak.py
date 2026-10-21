@@ -36,9 +36,10 @@ def test_events_and_summary(tmp_path, monkeypatch):
 
 def test_keyboard_owner_restart_counts_mk20_kbd(tmp_path, monkeypatch):
     monkeypatch.setenv("MK20_ADB", "true")
-    seq = [{"health": {"uptime_s": 100}, "kd_pid": "", "kbd_pid": "20", "loader": {}},
-           {"health": {"uptime_s": 400}, "kd_pid": "", "kbd_pid": "21", "loader": {}},
-           {"health": {"uptime_s": 700}, "kd_pid": "", "kbd_pid": "21", "loader": {}}]
+    # pid noise (a transient pid in sample 3) must not count; mk20d's restarts counter is authoritative
+    seq = [{"health": {"uptime_s": 100, "kbd": {"restarts": 0}}, "kd_pid": "", "kbd_pid": "20", "loader": {}},
+           {"health": {"uptime_s": 400, "kbd": {"restarts": 1}}, "kd_pid": "", "kbd_pid": "21", "loader": {}},
+           {"health": {"uptime_s": 700, "kbd": {"restarts": 1}}, "kd_pid": "", "kbd_pid": "4864", "loader": {}}]
     monkeypatch.setattr(soak, "sample", _samples(seq))
     monkeypatch.setattr(soak.time, "sleep", lambda s: None)
     monkeypatch.setattr("sys.argv", ["x", "--hours", "1", "--interval", "0", "--out", str(tmp_path)])
