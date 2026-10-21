@@ -23,7 +23,10 @@ Page sync (2026-10-22): the keyboard owns K2 short (it toggles its L1/L4 route a
 and K1 short on L4 (its own LS page); the deck changes ``page`` itself on a MODE long press, 回 L1 / mode keys and
 knob holds.  The controller stays I/O-free: the daemon compares ``page`` / ``page_sync`` with what the keyboard last
 confirmed and sends ``ui.page`` (firmware with that capability: ``device_pages``).  Without it (stock KD / legacy
-firmware) nothing is sent and K1 short on L4 still opens the deck's own settings page.
+firmware) nothing is sent and K1 short on L4 still opens the deck's own settings page.  With it the keyboard also
+decides knob holds itself (1 s, on the device) and forwards K1/K2 only as synthetic taps (down + up): every forwarded
+knob down -> up is a short press however late we process the up, and knob holds never fire here (a loop stall
+> LONG_PRESS between the two edges must not flip the page).  Legacy firmware keeps the timing (hold = L4 / L1).
 """
 from __future__ import annotations
 
@@ -332,6 +335,11 @@ class Controller:
         self.page_sync += 1
         self._touch()
 
+    def long_press_pending(self) -> bool:
+        """A press that can still reach LONG_PRESS (the daemon wakes up for it); knob presses only on legacy firmware."""
+        return any(not (p.long_fired or p.cancelled) and (pk[0] != "knob" or not self.device_pages)
+                   for pk, p in self.presses.items())
+
     def drop_gestures(self) -> None:
         """Reconnect / wake: presses in flight, a picked-up slot and option mode are never replayed."""
         self.presses.clear()
@@ -621,7 +629,8 @@ class Controller:
                 self._exit_option("回到会话列表")
         elif kind == "up":
             p = self.presses.pop(pk, None)
-            if p and not p.long_fired and not p.cancelled and t - p.t0 < LONG_PRESS:
+            # ui.page firmware forwards knob taps only (it decides holds itself): never judged by our timing
+            if p and not p.long_fired and not p.cancelled and (self.device_pages or t - p.t0 < LONG_PRESS):
                 if knob == 1 and self.page == "L4":
                     if self.device_pages:
                         # On its L4 route the keyboard handles K1 itself (its LS page; the web page is the settings
@@ -656,8 +665,8 @@ class Controller:
             self._cancel_move()  # 8 s without key/knob input: nothing changes
         self._option_tick(t)
         for pk, p in list(self.presses.items()):
-            if p.long_fired or p.cancelled or t - p.t0 < LONG_PRESS:
-                continue
+            if p.long_fired or p.cancelled or t - p.t0 < LONG_PRESS or (pk[0] == "knob" and self.device_pages):
+                continue  # knob holds: legacy firmware only (ui.page firmware sends taps; its up decides)
             p.long_fired = True
             if pk[0] == "knob":
                 if pk[1] == 1:

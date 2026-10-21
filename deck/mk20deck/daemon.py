@@ -427,8 +427,9 @@ class Daemon:
         view_fps = self.renderer.desired_fps(self.controller.view(), now)
         if view_fps > 0:
             waits.append(self._last_frame + 1.0 / view_fps - now)
-        if self.controller.presses:
-            waits.append(LONG_PRESS / 8)
+        c = self.controller
+        if c.long_press_pending() if hasattr(c, "long_press_pending") else c.presses:
+            waits.append(LONG_PRESS / 8)  # (never for a ui.page firmware knob tap waiting for its up)
         deadline = self.controller.move_deadline()
         if deadline is not None:  # a picked-up slot times out even when nothing animates
             waits.append(deadline - now)

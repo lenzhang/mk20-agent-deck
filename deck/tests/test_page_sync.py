@@ -165,7 +165,7 @@ def test_mode_long_press_sends_ui_page_l4_before_the_l4_frame(links):
     assert c.page == "L4" and pages(dev) == ["L1", "L4"]
 
 
-def test_back_l1_mode_select_and_knob_holds_send_the_page(links):
+def test_back_l1_mode_select_and_k2_send_the_page(links):
     d, c, clk, dev, link = rig(links)
     long_press_mode(d, clk)
     tap(d, clk, *BACK_KEY)  # the Mac's 回 L1 (reaches the Mac only when the keyboard is not on L4)
@@ -173,11 +173,8 @@ def test_back_l1_mode_select_and_knob_holds_send_the_page(links):
     long_press_mode(d, clk)
     tap(d, clk, 3, 1)  # L4 row 1 TMUX: switch_mode -> the Mac shows L1 (was a silent desync: keyboard stayed L4)
     assert c.mode == Mode.TMUX and c.page == "L1" and dev.route == "L1"
-    d.inject_knob(1, "down")  # legacy knob hold (fw >= 1.4 consumes holds): L4
-    d.step()
-    clk.advance(0.7)
-    d.step()
-    d.inject_knob(1, "up")
+    d.inject_knob(2, "down")  # a forwarded K2 tap (holds are the keyboard's own on this firmware)
+    d.inject_knob(2, "up")
     d.step()
     assert c.page == "L4" and dev.route == "L4"
     assert pages(dev) == ["L1", "L4", "L1", "L4", "L1", "L4"]
@@ -406,3 +403,91 @@ def test_option_mode_map_is_resent_after_a_page_boundary_in_order(links):
     device_events(d)
     assert c.option is None and c.page == "L4" and dev.route == "L4" and dev.hid_map == {}
     assert [e[:2] for e in log_] == [("page", "L4")]
+
+
+# ------------------------------------------------------------------ knob taps on ui.page firmware (2026-10-22)
+def knob_tap(d, clk, knob, delay):
+    """Forwarded knob down ... up, the up processed ``delay`` s later (e.g. the loop stalled on a slow poll)."""
+    d.inject_knob(knob, "down")
+    d.step()
+    clk.advance(delay)
+    d.step()  # tick() runs here: on legacy firmware a hold would fire now
+    d.inject_knob(knob, "up")
+    d.step()
+
+
+@pytest.mark.parametrize("delay", [0.05, 0.7, 3.0])
+def test_delayed_k2_release_still_toggles_exactly_once(links, delay):
+    d, c, clk, dev, link = rig(links)
+    knob_tap(d, clk, 2, delay)
+    assert c.page == "L4" and dev.route == "L4" and pages(dev) == ["L1", "L4"]
+    knob_tap(d, clk, 2, delay)
+    assert c.page == "L1" and dev.route == "L1" and pages(dev) == ["L1", "L4", "L1"]
+
+
+def test_no_knob_long_press_page_change_on_ui_page_firmware(links):
+    d, c, clk, dev, link = rig(links)
+    d.inject_knob(1, "down")
+    d.step()
+    for _ in range(4):
+        clk.advance(0.5)
+        d.step()
+        assert c.page == "L1" and pages(dev) == ["L1"]  # a legacy K1 hold would have gone to L4 at 0.6 s
+    d.heartbeat, d._next_poll = 1e9, 1e12
+    assert d.next_wait() > 1.0  # no 75 ms long-press wake-ups while waiting for a tap's up
+    d.inject_knob(1, "up")
+    d.step()  # the tap: K1 on L1 = focus the selection
+    assert c.page == "L1" and c.toast[0] == "未选中会话 · 转 K1 选择" and pages(dev) == ["L1"]
+    long_press_mode(d, clk)
+    knob_tap(d, clk, 2, 2.0)  # a stalled K2 on L4 is a toggle, never the legacy "hold = 回到 L1" plus nothing
+    assert c.page == "L1" and dev.route == "L1" and pages(dev) == ["L1", "L4", "L1"]
+
+
+def test_controller_knob_timing_ui_page_firmware_vs_legacy():
+    clk = FakeClock()
+    c = Controller(DeckConfig(), demo_adapters(), clock=clk, wall=lambda: 1.0, sim=True)
+    c.device_pages = True
+    c.on_knob(2, "down")
+    clk.advance(2.0)
+    c.tick()
+    assert c.page == "L1" and not c.long_press_pending()
+    c.on_knob(2, "up")
+    assert c.page == "L4"
+    c.device_pages = False  # legacy: a hold is a hold, a late up is no tap
+    c.on_knob(2, "down")
+    assert c.long_press_pending()
+    clk.advance(0.7)
+    c.tick()
+    assert c.page == "L1" and c.log[-1] == "回到 L1"
+    c.on_knob(2, "up")
+    assert c.page == "L1"
+    c.on_knob(1, "down")
+    clk.advance(0.7)
+    c.tick()
+    c.on_knob(1, "up")
+    assert c.page == "L4" and not c.settings.active
+
+
+@pytest.mark.parametrize("fw", ["stock", "no-capability"])
+def test_legacy_firmware_keeps_knob_hold_timing(links, fw):
+    dev = MockDevice(ui=fw != "stock")
+    if fw == "no-capability":
+        orig = dev._ui
+        def ui(method, obj):
+            res = orig(method, obj)
+            if method == "ui.hello" and res:
+                res["capabilities"] = ["ui.heartbeat"]
+            return res
+        dev._ui = ui
+    d, c, clk, dev, link = rig(links, dev)
+    knob_tap(d, clk, 1, 0.7)  # K1 hold: L4, the late up does nothing more
+    assert c.page == "L4" and not c.settings.active
+    knob_tap(d, clk, 2, 0.7)  # K2 hold: back to L1
+    assert c.page == "L1"
+    knob_tap(d, clk, 2, 0.05)  # K2 tap: toggle
+    assert c.page == "L4"
+    d.inject_knob(1, "down")
+    d.step()
+    d.heartbeat, d._next_poll = 1e9, 1e12
+    assert d.next_wait() == pytest.approx(0.6 / 8)  # legacy hold detection still wakes up
+    assert not any(r.get("method") == "ui.page" for r in dev.json_requests)
