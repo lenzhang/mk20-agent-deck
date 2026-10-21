@@ -414,7 +414,7 @@ echo "ECM+HID+ADB" > $C/strings/0x409/configuration 2>/dev/null
 if [ "$NOADB" = 0 ]; then
 mkdir -p /dev/usb-ffs/adb
 grep -q ' /dev/usb-ffs/adb ' /proc/mounts || mount -t functionfs adb /dev/usb-ffs/adb || die "mount ffs"
-/bin/adbd </dev/null >/tmp/adbd.log 2>&1 7>&- &
+/bin/adbd </dev/null >>/tmp/adbd.log 2>&1 7>&- &   # O_APPEND: mk20d maint caps it (debug adbd logs every command)
 i=0; while [ ! -e /dev/usb-ffs/adb/ep1 ] && [ $i -lt 40 ]; do sleep 0.2; i=$((i+1)); done
 [ -e /dev/usb-ffs/adb/ep1 ] || die "adbd did not write FFS descriptors"
 fi

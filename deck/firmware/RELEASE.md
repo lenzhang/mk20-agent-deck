@@ -13,6 +13,13 @@ it; see deck/SETTINGS.md), and the Mac side (mk20deck `ui.hello`/`ui.heartbeat`,
 "which agent needs me" hook states, K1 = next agent that needs me). Cross-reviews: Kimi K3 GO on all
 three (deck/reviews/1.4.0/). PRD v1.4 §15 lists the interaction changes.
 
+### 1.4.2-rc3: cap the debug adbd log (soak follow-up)
+
+Build id **rc3**; `firmware/VERSION` is **1.4.2**. The 1.4.1 soak patrol saw MemAvailable fall ~0.75 MB/h: the
+stock debug adbd was started with `>/tmp/adbd.log` (tmpfs = RAM) and logs every adb command (2.4 MB after 2.5 h of
+soak/watch polling), never trimmed. adbd now appends (`>>`) and mk20d maint trims `/tmp/adbd.log` like the other
+`/tmp` logs (>256 KiB -> last 64 KiB, every 300 s). Only `sbin/mk20d` and `share/{gadget,mk20-add-adb}.sh` changed.
+
 ### 1.4.1-rc2: `/run/mk20` on tmpfs (soak follow-up)
 
 Build id **rc2**: `sh tools/mk20-release-build.sh firmware out rc2`; `firmware/VERSION` is **1.4.1** (the loader keeps one MANIFEST per version: a changed 1.4.0 cannot be reinstalled over the confirmed 1.4.0). Only
@@ -170,6 +177,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
+| 1.4.2 | 2026-10-21 | **1.4.2-rc3**: debug adbd log on tmpfs capped (append + mk20d maint trim, was unbounded ~1 MB/h under adb polling). |
 | 1.4.1 | 2026-10-21 | **1.4.1-rc2**: `/run/mk20` on a 512 KiB tmpfs mounted first thing in boot (mk20-kbd wrote kbd.status 1/s to the TF-card overlay from its e-stop/HID main loop: wear + stall risk; files no longer survive reboots); refuses when a writer or its supervisor lock is live; health `run_tmpfs`, selftest INFO/WARN only; stale-status line carries uptime; soak records selftest WARN lines. Only `sbin/mk20d` changed. |
 | 1.4.0 | 2026-10-21 | **1.4.0-rc1**: on-device UX revision (real HOME status, read-only LS, fb19 opens the web on the Mac, boot follows the Mac to L1, fb20 = Mac mode key on L1/L4 unless the keyboard agent is active, e-stop host pause with bounded resync, status probes on a worker thread, full host sub-screen, pairing code incl. safe mode); usb0 settings web default-on as the only settings entry (pairing via /run/mk20/pair-code, maintenance page, catalogue-driven provider/model); Mac mk20deck heartbeat + needs-me hook states. **rc2**: `/run/mk20` on a 512 KiB tmpfs mounted first by `mk20d boot` (kbd.status no longer rewritten on the TF card every second; WARN + overlay fallback), health `run_tmpfs` + INFO/WARN selftest line, stale line carries the uptime, soak `selftest_warn`. Release: only `sbin/mk20d` changed. |
 | 1.3.1 | 2026-10-20 | **1.3.1-rc3**, build id `rc3`: K4 field fix — device BusyBox has no `stat`: kbd status age and maintenance hook link-count checks used `stat -c` and always failed on hardware (rc2 never confirmed, rolled back to 1.2.1); now `date -r` / `ls -ld`, negative age is stale, test shim removes `stat`. Binaries unchanged. |

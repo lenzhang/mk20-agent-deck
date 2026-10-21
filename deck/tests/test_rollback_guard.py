@@ -270,7 +270,7 @@ def test_cleanup_never_starts_kd_and_adb_is_detached():
     assert "kd_start" not in G and "exec /data/appLunch.sh" not in G
     assert "$KDSVC start" not in G and "$KDSVC stop" in G
     a = (Path(__file__).resolve().parents[1] / "firmware/release/share/mk20-add-adb.sh").read_text()
-    assert "( /bin/adbd </dev/null >/tmp/adbd.log 2>&1 7>&- & )" in a
+    assert "( /bin/adbd </dev/null >>/tmp/adbd.log 2>&1 7>&- & )" in a
 
 
 def test_detached_child_survives_kill_tree(dev, tmp_path):

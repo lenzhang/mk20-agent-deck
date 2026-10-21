@@ -285,18 +285,20 @@ def test_maint_rotates_and_trims(dev, rel, g1):
     conf(dev, "LOG_MAX_KB=16\nLOG_KEEP=2\n")
     (logs / "gadget.log").write_text("g" * 20000)
     b = dev.p("tmp/mk20/bridge.log"); b.write_text("b" * 300000)
+    a = dev.p("tmp/adbd.log"); a.write_text("a" * 300000)   # debug adbd log (tmpfs RAM) is capped too
     import subprocess, time
     e = dict(dev.env); e["MK20_MAINT_S"] = "1"
     p = subprocess.Popen([BB, "sh", str(rel / "sbin/mk20d"), "maint"], env=e)
     try:
         for _ in range(100):
-            if (logs / "gadget.log.1").exists() and dev.p("tmp/mk20/health.json").exists() and b.stat().st_size <= 65536:
+            if (logs / "gadget.log.1").exists() and dev.p("tmp/mk20/health.json").exists() and b.stat().st_size <= 65536 \
+                    and a.stat().st_size <= 65536:
                 break
             time.sleep(0.1)
     finally:
         p.kill(); p.wait()
     assert (logs / "gadget.log.1").stat().st_size == 20000 and not (logs / "gadget.log").exists()
-    assert b.stat().st_size == 65536
+    assert b.stat().st_size == 65536 and a.stat().st_size == 65536
     assert json.loads(dev.read("tmp/mk20/health.json"))["maint"] is True
 
 
