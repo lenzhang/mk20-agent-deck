@@ -320,6 +320,10 @@ class Daemon:
                 # show "Mac 已休眠" again) instead of leaving the keyboard with no host until the next wake.
                 if self.link is not None and not self.link.connected:
                     raise ConnectionError(self.link.lost_reason or "device disconnected")
+                # Re-send the sleep frame: the keyboard drops frames outside L1/L4 and needs a fresh one after
+                # any page change (e.g. it follows the Mac to L1 after boot while we are paused).
+                if self.clock() - self._last_sleep_frame >= self.sleep_frame_s:
+                    self.offline_frame("Mac 已休眠")
                 stop.wait(self.power_interval)
                 while not self.events.empty():  # drop input while the Mac sleeps
                     self.events.get_nowait()
@@ -333,8 +337,13 @@ class Daemon:
             if self.link is not None and not self.link.connected:
                 raise ConnectionError(self.link.lost_reason or "device disconnected")
 
+    sleep_frame_s = 10.0
+    _last_sleep_frame = float("-inf")
+
     def offline_frame(self, reason: str) -> None:
         """Best effort on normal exit / sleep (PRD §7.5, AC12)."""
+        if reason == "Mac 已休眠":
+            self._last_sleep_frame = self.clock()
         when = time.strftime("%H:%M:%S")
         jpeg = self.renderer.jpeg(self.renderer.compose_offline(reason, when))
         if self.link is not None:

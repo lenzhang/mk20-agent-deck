@@ -100,6 +100,28 @@ def test_daemon_display_sleep_pauses_and_wake_reconnects():
     assert not d.paused and not ctl.presses
 
 
+def test_paused_daemon_resends_sleep_frame():
+    clk = FakeClock()
+    frames = []
+    pw = FakePower()
+    d = Daemon(_ctl(clk), Renderer(DeviceLayout.default()), None, clock=clk, sink=frames.append, power=pw)
+    pw.queue = ["display_sleep"]
+    d.check_power()
+    assert d.paused and len(frames) == 1
+    stop = threading.Event()
+    ticks = iter(range(100))
+
+    class _Stop:
+        def is_set(self):
+            return next(ticks) >= 30
+
+        def wait(self, t):
+            clk.t += 1.0  # each paused iteration advances the fake clock by 1 s
+
+    d._run(_Stop())
+    assert 3 <= len(frames) <= 5  # ~ one "Mac 已休眠" frame per 10 s while paused, no live frames
+
+
 class _DeadLink:
     connected = False
     lost_reason = "读取失败（拔线？）"
