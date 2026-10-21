@@ -1,0 +1,2 @@
+ 2898 root      1064 S    /tmp/mk20/rel/bin/mk20-agent --web --web-listen 172.30.250.2:8780 --web-config-dir /data/mk20/agent --web
+ 3038 root     38692 S    /tmp/mk20/rel/bin/mk20-kbd --run --host /dev/ttyGS0 --hid /dev/hidg0 --hid-stop-file /tmp/mk20-router-sto
