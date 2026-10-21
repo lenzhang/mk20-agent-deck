@@ -57,8 +57,8 @@ def cmd_run(args) -> int:
 
 
 def cmd_shots(args) -> int:
-    from .sim import attention_shots, layout_shots, move_shots, shots
-    fn = {"attention": attention_shots, "layout": layout_shots, "move": move_shots}.get(
+    from .sim import attention_shots, layout_shots, move_shots, option_shots, shots
+    fn = {"attention": attention_shots, "layout": layout_shots, "move": move_shots, "option": option_shots}.get(
         getattr(args, "scenario", "default"), shots)
     made = fn(args.out, animations=not args.static)
     for n, cap in made:
@@ -285,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("sim-shots", help="render simulator screenshots")
     s.add_argument("--out", default="artifacts")
     s.add_argument("--static", action="store_true")
-    s.add_argument("--scenario", choices=("default", "attention", "layout", "move"), default="default")
+    s.add_argument("--scenario", choices=("default", "attention", "layout", "move", "option"), default="default")
     s.set_defaults(fn=cmd_shots)
     pt = sub.add_parser("probe-tmux", help="read-only tmux discovery: pane ids, commands, hook-derived states")
     pt.add_argument("--json", action="store_true")

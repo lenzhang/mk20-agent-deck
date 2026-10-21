@@ -75,6 +75,10 @@ CLAUDE_CASES = [
 ]
 
 
+def permission_event(ev, extra):
+    return ev == "PermissionRequest" or extra.get("notification_type") == "permission_prompt"
+
+
 @pytest.mark.parametrize("ev,extra,want", CLAUDE_CASES, ids=[f"{c[0]}-{c[2]}" for c in CLAUDE_CASES])
 def test_claude_event_to_state_and_privacy(home, ev, extra, want):
     rec = call(home, ev, **extra)
@@ -83,10 +87,11 @@ def test_claude_event_to_state_and_privacy(home, ev, extra, want):
     for s in SECRETS:  # never: prompt, message/title, tool input/output, transcript path, assistant text
         assert s not in raw
     on_disk = json.loads(raw)
-    assert set(on_disk) == FIELDS
+    kind = {"prompt_kind": "permission"} if permission_event(ev, extra) else {}  # deck option mode (2026-10-22)
+    assert set(on_disk) == FIELDS | set(kind)
     assert on_disk == {"tool": "claude", "session_id": "abc-123", "tmux_pane": "%7",
                        "tmux_socket": "/private/tmp/tmux-501/default", "cwd": "/Users/dev/worktrees/mk20-deck-attn/deck",
-                       "state": want, "ts": 1_792_500_000.0, "ppid": 4242}
+                       "state": want, "ts": 1_792_500_000.0, "ppid": 4242, **kind}
 
 
 @pytest.mark.parametrize("ev,extra", [
@@ -134,7 +139,119 @@ CODEX_CASES = [
 def test_codex_events(home, ev, extra, want):
     assert call(home, ev, tool="codex", **extra)["state"] == want
     raw = rec_file(home, "codex").read_text()
-    assert all(s not in raw for s in SECRETS) and set(json.loads(raw)) == FIELDS
+    kind = {"prompt_kind"} if ev == "PermissionRequest" else set()
+    assert all(s not in raw for s in SECRETS) and set(json.loads(raw)) == FIELDS | kind
+    if kind:
+        assert json.loads(raw)["prompt_kind"] == "permission"
+
+
+# ------------------------------------------------------------------ option mode records (2026-10-22)
+Q_SECRETS = ["SECRET-QUESTION-8", "SECRET-HEADER-9", "SECRET-DESC-10", "SECRET-Q2-LABEL-11", "SECRET-Q2-TEXT-12"]
+
+
+def ask(opts, questions_extra=()):
+    q = {"question": Q_SECRETS[0], "header": Q_SECRETS[1], "multiSelect": False,
+         "options": [o if isinstance(o, dict) else {"label": o, "description": Q_SECRETS[2]} for o in opts]}
+    return {"tool_name": "AskUserQuestion", "tool_use_id": "tu1",
+            "tool_input": {"questions": [q, *questions_extra]}}
+
+
+def test_ask_user_question_records_option_labels_only(home):
+    second = {"question": Q_SECRETS[4], "header": "h2", "options": [{"label": Q_SECRETS[3], "description": "d"}]}
+    rec = call(home, "PreToolUse", **ask(["用 SQLite", "用 Postgres", "先不加数据库"], [second]))
+    assert rec["state"] == "needs_input" and rec["options"] == ["用 SQLite", "用 Postgres", "先不加数据库"]
+    raw = rec_file(home).read_text()
+    for s in SECRETS + Q_SECRETS:  # never the question text, header, descriptions or other questions
+        assert s not in raw
+    assert set(json.loads(raw)) == FIELDS | {"options"} and "prompt_kind" not in raw
+
+
+def test_option_labels_bounded_and_sanitised(home):
+    labels = ["a\x00b\x1bc\n d\u202e e\u200b", "x" * 40, {"label": 7}, {"nolabel": "q"}, "  ", "six", "seven"]
+    rec = call(home, "PreToolUse", **ask(labels))
+    assert rec["options"] == ["a b c d e", "x" * 24, "", "", ""]  # 5 positions kept: digit k = option k
+    assert all(len(o) <= H.MAX_LABEL for o in rec["options"])
+    for bad in ([], [{"label": ""}], [{"label": 5}], "notalist"):
+        ti = {"questions": [{"question": "q", "options": bad}]}
+        r = call(home, "PreToolUse", tool_name="AskUserQuestion", tool_input=ti)
+        assert r["state"] == "needs_input" and "options" not in r
+    for ti in ({"questions": []}, {"questions": ["x"]}, {}, "x", None, {"questions": [{"question": "q"}]}):
+        assert "options" not in call(home, "PreToolUse", tool_name="AskUserQuestion", tool_input=ti)
+
+
+@pytest.mark.parametrize("ev,extra", [("PostToolUse", {"tool_name": "AskUserQuestion"}),
+                                      ("UserPromptSubmit", {"prompt": "x"}), ("Stop", {}),
+                                      ("PostToolUseFailure", {"tool_name": "AskUserQuestion"}),
+                                      ("Notification", {"notification_type": "idle_prompt"}),
+                                      ("SessionStart", {"source": "clear"}), ("StopFailure", {})])
+def test_options_cleared_when_the_session_moves_on(home, ev, extra):
+    call(home, "PreToolUse", **ask(["A", "B"]))
+    call(home, "PermissionRequest", tool_name="Bash")  # also clears a pending permission kind below
+    call(home, "PreToolUse", **ask(["A", "B"]))
+    assert read(home)["options"] == ["A", "B"]
+    call(home, ev, now=1_792_500_100.0, **extra)
+    d = read(home)
+    assert "options" not in d and "prompt_kind" not in d
+
+
+def test_question_dialog_notifications_keep_its_labels(home):
+    """The AskUserQuestion dialog may raise PermissionRequest / permission_prompt itself: not a tool permission."""
+    call(home, "PreToolUse", **ask(["A", "B", "C"]))
+    rec = call(home, "Notification", notification_type="permission_prompt", message=SECRETS[1])
+    assert rec["options"] == ["A", "B", "C"] and "prompt_kind" not in rec
+    rec = call(home, "PermissionRequest", tool_name="AskUserQuestion", tool_input={"questions": []})
+    assert rec["options"] == ["A", "B", "C"] and "prompt_kind" not in rec
+    # A tampered previous record is re-validated, never copied blindly
+    p = rec_file(home)
+    d = json.loads(p.read_text())
+    d["options"] = ["x" * 100, "\u0007bell", 3]
+    p.write_text(json.dumps(d))
+    rec = call(home, "Notification", notification_type="permission_prompt")
+    assert "options" not in rec and "prompt_kind" not in rec
+
+
+def test_plan_and_permission_prompt_kinds(home):
+    call(home, "PreToolUse", tool_name="ExitPlanMode", tool_input={"plan": SECRETS[2]})
+    rec = call(home, "Notification", notification_type="permission_prompt")  # the plan dialog: digits only
+    assert rec["state"] == "needs_approval" and "prompt_kind" not in rec and "options" not in rec
+    rec = call(home, "PermissionRequest", tool_name="ExitPlanMode")
+    assert "prompt_kind" not in rec and "options" not in rec
+    call(home, "PreToolUse", tool_name="Bash", tool_input={"command": SECRETS[2]})
+    assert call(home, "PermissionRequest", tool_name="Bash")["prompt_kind"] == "permission"
+    assert call(home, "Notification", notification_type="permission_prompt")["prompt_kind"] == "permission"
+    # denied → turn ends → idle_prompt: a free-text prompt now, the permission kind is gone
+    rec = call(home, "Notification", notification_type="idle_prompt", now=1_792_500_060.0)
+    assert rec["state"] == "needs_input" and "prompt_kind" not in rec
+    raw = rec_file(home).read_text()
+    assert all(s not in raw for s in SECRETS)
+
+
+def test_codex_request_user_input_has_no_labels(home):
+    rec = call(home, "PreToolUse", tool="codex", tool_name="request_user_input",
+               tool_input={"questions": [{"question": Q_SECRETS[0], "options": [{"label": "A"}]}]})
+    assert rec["state"] == "needs_input" and "options" not in rec and Q_SECRETS[0] not in rec_file(home, "codex").read_text()
+
+
+def test_option_record_read_side_roundtrip(home):
+    from mk20deck import agentstate
+    call(home, "PreToolUse", **ask(["用 SQLite", "B"]))
+    r = agentstate.parse_record(rec_file(home).read_bytes())
+    assert r.options == ("用 SQLite", "B") and r.prompt_kind == "" and r.state == "needs_input"
+    call(home, "PermissionRequest", tool_name="Bash")
+    r = agentstate.parse_record(rec_file(home).read_bytes())
+    assert r.options == () and r.prompt_kind == "permission"
+
+
+def test_ask_hook_subprocess_silent_and_fast(home):
+    env = dict(os.environ, **home)
+    env.pop("PYTHONPATH", None)
+    raw = payload("PreToolUse", **ask(["A", "B", "C"]))
+    t0 = time.perf_counter()
+    H.handle("claude", raw, env=home, ppid=1)
+    assert time.perf_counter() - t0 < 0.1
+    p = subprocess.run([sys.executable, "-I", "-S", str(SCRIPT), "claude"], input=raw, env=env,
+                       capture_output=True, timeout=10)
+    assert p.returncode == 0 and p.stdout == b"" and p.stderr == b"" and read(home)["options"] == ["A", "B", "C"]
 
 
 def test_session_id_sanitised_and_bad_input_ignored(home):

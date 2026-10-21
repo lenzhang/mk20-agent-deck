@@ -404,8 +404,8 @@ static void on_json(kbd_t *k, const host_frame *f)
     if (kbd_json_str(s, n, "method", m, sizeof m) < 0) { k->st.json_bad++; return; }
     if (k->onboard) {
         /* Handshake/liveness carry no page content. A physical route entry may
-         * race a hello already queued in the tty; only page requests are stale. */
-        if (f->data == k->hp.buf + HOST_HDR && k->hp.frame_stale && !strcmp(m,"ui.page")) {
+         * race a hello already queued in the tty; only page/option-key requests are stale. */
+        if (f->data == k->hp.buf + HOST_HDR && k->hp.frame_stale && (!strcmp(m,"ui.page") || !strcmp(m,"ui.hidKeys"))) {
             ack_json(k,f->id,m,0,"stale UI request"); return;
         }
         char result[256]; int handled = onboard_json(k,m,s,n,result,sizeof result);

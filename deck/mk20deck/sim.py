@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 from .adapters.herdr import HerdrAdapter
 from .adapters.mock import MockAdapter
 from .config import DeckConfig
-from .controller import HID_FACES, Controller, KeyView, Role
+from .controller import HID_FACES, Controller, KeyView, Role, slot_pos
 from .demo_data import DESKTOP_CAPS, demo_sessions
 from .layout import DeviceLayout
 from .link import DeviceLink
@@ -335,6 +335,86 @@ def move_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]]:
     clk2.advance(0.3)
     save(c2, clk2, "move-06-L1-placed-empty.png", "放到空槽 S15：S2 变空（之后按补位规则可再填），S15 钉住",
          clear_toast=False)
+    write_index(out_dir, made)
+    return made
+
+
+def option_adapters() -> dict[Mode, MockAdapter]:
+    """tmux with a bound terminal (focus works) and three sessions waiting for a numbered choice."""
+    ads = demo_adapters()
+    ss = demo_sessions(Mode.TMUX, (Tool.CCAI, Tool.CODEX), n=12)
+    for s in ss:
+        s.state_reason = "Claude hook" if s.tool == Tool.CCAI else "codex hook"
+    for s in ss[3:]:  # exactly three sessions wait for a choice
+        if s.state in (State.NEEDS_INPUT, State.NEEDS_APPROVAL):
+            s.state = State.RUNNING
+    q, perm, unk = ss[0], ss[1], ss[2]
+    q.tool, q.title, q.state, q.state_reason = Tool.CCAI, "数据库选型", State.NEEDS_INPUT, "等待输入（Claude hook）"
+    q.options = ("用 SQLite", "用 Postgres（docker compose）", "先不加数据库")
+    perm.tool, perm.title, perm.state, perm.state_reason = (Tool.CCAI, "推送发布", State.NEEDS_APPROVAL,
+                                                            "等待批准（Claude hook）")
+    perm.prompt_kind = "permission"
+    unk.tool, unk.title, unk.state, unk.state_reason = Tool.CODEX, "NAS挂载", State.NEEDS_INPUT, "等待输入（codex hook）"
+    caps = Capabilities(focus=None, new_session=None, skill_new_thread=None, approve="P1：请在终端内处理")
+    ads[Mode.TMUX] = MockAdapter(Mode.TMUX, ss, caps=caps, limited="状态来自 Claude/codex hooks")
+    return ads
+
+
+def option_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]]:
+    """Option mode (user decision 2026-10-22): tap a needs_* session = answer its numbered choice with digit keys."""
+    from . import protocol as P
+    from .slots import N_SLOTS
+    os.makedirs(out_dir, exist_ok=True)
+    lay = DeviceLayout.default()
+    made: list[tuple[str, str]] = []
+
+    def save(c: Controller, clock: FakeClock, name: str, caption: str, clear_toast: bool = True) -> None:
+        if clear_toast:
+            c.toast = None
+        r = Renderer(lay, animations=animations)
+        view = c.view()
+        r.compose(view, clock.t - 0.25)
+        device_mockup(r.compose(view, clock.t), lay, title=f"MK20 Agent Deck · SIM · {caption}").save(
+            os.path.join(out_dir, name))
+        made.append((name, caption))
+
+    def slot_of(c: Controller, title: str) -> tuple[int, int]:
+        for i in range(N_SLOTS):
+            s = c.mgr.session_at(i)
+            if s is not None and s.title == title:
+                return slot_pos(i)
+        raise LookupError(title)
+
+    clk = FakeClock()
+    c = Controller(DeckConfig(), option_adapters(), {"mode": "tmux"}, clock=clk, wall=lambda: 1792244000.0, sim=True)
+    c.refresh()
+    c.option_hid = "ok"  # what the daemon reports once the keyboard accepted ui.hidKeys
+    save(c, clk, "opt-00-L1-waiting.png", "L1：三个会话在等我选（待输入 / 待审批）")
+    tap(c, clk, *slot_of(c, "数据库选型"))
+    clk.advance(0.5)
+    save(c, clk, "opt-01-question-3-labels.png",
+         "点待输入会话 = 置前 + 选项模式（AskUserQuestion 3 个选项）")
+    c.on_key(2, 1, True, hid=P.HID_DIGIT[2])  # the keyboard typed "2" into the frontmost window
+    clk.advance(0.05)
+    c.on_key(2, 1, False)
+    clk.advance(0.3)
+    save(c, clk, "opt-02-chosen-2.png", "按 2：键盘直发数字 2，副屏「已选 2」，状态一变 / 3 s 后回列表",
+         clear_toast=False)
+    clk.advance(3.1)
+    c.tick()
+    c.toast = None
+    tap(c, clk, *slot_of(c, "推送发布"))
+    clk.advance(0.5)
+    save(c, clk, "opt-03-permission.png", "权限确认：固定「是 / 是，且不再问 / 否」")
+    c.on_knob(1, "down")
+    c.on_knob(1, "up")  # K1 = back to the grid
+    clk.advance(0.5)
+    tap(c, clk, *slot_of(c, "NAS挂载"))
+    clk.advance(0.5)
+    save(c, clk, "opt-04-unknown-digits.png", "未知提示（无选项信息）：只显示数字 1–5")
+    c.option_hid = "legacy"
+    c._touch()
+    save(c, clk, "opt-05-legacy-firmware.png", "旧固件（无 ui.hidKeys）：提示在 Mac 上按数字")
     write_index(out_dir, made)
     return made
 

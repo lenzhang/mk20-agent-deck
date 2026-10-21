@@ -41,6 +41,44 @@ non-PTT keys never produce HID". The only fb -> usage map is `HOST_HID_KEYS` in 
   continue. The PTT (long dictation) is not cut.
 - Safe mode and the legacy non-onboard loop keep PTT-only HID.
 
+## L1 option mode: host `ui.hidKeys` (user decision 2026-10-22; unreleased, for 1.5.1)
+
+When the user taps a needs_input / needs_approval session, mk20deck shows that agent's numbered choice on row 1
+(fb1..fbN, N <= 5; rows 2–3 dark; row 4 unchanged) and asks the keyboard to make those keys type the digit on the
+Mac. The tap already brought that session's window to the front, and Claude Code / codex accept number keys in
+their option menus.
+
+- **Request** (cmd101): `{"method":"ui.hidKeys","generation":G,"keys":{"1":"1","2":"2","3":"3"}}`. The only
+  host method with a nested value: `keys` is one flat object under the same strict parser (unique keys, primitive
+  values, <= 24 keys, <= 1023 bytes, nothing nested deeper). Keys are logical fb `"1"`..`"15"` (exact decimal),
+  values exactly one of `"1"`..`"9"` (HID usages 0x1E..0x26), at most 9 entries, no digit twice; `{}` clears.
+  G is 1..999999999 and strictly greater than the last accepted ui.hidKeys generation (own counter, independent
+  of `ui.page`, kept across hello/loss until process restart); a refused request consumes nothing.
+- **Accepted** (non-empty) only while negotiated (`ui.hello`), ONLINE, on L1 and not in the post-e-stop pause;
+  `{}` whenever negotiated and no handshake is pending. A request still queued in the tty at a route boundary is
+  refused as stale, like `ui.page`. Reply `{"ack_method":"ui.hidKeys","success":true,"result":{"generation":G,
+  "mapped":N}}`, otherwise `success:false` ("unavailable or invalid UI request" / "stale UI request"; firmware
+  without the method answers "unsupported"). `ui.hello` now returns `"capabilities":["ui.page","ui.heartbeat",
+  "ui.hidKeys"]`, `"generation"` (ui.page) and `"hid_generation"` (last accepted ui.hidKeys); the host continues
+  above both.
+- **Cleared** on every page boundary (leaving L1: K2, HOME, K1 hold, ctl page; `ui.page` even to L1; `ui.hello`;
+  host loss/EOF), on SUSPECT, on every e-stop (fb20/K2/socket), and 30 s (`HID_MAP_MS`) after the last accepted
+  request (mk20deck refreshes it every 10 s while the choice is shown). `onboard_hid_keys()` reports the count.
+- **Mapped key** (only on the live L1 page: ONLINE + fresh frame, never grace/PROBING/SUSPECT/offline/e-stop
+  pause, keycode 0; a `--ptt` position wins): exactly the fb17–19 path of `HOST_HID_KEYS` — lease preemption
+  (`ctl_human_input`) first, usage down on press and up on release, press-time ownership (`key_owner` 6 = owner 5
+  plus forwarding), repeated GD32 down ignored, the 10 s hold cut, released on every boundary/SUSPECT/e-stop/hidg0
+  replacement/exit, combined with RAlt and fb17–19 in one boot report. Unmapped fb1..fb15 stay ordinary host keys.
+- **Also forwarded** (unlike fb17–19 normally): the press as `{"method":"keyStateChanged","parameters":{"col":C,
+  "hid":U,"pressed":true,"row":R}}` with U = the usage the device put down, the release as an ordinary up (also
+  after the 10 s cut). While a map is active fb17–19 are forwarded the same way (U = 0x2A/0x28/0x29), so the Mac
+  sees Escape/Return at once. Safe because only a host that itself requested the map in the last 30 s receives
+  them, and the mark says the keyboard already typed the key: mk20deck maps a marked press to an option role only
+  (toast "已选 k", leave option mode on Escape) and never to a slot select/focus/pick-up or any other Mac action,
+  even when its option mode ended a moment earlier. The HID path never waits for or depends on the host.
+- Caveat (as for Option+Backspace today): a digit pressed while the PTT is held is Right Option + digit, which
+  macOS types as a symbol (e.g. "¡"), not as the digit.
+
 ## On-device UX revision (2026-10-20, branch feature/fw-ux; supersedes U2 text below where they differ)
 
 Host-validated only (Docker, fake clock/files); **no device acceptance claimed**.
@@ -189,7 +227,8 @@ Every outstanding host press receives an up before navigation taps. Agent page-i
 changes are boundaries even within the AGENT route; releases go to the original
 page/connection, with disconnect generations preventing client-slot reuse leaks.
 HOME/LS pressed keys retain their labels and show a white top edge until release.
-Mac PTT edges (and, since 2026-10-21, the fb17–19 Mac HID key edges) are not also forwarded as host key events. Short host K1 (on L1; the
+Mac PTT edges (and, since 2026-10-21, the fb17–19 Mac HID key edges) are not also forwarded as host key events
+(exception since 1.5.1: while a `ui.hidKeys` map is active, mapped keys and fb17–19 are forwarded marked with `hid`). Short host K1 (on L1; the
 Mac deck focuses the selected session) and short K2 toggle are forwarded as complete
 short taps only after the release decision. Knob rotation on L1/L4 is forwarded per
 detent (press edge only) while ONLINE and fresh; the Mac deck uses K1 rotation to move
@@ -201,7 +240,10 @@ a second navigation tap.
 Optional cmd101 **flat JSON** methods (<=1023 JSON bytes, strict duplicate/type checks):
 
 - `{"method":"ui.hello","version":1}` returns version1, heartbeat_ms1000,
-  capabilities `ui.page`/`ui.heartbeat`, and the last accepted generation.
+  capabilities `ui.page`/`ui.heartbeat` (since 1.5.1 also `ui.hidKeys`), and the last accepted generation
+  (since 1.5.1 also `hid_generation`).
+- `{"method":"ui.hidKeys","generation":G,"keys":{...}}` (1.5.1): L1 option-mode digit keys, see
+  "L1 option mode" above.
 - `{"method":"ui.heartbeat"}` at 1 Hz: three consecutive samples spanning >=2 s
   establish ONLINE. Samples closer than 1 s do not advance the count; a gap >1500 ms
   restarts the probing count. At 3 s silence, SUSPECT freezes host input/content and

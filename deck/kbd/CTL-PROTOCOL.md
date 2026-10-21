@@ -12,7 +12,9 @@ At most two clients; there is no socket operation to enable agent access. Both c
 have equal permissions after the uid check; leases and agent pages remain tied to the requesting connection.
 
 One JSON object per line, including LF at most 1024 bytes (1023 bytes of JSON).
-Objects have at most 24 unique top-level keys and primitive values; no nested request objects.
+Objects have at most 24 unique top-level keys and primitive values; no nested request objects (still true in
+1.5.1: the one-level `keys` object of the host's cmd101 `ui.hidKeys`, kbd/UI.md, uses separate `ctl_json_*1`
+helpers and is never accepted on this socket).
 Strings support JSON escapes and UTF-8; text fields reject control characters and
 invalid UTF-8. Integer fields accept at most nine digits, without fractions or exponents.
 Malformed/duplicate-key JSON returns `bad_request`; an overlong incoming line drops
@@ -61,7 +63,8 @@ already zero but reports were queued or last delivered buttons were down. E-stop
 clears the screen grant/binds, and returns to the system page. Only a keyboard-side
 explicit allow clears the latch; reconnecting or acquiring cannot clear it.
 U2 replacement `--run` processes physical safety before host forwarding, including
-without a control socket. Host writes never wait for ttyGS0: a bounded 16 KiB buffer
+without a control socket. A physical L1 option-mode digit (host `ui.hidKeys`, 1.5.1) is human input like
+fb16–19: it revokes a lease (all-up) before its digit goes down, and every e-stop clears the digit map. Host writes never wait for ttyGS0: a bounded 16 KiB buffer
 retains partial output, with space reserved for 64 empty cmd100 acks. Overflow drops
 ordinary replies, counted as host_tx_errors; EAGAIN is counted as host_tx_timeouts.
 Ack means handled, not displayed. The loop checks fresh safety deadlines between

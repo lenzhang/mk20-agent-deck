@@ -202,6 +202,8 @@ class TmuxAdapter(ModeAdapter):
         s.state = st
         s.state_reason = why.replace("hook", f"{HOOK_LABEL[rec.tool]} hook", 1)
         s.updated_ms = int(rec.ts * 1000)
+        if st in (State.NEEDS_INPUT, State.NEEDS_APPROVAL):  # the pending numbered choice (option mode)
+            s.options, s.prompt_kind = rec.options, rec.prompt_kind
         if st == State.DONE_UNREAD:
             s.done_marker = f"{rec.tool}:{rec.session_id}:{rec.ts:.3f}"
 

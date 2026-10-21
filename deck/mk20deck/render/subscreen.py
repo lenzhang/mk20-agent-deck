@@ -12,6 +12,7 @@ from .palette import BG, DIM, MODE_NAME, MODE_STRIP, STATE_COLOR, STATE_TEXT, TE
 W, H = 428, 142
 AMBER = (245, 180, 60)
 MOVE_PINK = (244, 114, 182)  # same as the picked-up key's dashed border
+OPTION_AMBER = (245, 158, 11)  # same as the option keys
 
 
 def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
@@ -58,7 +59,10 @@ def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
         summ = s.summary or ""
         if sv.scroll and summ:
             summ = summ[sv.scroll * 12:]
-        if not sv.moving:
+        if sv.option_note:  # option mode: why the digit keys may not type (legacy firmware / not accepted)
+            d.text((x, 92), fit(d, sv.option_note, font(12, bold=True), W - x - 10), font=font(12, bold=True),
+                   fill=(252, 165, 165))
+        elif not sv.moving and not sv.option:
             d.text((x, 92), fit(d, summ, f12, W - x - 10), font=f12, fill=(190, 194, 200))
     else:
         d.text((x - 90, 40), "未选中", font=font(24, bold=True), fill=TEXT)
@@ -76,13 +80,19 @@ def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
     if sv.overflow_attention:
         over += f" · {sv.overflow_attention} 待处理"
     ow = d.textbbox((0, 0), over, font=font(13, bold=True))[2] if over else 0
-    d.text((12, yb), fit(d, lim, f12, W - 30 - ow), font=f12, fill=AMBER)
-    if over:
-        d.text((W - 10 - ow, yb - 1), over, font=font(13, bold=True), fill=TEXT)
+    if not sv.option:  # option mode: the instruction banner takes the bottom line
+        d.text((12, yb), fit(d, lim, f12, W - 30 - ow), font=f12, fill=AMBER)
+        if over:
+            d.text((W - 10 - ow, yb - 1), over, font=font(13, bold=True), fill=TEXT)
     if sv.moving:  # picked-up slot: one prominent instruction line (replaces summary / note / pin info)
         fm = font(13, bold=True)
         d.rounded_rectangle([8, 93, W - 8, 115], radius=8, fill=MOVE_PINK)
         d.text((W / 2, 104), fit(d, sv.moving, fm, W - 28), font=fm, fill=(0, 0, 0), anchor="mm")
+    elif sv.option:  # option mode: the choice instruction (replaces summary / note)
+        fm = font(13, bold=True)
+        top = 112
+        d.rounded_rectangle([8, top, W - 8, top + 24], radius=8, fill=OPTION_AMBER)
+        d.text((W / 2, top + 12), fit(d, sv.option, fm, W - 28), font=fm, fill=(0, 0, 0), anchor="mm")
     elif sv.note and s is not None and sv.page != "L4":
         d.text((x, 106), fit(d, sv.note, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
     elif sv.page == "L4" and s is not None and sv.pin_info:

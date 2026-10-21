@@ -97,6 +97,10 @@ class Session:
     state_reason: str = ""  # why the state is what it is (shown on sub-screen)
     updated_ms: int = 0
     done_marker: str = ""  # identity of the completion that produced done_unread
+    # Pending numbered choice (option mode, 2026-10-22; tmux hook records only): AskUserQuestion labels for
+    # options 1..N, or prompt_kind "permission" (fixed 是 / 是，且不再问 / 否).  Empty = unknown → digits 1..5.
+    options: tuple[str, ...] = ()
+    prompt_kind: str = ""
 
 
 @dataclass

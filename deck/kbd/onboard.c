@@ -33,6 +33,11 @@ static const struct { int fb; uint8_t usage; } HOST_HID_KEYS[] = {
 /* GD32 key reports are edge-triggered without a state resync: a lost key-up must not leave an
  * auto-repeating Backspace/Return/Escape held. Longer holds are cut (press again to continue). */
 #define HID_KEY_HOLD_MS 10000
+/* L1 option mode (host ui.hidKeys, user decision 2026-10-22): the Mac maps up to 9 of fb1..fb15 to the
+ * digits 1..9 while an agent asks a numbered choice. The map lives only on the live L1 page and only
+ * HID_MAP_MS after the last accepted request (the Mac refreshes it every ~10 s while it is shown). */
+#define HID_MAP_MS 30000
+#define HID_MAP_MAX 9
 struct onboard_s {
     ui_t ui;
     enum onboard_route route, back, host_page;
@@ -44,9 +49,11 @@ struct onboard_s {
     uint32_t render;
     uint16_t *scratch;
     /* Press-time owner: 0 none, 1 host key event, 2 Mac PTT (Right Option), 3 agent page,
-     * 4 L4 back, 5 Mac HID key (hid_usage, pressed at hid_at). */
+     * 4 L4 back, 5 Mac HID key (hid_usage, pressed at hid_at), 6 Mac HID key whose edges are also
+     * forwarded to the host (option mode; the up becomes an owner-1 host up after the HID up). */
     int key_owner[20], knob_down[2], knob_long[2];
     uint8_t hid_usage[20]; int64_t hid_at[20];
+    uint8_t hid_map[20]; int hid_mapped; long hid_generation; int64_t hid_map_at; /* ui.hidKeys (fb1..fb15) */
     struct { int page, client; uint64_t generation; } agent_owner[20];
     uint32_t pressed;
     uint32_t pending_up;
@@ -70,6 +77,7 @@ struct onboard_s {
     kbd_t *kbd;
 };
 static void host_tap(kbd_t *k, int slot);
+static void hid_map_clear(onboard_t *o) { memset(o->hid_map,0,sizeof o->hid_map); o->hid_mapped = 0; }
 static int host_route(const onboard_t *o) { return o->route == ONBOARD_L1 || o->route == ONBOARD_L4; }
 static int safety_footer(const onboard_t *o) { return host_route(o) && (o->fresh || o->health==HOST_SUSPECT); }
 static int page_id(enum onboard_route r) { return r == ONBOARD_L5 ? 1 : r == ONBOARD_L1 || r == ONBOARD_L4 ? 2 : 0; }
@@ -131,19 +139,21 @@ static void mac_up(kbd_t *k, int i, int owner)
 {
     if (!k->hid) return;
     if (owner == 2) hid_set_mod(k->hid, HID_MOD_RALT, 0);
-    else if (owner == 5) hid_key(k->hid, k->onboard->hid_usage[i], 0);
+    else if (owner == 5 || owner == 6) hid_key(k->hid, k->onboard->hid_usage[i], 0);
 }
 static void release_mac(kbd_t *k)
 {
     onboard_t *o = k->onboard;
-    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 2 || o->key_owner[i] == 5) {
+    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 2 || o->key_owner[i] == 5 || o->key_owner[i] == 6) {
         int owner = o->key_owner[i];
-        o->key_owner[i] = 0; mac_up(k,i,owner);
+        o->key_owner[i] = owner == 6 ? 1 : 0; /* a forwarded key keeps its host half: its up follows the release */
+        mac_up(k,i,owner);
     }
 }
 static void release_key(kbd_t *k, int i)
 {
     onboard_t *o = k->onboard; int owner = o->key_owner[i];
+    if (owner == 6) { mac_up(k,i,6); o->key_owner[i] = owner = 1; } /* HID up first, then the host up */
     if (owner == 1) {
         o->pending_up |= 1u<<i;
         kbd_host_drain(k);
@@ -164,6 +174,7 @@ static void release_key(kbd_t *k, int i)
 static void boundary(kbd_t *k, int redraw)
 {
     onboard_t *o = k->onboard;
+    hid_map_clear(o); /* every page boundary (route, ui.page, K1 hold, ctl page, hello, loss) ends option mode */
     for (int i=0;i<20;i++) release_key(k,i);
     if (k->ctl) { k->ctl->confirm.shown=0; k->ctl->confirm.shown_ms=0; }
     o->tile_fb=0; o->restore=0;
@@ -280,12 +291,30 @@ static void sample(kbd_t *k, int64_t now)
     }
 }
 void onboard_valid_frame(kbd_t *k, int64_t now) { if (!k->onboard->negotiated) sample(k, now); }
+/* {"method":"ui.hidKeys","generation":G,"keys":{"<fb>":"<digit>",...}}: G 1..999999999, at most
+ * HID_MAP_MAX entries, keys exactly "1".."15", values exactly one of "1".."9", no digit twice. */
+static int parse_hid_keys(const char *s, size_t n, long *gen, uint8_t map[20], int *count)
+{
+    const char *obj; size_t len; long g; int total, found = 0; unsigned digits = 0;
+    if (ctl_json_int1(s,n,"generation",&g) || g < 1 || ctl_json_obj1(s,n,"keys",&obj,&len) ||
+        (total = ctl_json_count(obj,len)) < 0 || total > HID_MAP_MAX) return -1;
+    memset(map,0,20);
+    for (int fb = 1; fb <= 15; fb++) {
+        char key[4], v[4]; snprintf(key,sizeof key,"%d",fb);
+        if (!ctl_json_has(obj,len,key)) continue;
+        if (ctl_json_str(obj,len,key,v,sizeof v) != 1 || v[0] < '1' || v[0] > '9' || (digits & (1u << (v[0]-'0')))) return -1;
+        digits |= 1u << (v[0]-'0'); map[fb-1] = (uint8_t)(0x1E + (v[0]-'1')); found++; /* HID usage of digit 1..9 */
+    }
+    if (found != total) return -1; /* any other key ("0", "16", "01", "fb1") */
+    *gen = g; *count = found; return 0;
+}
 int onboard_json(kbd_t *k, const char *m, const char *s, size_t n, char *r, size_t cap)
 {
     onboard_t *o = k->onboard; long v;
     if (!strncmp(m,"ui.",3)) {
-        char method[64];
-        if (n >= CTL_LINE_MAX || ctl_json_str(s,n,"method",method,sizeof method) < 0 || strcmp(method,m)) return -1;
+        char method[64]; int nest = !strcmp(m,"ui.hidKeys"); /* its "keys" value is a flat object */
+        if (n >= CTL_LINE_MAX || (nest ? ctl_json_str1(s,n,"method",method,sizeof method) :
+            ctl_json_str(s,n,"method",method,sizeof method)) < 0 || strcmp(method,m)) return -1;
     }
     if (!strcmp(m, "getInfo")) {
         if (o->health == HOST_OFFLINE) {
@@ -298,8 +327,17 @@ int onboard_json(kbd_t *k, const char *m, const char *s, size_t n, char *r, size
         if (ctl_json_int(s,n,"version",&v) || v != 1) return -1;
         onboard_loss(k); o->negotiated = 1; o->handshake_required = 0;
         o->health = HOST_PROBING; o->seen = kbd_now(k);
-        snprintf(r,cap,"{\"version\":1,\"heartbeat_ms\":1000,\"capabilities\":[\"ui.page\",\"ui.heartbeat\"],\"generation\":%ld}",o->generation);
+        snprintf(r,cap,"{\"version\":1,\"heartbeat_ms\":1000,\"capabilities\":[\"ui.page\",\"ui.heartbeat\",\"ui.hidKeys\"],"
+                 "\"generation\":%ld,\"hid_generation\":%ld}",o->generation,o->hid_generation);
         return 1;
+    }
+    if (!strcmp(m, "ui.hidKeys")) {
+        long g; uint8_t map[20]; int count;
+        if (!o->negotiated || o->handshake_required || parse_hid_keys(s,n,&g,map,&count) || g <= o->hid_generation) return -1;
+        /* A non-empty map only on the live-capable L1 page; {} (clear) is always accepted. */
+        if (count && (o->health != HOST_ONLINE || o->route != ONBOARD_L1 || suspended(o))) return -1;
+        memcpy(o->hid_map,map,sizeof map); o->hid_mapped = count; o->hid_generation = g; o->hid_map_at = kbd_now(k);
+        snprintf(r,cap,"{\"generation\":%ld,\"mapped\":%d}",g,count); return 1;
     }
     if (!strcmp(m, "ui.heartbeat")) {
         if (!o->negotiated || o->handshake_required || o->health == HOST_SUSPECT) return -1;
@@ -379,7 +417,7 @@ static void stop(kbd_t *k, const char *reason, int64_t now)
     if (host_route(o)) {
         /* Stay on the Mac page: ctl_estop() already revoked the lease and sent all-up;
          * release a held Mac PTT too and show a bounded stop banner in the footer. */
-        release_mac(k);
+        release_mac(k); hid_map_clear(o); /* every e-stop also ends option mode */
         if (k->ctl) { k->ctl->screen.current = page_id(o->route); o->last_page = k->ctl->screen.current; }
         o->stop_banner = 1; o->stop_at = now; o->render |= RESERVED;
         o->suspend = 1; o->input_at = now; /* panic presses right after the stop never reach the Mac */
@@ -428,7 +466,7 @@ void onboard_tick(kbd_t *k, int64_t now)
     onboard_t *o = k->onboard; if (!o) return;
     if ((o->health == HOST_ONLINE || o->health == HOST_PROBING || o->health == HOST_SUSPECT) && now-o->seen >= 5000) onboard_loss(k);
     else if ((o->health == HOST_ONLINE || o->health == HOST_PROBING) && now-o->seen >= 3000) {
-        o->health = HOST_SUSPECT; release_mac(k); o->epoch++; o->fresh = o->publishing = 0;
+        o->health = HOST_SUSPECT; release_mac(k); hid_map_clear(o); o->epoch++; o->fresh = o->publishing = 0;
         o->tile_fb=0; o->restore=0;
         free(o->next_jpg); o->next_jpg=NULL;
         k->hp.barrier = k->hp.len; o->render |= RESERVED; /* stale footer; fb20 reads "K2 长按急停" */
@@ -469,7 +507,8 @@ void onboard_tick(kbd_t *k, int64_t now)
         if (active && o->key_owner[19] == 1) { release_key(k,19); stop(k,"fb20_held",now); }
         o->agent_was = agent_active(k); o->render |= 1u << 19;
     }
-    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 5 && now - o->hid_at[i] >= HID_KEY_HOLD_MS) {
+    if (o->hid_mapped && now - o->hid_map_at >= HID_MAP_MS) hid_map_clear(o); /* the Mac stopped refreshing it */
+    for (int i = 0; i < 20; i++) if ((o->key_owner[i] == 5 || o->key_owner[i] == 6) && now - o->hid_at[i] >= HID_KEY_HOLD_MS) {
         fprintf(stderr, "mk20-kbd: Mac key held %d s: released (lost key-up guard)\n", HID_KEY_HOLD_MS / 1000);
         release_key(k,i);
     }
@@ -571,7 +610,7 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
      * On L1/L4 with the agent inactive it is the Mac host's mode key (PRD §6.2). */
     if (fb == 20 && !fb20_host(k)) { stop(k,"page_key",now); return 1; }
     /* Repeated down of a held Mac HID key (its GD32 up was lost): still one down; the next up releases. */
-    if (o->key_owner[fb-1] == 5) return 1;
+    if (o->key_owner[fb-1] == 5 || o->key_owner[fb-1] == 6) return 1;
     /* Do not overwrite a still-owned host press with a new press while its up
      * is backpressured. Safety keys and deadlines have already been handled. */
     if (o->pending_up & (1u<<(fb-1))) {
@@ -591,10 +630,17 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
             return 1; /* physical PTT is consumed; no second Mac action */
         }
         uint8_t usage = host_hid_usage(fb);
+        /* L1 option mode (ui.hidKeys): a mapped fb1..fb15 is the Mac's digit; while a map is active these
+         * keys and fb17-19 are also forwarded (with "hid":usage) so the Mac can leave option mode. */
+        int fwd = o->route == ONBOARD_L1 && o->hid_mapped && (usage || (fb <= 15 && (usage = o->hid_map[fb-1])));
         if (usage) {
-            o->key_owner[fb-1] = 5; o->hid_usage[fb-1] = usage; o->hid_at[fb-1] = now;
+            o->key_owner[fb-1] = fwd ? 6 : 5; o->hid_usage[fb-1] = usage; o->hid_at[fb-1] = now;
             if (k->hid) hid_key(k->hid,usage,1);
-            return 1; /* a Mac keyboard key, consumed like the PTT: no host key event */
+            if (fwd && k->host_fd >= 0) {
+                char j[160]; int n = host_json_key_state_hid(j,sizeof j,col,row,usage);
+                if (n > 0) kbd_host_send(k,KBD_EVENT_ID,HOST_CMD_JSON,j,(size_t)n);
+            }
+            return 1; /* a Mac keyboard key, consumed like the PTT: no plain host key event */
         }
         return 0;
     }
@@ -828,6 +874,7 @@ void onboard_service(kbd_t *k, int64_t now)
 const ui_t *onboard_ui(const kbd_t *k) { return &k->onboard->ui; }
 enum onboard_route onboard_current(const kbd_t *k) { return k->onboard->route; }
 enum onboard_health onboard_health(const kbd_t *k) { return k->onboard->health; }
+int onboard_hid_keys(const kbd_t *k) { return k->onboard->hid_mapped; }
 
 int onboard_status_wait(kbd_t *k, int timeout_ms)
 {
@@ -858,6 +905,7 @@ int onboard_timeout(kbd_t *k, int64_t now, int dflt)
     int64_t left = dflt;
     if (!producing && o->render && o->next_render-now < left) left = o->next_render-now;
     for (int i=0;i<2;i++) if (o->knob_down[i] && !o->knob_long[i] && o->knob_at[i]+1000-now < left) left=o->knob_at[i]+1000-now;
-    for (int i=0;i<20;i++) if (o->key_owner[i]==5 && o->hid_at[i]+HID_KEY_HOLD_MS-now < left) left=o->hid_at[i]+HID_KEY_HOLD_MS-now;
+    for (int i=0;i<20;i++) if ((o->key_owner[i]==5 || o->key_owner[i]==6) && o->hid_at[i]+HID_KEY_HOLD_MS-now < left) left=o->hid_at[i]+HID_KEY_HOLD_MS-now;
+    if (o->hid_mapped && o->hid_map_at+HID_MAP_MS-now < left) left=o->hid_map_at+HID_MAP_MS-now;
     return left < 0 ? 0 : (int)left;
 }

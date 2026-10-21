@@ -2,7 +2,9 @@
 
 One small JSON file per agent session in ``$MK20DECK_HOME/agent-state`` (default
 ``~/.config/mk20-agent-deck/agent-state``): ``claude-<sid>.json`` / ``codex-<sid>.json``
-with exactly tool, session_id, tmux_pane, tmux_socket, cwd, state, ts, ppid.
+with exactly tool, session_id, tmux_pane, tmux_socket, cwd, state, ts, ppid, plus (2026-10-22, deck option
+mode) while a numbered choice is pending: ``options`` (AskUserQuestion labels, <= 5 x 24 chars) or
+``prompt_kind`` ("permission").  Those two are optional: invalid values are dropped, the record stays.
 Everything here is read-only and defensive: malformed, foreign-owned, oversized or
 unknown-state files are skipped, never trusted.
 """
@@ -19,6 +21,10 @@ PANE_RE = re.compile(r"^%[0-9]{1,9}$")
 STATES = frozenset({"idle", "running", "needs_approval", "needs_input", "done", "error", "removed"})
 MAX_FILE = 8192
 MAX_FILES = 512
+MAX_OPTIONS = 5
+MAX_LABEL = 24
+PROMPT_KINDS = frozenset({"permission"})
+_LABEL_BAD = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")
 
 
 def state_home(env: dict | None = None) -> str:
@@ -40,6 +46,16 @@ class AgentRecord:
     state: str
     ts: float
     ppid: int
+    options: tuple[str, ...] = ()  # pending AskUserQuestion labels (option 1..N); () = none / unknown
+    prompt_kind: str = ""          # "permission" = a tool permission prompt is pending
+
+
+def _options(v) -> tuple[str, ...]:
+    if not isinstance(v, list) or not 0 < len(v) <= MAX_OPTIONS:
+        return ()
+    if not all(isinstance(o, str) and len(o) <= MAX_LABEL and not _LABEL_BAD.search(o) for o in v):
+        return ()
+    return tuple(v) if any(v) else ()
 
 
 def parse_record(raw: bytes | str) -> AgentRecord | None:
@@ -58,7 +74,9 @@ def parse_record(raw: bytes | str) -> AgentRecord | None:
         return None
     if isinstance(ts, bool) or not isinstance(ts, (int, float)) or isinstance(ppid, bool) or not isinstance(ppid, int):
         return None
-    return AgentRecord(tool, sid, pane, sock, cwd, state, float(ts), ppid)
+    kind = d.get("prompt_kind", "")
+    return AgentRecord(tool, sid, pane, sock, cwd, state, float(ts), ppid, _options(d.get("options")),
+                       kind if isinstance(kind, str) and kind in PROMPT_KINDS else "")
 
 
 def load_records(state_dir: str, now: float, max_age_s: float) -> list[AgentRecord]:

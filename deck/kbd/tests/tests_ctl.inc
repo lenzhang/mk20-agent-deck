@@ -713,6 +713,23 @@ static void test_ctl_json_edges(void)
         CHECK(H(&c, 0, 0, q, r) > 0 && has(r, i == 22 ? "\"ok\":true" : "bad_request"));
         q[strlen(q) - 1] = 0;
     }
+    /* Host ui.hidKeys helpers (2026-10-22): one level of flat-object values, otherwise the same strict rules.
+     * The flat helpers (and therefore every kbd.sock request) still reject any nested object. */
+    const char *nest = "{\"method\":\"ui.hidKeys\",\"generation\":7,\"keys\":{\"1\":\"1\",\"12\":\"9\"}}", *o; size_t ol; long g = 0;
+    CHECK(ctl_json_str(nest, strlen(nest), "method", text, sizeof text) < 0 && !ctl_json_has(nest, strlen(nest), "keys"));
+    CHECK(ctl_json_str1(nest, strlen(nest), "method", text, sizeof text) == 10 && !strcmp(text, "ui.hidKeys"));
+    CHECK(!ctl_json_int1(nest, strlen(nest), "generation", &g) && g == 7);
+    CHECK(!ctl_json_obj1(nest, strlen(nest), "keys", &o, &ol) && ctl_json_count(o, ol) == 2 && o[ol - 1] == '}' &&
+          ctl_json_str(o, ol, "12", text, sizeof text) == 1 && text[0] == '9' && !ctl_json_has(o, ol, "2"));
+    CHECK(ctl_json_obj1(nest, strlen(nest), "method", &o, &ol) < 0 && ctl_json_obj1(nest, strlen(nest), "nope", &o, &ol) < 0);
+    const char *bad_nest[] = {"{\"k\":{\"a\":{\"b\":1}}}", "{\"k\":{\"a\":1,\"a\":2}}", "{\"k\":{\"a\":[1]}}", "{\"k\":{\"a\":1}",
+        "{\"k\":{\"a\":1}}x", "{\"k\":{\"a\" 1}}", "{\"k\":{,}}", "{\"k\":{\"a\":1,}}", "{\"k\":{\"a\":1},\"k\":{}}", "{\"k\":{1:1}}"};
+    for (size_t i = 0; i < sizeof bad_nest / sizeof *bad_nest; i++)
+        CHECK(ctl_json_obj1(bad_nest[i], strlen(bad_nest[i]), "k", &o, &ol) < 0 && ctl_json_int1(bad_nest[i], strlen(bad_nest[i]), "n", &g) < 0);
+    const char *three = " { \"a\" : 1 , \"b\":\"}\",\"c\":null } ";
+    CHECK(ctl_json_count("{}", 2) == 0 && ctl_json_count(three, strlen(three)) == 3);
+    CHECK(ctl_json_count("{\"a\":{}}", 8) < 0 && ctl_json_count("{\"a\":1", 6) < 0 && ctl_json_count("[]", 2) < 0);
+    CHECK(H(&c, 0, 0, "{\"op\":\"status\",\"x\":{\"a\":1}}", r) > 0 && has(r, "bad_request"));
     /* Defensive status quoting failure (keyboard-side state corruption / future callers). */
     strcpy(c.ui.summary, "bad\001summary");
     CHECK(H(&c, 0, 0, "{\"op\":\"status\",\"id\":7}", r) > 0 && has(r, "\"ok\":false") && has(r, "bad_args") && has(r, "\"id\":7"));

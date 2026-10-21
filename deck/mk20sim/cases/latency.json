@@ -14,14 +14,14 @@
   },
   "steps": [
    {
-    "press": "S1",
+    "press": "S5",
     "hold": 40
    },
    {
     "wait": 100
    },
    {
-    "press": "S1",
+    "press": "S5",
     "hold": 40
    },
    {
@@ -126,7 +126,7 @@
   },
   "steps": [
    {
-    "press": "S1",
+    "press": "S5",
     "hold": 150
    },
    {

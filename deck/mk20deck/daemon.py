@@ -48,6 +48,7 @@ class InputEvent:
     pressed: bool = False
     t: float = 0.0
     code: str = ""  # raw code for the key trace
+    hid: int | None = None  # option mode: the keyboard typed this press itself (HID usage)
 
 
 class WakeReconnect(ConnectionError):
@@ -96,6 +97,13 @@ class Daemon:
     bg_first_delay_s: float = 1.0
     bg_results: "queue.Queue[tuple]" = field(default_factory=queue.Queue)
     bg_polls: int = 0
+    # Option mode (2026-10-22): keep the keyboard's ui.hidKeys map equal to the controller's choice keys.
+    hid_refresh_s: float = 10.0  # the keyboard drops a map 30 s after the last request
+    hid_retry_s: float = 1.0
+    _hid_map: dict = field(default_factory=dict)  # what the keyboard last confirmed ({} = nothing mapped)
+    _hid_at: float = 0.0
+    _hid_retry_at: float = 0.0
+    _hid_epoch: int = -1
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -131,7 +139,7 @@ class Daemon:
             log.info("unmapped non-key event %d,%d (add it to [knobs])", ev.col, ev.row)
             return
         col, row = lay.fw_to_doc(ev.col, ev.row)
-        self.events.put(InputEvent("key", col, row, ev.pressed, t=now, code=code))
+        self.events.put(InputEvent("key", col, row, ev.pressed, t=now, code=code, hid=getattr(ev, "hid", None)))
 
     def on_device_event(self, obj: dict) -> None:
         """Non-key device JSON event, called from the link reader thread: only queue, never block or raise."""
@@ -174,7 +182,9 @@ class Daemon:
         if tr:
             c = self.controller
             ptt0, acts0 = c.ptt_held, c.action_count
-        if ev.kind == "key":
+        if ev.kind == "key" and ev.hid is not None:
+            self.controller.on_key(ev.a, int(ev.b), ev.pressed, hid=ev.hid)
+        elif ev.kind == "key":
             self.controller.on_key(ev.a, int(ev.b), ev.pressed)
         else:
             self.controller.on_knob(ev.a, str(ev.b))
@@ -224,6 +234,43 @@ class Daemon:
                 return
             self.controller.apply_background(m, sessions, err, t0)
 
+    # -------------------------------------------------------------- option mode (ui.hidKeys)
+    def _sync_hid_keys(self, now: float) -> None:
+        """Send the choice keys (or the clear) before the frame that shows them; refresh while shown."""
+        c, link = self.controller, self.link
+        want = c.hid_keys_wanted() if hasattr(c, "hid_keys_wanted") else {}
+        if link is None:
+            return
+        epoch = getattr(link, "ui_epoch", 0)
+        if epoch != self._hid_epoch or not getattr(link, "ui_negotiated", False):
+            self._hid_epoch, self._hid_map, self._hid_retry_at = epoch, {}, 0.0  # a hello/loss dropped the map
+        if not want and not self._hid_map:
+            return
+        if want and not link.supports("ui.hidKeys"):
+            c.set_option_hid("legacy")
+            return
+        if want == self._hid_map and now - self._hid_at < self.hid_refresh_s:
+            return
+        if now < self._hid_retry_at:
+            return
+        res = link.ui_hid_keys(want)
+        if res == "ok":
+            self._hid_map, self._hid_at, self._hid_retry_at = dict(want), now, 0.0
+        elif res == "unsupported":
+            self._hid_map = {}
+        else:
+            self._hid_retry_at = now + self.hid_retry_s
+        if want:
+            c.set_option_hid({"ok": "ok", "unsupported": "legacy"}.get(res, "pending"))
+
+    def _hid_wait(self, now: float) -> float | None:
+        want = self.controller.hid_keys_wanted() if hasattr(self.controller, "hid_keys_wanted") else {}
+        if self.link is None or (not want and not self._hid_map) or not self.link.supports("ui.hidKeys"):
+            return None  # nothing to send (legacy firmware: never spin on a map it cannot take)
+        if want != self._hid_map:
+            return max(0.0, self._hid_retry_at - now)
+        return self._hid_at + self.hid_refresh_s - now
+
     # -------------------------------------------------------------- loop
     def step(self, force: bool = False) -> bool:
         """One iteration; returns True if a frame was produced."""
@@ -238,6 +285,7 @@ class Daemon:
         if now >= self._next_poll:
             self.controller.refresh()
             self._next_poll = now + self.poll_interval
+        self._sync_hid_keys(now)
         view = self.controller.view()
         fps = self.renderer.desired_fps(view, now)
         due = force or self.controller.version != self._last_version
@@ -279,6 +327,12 @@ class Daemon:
         deadline = self.controller.move_deadline()
         if deadline is not None:  # a picked-up slot times out even when nothing animates
             waits.append(deadline - now)
+        deadline = getattr(self.controller, "option_deadline", lambda: None)()
+        if deadline is not None:  # option mode: 30 s without input / 3 s after a choice
+            waits.append(deadline - now)
+        hw = self._hid_wait(now)
+        if hw is not None:  # ui.hidKeys refresh / retry
+            waits.append(hw)
         if self.power is not None:
             waits.append(self._next_power - now)
         return max(0.005, min(waits))

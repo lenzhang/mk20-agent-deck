@@ -37,4 +37,5 @@ int host_encode(uint32_t id, uint32_t cmd, const uint8_t *pl, size_t n, uint8_t 
 /* JSON builders (compact, matching KD keys). Return length or -1. */
 int host_json_getinfo_ack(char *out, size_t cap, const char *version);
 int host_json_key_state(char *out, size_t cap, int col, int row, int pressed);
+int host_json_key_state_hid(char *out, size_t cap, int col, int row, int usage); /* pressed, "hid":usage */
 #endif

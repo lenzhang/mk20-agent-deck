@@ -4,6 +4,51 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
+## Unreleased: L1 option mode (feature/option-mode, for 1.5.1)
+
+`firmware/VERSION` stays **1.5.0** on this branch (the integrator bumps it to 1.5.1). User decision 2026-10-22:
+tapping a needs_input / needs_approval session on L1 brings it to the front and turns row 1 into its numbered
+choice (AskUserQuestion labels, the fixed permission menu 是 / 是，且不再问 / 否, or bare digits 1–5; rows 2–3
+dark, row 4 unchanged); the keys type the digit on the Mac. PRD delta: deck/docs/PRD-1.5-L1-LAYOUT.md §3.2.
+
+### `bin/mk20-kbd`: host cmd101 `ui.hidKeys`
+
+- `{"method":"ui.hidKeys","generation":G,"keys":{"1":"1",...}}`: up to 9 of fb1..fb15 -> digits "1".."9"
+  (HID 0x1E..0x26), strict validation (one nested flat object via new `ctl_json_*1` helpers; kbd.sock stays
+  flat-only), strictly increasing own generation (`hid_generation` in the `ui.hello` result, capability
+  `ui.hidKeys`), `{}` clears. Non-empty maps only while negotiated + ONLINE + on L1 + not in the post-e-stop
+  pause; stale tty requests refused like `ui.page`. Cleared on every page boundary, `ui.hello`, host loss,
+  SUSPECT, every e-stop, and 30 s after the last request (mk20deck refreshes every 10 s).
+- A mapped press on the live L1 page takes exactly the fb17–19 path (`HOST_HID_KEYS`: lease preemption,
+  down/up, press-time ownership `key_owner` 6, 10 s cut, all release paths, combined boot reports with RAlt) and
+  is ALSO forwarded as `keyStateChanged` with `"hid":usage` (fb17–19 too while a map is active); the release is
+  an ordinary up. Rules and the safety argument: kbd/UI.md "L1 option mode".
+- Tests: new `kbd/tests/tests_onboard_r6.inc` (accept/reject/validate incl. 21 malformed maps and 12 malformed
+  requests, generations across hello/loss/ui.page, digit reports per key and row, forwarding marks, PTT/RAlt
+  combinations, `--ptt` on a mapped key, `--no-hid`, lease preemption, gate L4/HOME/LS/L5/SUSPECT/offline/
+  PROBING/grace/e-stop pause, 14 clear paths with a held digit, 30 s expiry and refresh, 10 s cut sends the
+  host up, host EOF mid-press), parser checks in `tests_ctl.inc`, e2e on the real binary (hello capability,
+  digits 1–3 + Escape with RAlt held, marked forwarding, unmapped slot, stale generation, clear).
+
+### mk20deck + hook
+
+- Controller option mode (enter only after a confirmed focus on L1; exits: state leaves needs_*, Esc, K1, a
+  blank key, page/mode switch, 30 s without input, 3 s after a choice, reconnect), amber choice keys + dark
+  blanks, sub-screen line, toasts; legacy firmware -> "固件不支持数字键，请在 Mac 上按数字".
+- Daemon sends `ui.hidKeys` before the frame that shows the choice, refreshes every 10 s, clears on exit,
+  retries a refused map every 1 s, resends after a re-hello; `DeviceLink.ui_hid_keys()`, `MockDevice(hid_keys=)`.
+- Hook record: `options` (AskUserQuestion labels, <= 5 x 24, control/format characters stripped) or
+  `prompt_kind: "permission"`, gone with the next record; never the question text. Re-run the installers
+  (the installed hook is a copy).
+
+Host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 998 passed / 1 skipped
+(was 943), agent 398, onboard 12883 (was 11928; TSan build 12883), kbd 4191 ASan + 4191 TSan (was 4173), safe
+mode 2 scenarios, e2e OK (incl. option mode), ui 41396, 330 goldens unchanged, sim 38 (was 37), tools 64 passed /
+1 skipped, shellcheck clean, release binaries match source. E-stop latencies unchanged (socket e-stop -> all-up
+1.4 ms; stalled host 0.1 ms; K2 hold 1003.6 ms; blocked status worker 0.3 / 1006.9 ms). `bin/mk20-kbd` sha256
+`f9be5248518d0c9c0e40d6ba16bf13d73bfedbe65276027c3206470ea492f285` (595288 B, static ARM EABI5).
+**No device acceptance claimed** (digits in Claude Code / codex menus, held-digit auto-repeat, codex approval UI).
+
 ## 1.5.0-rc1 (user's L1 layout: 15 sessions + voice/delete/send/Esc row)
 
 `firmware/VERSION` is **1.5.0**; build id **rc1**. release/1.5.0 = 1.4.3-rc4 + feature/l1v2-hid (device HID keys)

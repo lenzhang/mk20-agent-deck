@@ -29,30 +29,97 @@
  {
   "name": "every_tap_focuses",
   "group": "gestures",
-  "desc": "再次单击同一会话或另一会话都会再置前一次（无双击手势）",
+  "desc": "再次单击同一会话或另一会话都会再置前一次（无双击手势；S5 运行中 / S3 出错：不进选项模式）",
   "steps": [
    {
-    "press": "S1",
+    "press": "S5",
     "hold": 40
    },
    {
     "wait": 100
    },
    {
-    "press": "S1",
+    "press": "S5",
     "hold": 40
    },
    {
     "wait": 400
    },
    {
-    "press": "S2",
+    "press": "S3",
     "hold": 40
    },
    {
     "expect": {
      "agent_calls": {
       "focus": 3
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "option_mode_tap_waiting_session",
+  "group": "gestures",
+  "desc": "点「待输入」会话 = 置前 + 选项模式（2026-10-22）：第 1 行变数字键，其余清空；SIM 无键盘数字映射 → 提示在 Mac 上按；点空白键 / K1 = 回到会话列表，都不再置前",
+  "steps": [
+   {
+    "press": "S2",
+    "hold": 40
+   },
+   {
+    "expect": {
+     "selected_title": "NAS部署",
+     "agent_calls": {
+      "focus": 1,
+      "*": 1
+     }
+    }
+   },
+   {
+    "press": "S3",
+    "hold": 40
+   },
+   {
+    "expect": {
+     "toast_contains": "数字键未生效，请在 Mac 上按 3",
+     "agent_calls": {
+      "focus": 1,
+      "*": 1
+     }
+    }
+   },
+   {
+    "press": "S7",
+    "hold": 40
+   },
+   {
+    "expect": {
+     "toast_contains": "回到会话列表",
+     "agent_calls": {
+      "focus": 1,
+      "*": 1
+     }
+    }
+   },
+   {
+    "wait": 1600
+   },
+   {
+    "press": "S2",
+    "hold": 40
+   },
+   {
+    "knob": "K1",
+    "action": "press"
+   },
+   {
+    "expect": {
+     "toast_contains": "回到会话列表",
+     "page": "L1",
+     "agent_calls": {
+      "focus": 2,
+      "*": 2
      }
     }
    }

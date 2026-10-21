@@ -57,6 +57,12 @@ void ctl_confirm_key(ctl_t *c, int ok, int64_t now_ms);
 int ctl_json_str(const char *s, size_t n, const char *key, char *out, size_t cap);
 int ctl_json_int(const char *s, size_t n, const char *key, long *v);
 int ctl_json_has(const char *s, size_t n, const char *key);
+/* Host ui.hidKeys only (kbd/UI.md): the same strict rules, but top-level values may also be flat
+ * objects (one level). ctl_json_obj1 returns the span of such an object value. */
+int ctl_json_str1(const char *s, size_t n, const char *key, char *out, size_t cap);
+int ctl_json_int1(const char *s, size_t n, const char *key, long *v);
+int ctl_json_obj1(const char *s, size_t n, const char *key, const char **obj, size_t *len);
+int ctl_json_count(const char *s, size_t n); /* members of a valid flat object, else -1 */
 int ctl_json_quote(char *out, size_t cap, const char *s);
 int ctl_text_ok(const char *s, size_t maxchars);
 void ctl_notify(ctl_t *c, int ci, const char *line);

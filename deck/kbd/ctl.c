@@ -75,39 +75,69 @@ static const char *jval(const char *p, const char *end)
     if (p < end && (*p == 'e' || *p == 'E')) { p++; if (p < end && (*p == '+' || *p == '-')) p++; const char *start = p; while (p < end && *p >= '0' && *p <= '9') p++; if (p == start) return NULL; }
     return p;
 }
-static const char *field(const char *s, size_t n, const char *key)
+/* One object at p: at most 24 unique keys with primitive values; with nest, a value may also be such
+ * a flat object (one level only: ui.hidKeys). Returns the byte after '}' or NULL; *found = key's value. */
+static const char *object(const char *p, const char *end, const char *key, const char **found, int nest)
 {
-    const char *end = s + n, *p = ws(s, end), *found = NULL; char keys[24][32]; int nk = 0;
+    char keys[24][32]; int nk = 0;
     if (p == end || *p++ != '{') return NULL;
     p = ws(p, end);
-    if (p < end && *p == '}') return key ? NULL : (ws(p + 1, end) == end ? s : NULL);
+    if (p < end && *p == '}') return p + 1;
     for (;;) {
         if (nk == 24 || !(p = jstr(p, end, keys[nk], sizeof keys[nk]))) return NULL;
         for (int i = 0; i < nk; i++) if (!strcmp(keys[i], keys[nk])) return NULL;
         p = ws(p, end); if (p == end || *p++ != ':') return NULL;
-        p = ws(p, end); if (key && !strcmp(keys[nk], key)) found = p;
-        nk++; p = jval(p, end); if (!p) return NULL;
+        p = ws(p, end); if (key && !strcmp(keys[nk], key)) *found = p;
+        nk++; p = nest && p < end && *p == '{' ? object(p, end, NULL, NULL, 0) : jval(p, end); if (!p) return NULL;
         p = ws(p, end); if (p == end) return NULL;
-        if (*p == '}') return ws(p + 1, end) == end ? (key ? found : s) : NULL;
+        if (*p == '}') return p + 1;
         if (*p++ != ',') return NULL;
         p = ws(p, end);
     }
 }
-int ctl_json_str(const char *s, size_t n, const char *key, char *out, size_t cap)
+static const char *field_nest(const char *s, size_t n, const char *key, int nest)
 {
-    const char *p = field(s, n, key);
-    return p && jstr(p, s + n, out, cap) ? (int)strlen(out) : -1;
+    const char *end = s + n, *found = NULL, *p = object(ws(s, end), end, key, &found, nest);
+    return p && ws(p, end) == end ? (key ? found : s) : NULL;
 }
-int ctl_json_int(const char *s, size_t n, const char *key, long *v)
+static const char *field(const char *s, size_t n, const char *key) { return field_nest(s, n, key, 0); }
+static int value_str(const char *p, const char *end, char *out, size_t cap)
+{ return p && jstr(p, end, out, cap) ? (int)strlen(out) : -1; }
+static int value_int(const char *p, const char *end, long *v)
 {
-    const char *p = field(s, n, key); long x = 0; int neg = 0, nd = 0;
+    long x = 0; int neg = 0, nd = 0;
     if (!p) return -1;
     if (*p == '-') { neg = 1; p++; }
-    while (p < s + n && *p >= '0' && *p <= '9') { if (++nd > 9) return -1; x = x * 10 + *p++ - '0'; }
-    if (!nd || (p < s + n && !strchr(" ,}\t\r\n", *p))) return -1;
+    while (p < end && *p >= '0' && *p <= '9') { if (++nd > 9) return -1; x = x * 10 + *p++ - '0'; }
+    if (!nd || (p < end && !strchr(" ,}\t\r\n", *p))) return -1;
     *v = neg ? -x : x; return 0;
 }
+int ctl_json_str(const char *s, size_t n, const char *key, char *out, size_t cap)
+{ return value_str(field(s, n, key), s + n, out, cap); }
+int ctl_json_int(const char *s, size_t n, const char *key, long *v) { return value_int(field(s, n, key), s + n, v); }
 int ctl_json_has(const char *s, size_t n, const char *key) { return field(s, n, key) != NULL; }
+int ctl_json_str1(const char *s, size_t n, const char *key, char *out, size_t cap)
+{ return value_str(field_nest(s, n, key, 1), s + n, out, cap); }
+int ctl_json_int1(const char *s, size_t n, const char *key, long *v) { return value_int(field_nest(s, n, key, 1), s + n, v); }
+int ctl_json_obj1(const char *s, size_t n, const char *key, const char **obj, size_t *len)
+{
+    const char *p = field_nest(s, n, key, 1), *e;
+    if (!p || *p != '{' || !(e = object(p, s + n, NULL, NULL, 0))) return -1;
+    *obj = p; *len = (size_t)(e - p); return 0;
+}
+int ctl_json_count(const char *s, size_t n)
+{
+    const char *end = s + n, *p = ws(s, end); int count = 0;
+    if (!field(s, n, NULL)) return -1;
+    for (p++; ; count++) {   /* validated above: alternate key, ':', value, ',' / '}' */
+        p = ws(p, end);
+        if (*p == '}') return count;
+        p = ws(jstr(p, end, NULL, 0), end) + 1;
+        p = ws(jval(ws(p, end), end), end);
+        if (*p == '}') return count + 1;
+        p++;
+    }
+}
 int ctl_text_ok(const char *s, size_t maxchars)
 {
     size_t count = 0;

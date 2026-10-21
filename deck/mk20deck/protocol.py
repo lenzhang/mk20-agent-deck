@@ -45,7 +45,10 @@ KNOWN_METHODS = (
 # rule (PRD §4/§6.5, G20); file management methods are not needed in P0.
 ALLOWED_METHODS = frozenset({"getInfo", "setBacklight", "setVolume", "playAudio", "stopAudio",
                              "getFilesBySuffix",  # read-only listing (devtest inventory)
-                             "ui.hello", "ui.heartbeat"})  # mk20-kbd (fw >= 1.3) host liveness, no content
+                             "ui.hello", "ui.heartbeat",  # mk20-kbd (fw >= 1.3) host liveness, no content
+                             # mk20-kbd (fw 1.5.1) L1 option mode: which slot keys type a digit when the USER presses
+                             # them; the deck itself never types (unlike keyboardInput), kbd/UI.md "ui.hidKeys"
+                             "ui.hidKeys"})
 # Methods that change device state (need explicit opt-in in tools); getInfo/getFilesBySuffix are reads.
 WRITE_METHODS = frozenset({"setBacklight", "setVolume", "playAudio", "stopAudio"})
 
@@ -191,6 +194,27 @@ def ui_heartbeat() -> dict[str, Any]:
     return request("ui.heartbeat")
 
 
+# HID usages (page 0x07) the firmware reports in an option-mode press ("hid" in keyStateChanged parameters).
+HID_DIGIT = {d: 0x1D + d for d in range(1, 10)}  # 1 -> 0x1E ... 9 -> 0x26
+HID_RETURN, HID_ESCAPE, HID_BACKSPACE = 0x28, 0x29, 0x2A
+HID_KEYS_MAX = 9  # firmware limit: at most nine of fb1..fb15
+
+
+def ui_hid_keys(keys: dict[int, int], generation: int) -> dict[str, Any]:
+    """mk20-kbd L1 option mode (kbd/UI.md): ``keys`` maps logical fb 1..15 -> digit 1..9 (``{}`` clears).
+    Validated like the firmware so a bad map never leaves the host: <= 9 entries, no digit twice."""
+    if not 1 <= int(generation) <= 999_999_999:
+        raise ValueError("generation out of range")
+    if len(keys) > HID_KEYS_MAX or len(set(keys.values())) != len(keys):
+        raise ValueError("at most nine keys, each digit once")
+    out: dict[str, str] = {}
+    for fb, d in sorted(keys.items()):
+        if isinstance(fb, bool) or isinstance(d, bool) or not 1 <= int(fb) <= 15 or not 1 <= int(d) <= 9:
+            raise ValueError(f"bad option key {fb!r}: {d!r}")
+        out[str(int(fb))] = str(int(d))
+    return {**request("ui.hidKeys"), "generation": int(generation), "keys": out}
+
+
 def play_audio(file_path: str) -> dict[str, Any]:
     return request("playAudio", {"filePath": file_path})
 
@@ -209,6 +233,7 @@ class KeyEvent:
     pressed: bool
     keycode: int | None = None
     request_id: Any = None
+    hid: int | None = None  # option mode: HID usage the keyboard itself put down for this press (kbd/UI.md)
 
 
 @dataclass(frozen=True)
@@ -236,7 +261,9 @@ def classify_json(obj: dict[str, Any]) -> KeyEvent | Ack | dict[str, Any]:
                 kc = None
                 if "keyCodeH" in p:
                     kc = (int(p["keyCodeH"]) << 8) | int(p.get("keyCodeL", 0))
-                return KeyEvent(int(p["col"]), int(p["row"]), bool(p.get("pressed")), kc, rid)
+                hid = p.get("hid")
+                hid = hid if type(hid) is int and 0x04 <= hid <= 0x65 else None  # anything else: not trusted
+                return KeyEvent(int(p["col"]), int(p["row"]), bool(p.get("pressed")), kc, rid, hid)
             if "keyCodeH" in p or "keyCodeL" in p:
                 kc = (int(p.get("keyCodeH", 0)) << 8) | int(p.get("keyCodeL", 0))
                 return KeyEvent(-1, -1, bool(p.get("pressed")), kc, rid)

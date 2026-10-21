@@ -110,13 +110,13 @@ def test_single_tap_selects_and_focuses(env):
 
 
 def test_every_tap_focuses_no_double_tap_gesture(env):
-    c, clk, ads, _ = env
-    tap(c, clk, 2, 1)
+    c, clk, ads, _ = env  # S5 running, S3 error: no option mode (that is test_option_mode.py)
+    tap(c, clk, 5, 1)
     clk.advance(0.1)
-    tap(c, clk, 2, 1)  # quick second tap: just another select + focus
+    tap(c, clk, 5, 1)  # quick second tap: just another select + focus
     clk.advance(1.0)
     tap(c, clk, 3, 1)
-    assert [k for _, k in focus_calls(ads)] == [c.mgr.slots[1].key] * 2 + [c.mgr.slots[2].key]
+    assert [k for _, k in focus_calls(ads)] == [c.mgr.slots[4].key] * 2 + [c.mgr.slots[2].key]
 
 
 def test_tap_on_done_clears_local_reminder(env):
@@ -317,7 +317,7 @@ def test_per_mode_selection_restored(env):
 
 def test_restart_restores_state(env):
     c, clk, ads, saved = env
-    tap(c, clk, 2, 1)
+    tap(c, clk, 5, 1)
     hold(c, clk, 3, 1, 0.7)
     tap(c, clk, 3, 1)  # pin S3 (pick up + press itself)
     tap(c, clk, 5, 4)

@@ -11,6 +11,13 @@ Session slots (PRD 1.5 delta 2026-10-22, "拿起 / 放下"): a tap selects + foc
 picks the slot up ("移动中").  While picked up, the next slot press places it (other slot → move
 there and pin, swapping with an occupant; same slot → toggle the pin) and never focuses.  A K1
 press, 8 s without key/knob input, a page/mode switch (K2, MODE, L4 row 1) or a reconnect cancels.
+
+Option mode (user decision 2026-10-22): a tap on L1 that focuses a needs_input / needs_approval session
+clears rows 1–3 down to the choice keys 1..N (AskUserQuestion labels from the hook record, the fixed
+permission labels, or bare digits 1..5).  The daemon asks the keyboard (``ui.hidKeys``) to make those
+keys type the digit into the frontmost window (the session just brought forward); presses come back
+marked with ``hid`` and only give feedback here.  Exit: the session leaves needs_*, ✗ Esc, a K1
+press, a blank key, a page/mode switch, 30 s without input, 3 s after a choice, or a reconnect.
 """
 from __future__ import annotations
 
@@ -20,6 +27,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import protocol as P
 from .adapters.base import BackendUnavailable, ModeAdapter
 from .config import DeckConfig
 from .model import (ATTENTION_STATES, MODE_CYCLE, PRIORITY, ActionResult, Mode, Session, State, Tool)
@@ -38,6 +46,15 @@ MOVE_TIMEOUT = 8.0   # a picked-up slot is dropped back after this long without 
 DOUBLE_TAP = 0.350   # devtest timing reference only: double-tap focus was removed (single tap focuses)
 TOAST_S = 1.5
 SWITCH_TOAST_S = 1.2
+# Option mode (2026-10-22)
+PROMPT_STATES = frozenset({State.NEEDS_INPUT, State.NEEDS_APPROVAL})
+OPTION_TIMEOUT = 30.0   # back to the session grid after this long without key/knob input
+OPTION_CHOSEN_S = 3.0   # after a digit / Return was typed: stay this long unless the state changes first
+OPTION_DIGITS = 5       # unknown prompt: bare digits 1..5
+OPTION_MAX = 5          # row 1 only
+PERMISSION_LABELS = ("是", "是，且不再问", "否")  # Claude Code / codex tool permission menus
+OPTION_LEGACY = "固件不支持数字键，请在 Mac 上按数字"
+OPTION_PENDING = "数字键暂未生效（键盘未确认），请在 Mac 上按数字"
 # K1 rotation order (PRD delta 2026-10-20): who needs me first, then the rest by slot order.
 K1_RANK = {State.NEEDS_APPROVAL: 0, State.NEEDS_INPUT: 1, State.ERROR: 2, State.DONE_UNREAD: 3}
 MODE_SHORT = {Mode.DESKTOP: "桌面", Mode.HERDR: "herdr", Mode.TMUX: "tmux"}
@@ -116,6 +133,8 @@ class KeyView:
     attention: bool = False
     badge_alert: bool = False  # badge is an attention count (other modes)
     moving: bool = False  # this slot is picked up (pick-up-and-place gesture)
+    option: int = 0  # option mode: this key answers choice N (1-based); label = the option text ("" = digit only)
+    blank: bool = False  # option mode: rows 1–3 beyond the choices (dark; a press leaves option mode)
 
 
 @dataclass
@@ -138,6 +157,8 @@ class SubView:
     selection_lost: bool = False
     other_modes: str = ""  # e.g. "tmux 2 待处理" (background poll of non-current modes)
     moving: str = ""  # instruction line while a slot is picked up
+    option: str = ""  # option mode instruction line ("选项：按 1–N 选择 · × 取消 · K1 返回")
+    option_note: str = ""  # option mode: why digits may not work (legacy firmware / not accepted yet)
 
 
 @dataclass
@@ -177,6 +198,27 @@ class _Move:
     last: float  # last key/knob input; MOVE_TIMEOUT after it the pick-up is cancelled
 
 
+@dataclass
+class _Option:
+    """Option mode: the numbered choice of one needs_* session, answered with the digit keys."""
+    key: str
+    mode: Mode
+    title: str
+    labels: tuple[str, ...]  # one per choice 1..N; "" = digit only
+    kind: str  # "question" (AskUserQuestion labels) | "permission" | "digits" (unknown)
+    last: float  # last key/knob input (OPTION_TIMEOUT)
+    chosen: tuple[str, float] | None = None  # (what was typed, when): OPTION_CHOSEN_S grace
+
+
+def option_labels(s: Session) -> tuple[tuple[str, ...], str]:
+    """Choices for a session's pending prompt: hook labels, the permission menu, or bare digits 1..5."""
+    if s.options:
+        return tuple(str(x) for x in s.options[:OPTION_MAX]), "question"
+    if s.prompt_kind == "permission":
+        return PERMISSION_LABELS, "permission"
+    return ("",) * OPTION_DIGITS, "digits"
+
+
 def _short(title: str, n: int = 6) -> str:
     return title if len(title) <= n else title[:n] + "…"
 
@@ -209,6 +251,8 @@ class Controller:
         self.ptt_observed = False
         self.presses: dict[tuple, _Press] = {}
         self.moving: _Move | None = None
+        self.option: _Option | None = None
+        self.option_hid = ""  # daemon: "ok" keyboard types the digits, "legacy" no ui.hidKeys, "pending" not (yet) accepted
         self.scroll = 0
         self.version = 0  # bumps whenever the view may have changed
         self.log: list[str] = []
@@ -260,15 +304,18 @@ class Controller:
         return bool(pre)
 
     def _goto(self, page: str, toast: str) -> None:
-        """Page switch (K2, K1/K2/MODE hold, 回 L1): also cancels a pick-up."""
+        """Page switch (K2, K1/K2/MODE hold, 回 L1): also cancels a pick-up and leaves option mode."""
         self.page = page
+        self._drop_option()
         if not self._cancel_move(toast):
             self._say(toast, 0.8)
 
     def drop_gestures(self) -> None:
-        """Reconnect / wake: presses in flight and a picked-up slot are never replayed."""
+        """Reconnect / wake: presses in flight, a picked-up slot and option mode are never replayed."""
         self.presses.clear()
         self._cancel_move()
+        self._drop_option()
+        self.option_hid = ""
 
     def move_deadline(self) -> float | None:
         """Clock time at which the pick-up times out (the daemon wakes up for it)."""
@@ -297,6 +344,91 @@ class Controller:
         self.persist()
         self._say(msg)
 
+    # ------------------------------------------------------------------ option mode (2026-10-22)
+    def _enter_option(self, s: Session) -> None:
+        labels, kind = option_labels(s)
+        self.option = _Option(s.sid.key(), self.mode, s.title or "?", labels, kind, self.clock())
+        self._touch()
+
+    def _drop_option(self) -> bool:
+        if self.option is None:
+            return False
+        self.option = None
+        self._touch()
+        return True
+
+    def _exit_option(self, toast: str = "") -> None:
+        if self._drop_option() and toast:
+            self._say(toast)
+
+    def option_deadline(self) -> float | None:
+        """Clock time of the next option-mode timeout (the daemon wakes up for it)."""
+        op = self.option
+        if op is None:
+            return None
+        d = op.last + OPTION_TIMEOUT
+        return min(d, op.chosen[1] + OPTION_CHOSEN_S) if op.chosen else d
+
+    def hid_keys_wanted(self) -> dict[int, int]:
+        """Logical fb -> digit the keyboard should type while option mode is shown ({} = none)."""
+        op = self.option
+        if op is None or self.page != "L1" or op.mode != self.mode:
+            return {}
+        return {i + 1: i + 1 for i in range(len(op.labels))}  # row 1: fb1..fbN = S1..SN
+
+    def set_option_hid(self, status: str) -> None:
+        if status != self.option_hid:
+            self.option_hid = status
+            self._touch()
+
+    def _option_tick(self, t: float) -> None:
+        op = self.option
+        if op is None:
+            return
+        if self.page != "L1" or op.mode != self.mode:
+            self._drop_option()
+            return
+        s = self.managers[op.mode].sessions.get(op.key)
+        if s is None or s.state not in PROMPT_STATES:
+            self._exit_option("已作答 · 回到会话列表" if op.chosen else "会话已不在等待选择 · 回到会话列表")
+        elif op.chosen and t - op.chosen[1] >= OPTION_CHOSEN_S:
+            self._exit_option("回到会话列表")
+        elif t - op.last >= OPTION_TIMEOUT:
+            self._exit_option("选项 30 s 无操作 · 回到会话列表")
+        elif not op.chosen and option_labels(s) != (op.labels, op.kind):
+            op.labels, op.kind = option_labels(s)  # e.g. the hook record got the labels a moment later
+            self._touch()
+
+    def _option_hid_key(self, kr: KeyRole, hid: int, t: float) -> None:
+        """A press the keyboard itself typed on the Mac (marked ``hid``): feedback only, never a deck action."""
+        digit = next((d for d, u in P.HID_DIGIT.items() if u == hid), None)
+        op = self.option
+        if op is None:  # the map outlived option mode by a moment: the key is typed, nothing else happens
+            if digit is not None:
+                self._say(f"已发送数字 {digit}")
+            return
+        op.last = t
+        if hid == P.HID_ESCAPE:
+            self._exit_option("已取消选择 (Esc)")
+        elif hid == P.HID_RETURN:
+            op.chosen = ("Return", t)
+            self._say("已确认 (Return)")
+        elif digit is not None:
+            op.chosen = (str(digit), t)
+            self._say(f"已选 {digit}")
+        self._touch()
+
+    def _option_key(self, kr: KeyRole, p: _Press, t: float) -> None:
+        """An unmarked rows 1–3 press while option mode is shown (never selects, focuses or picks up)."""
+        op = self.option
+        p.cancelled = True
+        op.last = t
+        if kr.index >= len(op.labels):
+            self._exit_option("回到会话列表")
+            return
+        n = kr.index + 1
+        self._say(OPTION_LEGACY if self.option_hid == "legacy" else f"数字键未生效，请在 Mac 上按 {n}")
+
     # ------------------------------------------------------------------ backend
     def refresh(self, mode: Mode | None = None) -> None:
         mode = mode or self.mode
@@ -316,6 +448,7 @@ class Controller:
             self.backend[mode] = (False, str(e))
             for s in mgr.sessions.values():
                 s.state, s.state_reason = State.OFFLINE, str(e)
+            self._option_tick(self.clock())
             self._touch()
             return
         except Exception as e:  # noqa: BLE001 — never crash the deck on a backend bug
@@ -341,6 +474,7 @@ class Controller:
             self._say("已取消移动：会话已消失")
         if (mgr.mapping_version, self.backend[mode]) != before:
             self.persist()
+        self._option_tick(self.clock())  # answered / gone: leave option mode with the fresh state
         self._touch()
 
     def _summarise(self, sessions) -> tuple[int, int]:
@@ -383,6 +517,7 @@ class Controller:
     def open_settings(self) -> None:
         self.presses.clear()
         self._drop_move()
+        self._drop_option()
         self.settings.open()
         self.page = "LS"
         self._touch()
@@ -393,8 +528,8 @@ class Controller:
             self.page = st.exit_to or "L1"
         self._touch()
 
-    def on_key(self, col: int, row: int, pressed: bool) -> None:
-        """1-based doc coordinates."""
+    def on_key(self, col: int, row: int, pressed: bool, hid: int | None = None) -> None:
+        """1-based doc coordinates.  ``hid``: the keyboard typed this press itself (option mode)."""
         if self.page == "LS":
             if pressed:
                 self.settings.key(col, row)
@@ -403,6 +538,10 @@ class Controller:
         t = self.clock()
         kr = role_at(self.page, col, row)
         if kr is None:
+            return
+        if hid is not None:
+            if pressed:  # its release carries no mark and finds no press here: nothing happens
+                self._option_hid_key(kr, hid, t)
             return
         if kr.role in DEVICE_HID_ROLES:
             # DELETE / SEND-OK / NO are keyboard-side HID (Backspace / Return / Escape to the frontmost
@@ -416,7 +555,9 @@ class Controller:
             if pk in self.presses:  # duplicate down (bounce) — ignore
                 return
             self.presses[pk] = p = _Press(kr, t, self.mode)
-            if self.moving is not None and kr.role == Role.AGENT:
+            if self.option is not None and kr.role == Role.AGENT and self.page == "L1":
+                self._option_key(kr, p, t)
+            elif self.moving is not None and kr.role == Role.AGENT:
                 p.cancelled = True  # the placing press: no select, no focus on release, no long press
                 self._place(kr.index)
             else:
@@ -440,10 +581,15 @@ class Controller:
         pk = ("knob", knob)
         if self.moving is not None:
             self.moving.last = t
+        if self.option is not None:
+            self.option.last = t
         if kind == "down":
             self.presses[pk] = p = _Press(KeyRole(Role.MODE), t, self.mode)
             if knob == 1 and self._cancel_move():
                 p.cancelled = True  # K1 press = cancel the pick-up only (no focus, no L4 on hold)
+            elif knob == 1 and self.option is not None:
+                p.cancelled = True  # K1 press = leave option mode only (no focus, no L4 on hold)
+                self._exit_option("回到会话列表")
         elif kind == "up":
             p = self.presses.pop(pk, None)
             if p and not p.long_fired and not p.cancelled and t - p.t0 < LONG_PRESS:
@@ -454,13 +600,15 @@ class Controller:
                     s = self.mgr.selected_session()  # K1 press = focus the selection (same as a slot tap)
                     if s is None:
                         self._say("未选中会话 · 转 K1 选择")
-                    else:
-                        self._focus(s)
+                    elif self._focus(s) and s.state in PROMPT_STATES and self.page == "L1":
+                        self._enter_option(s)
                 else:
                     page = "L4" if self.page == "L1" else "L1"
                     self._goto(page, f"切到 {page}")
         elif kind in ("cw", "ccw"):
-            if knob == 1:
+            if knob == 1 and self.option is not None:
+                pass  # the selection stays on the session being answered
+            elif knob == 1:
                 self._k1_step(1 if kind == "cw" else -1)
             else:
                 self.scroll = max(0, self.scroll + (1 if kind == "cw" else -1))
@@ -471,6 +619,7 @@ class Controller:
         t = self.clock()
         if self.moving is not None and t - self.moving.last >= MOVE_TIMEOUT:
             self._cancel_move()  # 8 s without key/knob input: nothing changes
+        self._option_tick(t)
         for pk, p in list(self.presses.items()):
             if p.long_fired or p.cancelled or t - p.t0 < LONG_PRESS:
                 continue
@@ -559,7 +708,9 @@ class Controller:
             return  # empty / lost slot, or the target changed while the key was down
         if self.adapter.capabilities().focus is not None:
             return  # select only; the sub-screen note explains why (no toast on every tap)
-        self._focus(s)
+        # Option mode only after the window really came forward: the keyboard types into the frontmost one.
+        if self._focus(s) and s.state in PROMPT_STATES and self.page == "L1":
+            self._enter_option(s)
 
     def _on_long(self, kr: KeyRole, p: _Press) -> None:
         r = kr.role
@@ -593,14 +744,15 @@ class Controller:
         elif r == Role.BACK_L1:
             self._goto("L1", "回到 L1")
 
-    def _focus(self, s: Session) -> None:
+    def _focus(self, s: Session) -> bool:
+        """Bring the session's window forward; True only if the adapter confirmed it."""
         if self.ptt_held:
             self._say("PTT 按住中，禁止置前")
-            return
+            return False
         cap = self.adapter.capabilities().focus
         if cap:
             self._say(cap)
-            return
+            return False
         res = self.adapter.focus(s)
         log.info("focus %s (%s): ok=%s %s", s.sid.key(), s.title[:24] if getattr(s, "title", None) else "",
                  res.ok, getattr(res, "message", ""))
@@ -608,10 +760,12 @@ class Controller:
             self.local_cleared[s.sid.key()] = s.done_marker
             s.state, s.state_reason = State.IDLE, "已聚焦（本地清提醒）"
         self._result(res)
+        return bool(res.ok)
 
     # ------------------------------------------------------------------ modes
     def switch_mode(self, m: Mode) -> None:
         pre = self._drop_move()  # a mode switch cancels a pick-up (nothing changes)
+        self._drop_option()
         for pk, p in self.presses.items():
             if p.role.role != Role.PTT:
                 p.cancelled = True  # G34: cancel pending long presses + old eligibility
@@ -648,12 +802,18 @@ class Controller:
         keys: list[KeyView] = []
         others = self.other_attention()
         mv = self.moving if (self.moving is not None and self.moving.mode == self.mode) else None
+        op = self.option if (self.option is not None and self.option.mode == self.mode and self.page == "L1") else None
         attention: tuple[int, int, str] | None = None  # (priority, -updated, key) best
         for row in range(1, 5):
             for col in range(1, 6):
                 kr = role_at(self.page, col, row)
                 kv = KeyView(col, row, kr.role)
-                if kr.role == Role.AGENT:
+                if op is not None and kr.role == Role.AGENT:
+                    if kr.index < len(op.labels):  # the choice keys (row 1); the session list is cleared
+                        kv.option, kv.label = kr.index + 1, op.labels[kr.index]
+                    else:
+                        kv.blank = True
+                elif kr.role == Role.AGENT:
                     e = mgr.entry(kr.index)
                     kv.moving = mv is not None and mv.src == kr.index
                     if e is None:
@@ -700,6 +860,8 @@ class Controller:
                 if kv.col == c and kv.row == r:
                     kv.attention = True
         sel = mgr.selected_session()
+        if op is not None:
+            sel = mgr.sessions.get(op.key) or sel
         lp = self.last_poll_wall.get(self.mode)
         upd = time.strftime("%H:%M:%S", time.localtime(lp)) if lp else "--:--:--"
         pin_info = ""
@@ -716,5 +878,9 @@ class Controller:
             pin_info=pin_info, selection_lost=mgr.selection_lost and sel is None,
             other_modes=(" · ".join(f"{MODE_SHORT[m]} {n}" for m, n in others) + " 待处理") if others else "",
             moving=f"移动『{_short(mv.title)}』：点目标键放下 · 点自己=切换钉住 · K1 取消" if mv else "",
+            # "×" not "✗": the Mac CJK fonts (PingFang / STHeiti) have no U+2717 glyph
+            option=(f"选项：按 1–{len(op.labels)} 选择 · × 取消 · K1 返回" if len(op.labels) > 1 else
+                    "选项：按 1 选择 · × 取消 · K1 返回") if op else "",
+            option_note=({"legacy": OPTION_LEGACY, "pending": OPTION_PENDING}.get(self.option_hid, "")) if op else "",
         )
         return DeckView(keys, sub)

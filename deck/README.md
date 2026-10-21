@@ -8,7 +8,7 @@ is **not** implemented (not approved).
 | module | what |
 |---|---|
 | `protocol.py` | Protocol A codec (`A1A55A5E`, crc32 of size & data), stream parser with resync, method allow-list (no `keyboardInput`) |
-| `transport.py` / `link.py` | pyserial transport (CDC `1d6b:0104`, alt `1234:5678`), `MockDevice`, handshake (1 MiB `'0'` preamble + `getInfo`, then `ui.hello`; on mk20-kbd fw >= 1.3 a `ui.heartbeat` thread keeps the host ONLINE on every device page, see `kbd/UI.md`), SHOW_JPG stop-and-wait using the device ack as display ACK, latency stats |
+| `transport.py` / `link.py` | pyserial transport (CDC `1d6b:0104`, alt `1234:5678`), `MockDevice`, handshake (1 MiB `'0'` preamble + `getInfo`, then `ui.hello`; on mk20-kbd fw >= 1.3 a `ui.heartbeat` thread keeps the host ONLINE on every device page, see `kbd/UI.md`; fw 1.5.1 `ui.hidKeys` option-mode digit keys), SHOW_JPG stop-and-wait using the device ack as display ACK, latency stats |
 | `layout.py` | canvas/rect model; default guess 640×656 (sub 428×142 @106,0; keys 128² @ (c·128, 144+r·128)); replaced by `getInfo` |
 | `adapters/codex_desktop.py` | read-only Codex Desktop source: `state_5.sqlite` (`mode=ro`), rollout tail, `.codex-global-state.json` unread, `codex://` deep links |
 | `adapters/tmux.py`, `adapters/herdr.py` | tmux (generation identity; state from Claude/codex hook records, else unknown) / herdr stub |
@@ -95,8 +95,11 @@ tmux 模式靠 agent 自己的 hooks 知道「哪个 agent 在等我」。hook �
 `tools/hooks/mk20-agent-state-hook.py`（只用 stdlib、<100 ms、不联网、不输出、永远 exit 0，
 不替你做任何审批决定）把事件写成 `~/.config/mk20-agent-deck/agent-state/<tool>-<session>.json`
 （目录 0700、文件 0600、tmp+rename；`MK20DECK_HOME` 可改目录），只含
-`tool, session_id, tmux_pane, tmux_socket, cwd, state, ts, ppid`——**不存** prompt、工具参数、
-通知正文、transcript 路径；超过 24 h 的记录自动清理，最多 256 个。
+`tool, session_id, tmux_pane, tmux_socket, cwd, state, ts, ppid`，等待编号选择时（选项模式，2026-10-22）另加其一：
+`options`（Claude AskUserQuestion 第一个问题的选项标签，≤5 个 × 24 字，去掉控制 / 格式字符）或
+`prompt_kind: "permission"`（PermissionRequest / `permission_prompt`，codex PermissionRequest）；会话下一次写记录
+（PostToolUse / UserPromptSubmit / Stop …）即消失。**不存** prompt、问题正文、其他工具参数、
+通知正文、transcript 路径；超过 24 h 的记录自动清理，最多 256 个。改了 hook 后需重跑安装器（已装的是副本）。
 
 | 事件（Claude Code，[hooks 文档](https://code.claude.com/docs/en/hooks)） | 状态 |
 |---|---|
@@ -131,6 +134,10 @@ deck 侧（`[tmux]`，见 `config.example.toml`）：窗格按命名（`ag-ccai-
 `bash` 包装脚本，只能靠 hook 记录关联）。记录须同一 tmux socket、窗格仍在、`ppid` 存活且在该窗格的
 进程树内（同窗格里由 Claude 启动的 `codex exec` 不会盖掉 Claude 本身）、未超过 `hook_max_age_s`；
 `running` 超过 `running_stale_s` 无事件 → unknown（Esc 中断不触发 Stop）。标题用 worktree 名/cwd 末级。
+
+**选项模式**（`docs/PRD-1.5-L1-LAYOUT.md` §3.2）：在 L1 单击「待输入 / 待审批」会话并成功置前 → 第 1 行变成
+选项键（标签 / 权限固定「是 · 是，且不再问 · 否」/ 数字 1–5），第 2–3 行清空；固件 1.5.1 起按选项键由键盘直接给
+前台窗口发数字（`ui.hidKeys`），Mac 只显示「已选 k」；Esc、K1、点暗键、换页 / 换模式、30 s 无输入、状态改变即返回。
 
 K1：**转 = 按「待审批 > 待输入 > 出错 > 完成未读 > 其余按槽位」顺序移动选中**；**按 = 聚焦选中会话**
 （同单击会话键）；长按仍进 L4。effort 不再映射到 K1（各模式本来都「此会话不支持」）。

@@ -230,12 +230,17 @@ class MockDevice:
     and until :meth:`lose`, its arrival times are recorded, and the device sample rules (gap < 1 period: not
     counted, > 1.5 periods: count restarts, 3 samples spanning >= 2 periods: ONLINE) run scaled to
     ``heartbeat_ms``.  Without ``ui`` the ``ui.*`` methods get "Unknown method" like stock KD.
+
+    ``hid_keys=True`` (with ``ui``) adds fw 1.5.1 option mode: ``ui.hello`` advertises ``ui.hidKeys`` and
+    ``hid_generation``; ``ui.hidKeys`` is validated like the firmware (strictly increasing generation, fb 1..15 ->
+    "1".."9", <= 9, no digit twice; a non-empty map only while ``hid_page_live``), ``{}`` clears, and a new hello /
+    :meth:`lose` drops the map.  :meth:`press` with ``hid=`` injects a marked (device-typed) press.
     """
 
     UI_REJECT = "unavailable or invalid UI request"
 
     def __init__(self, layout: DeviceLayout | None = None, draw_delay: float = 0.0, ui: bool = False,
-                 heartbeat_ms: int = 1000) -> None:
+                 heartbeat_ms: int = 1000, hid_keys: bool = False) -> None:
         self.layout = layout or DeviceLayout.default()
         self.draw_delay = draw_delay
         self.ui = ui
@@ -250,6 +255,11 @@ class MockDevice:
         self.beat_restarts = 0  # probing count restarted by a gap > 1.5 periods
         self.beats_too_close = 0  # samples < 1 period after the last counted one (not counted)
         self._beats, self._first, self._last_beat = 0, 0.0, 0.0
+        self.hid_keys = hid_keys
+        self.hid_page_live = True  # False: like the firmware off the live L1 page (non-empty maps rejected)
+        self.hid_generation = 0
+        self.hid_map: dict[int, int] = {}
+        self.hid_requests: list[dict] = []  # every ui.hidKeys request (accepted or not)
         self._parser = P.FrameParser()
         self._out: deque[bytes] = deque()
         self._cv = threading.Condition()
@@ -343,8 +353,15 @@ class MockDevice:
                 return None
             self.hellos.append(now)
             self.ui_negotiated, self.ui_lost, self.ui_online, self._beats = True, False, False, 0
+            self.hid_map = {}
+            if self.hid_keys:
+                return {"version": 1, "heartbeat_ms": self.heartbeat_ms,
+                        "capabilities": ["ui.page", "ui.heartbeat", "ui.hidKeys"],
+                        "generation": self.ui_generation, "hid_generation": self.hid_generation}
             return {"version": 1, "heartbeat_ms": self.heartbeat_ms, "capabilities": ["ui.page", "ui.heartbeat"],
                     "generation": self.ui_generation}
+        if method == "ui.hidKeys" and self.hid_keys:
+            return self._hid_keys(obj)
         if method == "ui.heartbeat":
             if not self.ui_negotiated or self.ui_lost:
                 self.heartbeats_rejected += 1
@@ -353,6 +370,25 @@ class MockDevice:
             self._sample(now)
             return {}
         return None  # ui.page etc.: not modelled
+
+    def _hid_keys(self, obj: dict) -> dict | None:
+        self.hid_requests.append(obj)
+        g, keys = obj.get("generation"), obj.get("keys")
+        if not self.ui_negotiated or self.ui_lost or type(g) is not int or not self.hid_generation < g <= 999_999_999:
+            return None
+        if not isinstance(keys, dict) or len(keys) > P.HID_KEYS_MAX:
+            return None
+        new: dict[int, int] = {}
+        for k, v in keys.items():
+            if k not in {str(i) for i in range(1, 16)} or not isinstance(v, str) or v not in set("123456789"):
+                return None
+            if int(v) in new.values():
+                return None
+            new[int(k)] = int(v)
+        if new and not self.hid_page_live:
+            return None
+        self.hid_generation, self.hid_map = g, new
+        return {"generation": g, "mapped": len(new)}
 
     def _sample(self, now: float) -> None:
         period = self.heartbeat_ms / 1000
@@ -372,6 +408,7 @@ class MockDevice:
     def lose(self) -> None:
         """Device-side host loss (5 s silence / SUSPECT): reject heartbeats until the next ui.hello."""
         self.ui_lost, self.ui_online, self._beats = True, False, 0
+        self.hid_map = {}
 
     EVENT_ID = 0xFFFFFFFF  # KD / mk20-kbd: device-originated events carry this frame id
 
@@ -379,7 +416,9 @@ class MockDevice:
         """Inject an arbitrary device JSON event (unknown knob formats etc.); ``frame_id=EVENT_ID`` as on hardware."""
         self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(obj), self._ids.next() if frame_id is None else frame_id))
 
-    def press(self, col: int, row: int, pressed: bool) -> None:
-        """Inject a firmware-coordinate key event."""
+    def press(self, col: int, row: int, pressed: bool, hid: int | None = None) -> None:
+        """Inject a firmware-coordinate key event (``hid``: an option-mode press the device typed itself)."""
         ev = {"method": "keyStateChanged", "parameters": {"col": col, "row": row, "pressed": pressed}}
+        if hid is not None:
+            ev["parameters"]["hid"] = hid
         self._emit(P.encode_frame(P.CMD_JSON, P.json_bytes(ev), self._ids.next()))

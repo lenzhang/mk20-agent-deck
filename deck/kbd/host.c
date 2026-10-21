@@ -94,3 +94,10 @@ int host_json_key_state(char *out, size_t cap, int col, int row, int pressed)
                      col, pressed ? "true" : "false", row);
     return (r < 0 || (size_t)r >= cap) ? -1 : r;
 }
+/* Option-mode press (kbd/UI.md ui.hidKeys): the same event plus the HID usage the device put down. */
+int host_json_key_state_hid(char *out, size_t cap, int col, int row, int usage)
+{
+    int r = snprintf(out, cap, "{\"method\":\"keyStateChanged\",\"parameters\":{\"col\":%d,\"hid\":%d,\"pressed\":true,\"row\":%d}}",
+                     col, usage, row);
+    return (r < 0 || (size_t)r >= cap) ? -1 : r;
+}

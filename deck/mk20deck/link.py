@@ -83,6 +83,10 @@ class DeviceLink:
         self.ui_beat_rejects = 0  # heartbeats answered success:false (lost / SUSPECT / not negotiated)
         self.ui_beat_timeouts = 0  # heartbeats without an answer within ack_timeout
         self.ui_rehellos = 0  # hellos after a rejected heartbeat (device had declared us lost)
+        self.ui_epoch = 0  # +1 per accepted ui.hello: the device dropped any ui.hidKeys map then
+        self.ui_generation = 0  # last ui.hidKeys generation we used (starts above the device's, from the hello)
+        self.hid_keys_sent = 0
+        self.hid_keys_rejected = 0
         self._beat: threading.Thread | None = None
 
     def start(self) -> None:
@@ -232,6 +236,10 @@ class DeviceLink:
             ms = 1000
         self.ui_beat_s = min(self.ui_beat_max_s, max(self.ui_beat_min_s, ms * self.ui_beat_factor / 1000))
         self.ui_hello_result = dict(ack.result)
+        gens = [g for g in (ack.result.get("hid_generation"), ack.result.get("generation")) if type(g) is int]
+        with self._lock:
+            self.ui_generation = max([self.ui_generation, *gens])
+            self.ui_epoch += 1
         self.ui_negotiated = True
         log.info("ui.hello ok: heartbeat_ms=%s generation=%s capabilities=%s, heartbeat every %.2f s",
                  ms, ack.result.get("generation"), ack.result.get("capabilities"), self.ui_beat_s)
@@ -273,6 +281,34 @@ class DeviceLink:
                 log.info("ui.heartbeat rejected (%s): ui.hello again", ack.error)
                 if self.ui_hello():
                     nxt = time.monotonic() + self.ui_beat_s
+
+    def supports(self, capability: str) -> bool:
+        """Advertised in the last accepted ui.hello (mk20-kbd); False for stock KD / legacy firmware."""
+        caps = self.ui_hello_result.get("capabilities") if self.ui_negotiated else None
+        return isinstance(caps, list) and capability in caps
+
+    def ui_hid_keys(self, keys: dict[int, int]) -> str:
+        """Option mode: logical fb -> digit map for the live L1 page ({} clears).  Returns "ok", "unsupported"
+        (firmware without ui.hidKeys), "rejected" (e.g. page not live yet: retry) or "timeout"."""
+        if not self.supports("ui.hidKeys"):
+            return "unsupported"
+        with self._lock:
+            self.ui_generation = gen = self.ui_generation + 1
+        try:
+            ack = self.call(P.ui_hid_keys(keys, gen))
+        except ConnectionError:
+            return "timeout"
+        if ack is None:
+            return "timeout"
+        if ack.success and ack.result.get("generation") == gen:
+            self.hid_keys_sent += 1
+            return "ok"
+        self.hid_keys_rejected += 1
+        err = str(ack.error or "")
+        if "unsupported" in err or "Unknown method" in err:
+            return "unsupported"
+        log.info("ui.hidKeys %s not accepted (%s)", sorted(keys.items()), err[:80])
+        return "rejected"
 
     def call(self, req: dict, sent_at: list | None = None) -> P.Ack | None:
         fr = self._send(P.CMD_JSON, P.json_bytes(req), wait=True, sent_at=sent_at)

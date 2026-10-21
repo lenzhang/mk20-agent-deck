@@ -7,7 +7,14 @@ Maps a hook event to a coarse agent state and atomically writes
 ``$MK20DECK_HOME/agent-state/<tool>-<session_id>.json`` (default
 ``~/.config/mk20-agent-deck``; dir 0700, file 0600, tmp + rename) holding ONLY:
 tool, session_id, tmux_pane ($TMUX_PANE), tmux_socket (socket path of $TMUX),
-cwd, state, ts, ppid.  Prompt text, tool input/output, notification messages and
+cwd, state, ts, ppid, and while a numbered choice is pending (deck option mode,
+2026-10-22) at most one of:
+  options      Claude AskUserQuestion: questions[0].options[*].label, <= 5 labels x 24 chars,
+               control/format characters stripped (the option labels only)
+  prompt_kind  "permission": a tool permission prompt (PermissionRequest / Notification
+               permission_prompt; codex PermissionRequest)
+Both disappear with the next record the session writes (PostToolUse, UserPromptSubmit,
+Stop, ...).  Question text, prompts, other tool input/output, notification messages and
 transcript paths are never stored.  The deck's tmux adapter joins records to panes
 by tmux socket + pane id.
 
@@ -77,6 +84,11 @@ CODEX_EVENTS = {
     "SessionEnd": "removed",
 }
 CODEX_ASK_TOOLS = {"request_user_input": "needs_input"}
+PROMPT_STATES = ("needs_input", "needs_approval")
+MAX_OPTIONS = 5
+MAX_LABEL = 24
+# C0/C1 controls, zero-width/bidi format characters, line/paragraph separators, BOM
+_LABEL_BAD = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")
 
 
 def state_home(env=None):
@@ -120,16 +132,66 @@ def map_event(tool, d, prev_state=None):
     return None
 
 
+def clean_label(s):
+    """One option label for the key face: no control/format characters, whitespace collapsed, <= MAX_LABEL."""
+    if not isinstance(s, str):
+        return ""
+    return " ".join(_LABEL_BAD.sub(" ", s[:256]).split())[:MAX_LABEL]
+
+
+def question_options(tool_input):
+    """AskUserQuestion tool_input -> labels of the FIRST question's options (never the question text)."""
+    qs = tool_input.get("questions") if isinstance(tool_input, dict) else None
+    if not isinstance(qs, list) or not qs or not isinstance(qs[0], dict):
+        return []
+    opts = qs[0].get("options")
+    if not isinstance(opts, list):
+        return []
+    out = [clean_label(o.get("label") if isinstance(o, dict) else None) for o in opts[:MAX_OPTIONS]]
+    return out if any(out) else []
+
+
+def _carry(prev):
+    """The still-pending choice of the previous record (re-validated, never trusted blindly)."""
+    opts = prev.get("options") if isinstance(prev, dict) else None
+    if isinstance(opts, list) and 0 < len(opts) <= MAX_OPTIONS and all(isinstance(o, str) for o in opts):
+        out = [clean_label(o) for o in opts]
+        if any(out):
+            return {"options": out}
+    return {}
+
+
+def prompt_fields(tool, d, state, prev=None):
+    """Which numbered choice is pending (deck option mode): {"options": [...]}, {"prompt_kind": "permission"} or {}."""
+    if state not in PROMPT_STATES:
+        return {}
+    ev, tn = d.get("hook_event_name"), d.get("tool_name")
+    if tool == "codex":
+        return {"prompt_kind": "permission"} if ev == "PermissionRequest" else {}
+    if ev == "PreToolUse" and tn == "AskUserQuestion":
+        opts = question_options(d.get("tool_input"))
+        return {"options": opts} if opts else {}
+    notify = ev == "Notification" and d.get("notification_type") == "permission_prompt"
+    if ev == "PermissionRequest" or notify:
+        # The question / plan dialog itself may raise these: keep what its PreToolUse recorded.
+        pending = (isinstance(prev, dict) and prev.get("state") in PROMPT_STATES
+                   and prev.get("prompt_kind") != "permission")
+        if (notify and pending) or (ev == "PermissionRequest" and tn in CLAUDE_ASK_TOOLS):
+            return _carry(prev) if pending else {}
+        return {"prompt_kind": "permission"}
+    return {}
+
+
 def tmux_socket(env):
     v = env.get("TMUX") or ""
     return v.split(",", 1)[0] if v else ""
 
 
-def build_record(tool, d, state, env, now, ppid):
-    """Only the whitelisted fields; never message/prompt/tool_input/transcript_path."""
+def build_record(tool, d, state, env, now, ppid, prev=None):
+    """Only the whitelisted fields; never message/prompt/question/tool_input/transcript_path."""
     cwd = d.get("cwd")
     pane = env.get("TMUX_PANE") or ""
-    return {
+    rec = {
         "tool": tool,
         "session_id": safe_session_id(d.get("session_id")),
         "tmux_pane": pane if re.match(r"^%[0-9]{1,9}$", pane) else "",
@@ -139,18 +201,26 @@ def build_record(tool, d, state, env, now, ppid):
         "ts": round(now, 3),
         "ppid": int(ppid),
     }
+    rec.update(prompt_fields(tool, d, state, prev))
+    return rec
 
 
-def read_prev_state(path, sid):
+def read_prev(path, sid):
+    """This session's previous record (dict) or None."""
     try:
         with open(path, "rb") as f:
             raw = f.read(8192)
         rec = json.loads(raw)
         if isinstance(rec, dict) and rec.get("session_id") == sid and rec.get("state") in STATES:
-            return rec["state"]
+            return rec
     except (OSError, ValueError):
         pass
     return None
+
+
+def read_prev_state(path, sid):
+    rec = read_prev(path, sid)
+    return rec["state"] if rec else None
 
 
 def write_atomic(dirpath, name, rec):
@@ -235,12 +305,12 @@ def handle(tool, raw, env=None, now=None, ppid=None):
     dirpath = ensure_dir(state_home(env))
     name = "%s-%s.json" % (tool, sid)
     prev = None
-    if d.get("hook_event_name") in ("SessionStart", "Notification"):
-        prev = read_prev_state(os.path.join(dirpath, name), sid)
-    state = map_event(tool, d, prev)
+    if d.get("hook_event_name") in ("SessionStart", "Notification", "PermissionRequest"):
+        prev = read_prev(os.path.join(dirpath, name), sid)
+    state = map_event(tool, d, prev["state"] if prev else None)
     if state is None:
         return None
-    rec = build_record(tool, d, state, env, now, os.getppid() if ppid is None else ppid)
+    rec = build_record(tool, d, state, env, now, os.getppid() if ppid is None else ppid, prev)
     write_atomic(dirpath, name, rec)
     if d.get("hook_event_name") not in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
         prune(dirpath, now, keep=name)

@@ -30,6 +30,9 @@ ERROR_SHAKE_S = 1.5  # error: 8 fps shake, then static
 PTT_FPS = 8
 MOVE_FPS = 4  # picked-up slot: marching dashed border (static dashes when animations are off)
 MOVE_PINK = (244, 114, 182)  # distinct from every state colour
+OPTION_AMBER = (245, 158, 11)  # option mode choice keys (the needs_* amber)
+OPTION_INK = (24, 16, 4)
+BLANK_BG = (8, 9, 11)  # option mode: rows 1–3 beyond the choices
 
 
 def key_fps(kv: KeyView, age: float, animations: bool) -> float:
@@ -301,7 +304,52 @@ def _short_reason(reason: str) -> str:
     return reason.split("，")[0].split("（")[0][:10]
 
 
+def _wrap(d: ImageDraw.ImageDraw, text: str, f, max_w: int, lines: int) -> list[str]:
+    """Greedy wrap (CJK per character, Latin at spaces when possible); the last line is ellipsised."""
+    out: list[str] = []
+    rest = text.strip()
+    while rest and len(out) < lines:
+        if len(out) == lines - 1 or d.textbbox((0, 0), rest, font=f)[2] <= max_w:
+            out.append(fit(d, rest, f, max_w))
+            break
+        n = 1
+        while n < len(rest) and d.textbbox((0, 0), rest[:n + 1], font=f)[2] <= max_w:
+            n += 1
+        cut = rest.rfind(" ", 0, n + 1)
+        n = cut if cut >= n // 2 and cut > 0 else n  # break at a space only if the line stays reasonably full
+        out.append(rest[:n].rstrip())
+        rest = rest[n:].lstrip()
+    return out
+
+
+def render_option(kv: KeyView) -> Image.Image:
+    """Option mode choice key: amber, big digit (what the keyboard types) + the option label."""
+    img = Image.new("RGB", (S, S), OPTION_AMBER)
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([2, 2, S - 3, S - 3], radius=14, outline=mix(OPTION_AMBER, WHITE, 0.55), width=3)
+    num = str(kv.option)
+    if not kv.label:
+        d.text((S / 2, S / 2 - 4), num, font=font(76, bold=True), fill=OPTION_INK, anchor="mm")
+        return img
+    d.text((S / 2, 38), num, font=font(54, bold=True), fill=OPTION_INK, anchor="mm")
+    f = font(15, bold=True)
+    lines = _wrap(d, kv.label, f, S - 14, 2)
+    y0 = 92 if len(lines) == 1 else 82
+    for i, line in enumerate(lines):
+        d.text((S / 2, y0 + i * 20), line, font=f, fill=OPTION_INK, anchor="mm")
+    return img
+
+
+def render_blank(kv: KeyView) -> Image.Image:
+    """Option mode: rows 1–3 beyond the choices are dark (a press there leaves option mode)."""
+    return Image.new("RGB", (S, S), BLANK_BG)
+
+
 def render_key(kv: KeyView, age: float, t: float, animations: bool = True) -> Image.Image:
+    if kv.option:
+        return render_option(kv)
+    if kv.blank:
+        return render_blank(kv)
     if kv.role == Role.AGENT:
         return render_agent(kv, age, t, animations)
     return render_command(kv, t, animations)
