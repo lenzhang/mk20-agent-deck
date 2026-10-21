@@ -235,6 +235,12 @@ class MockDevice:
     ``hid_generation``; ``ui.hidKeys`` is validated like the firmware (strictly increasing generation, fb 1..15 ->
     "1".."9", <= 9, no digit twice; a non-empty map only while ``hid_page_live``), ``{}`` clears, and a new hello /
     :meth:`lose` drops the map.  :meth:`press` with ``hid=`` injects a marked (device-typed) press.
+
+    ``ui.page`` (advertised with ``ui``, as on fw >= 1.4) is modelled on a keyboard ``route`` ("L1" boot auto-L1,
+    "L4", or one of its own pages such as "HOME"/"LS"): accepted only while negotiated, ``page_live`` (ONLINE), on
+    L1/L4 and with a generation above the last accepted one (shared with the hello's ``generation``); it sets the
+    route and, like every firmware page boundary, drops the ui.hidKeys map (a non-empty map needs route L1).
+    :meth:`tap_k2` / :meth:`back_l1` are the keyboard's own K2 short and L4 回 L1: route change + synthetic K2 tap.
     """
 
     UI_REJECT = "unavailable or invalid UI request"
@@ -260,6 +266,10 @@ class MockDevice:
         self.hid_generation = 0
         self.hid_map: dict[int, int] = {}
         self.hid_requests: list[dict] = []  # every ui.hidKeys request (accepted or not)
+        self.route = "L1"  # keyboard route (kbd onboard): L1 / L4 host pages, or its own pages (HOME, LS, ...)
+        self.page_live = True  # False: like the firmware while PROBING / SUSPECT (ui.page refused)
+        self.page_requests: list[dict] = []  # every ui.page request (accepted or not)
+        self.pages_accepted: list[str] = []
         self._parser = P.FrameParser()
         self._out: deque[bytes] = deque()
         self._cv = threading.Condition()
@@ -362,6 +372,8 @@ class MockDevice:
                     "generation": self.ui_generation}
         if method == "ui.hidKeys" and self.hid_keys:
             return self._hid_keys(obj)
+        if method == "ui.page":
+            return self._page(obj)
         if method == "ui.heartbeat":
             if not self.ui_negotiated or self.ui_lost:
                 self.heartbeats_rejected += 1
@@ -369,7 +381,7 @@ class MockDevice:
             self.heartbeats.append(now)
             self._sample(now)
             return {}
-        return None  # ui.page etc.: not modelled
+        return None  # other ui.* methods: not modelled
 
     def _hid_keys(self, obj: dict) -> dict | None:
         self.hid_requests.append(obj)
@@ -385,10 +397,39 @@ class MockDevice:
             if int(v) in new.values():
                 return None
             new[int(k)] = int(v)
-        if new and not self.hid_page_live:
+        if new and (not self.hid_page_live or self.route != "L1"):
             return None
         self.hid_generation, self.hid_map = g, new
         return {"generation": g, "mapped": len(new)}
+
+    def _page(self, obj: dict) -> dict | None:
+        self.page_requests.append(obj)
+        g, page = obj.get("generation"), obj.get("page")
+        if (not self.ui_negotiated or self.ui_lost or not self.page_live or self.route not in P.PAGES
+                or type(g) is not int or not self.ui_generation < g <= 999_999_999 or page not in P.PAGES):
+            return None
+        self.ui_generation, self.route, self.hid_map = g, page, {}
+        self.pages_accepted.append(page)
+        return {"page": page, "generation": g}
+
+    def _tap(self, code: int) -> None:
+        for pressed in (True, False):
+            self.press(code, code, pressed)
+
+    def tap_k2(self) -> None:
+        """Keyboard K2 short on L1/L4: toggle the route, then tell the host with a K2 tap (103,103 down + up)."""
+        if self.route in P.PAGES:
+            self.route, self.hid_map = ("L4" if self.route == "L1" else "L1"), {}
+            self._tap(103)
+
+    def back_l1(self) -> None:
+        """Keyboard L4 回 L1 (fb5, decided on the device): route L1, then a K2 tap; on L1 fb5 is a plain host key."""
+        if self.route == "L4":
+            self.route, self.hid_map = "L1", {}
+            self._tap(103)
+        else:
+            self.press(4, 0, True)
+            self.press(4, 0, False)
 
     def _sample(self, now: float) -> None:
         period = self.heartbeat_ms / 1000

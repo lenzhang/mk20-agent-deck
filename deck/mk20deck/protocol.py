@@ -48,7 +48,9 @@ ALLOWED_METHODS = frozenset({"getInfo", "setBacklight", "setVolume", "playAudio"
                              "ui.hello", "ui.heartbeat",  # mk20-kbd (fw >= 1.3) host liveness, no content
                              # mk20-kbd (fw 1.5.1) L1 option mode: which slot keys type a digit when the USER presses
                              # them; the deck itself never types (unlike keyboardInput), kbd/UI.md "ui.hidKeys"
-                             "ui.hidKeys"})
+                             "ui.hidKeys",
+                             # mk20-kbd (fw >= 1.4): the keyboard's L1/L4 route follows the deck's page, kbd/UI.md
+                             "ui.page"})
 # Methods that change device state (need explicit opt-in in tools); getInfo/getFilesBySuffix are reads.
 WRITE_METHODS = frozenset({"setBacklight", "setVolume", "playAudio", "stopAudio"})
 
@@ -213,6 +215,20 @@ def ui_hid_keys(keys: dict[int, int], generation: int) -> dict[str, Any]:
             raise ValueError(f"bad option key {fb!r}: {d!r}")
         out[str(int(fb))] = str(int(d))
     return {**request("ui.hidKeys"), "generation": int(generation), "keys": out}
+
+
+PAGES = ("L1", "L4")  # the host pages a ui.page request can name (HOME/LS/L5/agent are the keyboard's own)
+
+
+def ui_page(page: str, generation: int) -> dict[str, Any]:
+    """mk20-kbd host page (kbd/UI.md "ui.page", fw >= 1.4): the keyboard switches its L1/L4 route to ``page`` without
+    a synthetic K2 tap back and then needs a fresh full frame.  Flat JSON, validated like the firmware: page L1/L4,
+    generation 1..999999999 (strictly increasing on the device side)."""
+    if page not in PAGES:
+        raise ValueError(f"bad page {page!r}")
+    if isinstance(generation, bool) or not 1 <= int(generation) <= 999_999_999:
+        raise ValueError("generation out of range")
+    return {**request("ui.page"), "generation": int(generation), "page": page}
 
 
 def play_audio(file_path: str) -> dict[str, Any]:

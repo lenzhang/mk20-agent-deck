@@ -84,9 +84,14 @@ class DeviceLink:
         self.ui_beat_timeouts = 0  # heartbeats without an answer within ack_timeout
         self.ui_rehellos = 0  # hellos after a rejected heartbeat (device had declared us lost)
         self.ui_epoch = 0  # +1 per accepted ui.hello: the device dropped any ui.hidKeys map then
-        self.ui_generation = 0  # last ui.hidKeys generation we used (starts above the device's, from the hello)
+        # last ui.hidKeys / ui.page generation we used: one counter for both (each device counter only needs to see
+        # strictly increasing values), starting above both of the device's, from the hello
+        self.ui_generation = 0
         self.hid_keys_sent = 0
         self.hid_keys_rejected = 0
+        self.pages_sent = 0  # accepted ui.page requests
+        self.pages_rejected = 0
+        self.ui_page_error = ""  # device reason of the last refused ui.page (fixed firmware strings, truncated)
         self._beat: threading.Thread | None = None
 
     def start(self) -> None:
@@ -314,6 +319,39 @@ class DeviceLink:
         if "unsupported" in err or "Unknown method" in err:
             return "unsupported"
         log.info("ui.hidKeys %s not accepted (%s)", sorted(keys.items()), err[:80])
+        return "rejected"
+
+    def ui_page(self, page: str) -> str:
+        """Ask the keyboard to show host page ``page`` ("L1" / "L4").  Returns "ok" (it switched, or re-entered the same
+        page: either way it now waits for a fresh full frame and has dropped any ui.hidKeys map), "unsupported" (no
+        negotiated ``ui.page``: stock KD / legacy firmware), "rejected" (not ONLINE yet, keyboard on HOME/LS/L5/agent,
+        a request made stale by a route change on the keyboard: retry later) or "timeout".  Never logs above debug:
+        the daemon logs a failing streak once."""
+        if not self.supports("ui.page"):
+            return "unsupported"
+        with self._lock:
+            self.ui_generation = gen = self.ui_generation + 1
+        try:
+            req = P.ui_page(page, gen)
+        except ValueError as e:   # generation exhausted / bad page: never let it escape into the frame loop
+            self.pages_rejected += 1
+            self.ui_page_error = str(e)[:80]
+            return "rejected"
+        try:
+            ack = self.call(req)
+        except ConnectionError:
+            return "timeout"
+        if ack is None:
+            return "timeout"
+        if ack.success and ack.result.get("page") == page and ack.result.get("generation") == gen:
+            self.pages_sent += 1
+            return "ok"
+        self.pages_rejected += 1
+        err = str(ack.error or "")
+        self.ui_page_error = err[:80]
+        log.debug("ui.page %s (generation %d) not accepted (%s)", page, gen, self.ui_page_error)
+        if "unsupported" in err or "Unknown method" in err:
+            return "unsupported"
         return "rejected"
 
     def call(self, req: dict, sent_at: list | None = None) -> P.Ack | None:

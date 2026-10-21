@@ -115,6 +115,17 @@ class Daemon:
     _hid_at: float = 0.0
     _hid_retry_at: float = 0.0
     _hid_epoch: int = -1
+    # Page sync (2026-10-22): keep the keyboard's L1/L4 route equal to the controller's page with ui.page.
+    page_retry_s: float = 0.5  # first retry of a refused / unanswered ui.page (PROBING after a hello, HOME, LS ...)
+    page_retry_max_s: float = 2.0  # back-off cap: bounded traffic while the keyboard sits on its own pages
+    _page_acked: str | None = None  # what the keyboard last confirmed on this link epoch (None: tell it again)
+    _page_epoch: int = -1
+    _page_sync: int = 0  # controller.page_sync seen
+    _page_tried: str | None = None  # page of the current failing streak
+    _page_retry_at: float = 0.0
+    _page_backoff: float = 0.0
+    _page_failing: bool = False  # a streak was logged (once) and not yet resolved
+    _page_off_epoch: int = -1  # the keyboard answered "unsupported" on this epoch: stop asking until a new hello
     bg_sessions: dict = field(default_factory=dict)  # mode -> (sessions | None, error, t0) of the last bg poll
     # Cross-thread hand-off (webui.LoopCalls): the arrange web page queues its changes here; they run on this
     # loop thread inside step() (never from the HTTP thread) and force a frame.
@@ -195,6 +206,8 @@ class Daemon:
                 self._open_settings()
             return
         log.info("input %s %s %s%s", ev.kind, ev.a, ev.b, "" if ev.kind != "key" else (" down" if ev.pressed else " up"))
+        if hasattr(self.controller, "device_pages"):  # before the input: K1 on L4 depends on it
+            self.controller.device_pages = self._pages_supported()
         tr = self.trace
         if tr:
             c = self.controller
@@ -256,6 +269,69 @@ class Daemon:
             self.bg_sessions[m] = (sessions, err, t0)
             self.controller.apply_background(m, sessions, err, t0)
 
+    # -------------------------------------------------------------- page sync (ui.page)
+    def _pages_supported(self) -> bool:
+        link = self.link
+        return (link is not None and getattr(link, "ui_negotiated", False) and link.supports("ui.page")
+                and self._page_off_epoch != getattr(link, "ui_epoch", 0))
+
+    def _page_wanted(self) -> str | None:
+        page = self.controller.page
+        return page if page in P.PAGES else None  # "LS" (legacy settings page) is never claimed
+
+    def _sync_page(self, now: float) -> bool:
+        """Send the controller's absolute page whenever it differs from what the keyboard last confirmed (any cause:
+        MODE long press, 回 L1, mode keys, knob holds, a K2 tap from the keyboard), after every hello, and again when
+        the controller saw the keyboard disagree.  True when the keyboard accepted: it then needs a fresh full frame and
+        has dropped its ui.hidKeys map (every page boundary does), so both are re-sent right after."""
+        c, link = self.controller, self.link
+        if link is None:
+            return False
+        supported = self._pages_supported()
+        if hasattr(c, "device_pages"):
+            c.device_pages = supported
+        epoch = getattr(link, "ui_epoch", 0)
+        if epoch != self._page_epoch:  # reconnect / re-hello: the keyboard may show anything (reboot -> auto-L1)
+            self._page_epoch, self._page_acked, self._page_tried, self._page_retry_at = epoch, None, None, 0.0
+        sync = getattr(c, "page_sync", 0)
+        if sync != self._page_sync:  # the controller saw the keyboard on another route: say it again
+            self._page_sync, self._page_acked, self._page_tried, self._page_retry_at = sync, None, None, 0.0
+        want = self._page_wanted()
+        if not supported or want is None or want == self._page_acked:
+            return False
+        if want != self._page_tried:  # a new target goes out at once, with a fresh back-off
+            self._page_tried, self._page_retry_at, self._page_backoff = want, 0.0, self.page_retry_s
+        elif now < self._page_retry_at:
+            return False
+        res = link.ui_page(want)
+        if res == "ok":
+            if self._page_failing:
+                log.info("ui.page %s accepted", want)
+            self._page_acked, self._page_tried, self._page_failing = want, None, False
+            self._hid_map, self._hid_retry_at = {}, 0.0  # the keyboard cleared its option-mode map at the boundary
+            return True
+        if res == "unsupported":
+            self._page_off_epoch = epoch
+            log.info("ui.page refused as unsupported: not sent again until the next hello")
+            return False
+        self._page_retry_at = now + self._page_backoff
+        self._page_backoff = min(self.page_retry_max_s, self._page_backoff * 2)
+        if not self._page_failing:  # once per streak; the reason is a fixed firmware string, no content
+            self._page_failing = True
+            log.info("ui.page %s not accepted (%s%s): retrying every <= %.1f s", want, res,
+                     f": {link.ui_page_error}" if res == "rejected" and getattr(link, "ui_page_error", "") else "",
+                     self.page_retry_max_s)
+        return False
+
+    def _page_wait(self, now: float) -> float | None:
+        want = self._page_wanted()
+        if want is None or not self._pages_supported():
+            return None  # legacy firmware: never spin on a request it cannot take
+        if (getattr(self.link, "ui_epoch", 0), getattr(self.controller, "page_sync", 0)) != (self._page_epoch,
+                                                                                            self._page_sync):
+            return 0.0  # a hello / resync request since the last step: tell the keyboard now
+        return None if want == self._page_acked else max(0.0, self._page_retry_at - now)
+
     # -------------------------------------------------------------- option mode (ui.hidKeys)
     def _sync_hid_keys(self, now: float) -> None:
         """Send the choice keys (or the clear) before the frame that shows them; refresh while shown."""
@@ -309,10 +385,12 @@ class Daemon:
             force = True  # an arrange-page change: show it on the keyboard now
         self._drain_background()
         self.controller.tick()
+        if self._sync_page(now):  # before the (possibly slow) poll: the keyboard switches at once ...
+            force = True          # ... and gets the new page's full frame in this step (it shows a placeholder)
         if now >= self._next_poll:
             self.controller.refresh()
             self._next_poll = now + self.poll_interval
-        self._sync_hid_keys(now)
+        self._sync_hid_keys(now)  # after ui.page: the boundary dropped the keyboard's map
         view = self.controller.view()
         fps = self.renderer.desired_fps(view, now)
         due = force or self.controller.version != self._last_version
@@ -360,6 +438,9 @@ class Daemon:
         hw = self._hid_wait(now)
         if hw is not None:  # ui.hidKeys refresh / retry
             waits.append(hw)
+        pw = self._page_wait(now)
+        if pw is not None:  # ui.page retry
+            waits.append(pw)
         if self.power is not None:
             waits.append(self._next_power - now)
         return max(0.005, min(waits))
