@@ -248,6 +248,9 @@ class Daemon:
             self._hid_epoch, self._hid_map, self._hid_retry_at = epoch, {}, 0.0  # a hello/loss dropped the map
         if not want and not self._hid_map:
             return
+        if want and not getattr(link, "ui_negotiated", False):
+            c.set_option_hid("pending")   # reconnect: hello not done yet — not "legacy" (Kimi MINOR)
+            return
         if want and not link.supports("ui.hidKeys"):
             c.set_option_hid("legacy")
             return

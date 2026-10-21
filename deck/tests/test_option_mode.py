@@ -625,3 +625,18 @@ def test_tmux_adapter_exposes_pending_choice(tmp_path):
     p.write_text(json.dumps({**d, "state": "running", "options": ["stale"], "prompt_kind": "permission"}))
     ss = by_pane(adapter(sdir))
     assert ss["%0"].options == () and ss["%0"].prompt_kind == ""  # only a pending prompt carries a choice
+
+
+def test_hid_keys_generation_exhaustion_is_rejected_not_raised():
+    """Kimi MINOR: ui_generation beyond 999999999 must not raise into the frame loop."""
+    from mk20deck.link import DeviceLink
+    from mk20deck.transport import MockDevice
+    dev = MockDevice(ui=True)
+    link = DeviceLink(dev, ack_timeout=0.5, preamble_flush=0)
+    link.start()
+    try:
+        link.handshake()
+        link.ui_generation = 999999999
+        assert link.ui_hid_keys({1: 1}) in ("rejected", "unsupported")
+    finally:
+        link.close()

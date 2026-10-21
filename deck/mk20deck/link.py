@@ -295,7 +295,13 @@ class DeviceLink:
         with self._lock:
             self.ui_generation = gen = self.ui_generation + 1
         try:
-            ack = self.call(P.ui_hid_keys(keys, gen))
+            req = P.ui_hid_keys(keys, gen)
+        except ValueError as e:   # generation exhausted / bad map: never let it escape into the frame loop
+            self.hid_keys_rejected += 1
+            log.warning("ui.hidKeys not sent: %s", e)
+            return "rejected"
+        try:
+            ack = self.call(req)
         except ConnectionError:
             return "timeout"
         if ack is None:
