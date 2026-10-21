@@ -1,0 +1,40 @@
+2026-10-21 11:20:30,452 INFO mk20deck.link: ui liveness: 3559 heartbeats accepted, 0 rejected, 15 timeouts, 0 re-hellos
+2026-10-21 11:20:30,934 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 11:20:30,935 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 11:20:30,938 INFO mk20deck.supervisor: 背光 80
+2026-10-21 11:20:30,963 INFO mk20deck.daemon: power event: display_sleep
+2026-10-21 11:20:32,146 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 11:23:13,208 INFO mk20deck.link: ui liveness: 134 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-21 11:23:13,557 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 11:23:13,558 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 11:23:13,560 INFO mk20deck.supervisor: 背光 80
+2026-10-21 11:23:13,575 INFO mk20deck.daemon: power event: display_sleep
+2026-10-21 11:23:14,770 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 11:51:53,227 INFO mk20deck.link: ui liveness: 1421 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-21 11:51:53,663 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 11:51:53,663 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 11:51:53,667 INFO mk20deck.supervisor: 背光 80
+2026-10-21 11:51:53,687 INFO mk20deck.daemon: power event: display_sleep
+2026-10-21 11:51:54,875 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 18:15:41,699 WARNING mk20deck.link: transport read failed: [Errno 49] Can't assign requested address
+2026-10-21 18:15:42,323 INFO mk20deck.supervisor: 连接中断：读取失败（拔线？）: [Errno 49] Can't assign requested address
+2026-10-21 18:15:42,323 INFO mk20deck.link: ui liveness: 19043 heartbeats accepted, 0 rejected, 15 timeouts, 0 re-hellos
+2026-10-21 18:15:43,892 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 18:16:07,408 INFO mk20deck.supervisor: 握手失败：Write timeout
+2026-10-21 18:16:24,612 INFO mk20deck.supervisor: 握手失败：write failed: [Errno 6] Device not configured
+2026-10-21 18:16:25,682 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 18:16:29,981 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 18:16:29,982 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 18:16:29,984 INFO mk20deck.supervisor: 背光 80
+2026-10-21 18:16:31,190 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 21:28:22,946 WARNING mk20deck.link: transport read failed: [Errno 49] Can't assign requested address
+2026-10-21 21:28:23,813 INFO mk20deck.supervisor: 连接中断：读取失败（拔线？）: [Errno 49] Can't assign requested address
+2026-10-21 21:28:23,814 INFO mk20deck.link: ui liveness: 9513 heartbeats accepted, 0 rejected, 15 timeouts, 0 re-hellos
+2026-10-21 21:28:25,386 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 21:28:48,898 INFO mk20deck.supervisor: 握手失败：Write timeout
+2026-10-21 21:29:07,029 INFO mk20deck.supervisor: 握手失败：write failed: [Errno 6] Device not configured
+2026-10-21 21:29:08,090 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 21:29:12,394 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 21:29:12,396 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 21:29:12,398 INFO mk20deck.supervisor: 背光 80
+2026-10-21 21:29:13,606 INFO mk20deck.link: ui.heartbeat accepted (first)

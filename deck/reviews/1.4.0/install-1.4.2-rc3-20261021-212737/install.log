@@ -1,0 +1,7 @@
+release 1.4.2 sha256 8cb854fb81564279bb4e5a10af35925fa22d724cec0abc6cde7e9a41af5599fa
+/Users/dev/mk20-backup/releases/mk20-fw-1.4.2.tar: 1 file pushed, 0 skipped. 10.0 MB/s (2723840 bytes in 0.259s)
+ok: 1.4.2 installed; ok: 1.4.2 pending; reboot to start probation
+rc=0
+reboot requested (watcher -> hardreset, WDT reset in ~30 s)
+current=A 21 1.4.2 good=1.4.2 pending= attempts= active=1.4.2 last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)
+OK: 1.4.2 confirmed good
