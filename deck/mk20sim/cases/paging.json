@@ -2,7 +2,7 @@
  {
   "name": "mode_short_cycle_long_l4",
   "group": "paging",
-  "desc": "模式键短按循环模式，长按 ≥600 ms 进 L4，回L1 键返回",
+  "desc": "模式键短按循环模式，长按 ≥600 ms 进 L4，L4 第 1 行右端「回 L1」返回",
   "steps": [
    {
     "mark": "t"

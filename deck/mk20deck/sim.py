@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 from .adapters.herdr import HerdrAdapter
 from .adapters.mock import MockAdapter
 from .config import DeckConfig
-from .controller import Controller, KeyView, Role
+from .controller import HID_FACES, Controller, KeyView, Role
 from .demo_data import DESKTOP_CAPS, demo_sessions
 from .layout import DeviceLayout
 from .link import DeviceLink
@@ -56,6 +56,13 @@ def demo_adapters(herdr_unavailable: str = "herdr 未安装") -> dict[Mode, Mock
     }
 
 
+def full_adapters() -> dict[Mode, MockAdapter]:
+    """demo_adapters with 15 Desktop sessions (every L1 slot occupied, all base states mixed)."""
+    ads = demo_adapters()
+    ads[Mode.DESKTOP].sessions = demo_sessions(n=15)
+    return ads
+
+
 def _ctl(clock: FakeClock, adapters=None, cfg: DeckConfig | None = None) -> Controller:
     c = Controller(cfg or DeckConfig(), adapters or demo_adapters(), clock=clock, wall=lambda: 1792244000.0,
                    sim=True)
@@ -85,26 +92,25 @@ def shots(out_dir: str, animations: bool = True) -> list[tuple[str, str]]:
         made.append((name, caption))
 
     clk = FakeClock()
-    c = _ctl(clk)
-    save(c, clk, "01-desktop-L1-default.png", "Desktop 默认 L1（未选中）")
-    tap(c, clk, 3, 2)  # select A7 (OTA, needs_approval demo)
+    c = _ctl(clk, full_adapters())
+    save(c, clk, "01-desktop-L1-default.png", "Desktop 默认 L1：15 会话槽（未选中）")
+    tap(c, clk, 2, 2)  # S7: select + focus
     clk.advance(0.5)
     c.toast = None
-    save(c, clk, "02-desktop-L1-selected.png", "单击 A7 选中（只更新副屏）")
-    tap(c, clk, 5, 1)
-    save(c, clk, "03-accept-disabled-toast.png", "P0 接受键：只提示「请在 App 内处理」")
+    save(c, clk, "02-desktop-L1-selected.png", "单击 S7 = 选中并置前（口述/删除/回车/Esc 都去这个会话）")
+    tap(c, clk, 2, 4)  # DELETE: keyboard-side Backspace, the deck ignores the event
+    save(c, clk, "03-device-hid-keys.png", "第 4 行：PTT / 删除 / 发送·可以 / 不行 Esc 由键盘直发 HID，deck 只画键面")
     clk.advance(2)
-    c.on_key(5, 4, True)
-    clk.advance(0.65)
-    c.tick()
-    c.on_key(5, 4, False)
-    clk.advance(0.1)
-    save(c, clk, "04-L4-mode-page.png", "长按模式键 → L4 模式页")
-    tap(c, clk, 2, 3)  # HERD
-    save(c, clk, "05-herdr-offline.png", "切到 herdr（未安装 → offline + 原因）")
+    c.on_knob(2, "down")
+    c.on_knob(2, "up")
+    clk.advance(1.0)
+    c.toast = None
+    save(c, clk, "04-L4-mode-page.png", "K2 短按 → L4：第 1 行 DESK/HERD/TMUX/＋新会话/回 L1，第 2–3 行同 L1 的 S6–S15")
+    tap(c, clk, 2, 1)  # HERD
+    save(c, clk, "05-herdr-offline.png", "L4 点 HERD（未安装 → offline + 原因）")
     clk.advance(2)
     tap(c, clk, 5, 4)  # cycle -> tmux
-    save(c, clk, "06-tmux-mode.png", "短按模式键 → tmux（状态 unknown）")
+    save(c, clk, "06-tmux-mode.png", "短按模式键 → tmux（状态 unknown；未绑定终端 App 时单击只选中）")
     clk.advance(2)
     tap(c, clk, 5, 4)  # cycle -> desktop (restores mapping/selection)
     clk.advance(2)
@@ -112,13 +118,13 @@ def shots(out_dir: str, animations: bool = True) -> list[tuple[str, str]]:
     save(c, clk, "07-ptt-held.png", "按住 PTT（右 Option 由设备 HID 发出）")
     c.on_key(1, 4, False)
 
-    # overflow: 12 sessions → +4
+    # overflow: 19 sessions → +4
     clk2 = FakeClock()
-    many = demo_sessions()
+    many = demo_sessions(n=15)
     extra = []
     for i in range(4):
         s = replace(many[i], sid=SessionId(Mode.DESKTOP, f"01a1{i:04d}-0000-7000-8000-00000000000{i}"),
-                    title=f"会话{i + 9}", state=State.IDLE)
+                    title=f"会话{i + 16}", state=State.IDLE, updated_ms=1_000 + i)
         extra.append(s)
     ads = demo_adapters()
     ads[Mode.DESKTOP].sessions = many + extra
@@ -127,9 +133,9 @@ def shots(out_dir: str, animations: bool = True) -> list[tuple[str, str]]:
     c2.on_key(2, 1, True)
     clk2.advance(0.65)
     c2.tick()
-    c2.on_key(2, 1, False)  # pin A2
+    c2.on_key(2, 1, False)  # pin S2
     clk2.advance(2)
-    save(c2, clk2, "08-overflow-12-sessions.png", "12 个会话：副屏 +4，A2 钉扎")
+    save(c2, clk2, "08-overflow-19-sessions.png", "19 个会话：副屏 +4，S2 钉扎")
 
     gallery(os.path.join(out_dir, "09-state-gallery-static.png"))
     made.append(("09-state-gallery-static.png", "AC10 单帧状态图鉴（动画关闭）"))
@@ -210,14 +216,14 @@ def attention_shots(out_dir: str, animations: bool = True) -> list[tuple[str, st
     save(c, clk, "attn-01-tmux-L1.png", "tmux L1：2 待审批 · 1 出错 · 1 完成 · 其余运行；副屏「桌面 1 待处理」")
     c.on_knob(1, "cw")
     clk.advance(0.5)
-    save(c, clk, "attn-02-k1-cw-first-approval.png", "K1 顺转 1 格 → 选中最急的「待审批」(A3)")
+    save(c, clk, "attn-02-k1-cw-first-approval.png", "K1 顺转 1 格 → 选中最急的「待审批」(S3)")
     c.on_knob(1, "cw")
     c.on_knob(1, "cw")
     clk.advance(0.5)
-    save(c, clk, "attn-03-k1-cw-error.png", "再转 2 格：待审批 A6 → 出错 A1（顺序 审批>输入>出错>完成>槽位）")
+    save(c, clk, "attn-03-k1-cw-error.png", "再转 2 格：待审批 S6 → 出错 S1（顺序 审批>输入>出错>完成>槽位）")
     c.on_knob(1, "cw")
     clk.advance(0.5)
-    save(c, clk, "attn-04-k1-cw-done.png", "再转 1 格 → 完成未读 A8；按 K1 = 聚焦（同双击）")
+    save(c, clk, "attn-04-k1-cw-done.png", "再转 1 格 → 完成未读 S8；按 K1 = 聚焦（同单击会话键）")
     c.on_knob(1, "down")
     c.on_knob(1, "up")
     clk.advance(0.3)
@@ -228,6 +234,45 @@ def attention_shots(out_dir: str, animations: bool = True) -> list[tuple[str, st
     clk.advance(1.0)
     c.toast = None
     save(c, clk, "attn-06-L4-mode-badges.png", "L4：DESK 键角标 = 桌面待处理数（后台 10 s 轮询）")
+    write_index(out_dir, made)
+    return made
+
+
+def layout_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]]:
+    """PRD 1.5 L1/L4 key layout (deck/docs/PRD-1.5-L1-LAYOUT.md): 15 slots in mixed states, one selected."""
+    os.makedirs(out_dir, exist_ok=True)
+    lay = DeviceLayout.default()
+    made: list[tuple[str, str]] = []
+
+    def save(c: Controller, clock: FakeClock, name: str, caption: str) -> None:
+        r = Renderer(lay, animations=animations)
+        view = c.view()
+        r.compose(view, clock.t - 0.25)
+        device_mockup(r.compose(view, clock.t), lay, title=f"MK20 Agent Deck · SIM · {caption}").save(
+            os.path.join(out_dir, name))
+        made.append((name, caption))
+
+    clk = FakeClock()
+    c = _ctl(clk, full_adapters())
+    tap(c, clk, 2, 2)  # S7: single tap = select AND focus
+    clk.advance(2.0)
+    c.toast = None
+    save(c, clk, "l1v2-01-L1-15-sessions-selected.png", "L1：S1–S15 会话（混合状态），单击 S7 = 选中并置前")
+    c.on_knob(2, "down")
+    c.on_knob(2, "up")
+    clk.advance(2.0)
+    c.toast = None
+    save(c, clk, "l1v2-02-L4.png", "L4：DESK/HERD/TMUX/＋新会话/回 L1 · S6–S15 同位 · 第 4 行同 L1")
+    clk2 = FakeClock()
+    ads = full_adapters()
+    tm = demo_sessions(Mode.TMUX, (Tool.CCAI, Tool.CODEX), n=15)
+    ads[Mode.TMUX] = MockAdapter(Mode.TMUX, tm, caps=TMUX_HOOK_CAPS, limited="状态来自 Claude/codex hooks")
+    c2 = Controller(DeckConfig(default_mode=Mode.TMUX), ads, clock=clk2, wall=lambda: 1792244000.0, sim=True)
+    c2.refresh()
+    c2.on_knob(1, "cw")  # K1: the most urgent session
+    clk2.advance(2.0)
+    c2.toast = None
+    save(c2, clk2, "l1v2-03-L1-tmux-mixed-tools.png", "tmux L1：ccai/codex 混排 15 会话，转 K1 选中最急的「待审批」")
     write_index(out_dir, made)
     return made
 
@@ -257,17 +302,17 @@ def gallery(path: str) -> None:
     extras = [
         KeyView(1, 4, Role.PTT, label="按住说话", active=True),
         KeyView(1, 4, Role.PTT, label="按住说话"),
+        KeyView(2, 4, Role.DELETE, label=HID_FACES[Role.DELETE][0], sublabel=HID_FACES[Role.DELETE][1]),
+        KeyView(3, 4, Role.OK, label=HID_FACES[Role.OK][0], sublabel=HID_FACES[Role.OK][1]),
+        KeyView(4, 4, Role.NO, label=HID_FACES[Role.NO][0], sublabel=HID_FACES[Role.NO][1]),
         KeyView(1, 1, Role.AGENT, state=State.UNASSIGNED, lost=True, pinned=True, label="失联钉扎"),
         KeyView(1, 1, Role.AGENT, state=State.RUNNING, tool=Tool.CODEX, title="钉扎", pinned=True),
-        KeyView(2, 4, Role.STOP, label="停止", progress=3),
         KeyView(5, 4, Role.MODE, label="DESK", mode=Mode.DESKTOP),
-        KeyView(5, 4, Role.MODE, label="HERD", mode=Mode.HERDR),
-        KeyView(5, 4, Role.MODE, label="TMUX", mode=Mode.TMUX),
-        KeyView(1, 3, Role.SKILL, label="审 PR", badge="+新"),
-        KeyView(5, 1, Role.ACCEPT, label="接受", disabled="请在 App 内处理（审批代答为 P1）"),
+        KeyView(4, 1, Role.NEW, label="新会话", disabled="未配置新会话命令"),
+        KeyView(5, 1, Role.BACK_L1, label="回 L1"),
     ]
-    names = ["PTT 按住", "PTT 静态", "失联钉扎", "钉扎", "停止进度 3/4", "模式 DESK", "模式 HERD", "模式 TMUX",
-             "技能 +新", "接受(禁用)"]
+    names = ["PTT 按住", "PTT 静态", "删除", "发送/可以", "不行 Esc", "失联钉扎", "钉扎", "模式 DESK",
+             "新会话(禁用)", "回 L1"]
     for ci, kv in enumerate(extras):
         face = render_key(kv, 5.0, 0.0, animations=False)
         x, y = pad + ci * (cell + pad), 40 + 4 * (cell + pad + 18)
@@ -278,7 +323,7 @@ def gallery(path: str) -> None:
 
 def gif(path: str, seconds: float = 3.0) -> None:
     clk = FakeClock()
-    c = _ctl(clk)
+    c = _ctl(clk, full_adapters())
     tap(c, clk, 3, 2)
     clk.advance(1.6)
     lay = DeviceLayout.default()

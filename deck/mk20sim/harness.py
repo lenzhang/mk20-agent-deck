@@ -9,8 +9,9 @@ fw→doc coordinate translation are all exercised.  Output side:
 * screen   – ``Daemon.sink`` captures every JPEG frame the daemon would push;
              ``key_image(name)`` / ``sub_image()`` crop it with the device layout.
 * outputs  – what the router *would* emit, recorded instead of sent:
-             ``hid``   (PTT → Right Option down/up),
-             ``agent`` (adapter calls: focus/send/skill/stop/new/effort),
+             ``hid``   (PTT → Right Option, DELETE → Backspace, OK → Return, NO → Escape;
+                        the keyboard sends these itself, the deck ignores the last three),
+             ``agent`` (adapter calls: focus/new/effort),
              ``local`` (page / mode changes) and ``toast`` (sub-screen messages).
 """
 from __future__ import annotations
@@ -28,7 +29,7 @@ from PIL import Image
 
 from mk20deck.adapters.mock import MockAdapter
 from mk20deck.config import DEFAULT_KNOB_MAP, DeckConfig
-from mk20deck.controller import Controller
+from mk20deck.controller import Controller, Role, role_at
 from mk20deck.daemon import Daemon
 from mk20deck.layout import DeviceLayout
 from mk20deck.model import ActionResult
@@ -39,16 +40,15 @@ from mk20deck.settings import SettingsPage, SettingsStore
 from mk20deck.sim import FakeClock, demo_adapters
 
 
-# PRD §6.2 L1 names → 1-based document (col, row)
+# PRD 1.5 L1 names (deck/docs/PRD-1.5-L1-LAYOUT.md) → 1-based document (col, row)
 KEY_NAMES: dict[str, tuple[int, int]] = {
-    **{f"A{i + 1}": (i % 4 + 1, i // 4 + 1) for i in range(8)},
-    "ACCEPT": (5, 1), "DECLINE": (5, 2),
-    **{f"SKILL{i + 1}": (i + 1, 3) for i in range(4)},
-    "SEND": (5, 3),
-    "PTT": (1, 4), "STOP": (2, 4), "NEW": (3, 4), "FOCUS": (4, 4), "MODE": (5, 4),
+    **{f"S{i + 1}": (i % 5 + 1, i // 5 + 1) for i in range(15)},
+    "PTT": (1, 4), "DELETE": (2, 4), "OK": (3, 4), "SEND": (3, 4), "NO": (4, 4), "ESC": (4, 4), "MODE": (5, 4),
 }
-# L4 aliases (same positions, row 3 differs)
-KEY_NAMES.update({"DESK": (1, 3), "HERD": (2, 3), "TMUX": (3, 3), "BACK": (4, 3)})
+# L4 aliases (row 1 differs; rows 2-3 are S6..S15 as on L1, row 4 identical)
+KEY_NAMES.update({"DESK": (1, 1), "HERD": (2, 1), "TMUX": (3, 1), "NEW": (4, 1), "BACK": (5, 1)})
+# Keys the keyboard firmware sends itself as USB HID on L1/L4 (recorded as "hid" outputs, never sent).
+DEVICE_HID_NAMES = {Role.DELETE: "Backspace", Role.OK: "Return", Role.NO: "Escape"}
 # Knob raw codes (col == row), measured on V2.32
 KNOB_CODES = {(k, a): int(code.split(",")[0]) for code, tag in DEFAULT_KNOB_MAP.items()
               for k, a in [tuple(tag.split(":"))]}
@@ -182,6 +182,11 @@ class Sim:
 
     def _deliver(self, col: int, row: int, pressed: bool) -> None:
         """Router → the real daemon/controller (settings page included)."""
+        c = self.controller
+        if c.page in ("L1", "L4") and any(r.col == col and r.row == row for r in self.layout.keys):
+            kr = role_at(c.page, *self.layout.fw_to_doc(col, row))
+            if kr is not None and kr.role in DEVICE_HID_NAMES:  # what the firmware itself would emit
+                self._emit("hid", f"{DEVICE_HID_NAMES[kr.role]} {'down' if pressed else 'up'} (device-side, recorded)")
         self.daemon.on_device_key(KeyEvent(col, row, pressed))
 
     @property

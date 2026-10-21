@@ -97,3 +97,37 @@ def test_render_speed_reasonable():
         r.jpeg(r.compose(v, clk.t + i / 8))
     per = (time.perf_counter() - t0) / 5
     assert per < 0.5, per
+
+
+def test_bottom_row_device_hid_faces_distinct_and_labelled():
+    from mk20deck.controller import HID_FACES
+    faces = {}
+    for col, role in ((2, Role.DELETE), (3, Role.OK), (4, Role.NO)):
+        label, sub = HID_FACES[role]
+        faces[role] = render_key(KeyView(col, 4, role, label=label, sublabel=sub), 0, 0, False)
+        assert faces[role].size == (128, 128)
+        bare = render_key(KeyView(col, 4, role), 0, 0, False)
+        assert diff(faces[role], bare) > 0.5  # label + sublabel drawn
+    roles = list(faces)
+    for i, a in enumerate(roles):
+        for b in roles[i + 1:]:
+            assert diff(faces[a], faces[b]) > 1.0, (a, b)
+    ptt = render_key(KeyView(1, 4, Role.PTT, label="按住说话"), 0, 0, False)
+    assert all(diff(ptt, f) > 1.0 for f in faces.values())
+
+
+def test_l1_canvas_has_fifteen_session_faces():
+    from mk20deck.sim import full_adapters
+    clk = FakeClock()
+    c = _ctl(clk, full_adapters())
+    tap(c, clk, 2, 2)
+    v = c.view()
+    assert sum(1 for k in v.keys if k.role == Role.AGENT) == 15
+    assert sum(1 for k in v.keys if k.selected) == 1
+    r = Renderer(DeviceLayout.default(), animations=False)
+    img = r.compose(v, clk.t)
+    lay = DeviceLayout.default()
+    empty = render_key(KeyView(1, 1, Role.AGENT, state=State.UNASSIGNED, label="空槽"), 0, 0, False)
+    for i in range(15):
+        k = lay.key_rect(i % 5 + 1, i // 5 + 1)
+        assert diff(img.crop((k.x, k.y, k.x + k.w, k.y + k.h)), empty) > 1.0, i  # every slot occupied

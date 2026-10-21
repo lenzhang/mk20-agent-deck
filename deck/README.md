@@ -13,7 +13,7 @@ is **not** implemented (not approved).
 | `adapters/codex_desktop.py` | read-only Codex Desktop source: `state_5.sqlite` (`mode=ro`), rollout tail, `.codex-global-state.json` unread, `codex://` deep links |
 | `adapters/tmux.py`, `adapters/herdr.py` | tmux (generation identity; state from Claude/codex hook records, else unknown) / herdr stub |
 | `agentstate.py` | read side of the hook state records (`agent-state/*.json`), pane/process-tree matching |
-| `slots.py`, `controller.py` | slot manager (sticky, strict-higher replace, pins, per-mode memory), gestures, stop long-press, roles L1/L4 |
+| `slots.py`, `controller.py` | slot manager (15 sticky slots, strict-higher replace, pins, per-mode memory, 8-slot state migration), gestures, roles L1/L4 (see Key layout) |
 | `render/` | key & sub-screen renderer, ≤8 fps global cap, single attention animation |
 | `daemon.py`, `cli.py` | daemon loop, heartbeat, offline frame on exit, CLI; device event `ui.openSettings` (网页设置 key) opens `[deck] web_url` (Mac config only, IP/localhost, max once per 3 s) |
 | `sim.py` | headless screenshots + interactive web sim |
@@ -22,6 +22,37 @@ is **not** implemented (not approved).
 | `hw/via.py` | VIA raw-HID client: read-only backup, diff-only verified restore, mock keyboard |
 | `hw/gd32dfu.py` | GD32 DFU (`1eaf:0003`) re-flash wrapper, dry-run by default |
 | `hw/usbenum.py`, `hw/power.py` | read-only USB enumeration; sleep/wake (clock jump + `CGDisplayIsAsleep`) |
+
+## Key layout (L1 / L4, PRD 1.5 — [docs/PRD-1.5-L1-LAYOUT.md](docs/PRD-1.5-L1-LAYOUT.md))
+Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key `fb = (row-1)*5 + col`.
+
+| row | col 1 | col 2 | col 3 | col 4 | col 5 |
+|---|---|---|---|---|---|
+| L1 row 1 | S1 | S2 | S3 | S4 | S5 |
+| L1 row 2 | S6 | S7 | S8 | S9 | S10 |
+| L1 row 3 | S11 | S12 | S13 | S14 | S15 |
+| **L4 row 1** | DESK | HERD | TMUX | ＋新会话 | 回 L1 |
+| L4 rows 2–3 | S6..S15, same keys as on L1 | | | | |
+| row 4 (L1 = L4) | PTT (fb16) | ⌫ 删除 (fb17) | ⏎ 发送 / 可以 (fb18) | ✗ 不行 Esc (fb19) | MODE (fb20) |
+
+- **Session slot (S1..S15)**: single tap = **select and focus** (window / tmux pane to the front, so dictation and
+  the device keys land there); the selection happens on press, the focus on release (< 600 ms). Long press
+  ≥600 ms = pin/unpin (no focus). No double-tap gesture any more. If the mode cannot focus (e.g. tmux without
+  `terminal_app`) a tap only selects and the sub-screen says why. Empty slot: "空槽"; lost pin: long press releases it.
+- **fb16..fb19 are keyboard-side USB HID** to the Mac's frontmost window: PTT = Right Option (hold), 删除 =
+  Backspace (hold repeats), 发送/可以 = Return, 不行 = Escape (also interrupts Claude/codex). mk20deck only draws
+  these faces and ignores their key events (the firmware does not forward them; stray ones are dropped). A PTT
+  press that is observed only drives the sea-green overlay.
+- **MODE (fb20)**: short press cycles Desktop → herdr → tmux (decided on release); long press ≥600 ms opens L4.
+  The firmware forwards fb20 on L1/L4 while the keyboard agent is inactive (otherwise it is the e-stop).
+- **L4** (K2 short press toggles L1↔L4): DESK/HERD/TMUX switch mode and return to L1, ＋新会话 = new session in
+  the current mode (cwd of the confirmed selection), 回 L1. S1..S5 are not on L4 (use L1 or K1).
+- **K1**: rotate = move the selection in "needs me" order, press = focus the selection, hold = L4. **K2**: rotate
+  scrolls the sub-screen summary, short = L1↔L4, hold = L1.
+- Slots: 15 per mode, sticky, strict-higher overflow replacement, pins/selection protected, `+N` overflow on the
+  sub-screen. State files from the 8-slot layout (no `n_slots` field) migrate by physical key: A1..A4 → S1..S4,
+  A5..A8 → S6..S9.
+- Screenshots: `python -m mk20deck sim-shots --scenario layout --out <dir>`.
 
 ## Dev
 ```bash
@@ -92,7 +123,7 @@ deck 侧（`[tmux]`，见 `config.example.toml`）：窗格按命名（`ag-ccai-
 `running` 超过 `running_stale_s` 无事件 → unknown（Esc 中断不触发 Stop）。标题用 worktree 名/cwd 末级。
 
 K1：**转 = 按「待审批 > 待输入 > 出错 > 完成未读 > 其余按槽位」顺序移动选中**；**按 = 聚焦选中会话**
-（同双击/聚焦键）；长按仍进 L4。effort 不再映射到 K1（各模式本来都「此会话不支持」）。
+（同单击会话键）；长按仍进 L4。effort 不再映射到 K1（各模式本来都「此会话不支持」）。
 其他模式每 10 s 后台轮询一次（`[deck] background_poll_s`，不阻塞帧循环），副屏顶部显示
 「tmux 2 待处理」，L4 模式键与 L1 模式键带琥珀角标。
 
@@ -103,8 +134,9 @@ K1：**转 = 按「待审批 > 待输入 > 出错 > 完成未读 > 其余按槽�
   `.jsonl.zst` (Codex does this for inactive threads) → idle (or done-unread if in
   the App unread set). All Desktop sessions are
   tagged 来源推定 (source=vscode + originator heuristic; codex-tui also writes vscode).
-- Desktop send / stop / effort disabled; accept/decline only explain (no approve via deck).
-- Skills prefill a new thread via `codex://threads/new?path=&prompt=` — never submit; long prompts fail, not truncated.
+- No accept/decline/send/stop/skill keys since the 1.5 layout (see Key layout); the adapters keep
+  `send()`/`stop()`/`skill()` (unbound). Desktop effort stays unsupported. `[[skills]]` in config.toml
+  is still parsed (old files load) but bound to nothing.
 - Knob event mapping unverified (`knob_map` in config). PTT path B not implemented (PTT = device-side KC_RALT).
 - Sleep: display sleep → "Mac 已休眠" frame + pause; wake (clock jump) → reconnect + re-handshake, gestures dropped. tmux new-session off unless configured. herdr stub. L2/L3 are P1.
 - Knob events that arrive as a non-`keyStateChanged` JSON method are recorded by devtest but not yet mapped by the daemon.

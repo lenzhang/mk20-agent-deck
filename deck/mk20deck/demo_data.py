@@ -12,12 +12,21 @@ _DEMO = [
     ("01a1119e-5438-70e1-a853-8ed131942e29", "风道修复", State.THINKING, "high", "Fix airflow defects"),
     ("01a1153e-31fe-7c90-b681-b10e201d1787", "OTA发布", State.NEEDS_APPROVAL, "medium", "等待批准：git push"),
     ("01a114c4-44b8-7511-8eaf-0e40a1f33295", "NAS部署", State.NEEDS_INPUT, "low", "请确认部署目标"),
+    # 9..15: only with n=15 (full PRD 1.5 L1 grid); the default 8 keep existing scenarios stable
+    ("01a1c001-0000-7000-8000-000000000009", "固件1.5", State.RUNNING, "high", "L1 新键位联调"),
+    ("01a1c001-0000-7000-8000-000000000010", "键位文档", State.IDLE, "medium", "README 键位表"),
+    ("01a1c001-0000-7000-8000-000000000011", "路由测试", State.THINKING, "xhigh", "router 回归"),
+    ("01a1c001-0000-7000-8000-000000000012", "副屏渲染", State.RUNNING, "high", "副屏提示更新"),
+    ("01a1c001-0000-7000-8000-000000000013", "听写修正", State.DONE_UNREAD, "medium", "PTT 后删字验证"),
+    ("01a1c001-0000-7000-8000-000000000014", "日志清理", State.IDLE, "low", "rotate 旧日志"),
+    ("01a1c001-0000-7000-8000-000000000015", "OTA回滚", State.RUNNING, "high", "rollback guard"),
 ]
+N_DEFAULT = 8
 
 
-def demo_sessions(mode: Mode = Mode.DESKTOP, tools=(Tool.CODEX,)) -> list[Session]:
+def demo_sessions(mode: Mode = Mode.DESKTOP, tools=(Tool.CODEX,), n: int = N_DEFAULT) -> list[Session]:
     out = []
-    for i, (tid, title, st, eff, summ) in enumerate(_DEMO):
+    for i, (tid, title, st, eff, summ) in enumerate(_DEMO[:n]):
         tool = tools[i % len(tools)]
         out.append(Session(SessionId(mode, tid if mode == Mode.DESKTOP else f"%{i + 1}",
                                      "" if mode == Mode.DESKTOP else "4242-1700000000"),

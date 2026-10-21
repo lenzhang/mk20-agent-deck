@@ -14,6 +14,8 @@ from .mascot import draw_mascot
 from .palette import (BLACK, CMD_BG, DIM, KEY_BG, RED, SEA_GREEN, STATE_COLOR, STATE_TEXT, TEXT, WHITE, mix)
 
 S = 128
+OK_GREEN = (74, 222, 128)   # 发送 / 可以 (Return) glyph
+NO_RED = (248, 113, 113)    # 不行 Esc glyph
 
 # Expected fps caps (PRD §7.3) — shared global budget, never per-key guarantees.
 FPS = {
@@ -31,8 +33,6 @@ def key_fps(kv: KeyView, age: float, animations: bool) -> float:
         return 0
     if kv.role == Role.PTT:
         return PTT_FPS if kv.active else 0
-    if kv.role == Role.STOP and kv.progress:
-        return 0  # progress redraws are event driven (≤4 discrete steps)
     if kv.role != Role.AGENT or kv.state is None:
         return 0
     st = kv.state
@@ -192,25 +192,14 @@ def render_command(kv: KeyView, t: float, animations: bool) -> Image.Image:
             d.text((S / 2, 115), "右 Option", font=font(12), fill=WHITE, anchor="mm")
             return img
         icons.mic(d, S / 2, cy, 54, fg)
-    elif r == Role.ACCEPT:
-        icons.check(d, S / 2, cy, 50, fg)
-    elif r == Role.DECLINE:
-        icons.cross(d, S / 2, cy, 46, fg)
-    elif r == Role.SEND:
-        icons.send(d, S / 2, cy, 50, fg)
-    elif r == Role.STOP:
-        icons.square(d, S / 2, cy, 52, (180, 70, 70) if not disabled else fg)
-        if kv.progress:
-            segs = [(-90, 0), (0, 90), (90, 180), (180, 270)]
-            for i in range(kv.progress):
-                a0, a1 = segs[i]
-                d.arc([6, 6, S - 7, S - 7], a0 + 3, a1 - 3, fill=RED, width=7)
+    elif r == Role.DELETE:
+        icons.backspace(d, S / 2, cy - 2, 56, fg)
+    elif r == Role.OK:
+        icons.enter(d, S / 2, cy - 2, 54, OK_GREEN)
+    elif r == Role.NO:
+        icons.cross(d, S / 2, cy - 2, 44, NO_RED)
     elif r == Role.NEW:
         icons.plus(d, S / 2, cy, 50, fg)
-    elif r == Role.FOCUS:
-        icons.target(d, S / 2, cy, 52, fg)
-    elif r == Role.SKILL:
-        icons.SKILL_ICONS[(kv.col - 1) % 4](d, S / 2, cy, 50, fg)
     elif r in (Role.MODE, Role.MODE_SELECT):
         icons.MODE_ICONS[kv.mode.value](d, S / 2, cy - 2, 56, fg)
     elif r == Role.BACK_L1:
@@ -219,6 +208,8 @@ def render_command(kv: KeyView, t: float, animations: bool) -> Image.Image:
     label = kv.label
     f = font(20 if r in (Role.MODE, Role.MODE_SELECT) else 17, bold=True)
     d.text((S / 2, 96), fit(d, label, f, S - 12), font=f, fill=fg, anchor="mm")
+    if kv.sublabel and not disabled:  # device-HID keys: what the keyboard itself sends
+        d.text((S / 2, 117), fit(d, kv.sublabel, font(11), S - 10), font=font(11), fill=DIM, anchor="mm")
     if r == Role.MODE_SELECT and kv.active:
         d.rounded_rectangle([2, 2, S - 3, S - 3], radius=14, outline=WHITE, width=4)
     if disabled:

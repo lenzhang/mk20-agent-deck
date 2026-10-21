@@ -68,7 +68,7 @@
  {
   "name": "k1_press_focuses_selected",
   "group": "knobs",
-  "desc": "K1 短按 = 聚焦选中会话（同双击/聚焦键，码 100）；未选中只提示",
+  "desc": "K1 短按 = 聚焦选中会话（同单击会话键，码 100）；未选中只提示",
   "steps": [
    {
     "knob": "K1",
@@ -116,7 +116,7 @@
   "desc": "K2 旋转只滚动副屏，不改选中",
   "steps": [
    {
-    "press": "A1"
+    "press": "S1"
    },
    {
     "mark": "t"

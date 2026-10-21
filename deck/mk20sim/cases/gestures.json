@@ -1,43 +1,23 @@
 [
  {
-  "name": "single_tap_selects",
+  "name": "single_tap_selects_and_focuses",
   "group": "gestures",
-  "desc": "单击 Agent 键只选中，不聚焦（PRD §6.3）",
+  "desc": "单击会话键 = 选中并置前（PRD 1.5：按下即选中，松开 <600 ms 才聚焦）",
   "steps": [
    {
-    "press": "A1"
+    "mark": "t"
+   },
+   {
+    "press": "S1",
+    "hold": 40
    },
    {
     "expect": {
      "selected": true,
      "agent_calls": {
-      "focus": 0
-     }
-    }
-   }
-  ]
- },
- {
-  "name": "double_tap_focus",
-  "group": "gestures",
-  "desc": "同键双击 ≤350 ms 追加聚焦",
-  "steps": [
-   {
-    "press": "A1",
-    "hold": 40
-   },
-   {
-    "mark": "t"
-   },
-   {
-    "wait": 100
-   },
-   {
-    "press": "A1",
-    "hold": 40
-   },
-   {
-    "expect": {
+      "focus": 1,
+      "*": 1
+     },
      "agent_call_within_ms": {
       "name": "focus",
       "ms": 350
@@ -47,46 +27,141 @@
   ]
  },
  {
-  "name": "slow_double_tap_no_focus",
+  "name": "every_tap_focuses",
   "group": "gestures",
-  "desc": "间隔 400 ms 不算双击",
+  "desc": "再次单击同一会话或另一会话都会再置前一次（无双击手势）",
   "steps": [
    {
-    "press": "A1",
+    "press": "S1",
+    "hold": 40
+   },
+   {
+    "wait": 100
+   },
+   {
+    "press": "S1",
     "hold": 40
    },
    {
     "wait": 400
    },
    {
-    "press": "A1",
+    "press": "S2",
     "hold": 40
    },
    {
     "expect": {
      "agent_calls": {
-      "focus": 0
+      "focus": 3
      }
     }
    }
   ]
  },
  {
-  "name": "stop_short_press_hints",
+  "name": "long_press_pins_without_focus",
   "group": "gestures",
-  "desc": "停止键短按只提示，不执行（长按 ≥600 ms 才执行）",
+  "desc": "长按会话键 ≥600 ms 钉扎/解除，只选中不置前",
   "steps": [
    {
-    "press": "A1"
-   },
-   {
-    "press": "STOP",
-    "hold": 100
+    "press": "S2",
+    "hold": 700
    },
    {
     "expect": {
+     "selected": true,
+     "toast_contains": "已钉扎",
      "agent_calls": {
-      "stop": 0
+      "*": 0
+     }
+    }
+   },
+   {
+    "wait": 1600
+   },
+   {
+    "press": "S2",
+    "hold": 700
+   },
+   {
+    "expect": {
+     "toast_contains": "已取消钉扎",
+     "agent_calls": {
+      "*": 0
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "empty_slot_tap_no_action",
+  "group": "gestures",
+  "desc": "空槽（演示数据只有 8 个会话，S15 为空）单击只提示「空槽」",
+  "steps": [
+   {
+    "press": "S15"
+   },
+   {
+    "expect": {
+     "toast_contains": "空槽",
+     "selected": false,
+     "agent_calls": {
+      "*": 0
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "device_hid_keys_ignored",
+  "group": "gestures",
+  "desc": "删除 / 发送·可以 / 不行 Esc 由键盘直发 HID；即使事件到了 Mac，deck 也不动作、不改选中",
+  "steps": [
+   {
+    "press": "S1"
+   },
+   {
+    "mark": "t"
+   },
+   {
+    "press": "DELETE",
+    "hold": 400
+   },
+   {
+    "press": "OK"
+   },
+   {
+    "press": "NO"
+   },
+   {
+    "expect": {
+     "page": "L1",
+     "selected_changed": false,
+     "agent_calls": {
+      "*": 1
+     },
+     "hid": [
+      "Backspace down",
+      "Backspace up",
+      "Return down",
+      "Return up",
+      "Escape down",
+      "Escape up"
+     ]
+    }
+   },
+   {
+    "knob": "K2",
+    "action": "press"
+   },
+   {
+    "press": "OK"
+   },
+   {
+    "expect": {
+     "page": "L4",
+     "agent_calls": {
+      "*": 1
      }
     }
    }

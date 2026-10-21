@@ -4,9 +4,9 @@ the CLI (``python -m mk20sim run-cases``) and the web UI test panel.
 A case is a JSON file in ``mk20sim/cases/`` (``drafts/`` holds recordings and is
 listed in the UI but skipped by pytest/CLI unless asked for)::
 
-    {"name": "double_tap_focus", "group": "gestures", "desc": "...",
+    {"name": "single_tap_selects_and_focuses", "group": "gestures", "desc": "...",
      "steps": [
-       {"press": "A1", "hold": 40},          # down, hold ms, up
+       {"press": "S1", "hold": 40},          # down, hold ms, up (names: harness.KEY_NAMES or "col,row")
        {"down": "PTT"}, {"up": "PTT"},
        {"wait": 100},
        {"knob": "K1", "action": "cw", "n": 3},  # action: cw|ccw|press|down|up
@@ -22,7 +22,7 @@ Expectations (all keys optional, all must hold):
   mode_changed / selected_changed / page_changed: true|false  – vs the last "mark"
   agent_calls: {name: n}  (n exact; "*" for any name; {"min": n} also accepted)
   agent_call_within_ms: {"name": "focus", "ms": 350}  – first call ≤ ms after last mark
-  hid: ["RightOption down", ...]                 – prefixes of the HID outputs, in order
+  hid: ["RightOption down", "Backspace down", ...] – prefixes of the HID outputs, in order
   key_image_size: [128,128], sub_image_size: [428,142], frames_min: n
   settings.<field>: value   – settings mock: active/tab/focus/test or a config key (profile, provider…)
   settings_toast_contains: text
@@ -160,7 +160,7 @@ def _check(sim: Sim, exp: dict, mark: dict, idx: int, src: dict) -> None:
             ok = len(got) >= len(v) and all(g.startswith(e) for g, e in zip(got, v))
             need(k, v, got, ok)
         elif k == "key_image_size":
-            need(k, list(v), list(sim.key_image(exp.get("key", "A1")).size))
+            need(k, list(v), list(sim.key_image(exp.get("key", "S1")).size))
         elif k == "sub_image_size":
             need(k, list(v), list(sim.sub_image().size))
         elif k == "frames_min":
