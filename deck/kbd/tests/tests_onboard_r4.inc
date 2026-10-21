@@ -239,7 +239,7 @@ static void ux_grace(void)
         if (variant==0) {
             /* A fresh frame ends the grace window: keys belong to the host again. */
             now+=300; jpeg(&k); finish_decode(&k); CHECK(onboard_tile_allowed(&k,1,0,1));
-            key(&k,5,1); key(&k,5,0); n=ux_frames(p[0],frames,ids,64);
+            key(&k,6,1); key(&k,6,0); n=ux_frames(p[0],frames,ids,64);   /* fb5 is L4's local 回 L1 since 1.5.0 */
             CHECK(onboard_current(&k)==ONBOARD_L4 && ux_count(frames,n,"keyStateChanged")==2);
         } else if (variant==1) {
             /* No frame for 2 s: the placeholder's navigation labels and actions return. */

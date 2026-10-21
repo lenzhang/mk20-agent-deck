@@ -492,7 +492,7 @@ class Controller:
             if caps.new_session:
                 self._say(caps.new_session)
             elif self.ptt_held:
-                self._say("PTT 按住中，禁止置前")
+                self._say("按住说话中，暂不新建会话")
             else:
                 cwd = s.cwd if (s and s.cwd_confirmed) else None
                 self._result(self.adapter.new_session(cwd))
