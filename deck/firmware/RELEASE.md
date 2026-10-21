@@ -6,7 +6,7 @@ see RECOVERY.md level 5).
 
 ## 1.5.1-rc1: L1 option mode (answer an agent's choice with 1–5)
 
-`firmware/VERSION` stays **1.5.0** on this branch (the integrator bumps it to 1.5.1). User decision 2026-10-22:
+`firmware/VERSION` is **1.5.1**; build id **rc1** (release/1.5.1 = 1.5.0 slot-move 7c599a3 + feature/option-mode). User decision 2026-10-22:
 tapping a needs_input / needs_approval session on L1 brings it to the front and turns row 1 into its numbered
 choice (AskUserQuestion labels, the fixed permission menu 是 / 是，且不再问 / 否, or bare digits 1–5; rows 2–3
 dark, row 4 unchanged); the keys type the digit on the Mac. PRD delta: deck/docs/PRD-1.5-L1-LAYOUT.md §3.2.
