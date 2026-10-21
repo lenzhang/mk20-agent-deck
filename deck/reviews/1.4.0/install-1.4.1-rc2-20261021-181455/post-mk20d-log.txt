@@ -1,0 +1,200 @@
+29233 89.79 INFO mk20d confirm v=1.1.4 ok
+29235 92.26 INFO mk20d maint v=1.1.4 start pid=3786
+48419 19.67 INFO mk20d boot v=1.2.0 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+48459 59.04 INFO mk20d gadget v=1.2.0 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+48459 59.11 INFO mk20d router v=1.2.0 supervisor launched
+48459 59.14 INFO mk20d router v=1.2.0 start pid=2904
+48489 89.42 INFO mk20d selftest v=1.2.0 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+48490 89.74 INFO mk20d confirm v=1.2.0 ok
+48492 92.35 INFO mk20d maint v=1.2.0 start pid=3834
+48651 251.62 INFO mk20d router v=1.2.0 stop (stop file)
+48671 270.97 INFO mk20d router v=1.2.0 start pid=7229
+48751 19.31 INFO mk20d boot v=1.2.0 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+48793 61.13 INFO mk20d gadget v=1.2.0 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+48793 61.22 INFO mk20d router v=1.2.0 supervisor launched
+48793 61.23 INFO mk20d router v=1.2.0 start pid=2794
+48824 91.62 INFO mk20d selftest v=1.2.0 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+48824 91.94 INFO mk20d confirm v=1.2.0 ok
+48826 94.01 INFO mk20d maint v=1.2.0 start pid=3457
+54199 19.46 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+54240 60.58 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+54241 60.69 INFO mk20d router v=1.2.1 supervisor launched
+54241 60.70 INFO mk20d router v=1.2.1 start pid=2927
+54271 90.98 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+54271 91.37 INFO mk20d confirm v=1.2.1 ok
+54273 93.50 INFO mk20d maint v=1.2.1 start pid=3888
+54467 286.65 INFO mk20d router v=1.2.1 stop (stop file)
+54470 290.20 INFO mk20d router v=1.2.1 start pid=7162
+54491 19.28 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+54532 59.66 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+54532 59.74 INFO mk20d router v=1.2.1 supervisor launched
+54532 59.75 INFO mk20d router v=1.2.1 start pid=2783
+54562 90.11 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+54562 90.42 INFO mk20d confirm v=1.2.1 ok
+54564 92.44 INFO mk20d maint v=1.2.1 start pid=3481
+66384 19.54 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+66425 60.12 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+66425 60.25 INFO mk20d router v=1.2.1 supervisor launched
+66425 60.30 INFO mk20d router v=1.2.1 start pid=2816
+66456 90.59 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+66456 90.78 INFO mk20d confirm v=1.2.1 ok
+66458 92.96 INFO mk20d maint v=1.2.1 start pid=3516
+66680 19.41 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+66721 59.91 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+66721 60.01 INFO mk20d router v=1.2.1 supervisor launched
+66721 60.08 INFO mk20d router v=1.2.1 start pid=2790
+66751 90.41 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+66752 90.59 INFO mk20d confirm v=1.2.1 ok
+66754 92.64 INFO mk20d maint v=1.2.1 start pid=3504
+68268 19.17 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+68308 59.26 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+68308 59.32 INFO mk20d router v=1.2.1 supervisor launched
+68308 59.38 INFO mk20d router v=1.2.1 start pid=2781
+68339 89.58 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+68339 89.72 INFO mk20d confirm v=1.2.1 ok
+68340 91.35 INFO mk20d maint v=1.2.1 start pid=3479
+74396 19.47 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+74437 59.75 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+74437 59.80 INFO mk20d router v=1.2.1 supervisor launched
+74437 59.85 INFO mk20d router v=1.2.1 start pid=2807
+74467 90.12 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+74467 90.33 INFO mk20d confirm v=1.2.1 ok
+74469 92.41 INFO mk20d maint v=1.2.1 start pid=3604
+76316 19.47 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+76355 58.56 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+76356 58.61 INFO mk20d router v=1.2.1 supervisor launched
+76356 58.66 INFO mk20d router v=1.2.1 start pid=2784
+76386 89.06 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+76386 89.31 INFO mk20d confirm v=1.2.1 ok
+76389 91.57 INFO mk20d maint v=1.2.1 start pid=3590
+78564 19.77 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+78606 61.93 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+78606 61.97 INFO mk20d router v=1.2.1 supervisor launched
+78606 62.03 INFO mk20d router v=1.2.1 start pid=2826
+78636 92.29 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+78636 92.52 INFO mk20d confirm v=1.2.1 ok
+78639 94.57 INFO mk20d maint v=1.2.1 start pid=3625
+87436 19.20 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+87477 60.09 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+87477 60.18 INFO mk20d router v=1.2.1 supervisor launched
+87477 60.19 INFO mk20d router v=1.2.1 start pid=2818
+87508 90.54 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+87508 90.78 INFO mk20d confirm v=1.2.1 ok
+87510 92.85 INFO mk20d maint v=1.2.1 start pid=3619
+103032 19.80 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+103073 60.59 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+103073 60.66 INFO mk20d router v=1.2.1 start pid=2814
+103073 60.69 INFO mk20d router v=1.2.1 supervisor launched
+103104 91.18 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+103104 91.41 INFO mk20d confirm v=1.2.1 ok
+103106 93.55 INFO mk20d maint v=1.2.1 start pid=3627
+106753 19.44 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+106794 59.83 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+106794 59.97 INFO mk20d router v=1.2.1 supervisor launched
+106794 60.06 INFO mk20d router v=1.2.1 start pid=2815
+106824 90.30 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+106824 90.59 INFO mk20d confirm v=1.2.1 ok
+106827 92.82 INFO mk20d maint v=1.2.1 start pid=3629
+109416 20.35 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+109457 61.10 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+109457 61.16 INFO mk20d router v=1.2.1 supervisor launched
+109457 61.20 INFO mk20d router v=1.2.1 start pid=2800
+109488 91.54 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+109488 91.83 INFO mk20d confirm v=1.2.1 ok
+109490 94.18 INFO mk20d maint v=1.2.1 start pid=3593
+24 19.29 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+65 60.06 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+65 60.12 INFO mk20d router v=1.2.1 supervisor launched
+65 60.18 INFO mk20d router v=1.2.1 start pid=2794
+95 90.39 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+96 90.64 INFO mk20d confirm v=1.2.1 ok
+98 92.67 INFO mk20d maint v=1.2.1 start pid=3501
+307 20.31 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+347 60.44 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+347 60.51 INFO mk20d router v=1.2.1 supervisor launched
+347 60.55 INFO mk20d router v=1.2.1 start pid=2808
+378 90.89 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+378 91.13 INFO mk20d confirm v=1.2.1 ok
+380 93.39 INFO mk20d maint v=1.2.1 start pid=3617
+3185 19.27 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+3226 59.78 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+3226 59.97 INFO mk20d router v=1.2.1 supervisor launched
+3226 60.08 INFO mk20d router v=1.2.1 start pid=2809
+3256 90.34 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+3256 90.51 INFO mk20d confirm v=1.2.1 ok
+3258 92.66 INFO mk20d maint v=1.2.1 start pid=3617
+8298 19.65 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+8340 61.68 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+8340 61.74 INFO mk20d router v=1.2.1 supervisor launched
+8340 61.80 INFO mk20d router v=1.2.1 start pid=2795
+8371 92.08 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+8371 92.30 INFO mk20d confirm v=1.2.1 ok
+8373 94.42 INFO mk20d maint v=1.2.1 start pid=3596
+15744 19.75 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+15785 60.37 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+15785 60.43 INFO mk20d router v=1.2.1 supervisor launched
+15785 60.46 INFO mk20d router v=1.2.1 start pid=2809
+15816 90.89 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+15816 91.15 INFO mk20d confirm v=1.2.1 ok
+15818 93.56 INFO mk20d maint v=1.2.1 start pid=3606
+36969 19.37 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+37011 60.97 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+37011 61.03 INFO mk20d router v=1.2.1 supervisor launched
+37011 61.09 INFO mk20d router v=1.2.1 start pid=2812
+37041 91.39 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+37042 91.76 INFO mk20d confirm v=1.2.1 ok
+37044 93.96 INFO mk20d maint v=1.2.1 start pid=3617
+37420 19.78 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+37461 60.35 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+37461 60.39 INFO mk20d router v=1.2.1 supervisor launched
+37461 60.47 INFO mk20d router v=1.2.1 start pid=2792
+37491 90.73 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+37491 91.01 INFO mk20d confirm v=1.2.1 ok
+37494 93.20 INFO mk20d maint v=1.2.1 start pid=3589
+38437 20.81 INFO mk20d boot v=1.3.0 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+38474 57.12 INFO mk20d gadget v=1.3.0 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+38474 57.22 INFO mk20d kbd v=1.3.0 supervisor launched (nohid=0); router off
+38474 57.28 INFO mk20d router v=1.3.0 not started (mode=composite grc=0 nohid=0 enabled=1 kbd=1)
+38474 57.34 INFO mk20d kbd v=1.3.0 start pid=2786
+38525 108.19 INFO mk20d selftest v=1.3.0 rc=1 try=3 mode=composite PASS kd=0 (mk20-kbd mode);PASS mk20-kbd running;FAIL kbd status stale (38525s);PASS kbd gd32 knob_ok=6 frames=0;PASS kbd panels 21/21;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router not running;INFO agent disabled;
+38525 108.25 ERROR mk20d selftest v=1.3.0 FAILED: not confirming; loader owns A/B rollback
+38527 109.91 INFO mk20d maint v=1.3.0 start pid=5937
+38987 20.87 INFO mk20d boot v=1.2.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+39029 63.02 INFO mk20d gadget v=1.2.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+39029 63.05 INFO mk20d router v=1.2.1 supervisor launched
+39029 63.20 INFO mk20d router v=1.2.1 start pid=3015
+39059 93.44 INFO mk20d selftest v=1.2.1 rc=0 try=1 mode=composite PASS kd=1;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router running;
+39059 93.69 INFO mk20d confirm v=1.2.1 ok
+39062 96.09 INFO mk20d maint v=1.2.1 start pid=4321
+41586 20.42 INFO mk20d boot v=1.3.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+41624 58.41 INFO mk20d gadget v=1.3.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+41624 58.50 INFO mk20d kbd v=1.3.1 supervisor launched (nohid=0); router off
+41625 58.57 INFO mk20d router v=1.3.1 not started (mode=composite grc=0 nohid=0 enabled=1 kbd=1)
+41625 58.61 INFO mk20d kbd v=1.3.1 start pid=2788
+41655 88.90 INFO mk20d selftest v=1.3.1 rc=0 try=1 mode=composite PASS kd=0 (mk20-kbd mode);PASS mk20-kbd running;PASS kbd status fresh (1s);PASS kbd gd32 knob_ok=6 frames=0;PASS kbd panels 21/21;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router not running;INFO agent disabled;
+41655 89.12 INFO mk20d confirm v=1.3.1 ok
+41657 90.83 INFO mk20d maint v=1.3.1 start pid=4830
+44722 3155.56 WARN mk20d kbd v=1.3.1 mk20-kbd exit rc=137 (restart #1, backoff 1s)
+82998 21.19 INFO mk20d boot v=1.4.0 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+83035 58.35 INFO mk20d gadget v=1.4.0 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+83036 58.41 INFO mk20d kbd v=1.4.0 supervisor launched (nohid=0); router off
+83036 58.46 INFO mk20d router v=1.4.0 not started (mode=composite grc=0 nohid=0 enabled=1 kbd=1)
+83036 58.52 INFO mk20d web v=1.4.0 supervisor launched (web=1 agent=0)
+83036 58.53 INFO mk20d kbd v=1.4.0 start pid=2814
+83036 58.57 INFO mk20d web v=1.4.0 start pid=2836
+83036 58.66 INFO mk20d web v=1.4.0 mode=web url=http://172.30.250.2:8780
+83066 88.95 INFO mk20d selftest v=1.4.0 rc=0 try=1 mode=composite PASS kd=0 (mk20-kbd mode);PASS mk20-kbd running;PASS kbd status fresh (1s);PASS kbd gd32 knob_ok=6 frames=0;PASS kbd panels 21/21;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO router not running;INFO web running (http://172.30.250.2:8780);INFO agent disabled;
+83066 89.19 INFO mk20d confirm v=1.4.0 ok
+83068 91.15 INFO mk20d maint v=1.4.0 start pid=5043
+105213 21.95 INFO mk20d boot v=1.4.1 rel=/tmp/mk20/rel cfg=defaults subnet=172.30.250.0/24 composite=1 hid=1 adb=1 warn=
+105213 22.09 INFO mk20d boot v=1.4.1 run tmpfs: mounted on /run/mk20 (was overlay)
+105248 56.94 INFO mk20d gadget v=1.4.1 rc=0 status=gadget-ok-boot nohid=0 noadb=0 ip=172.30.250.2
+105248 57.04 INFO mk20d kbd v=1.4.1 supervisor launched (nohid=0); router off
+105248 57.09 INFO mk20d router v=1.4.1 not started (mode=composite grc=0 nohid=0 enabled=1 kbd=1)
+105248 57.18 INFO mk20d kbd v=1.4.1 start pid=2799
+105248 57.18 INFO mk20d web v=1.4.1 supervisor launched (web=1 agent=0)
+105248 57.24 INFO mk20d web v=1.4.1 start pid=2821
+105248 57.37 INFO mk20d web v=1.4.1 mode=web url=http://172.30.250.2:8780
+105279 87.60 INFO mk20d selftest v=1.4.1 rc=0 try=1 mode=composite PASS kd=0 (mk20-kbd mode);PASS mk20-kbd running;PASS kbd status fresh (0s);PASS kbd gd32 knob_ok=6 frames=0;PASS kbd panels 21/21;PASS udc bound;PASS ttyGS0;PASS watchdog armed;PASS bridge 172.30.250.2:17890;PASS bridge link-local;PASS hid;INFO /run/mk20 on tmpfs;INFO router not running;INFO web running (http://172.30.250.2:8780);INFO agent disabled;
+105279 87.79 INFO mk20d confirm v=1.4.1 ok
+105281 89.79 INFO mk20d maint v=1.4.1 start pid=5063
