@@ -16,13 +16,22 @@
 #include <time.h>
 #include <unistd.h>
 static const cJSON *get(const cJSON *j, const char *k) { return cJSON_GetObjectItemCaseSensitive(j,k); }
+/* Snapshots come from root supervisors: a file owned by anyone else, or writable
+ * by group/other, could be forged and is not shown (cf. web_read_config). */
+static int trusted(const struct stat *st)
+{
+    return S_ISREG(st->st_mode) && (st->st_uid == 0 || st->st_uid == geteuid()) && !(st->st_mode & 022);
+}
+enum { SNAP_OK, SNAP_MISSING, SNAP_UNTRUSTED };
+static const char *snap_name(int s) { return s == SNAP_OK ? "ok" : s == SNAP_MISSING ? "missing" : "unavailable"; }
 /* Bounded regular-file JSON read; never follows a final symlink. */
-static cJSON *read_json(int dir, const char *path, size_t cap, long long *age)
+static cJSON *read_json(int dir, const char *path, size_t cap, long long *age, int *state)
 {
     int fd = dir >= 0 ? openat(dir,path,O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) : open(path,O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    *state = fd < 0 && errno == ENOENT ? SNAP_MISSING : SNAP_UNTRUSTED;
     if (fd < 0) return NULL;
     struct stat st; char *data = NULL; size_t n = 0; cJSON *j = NULL;
-    if (fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_size < 0 || (size_t)st.st_size > cap || !(data = malloc(cap+1))) goto end;
+    if (fstat(fd,&st) || !trusted(&st) || st.st_size < 0 || (size_t)st.st_size > cap || !(data = malloc(cap+1))) goto end;
     while (n <= cap) {
         ssize_t k = read(fd,data+n,cap+1-n);
         if (k < 0 && errno == EINTR) continue;
@@ -30,6 +39,7 @@ static cJSON *read_json(int dir, const char *path, size_t cap, long long *age)
         n += (size_t)k;
     }
     if (n <= cap) j = agent_json_parse(data,n,cap);
+    if (cJSON_IsObject(j)) *state = SNAP_OK;
     if (age) { long long a = (long long)time(NULL)-(long long)st.st_mtime; *age = a < 0 ? 0 : a; }
 end:
     free(data); close(fd); return j;
@@ -88,7 +98,7 @@ static int debug_verbose(web_t *w)
     int fd = open(w->debug_path,O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return errno == ENOENT ? 0 : -1;
     struct stat st; char b[130]; ssize_t n = -1;
-    if (!fstat(fd,&st) && S_ISREG(st.st_mode) && st.st_size <= 128) { do n = read(fd,b,sizeof b-1); while (n < 0 && errno == EINTR); }
+    if (!fstat(fd,&st) && trusted(&st) && st.st_size <= 128) { do n = read(fd,b,sizeof b-1); while (n < 0 && errno == EINTR); }
     close(fd); if (n < 0) return -1;
     b[n] = 0; return !strcmp(b,"verbose=1") || !strcmp(b,"verbose=1\n");
 }
@@ -100,8 +110,10 @@ cJSON *web_status(web_t *w)
     char ip[sizeof w->host]; memcpy(ip,w->host,sizeof ip); char *colon = strrchr(ip,':'); if (colon) *colon = 0;
     cJSON_AddStringToObject(o,"usb0_ip",ip); cJSON_AddStringToObject(o,"web_url",w->origin);
     cJSON_AddBoolToObject(o,"agent",w->agent);
-    cJSON *h = *w->health_path ? read_json(-1,w->health_path,65536,&age) : NULL;
-    cJSON_AddBoolToObject(o,"health",cJSON_IsObject(h));
+    int hs = SNAP_MISSING, ss = SNAP_MISSING;
+    cJSON *h = *w->health_path ? read_json(-1,w->health_path,65536,&age,&hs) : NULL;
+    if (h && !cJSON_IsObject(h)) hs = SNAP_UNTRUSTED;
+    cJSON_AddBoolToObject(o,"health",cJSON_IsObject(h)); cJSON_AddStringToObject(o,"health_state",snap_name(hs));
     if (cJSON_IsObject(h)) {
         cJSON_AddNumberToObject(o,"health_age_s",(double)age);
         add_string(o,"version",get(h,"version"),32); add_string(o,"status",get(h,"status"),16);
@@ -117,8 +129,10 @@ cJSON *web_status(web_t *w)
     cJSON_Delete(h);
     /* Supervisor snapshot (about once per second) is fresher than health. */
     int dir = *w->maint_dir ? web_directory(w->maint_dir,0) : -1;
-    cJSON *s = dir >= 0 ? read_json(dir,"state.json",4096,NULL) : NULL;
+    cJSON *s = dir >= 0 ? read_json(dir,"state.json",4096,NULL,&ss) : NULL;
+    if (s && !cJSON_IsObject(s)) ss = SNAP_UNTRUSTED;
     cJSON *m = cJSON_AddObjectToObject(o,"maint"); cJSON_AddBoolToObject(m,"available",dir >= 0);
+    cJSON_AddStringToObject(m,"state_status",snap_name(dir >= 0 ? ss : SNAP_MISSING));
     if (cJSON_IsObject(s)) {
         cJSON *st = cJSON_AddObjectToObject(m,"state");
         add_string(st,"mode",get(s,"mode"),16); add_number(st,"restarts",get(s,"restarts"));

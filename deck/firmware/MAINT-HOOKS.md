@@ -20,7 +20,10 @@ paired browser session:
   restarts, selftest pass and its WARN/FAIL lines as printable ASCII) plus the live
   uptime, the bound usb0 address, `state.json` below and the `debug.conf` verbose flag.
   Raw `kbd.status`, config paths, agent/provider state and every other field are dropped;
-  nothing under `/data/mk20/secrets` is read.
+  nothing under `/data/mk20/secrets` is read. `health.json`, `state.json` and `debug.conf`
+  must be regular files owned by root (or the service uid) and not group/other-writable,
+  otherwise the page shows 状态不可用. mk20d keeps `/tmp/mk20` at 0700 and writes
+  `health.json` through `mktemp` + atomic rename.
 - **Actions**: 重启键盘程序 (`restart-kbd`), 退出安全模式 (`exit-safe-mode`) and 详细调试日志
   (`debug`, `verbose=0|1`). Each is `POST /api/maint/<name>` with the session CSRF token,
   a same-origin request and a body that confirms the action by name

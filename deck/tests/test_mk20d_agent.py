@@ -585,3 +585,29 @@ def test_web_selftest_and_health_never_fail(dev, rel, g1, web):
     (slots / "A").write_text("gen=3\nversion=9.9.8\n"); (slots / "B").write_text("gen=4\nversion=9.9.9\n")
     h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
     assert h["release"]["slot"] == "B" and h["release"]["pending"] == "9.9.9" and h["web"]["enabled"] is False
+
+
+
+def test_runtime_dir_private_and_health_temp_exclusive(dev, rel, g1):
+    tm = dev.p("tmp/mk20"); tm.chmod(0o755)
+    r = dev.run(rel / "sbin/mk20d", "health")
+    assert r.returncode == 0 and json.loads(r.stdout)["version"] == "9.9.9"
+    assert tm.stat().st_mode & 0o7777 == 0o700
+    h = tm / "health.json"
+    assert h.stat().st_mode & 0o7777 == 0o600 and not h.is_symlink()
+    assert not [p.name for p in tm.iterdir() if p.name.startswith(".health.") or ".tmp." in p.name]
+    # A planted symlink destination is replaced, never written through.
+    victim = dev.tmp / "victim"; victim.write_text("keep\n"); h.unlink(); h.symlink_to(victim)
+    assert dev.run(rel / "sbin/mk20d", "health").returncode == 0
+    assert victim.read_text() == "keep\n" and not h.is_symlink() and json.loads(h.read_text())["version"] == "9.9.9"
+    # Replace failure (a directory at the destination): temp cleaned, rc != 0.
+    h.unlink(); h.mkdir()
+    assert dev.run(rel / "sbin/mk20d", "health").returncode != 0
+    assert h.is_dir() and not [p.name for p in tm.iterdir() if p.name.startswith(".health.")]
+
+
+def test_runtime_dir_symlink_not_chmodded(dev, rel, tmp_path):
+    real = tmp_path / "elsewhere"; real.mkdir(); real.chmod(0o755)
+    tm = dev.p("tmp/mk20"); shutil.rmtree(tm); tm.symlink_to(real)
+    assert dev.run(rel / "sbin/mk20d", "config").returncode == 0
+    assert real.stat().st_mode & 0o7777 == 0o755

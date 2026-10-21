@@ -15,6 +15,9 @@ V=${MK20_VERSION:-$(sed -n 's/^version=//p' "$REL/MANIFEST" 2>/dev/null)}
 TM=$R/tmp/mk20; G=$R/sys/kernel/config/usb_gadget/g1; C=$G/configs/c.1
 MOUNTS=${MK20_MOUNTS:-/proc/mounts}
 mkdir -p "$TM" "$LOGDIR" "$MK20_HOME/state" 2>/dev/null
+# Runtime state (health/selftest/gadget.env/maint inbox) is private to root: tighten only a real
+# directory we own; never chmod through a symlink or someone else's directory.
+[ -d "$TM" ] && [ ! -L "$TM" ] && [ -O "$TM" ] && chmod 700 "$TM" 2>/dev/null
 log() { mk20log "$1" mk20d "$2" "v=$V" "$3"; }
 
 p4sha() { [ -n "${MK20_P4_SHA:-}" ] && { echo "$MK20_P4_SHA"; return; }; [ -s "$TM/p4.sha" ] || sha256sum "$R/dev/by-name/boot" 2>/dev/null | cut -d' ' -f1 > "$TM/p4.sha"; cat "$TM/p4.sha"; }
@@ -251,7 +254,7 @@ jstr() { # JSON string: drop control bytes, escape backslash and quote
   printf '"%s"' "$(printf '%s' "$1" | tr '\n\t' '  ' | LC_ALL=C tr -cd ' -~' | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 jbool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
 health() {
-  local kl up fat dat mem links l st rc mounts
+  local kl up fat dat mem links l st rc mounts ht
   cfg_load
   agent_status_load
   kl=$(kernel_line); up=$(cut -d. -f1 /proc/uptime)
@@ -260,6 +263,8 @@ health() {
   links=""; for l in "$C"/*usb0 "$C"/*adb; do [ -e "$l" ] && links="$links${l##*/} "; done
   st=$(selftest 2>/dev/null); rc=$?
   mounts=0; for l in /data/appLunch.sh /data/setusbconfig; do shim_mounted "$l" && mounts=$((mounts+1)); done
+  # Exclusive, unpredictable temp in the private runtime dir (0600), then atomic replace.
+  ht=$(mktemp "$TM/.health.XXXXXX") || return 1
   {
     printf '{'
     printf '"version":%s,"uptime_s":%s,' "$(jstr "$V")" "$(num "$up")"
@@ -288,7 +293,7 @@ health() {
     printf '"selftest":{"pass":%s,"detail":%s},' "$([ "$rc" = 0 ] && echo true || echo false)" "$(jstr "$st")"
     printf '"status":%s' "$(jstr "$(if [ "$rc" != 0 ]; then echo fail; elif echo "$st" | grep -q '^WARN'; then echo degraded; else echo ok; fi)")"
     printf '}\n'
-  } > "$TM/health.json.tmp.$$" && mv -f "$TM/health.json.tmp.$$" "$TM/health.json" || { rm -f "$TM/health.json" "$TM/health.json.tmp.$$"; return 1; }
+  } > "$ht" && maint_replace "$ht" "$TM/health.json" || { rm -f "$ht"; [ -L "$TM/health.json" ] || [ -f "$TM/health.json" ] && rm -f "$TM/health.json"; return 1; }
   cat "$TM/health.json"
 }
 
