@@ -83,13 +83,14 @@ static void r1_press_owners(void)
     kbd_t k; ctl_t c; init(&k,&c); onboard_route(&k,ONBOARD_L1);
     hello(&k); beat(&k); now+=1000; beat(&k); now+=1000; beat(&k); jpeg(&k); finish_decode(&k);
     int sv[2]; CHECK(!socketpair(AF_UNIX,SOCK_STREAM,0,sv)); k.host_fd=sv[0]; fcntl(sv[1],F_SETFL,O_NONBLOCK);
-    key(&k,17,1); knob(&k,103,1); now+=20; knob(&k,103,0); key(&k,17,0);
+    /* fb12 (col 1): fb17 is the Mac Backspace HID key on live L1/L4 since 2026-10-21. */
+    key(&k,12,1); knob(&k,103,1); now+=20; knob(&k,103,0); key(&k,12,0);
     CHECK(onboard_current(&k)==ONBOARD_L4);
     uint8_t buf[2048]; ssize_t n=read(sv[1],buf,sizeof buf); CHECK(n>0);
     host_parser p; host_parser_init(&p,sizeof buf); if(n>0) host_push(&p,buf,(size_t)n);
     host_frame f; int count=0;
     while (host_next(&p,&f)) {
-        char expected[160]; int slot=count<2 ? 1 : 103, row=count<2 ? 3 : 103;
+        char expected[160]; int slot=count<2 ? 1 : 103, row=count<2 ? 2 : 103;
         int len=host_json_key_state(expected,sizeof expected,slot,row,(count%2)==0);
         CHECK(f.cmd==101 && f.size==(uint32_t)len && !memcmp(expected,f.data,f.size)); count++;
     }

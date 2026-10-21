@@ -5,7 +5,7 @@ static void r3_ack_backpressure(int probe, int stale)
     kbd_t k; ctl_t c; r2_online(&k,&c);
     int p[2]; CHECK(!pipe(p)); k.host_fd=p[1];
     CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(p[1],F_SETFL,O_NONBLOCK));
-    key(&k,17,1);
+    key(&k,12,1); /* fb17 is a Mac HID key on live L1/L4 since 2026-10-21 */
     int downs,ups; CHECK(host_events(p[0],&downs,&ups)==1 && downs==1 && !ups);
     if(probe) r2_saturate(&k,p[1]); /* exact saved re-acceptance probe */
     else {
@@ -20,7 +20,7 @@ static void r3_ack_backpressure(int probe, int stale)
         kbd_host_feed(&k,wire,10);
     }
     if(probe || stale) { knob(&k,103,1); now+=20; knob(&k,103,0); }
-    key(&k,17,0);
+    key(&k,12,0);
     CHECK(kbd_host_send(&k,501,HOST_CMD_JSON,"later",5)==-1);
     size_t queued=k.host_out_len;
     unsigned sent=k.st.host_tx;
@@ -57,7 +57,7 @@ static void r3_ack_backpressure(int probe, int stale)
             }
             if(f.cmd==HOST_CMD_JSON && f.id==KBD_EVENT_ID) {
                 char j[160]; int len=events ? host_json_key_state(j,sizeof j,103,103,events==1) :
-                    host_json_key_state(j,sizeof j,1,3,0);
+                    host_json_key_state(j,sizeof j,1,2,0);
                 CHECK(f.size==(uint32_t)len && !memcmp(f.data,j,f.size)); events++;
             }
             CHECK(f.id!=501 && f.id!=502 && f.id!=503);
@@ -67,7 +67,7 @@ static void r3_ack_backpressure(int probe, int stale)
     CHECK(events==(probe || stale ? 3 : 1)); CHECK(!k.host_out_len && !k.host_out_off);
     CHECK(!parser.bad_size_crc && !parser.bad_data_crc && !parser.dropped_bytes);
     /* Release ownership clears once, including after another physical up. */
-    key(&k,17,0); kbd_host_drain(&k); CHECK(!host_events(p[0],&downs,&ups));
+    key(&k,12,0); kbd_host_drain(&k); CHECK(!host_events(p[0],&downs,&ups));
     CHECK(!kbd_host_send(&k,504,HOST_CMD_JSON,"later",5));
     uint8_t bytes[128]; ssize_t n=read(p[0],bytes,sizeof bytes); CHECK(n>0);
     if(n>0) host_push(&parser,bytes,(size_t)n);

@@ -16,6 +16,13 @@ pauses until everything is released and 1 s is quiet; fb20 held as a host key wh
 active -> host up, then e-stop; status probes run on a worker thread only (stale after 10 s); a stop of
 an active agent shows a persistent footer notice until re-allowed/acknowledged on L5; safe mode shows the
 usb0 IP and the pairing code.
+**Decision 2026-10-21 (user, new L1 layout; replaces the PRD rule "non-PTT keys never produce HID" for
+exactly these keys):** on a live L1/L4 page fb17 DELETE = USB HID Backspace, fb18 SEND/OK = Return, fb19
+NO = Escape (also interrupts Claude Code / codex): down on press, up on release (held = macOS
+auto-repeat), the same gate and press-time ownership as the Mac PTT, never forwarded as keyStateChanged,
+every all-up/release path included. fb16 PTT (Right Option) and fb20 MODE are unchanged; rows 1–3 become
+15 session slots rendered by the Mac; L4 keeps the same bottom row; all other pages keep fb17–19's
+on-board meaning. Details and the fb -> usage table: kbd/UI.md (device side, unreleased 1.5.0).
 The keyboard must be fully usable without the Mac app. This supersedes the earlier
 “no Mac helper” decision with **optional helper, never required** (2026-10-19).
 No AirPlay. Network access uses only the explicitly selected egress: Mac proxy is
@@ -220,7 +227,7 @@ unavailable”; the reserved key and pause state still work, with no fake transc
 | L1/L4 row2 fb6–10 | Session5 | Session6 | Session7 | Session8 | Decline |
 | L1 row3 fb11–15 | Skill1 | Skill2 | Skill3 | Skill4 | Send |
 | L4 row3 fb11–15 | Codex Desktop | herdr | tmux | Back L1 | Send |
-| L1/L4 row4 fb16–20 | Mac PTT | Stop session | New session | Focus | Mac mode key; **E-stop** while the keyboard agent is active |
+| L1/L4 row4 fb16–20 | Mac PTT | ~~Stop session~~ DELETE: HID Backspace (2026-10-21) | ~~New session~~ SEND/OK: HID Return | ~~Focus~~ NO: HID Escape | Mac mode key; **E-stop** while the keyboard agent is active |
 | Offline row1 fb1–5 | Mac offline | Link state | Last-seen age | Reconnect state | Settings |
 | Offline row2 fb6–10 | Home | Agent L5 | blank | blank | blank |
 | Offline row3 fb11–15 | blank | blank | blank | blank | blank |
@@ -232,7 +239,9 @@ L1/L4 unless the keyboard agent is active (short K2 still toggles L1 <-> L4). Ke
 show session details; ~~an on-board footer always states “语音目标: Mac / Right Option”
 and current safety status~~ (2026-10-20: the host owns all 142 rows unless an attention
 footer is due: pairing code, stop banner, confirmation, stale Mac, held PTT, GD32 mapping). Offline Mac PTT emits no HID. Host reconnect cannot
-select a session or execute a stale key press automatically.
+select a session or execute a stale key press automatically. (2026-10-21 new L1 layout: rows 1–3 are 15
+Mac-rendered session slots; row 4 is PTT / DELETE / SEND-OK / NO / MODE, fb17–19 as device-side HID keys,
+offline they keep the placeholder roles above and emit no HID.)
 
 ## 3. Input, state machine and safety
 
@@ -245,6 +254,7 @@ select a session or execute a stale key press automatically.
 | fb20 | Immediate latched e-stop on HOME/LS/L5/agent pages, and on L1/L4 while the keyboard agent is allowed/leased; host/agent cannot draw or bind it then. L1/L4 with the agent inactive: forwarded Mac mode key (2026-10-20) |
 | fb16 on L5/agent pages | Board PTT, consumed locally, cannot be rebound; never sends Right Option |
 | fb16 on L1/L4 online | Existing Mac Right Option down/up; revokes agent lease as before |
+| fb17/18/19 on L1/L4 online | HID Backspace/Return/Escape down/up (2026-10-21), same gate and press-time ownership as the Mac PTT; revokes agent lease; no host key event; hold >10 s cut (lost GD32 up guard) |
 
 K2 release support must be validated. Preserve `k2estop.c` press-only fallback:
 three presses within <=1500 ms until release observed; `--k2-release`/release switch
