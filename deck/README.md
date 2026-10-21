@@ -14,7 +14,7 @@ is **not** implemented (not approved).
 | `adapters/tmux.py`, `adapters/herdr.py` | tmux (generation identity; state from Claude/codex hook records, else unknown) / herdr stub |
 | `agentstate.py` | read side of the hook state records (`agent-state/*.json`), pane/process-tree matching |
 | `slots.py`, `controller.py` | slot manager (15 sticky slots, strict-higher replace, pins, per-mode memory, 8-slot state migration), gestures, roles L1/L4 (see Key layout) |
-| `rules.py`, `webui.py` | slot rules (固定规则, `slot-rules.json`) and the local 会话安排 web page on 127.0.0.1:8781 (see 会话安排网页) |
+| `rules.py`, `webui.py`, `webauth.py` | slot rules (固定规则, `slot-rules.json`), the local 会话安排 web page on 127.0.0.1:8781 and its one-time-link / session authorization (see 会话安排网页) |
 | `render/` | key & sub-screen renderer, ≤8 fps global cap, single attention animation |
 | `daemon.py`, `cli.py` | daemon loop, heartbeat, offline frame on exit, CLI; device event `ui.openSettings` (网页设置 key) opens `[deck] web_url` (Mac config only, IP/localhost, max once per 3 s) |
 | `sim.py` | headless screenshots + interactive web sim |
@@ -67,7 +67,9 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
 
 ## 会话安排网页
 哪个会话在哪个键，用网页安排（不用写配置文件）。mk20deck 守护进程自己提供这个页面：
-**http://127.0.0.1:8781/**（`python -m mk20deck arrange` 用默认浏览器打开；`--print` 只打印地址）。
+**http://127.0.0.1:8781/**——**只能用 `python -m mk20deck arrange` 打开**：它通过守护进程的本机授权通道拿一个
+一次性链接（60 秒内有效、只能用一次）交给默认浏览器（`--print` 只打印这个链接）。直接打开地址只会看到
+“请在 Mac 上运行 mk20deck arrange 打开（安全起见）”。授权后浏览器保持 30 天（守护进程重启也不用重新授权）。
 端口在 `config.toml` 的 `[web] arrange_port`（默认 8781，`0` = 关闭）；端口被占用时只记一条警告，守护进程照常运行、
 没有网页。键盘没接时页面照样能用（显示 “键盘未连接”，打开页面期间每 2 秒刷新当前模式）。
 
@@ -90,20 +92,32 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
 - **存储**：`~/.config/mk20-agent-deck/slot-rules.json`（遵循 `MK20DECK_HOME`），`version: 1`，原子写入
   （临时文件 + fsync + rename）、权限 0600。文件损坏 → 规则全部忽略，页面顶部和键盘副屏都提示，绝不崩溃；
   下一次保存前把坏文件改名为 `slot-rules.json.bad-<时间>`，不会悄悄覆盖。规则在网页关闭（端口 0）时照样生效。
-- **线程**：HTTP 服务（标准库 `ThreadingHTTPServer`，守护线程）从不直接改控制器 / 槽位：每个读写都排队到
+- **线程与上限**：HTTP 服务（标准库 `ThreadingHTTPServer`）从不直接改控制器 / 槽位：每个读写都排队到
   deck 主循环线程执行（键盘连着时在 `Daemon.step` 里，没连时在 `Supervisor` 的等待里），改动后立刻强制出一帧，
   键盘上还会弹 “网页：…” 提示。主循环忙（例如正在握手）超过 3 秒 → 返回 “请稍后重试”，该请求作废、之后也不会执行。
+  同时最多 8 个连接（再多立即 503）；每个请求从建立连接起最多 5 秒（含读请求头/请求体，慢速逐字节发送也会被切断）；
+  排队的改动最多 32 个（满了立即 503）；唤醒主循环会合并，主循环每轮最多执行 8 个，键盘帧不会被网页拖慢。
+- **非当前模式的改动**：网页显示的和改动用的是同一批后台会话数据——改动前先把该模式的槽位按这批数据对齐，
+  请求里带上页面看到的会话（`expect`），对不上就返回 409 “已经变了，请看最新的页面”；该模式读不到会话
+  （例如 herdr 未安装、读取失败、还没轮询到）时拒绝修改，绝不在空列表上改。
+- **授权**（`webauth.py`）：一次性令牌只从 `$MK20DECK_HOME/run/arrange.sock` 发放（目录 0700、socket 0600，系统报告
+  对端 uid 时再核对）——需要文件系统权限，只会发 HTTP 请求的本机程序（包括沙盒 App）拿不到。`/auth?t=…` 兑换后设
+  `SameSite=Strict; HttpOnly` 会话 cookie（30 天，每次打开页面换新 id，旧 id 短暂宽限），每个会话有单独的 CSRF 令牌；
+  会话只以 id 的哈希保存在 `run/arrange-sessions.json`（0600），最多 8 个。键盘侧以后的 “会话安排” 链接也走
+  mk20deck（进程内 `ArrangeServer.mint_url()`），不会绕过这一步。
 - **安全**：只绑定 127.0.0.1；`Host` 必须正好是 `127.0.0.1:<端口>` 或 `localhost:<端口>`（防 DNS rebinding）；
   无任何 CORS 头，`OPTIONS`/`DELETE`/`PATCH`/`HEAD` 一律 405；改动只能 `POST`/`PUT` JSON（`Content-Type:
   application/json`，`Content-Length` ≤ 8 KiB，不接受分块），`Origin` 必须等于 `http://<Host>`，`Sec-Fetch-Site`
-  （若有）必须 `same-origin`，CSRF 令牌（`GET /` 写在页面里，并设 `SameSite=Strict; HttpOnly` cookie；每次进程启动新生成）
-  请求头和 cookie 都要与之恒定时间比较一致；读状态 `GET /api/state` 也要令牌。CSP `default-src 'none'`，内联样式/脚本用
-  每次响应的 nonce，无外部资源；`frame-ancestors 'none'`、`nosniff`、`no-referrer`、`no-store`。接口只给标题、工具、状态、
-  tmux 窗口名和目录**名**，不给完整路径、摘要或提示词。
-- **接口**（都要令牌）：`GET /api/state`；`POST /api/move {mode, slot, key}`、`POST /api/unpin {mode, slot}`、
-  `POST /api/clear {mode, slot}`；`POST /api/rules {mode, slot, kind, value | session, enabled}`（建立/替换该键的规则），
+  （若有）必须 `same-origin`，要有效的会话 cookie，并且 `X-MK20-CSRF` 请求头与该会话的 CSRF 令牌恒定时间比较一致；
+  读状态 `GET /api/state` 也一样。CSP `default-src 'none'`，内联样式/脚本用每次响应的 nonce，无外部资源；
+  `frame-ancestors 'none'`、`nosniff`、`no-referrer`、`no-store`。接口只给标题、工具、状态、tmux 窗口名和目录**名**，
+  不给完整路径、摘要或提示词；Codex 桌面线程没有标题、只有提示词预览时，网页只显示线程 id 前 8 位
+  （键盘上照旧，键盘副屏本来就显示预览）。规则文件写失败时改动整个不生效并返回错误（500），不会显示 “已保存”。
+- **接口**（都要会话 cookie + CSRF 令牌）：`GET /api/state`；`POST /api/move {mode, slot, key}`、`POST /api/unpin {mode, slot}`、
+  `POST /api/clear {mode, slot}`（三者都可带 `expect`：页面看到的那个键上的会话 key，或 null）；`POST /api/rules {mode, slot, kind, value | session, enabled}`（建立/替换该键的规则），
   `PUT /api/rules/<id> {enabled?, kind?, value? | session?}`，`POST /api/rules/<id>/delete`。`slot` 是 0–14（S1–S15）。
-- 开发：`python -m mk20deck sim-serve --arrange-port 8782` 对着模拟数据开这个页面（规则写到临时文件）。
+- 开发：`python -m mk20deck sim-serve --arrange-port 8782` 对着模拟数据开这个页面（规则写到临时文件；启动时打印
+  `mk20deck arrange --socket <临时 socket>` 命令和一个一次性链接）。
   键盘设备网页以后会加一个指向这里的链接（固件侧，不在本模块）。
 
 ## Dev
@@ -114,7 +128,7 @@ python3 -m venv .venv && .venv/bin/pip install -e . pytest
 .venv/bin/python -m mk20deck sim-serve        # http://127.0.0.1:8765 (--source real on the Mac)
 python3 -m mk20deck probe-codex [--json]      # read-only Codex Desktop snapshot (Mac)
 python3 -m mk20deck probe-tmux [--json]       # read-only tmux panes + hook-derived states (Mac)
-python3 -m mk20deck arrange [--print]         # open the 会话安排 page of the running daemon (127.0.0.1:8781)
+python3 -m mk20deck arrange [--print]         # open the 会话安排 page (one-time link over the daemon's 0600 socket)
 .venv/bin/python -m mk20deck sim-shots --scenario attention --out ../artifacts/attention
 .venv/bin/python -m mk20deck [--config ~/.config/mk20-agent-deck/config.toml] run [--port /dev/cu.usbmodemXXX]
 .venv/bin/python -m mk20deck launchd-plist > ~/Library/LaunchAgents/com.leo.mk20-agent-deck.plist

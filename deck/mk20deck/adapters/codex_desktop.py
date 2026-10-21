@@ -264,8 +264,9 @@ class CodexDesktopAdapter(ModeAdapter):
             if not UUID_RE.match(tid):
                 continue
             keys = r.keys()
-            name = (r["name"] if "name" in keys else None) or r["title"] or \
-                   (r["preview"] if "preview" in keys else "") or tid[:8]
+            real = (r["name"] if "name" in keys else None) or r["title"]
+            preview = (r["preview"] if "preview" in keys else "") or ""
+            name = real or preview or tid[:8]  # keyboard: unchanged (the sub-screen shows the preview anyway)
             name = " ".join(str(name).split())
             cwd = r["cwd"] or None
             cwd_ok = bool(cwd and os.path.isabs(cwd) and (not self.cfg.require_cwd_exists or os.path.isdir(cwd)))
@@ -281,6 +282,7 @@ class CodexDesktopAdapter(ModeAdapter):
                 # originator whitelist is a heuristic (codex-tui also writes source=vscode)
                 source_note=f"来源推定（{originator or '无 originator'}）",
                 updated_ms=int((r["recency_at_ms"] if "recency_at_ms" in keys else 0) or 0),
+                title_private=not real and bool(preview),  # prompt text: never in the arrange web API
             )
             if alive is False:
                 s.state, s.state_reason = State.OFFLINE, "Codex App 未运行"

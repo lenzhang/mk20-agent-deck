@@ -99,6 +99,9 @@ class Session:
     done_marker: str = ""  # identity of the completion that produced done_unread
     window: str = ""  # tmux window name (slot rules "tmux 窗口名")
     tmux_session: str = ""  # tmux session name (slot rules match it too)
+    # The title fell back to prompt text (Codex Desktop thread preview): fine on the keyboard, which shows the
+    # preview anyway, but it never leaves the Mac process (arrange web API shows the id prefix instead).
+    title_private: bool = False
 
 
 @dataclass

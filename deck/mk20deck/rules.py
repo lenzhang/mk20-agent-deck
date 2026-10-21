@@ -29,6 +29,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
+import math
 import os
 import secrets
 import tempfile
@@ -173,15 +174,32 @@ class SlotRule:
         return d
 
 
+MAX_CREATED = 1e11  # epoch seconds (year ~5138): anything larger is corrupt
+
+
+def _number(v: object, lo: float, hi: float, what: str) -> float:
+    """Finite JSON number in [lo, hi]; huge ints / NaN / inf / bools are rejected (never OverflowError)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError(f"{what} 无效")
+    try:
+        f = float(v)
+    except (OverflowError, ValueError):
+        raise ValueError(f"{what} 超出范围") from None
+    if not math.isfinite(f) or not lo <= f <= hi:
+        raise ValueError(f"{what} 超出范围")
+    return f
+
+
 def _rule_from_json(d: object) -> SlotRule:
     if not isinstance(d, dict):
         raise ValueError("不是对象")
     rid = d.get("id")
-    if not isinstance(rid, str) or not rid or len(rid) > 32 or not rid.replace("-", "").isalnum():
+    if not isinstance(rid, str) or not rid or len(rid) > 32 or not rid.replace("-", "").isalnum() \
+            or not rid.isascii():
         raise ValueError("id 无效")
     try:
         mode = Mode(d.get("mode"))
-    except ValueError:
+    except (ValueError, TypeError):
         raise ValueError("mode 无效") from None
     slot, kind, value = validate(mode, d.get("slot"), d.get("kind"), d.get("value"))
     enabled = d.get("enabled", True)
@@ -189,8 +207,7 @@ def _rule_from_json(d: object) -> SlotRule:
         raise ValueError("enabled 无效")
     note = d.get("note", "")
     note = note[:MAX_NOTE] if isinstance(note, str) else ""
-    created = d.get("created", 0.0)
-    created = float(created) if isinstance(created, (int, float)) and not isinstance(created, bool) else 0.0
+    created = _number(d.get("created", 0.0), 0.0, MAX_CREATED, "created") if "created" in d else 0.0
     return SlotRule(rid, mode, slot, kind, value, enabled, note, created)
 
 
@@ -226,21 +243,36 @@ def resolve(rules: Iterable[SlotRule], sessions: Mapping[str, Session],
     return placed, waiting
 
 
+class RulesSaveError(OSError):
+    """A rule change could not be written: nothing was changed (``str`` is the Chinese message)."""
+
+
 class RulesStore:
-    """All rules of all modes, persisted in ``slot-rules.json``.  Loop-thread only (not locked)."""
+    """All rules of all modes, persisted in ``slot-rules.json``.  Loop-thread only (not locked).
+
+    Changes are transactional: the candidate list is written atomically first and only then swapped in
+    memory, so a failed write leaves both the file and the in-memory rules unchanged (``RulesSaveError``).
+    The one exception is ``disable`` after a manual keyboard change (``strict=False``): the user's change
+    already happened, so the rule is disabled in memory anyway and ``warning`` says it is not on disk yet
+    (the next successful save writes it)."""
 
     def __init__(self, path: str | None = None, clock=time.time) -> None:
         self.path = path or default_rules_path()
         self.clock = clock
         self.rules: list[SlotRule] = []
         self.warning = ""  # malformed file / skipped entries / save failure (Chinese, no paths)
-        self._bad_file = False  # the file on disk is malformed: move it aside before the first save
+        self._bad_file = False  # the file on disk has content we did not load: move it aside before saving
+        self.dirty = False  # in-memory rules newer than the file (a non-strict save failed)
         self.revision = 0
-        self.load()
+        try:
+            self.load()
+        except Exception as e:  # noqa: BLE001 — a rules file never stops the daemon
+            self.rules = []
+            self._warn(f"规则文件无法解析（{type(e).__name__}），全部规则已忽略", bad=True)
 
     # ------------------------------------------------------------------ io
     def load(self) -> None:
-        self.rules, self.warning, self._bad_file = [], "", False
+        self.rules, self.warning, self._bad_file, self.dirty = [], "", False, False
         try:
             with open(self.path, "rb") as f:
                 raw = f.read(1024 * 1024 + 1)
@@ -256,12 +288,14 @@ class RulesStore:
             if not isinstance(d, dict) or not isinstance(d.get("rules"), list):
                 raise ValueError("格式不对")
             if d.get("version") != SCHEMA_VERSION:
-                raise ValueError(f"版本 {d.get('version')!r} 不支持")
-        except (ValueError, UnicodeDecodeError) as e:
+                raise ValueError(f"版本 {str(d.get('version'))[:12]!r} 不支持")
+        except (ValueError, UnicodeDecodeError, RecursionError) as e:
             if isinstance(e, json.JSONDecodeError):
                 why = f"JSON 第 {e.lineno} 行第 {e.colno} 列"
             elif isinstance(e, UnicodeDecodeError):
                 why = "不是 UTF-8"
+            elif isinstance(e, RecursionError):
+                why = "嵌套过深"
             else:
                 why = str(e)[:40]
             self._warn(f"规则文件格式错误（{why}），全部规则已忽略", bad=True)
@@ -270,7 +304,7 @@ class RulesStore:
         for item in d["rules"][:MAX_RULES]:
             try:
                 r = _rule_from_json(item)
-            except ValueError:
+            except Exception:  # noqa: BLE001 — quarantine this entry, keep the rest
                 bad += 1
                 continue
             if (r.mode, r.slot) in slots or any(x.id == r.id for x in out):
@@ -280,42 +314,45 @@ class RulesStore:
             out.append(r)
         bad += max(0, len(d["rules"]) - MAX_RULES)
         self.rules = out
-        if bad:
-            self._warn(f"规则文件有 {bad} 条无效规则，已忽略", bad=False)
+        if bad:  # the skipped entries stay in a backup (.bad-<time>) when the file is next rewritten
+            self._warn(f"规则文件有 {bad} 条无效规则，已忽略（下次保存前备份原文件）", bad=True)
 
     def _warn(self, msg: str, bad: bool) -> None:
         self.warning = msg
         self._bad_file = self._bad_file or bad
         log.warning("slot rules: %s", msg)
 
-    def save(self) -> bool:
-        d = {"version": SCHEMA_VERSION, "rules": [r.to_json() for r in self.rules]}
+    def _write(self, rules: list[SlotRule]) -> None:
+        """Atomic write of ``rules`` (tmp + fsync + rename, 0600); raises OSError, never half-writes."""
+        d = {"version": SCHEMA_VERSION, "rules": [r.to_json() for r in rules]}
+        folder = os.path.dirname(self.path) or "."
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".slot-rules.", dir=folder)  # mkstemp: mode 0600
         try:
-            folder = os.path.dirname(self.path) or "."
-            os.makedirs(folder, mode=0o700, exist_ok=True)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o600)
             if self._bad_file and os.path.exists(self.path):
                 os.replace(self.path, f"{self.path}.bad-{time.strftime('%Y%m%d-%H%M%S')}")
-            fd, tmp = tempfile.mkstemp(prefix=".slot-rules.", dir=folder)  # mkstemp: mode 0600
+                self._bad_file = False
+            os.replace(tmp, self.path)
+        except BaseException:
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(d, f, ensure_ascii=False, indent=1)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.chmod(tmp, 0o600)
-                os.replace(tmp, self.path)
-            except BaseException:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def save(self) -> bool:
+        try:
+            self._write(self.rules)
         except OSError as e:
             self.warning = f"规则保存失败（{type(e).__name__}）"
             log.warning("slot rules: save failed: %s", e)
             return False
-        if self._bad_file:
-            self._bad_file = False
-        self.warning = ""
+        self.dirty, self.warning = False, ""
         return True
 
     # ------------------------------------------------------------------ queries
@@ -329,21 +366,31 @@ class RulesStore:
         return next((r for r in self.rules if r.mode == mode and r.slot == slot), None)
 
     # ------------------------------------------------------------------ changes (each saves)
-    def _commit(self) -> bool:
+    def _commit(self, candidate: list[SlotRule], strict: bool = True) -> None:
+        try:
+            self._write(candidate)
+        except OSError as e:
+            msg = f"规则保存失败（{type(e).__name__}）"
+            log.warning("slot rules: save failed: %s", e)
+            if strict:  # nothing changed: the API error says so (no lingering warning)
+                raise RulesSaveError(msg + "，未做修改") from e
+            self.rules, self.dirty = candidate, True
+            self.warning = msg + "：停用只在本次运行有效"
+            self.revision += 1
+            return
+        self.rules, self.dirty, self.warning = candidate, False, ""
         self.revision += 1
-        return self.save()
 
     def put(self, mode: Mode, slot: int, kind: str, value: str, enabled: bool = True) -> SlotRule:
         """Create the rule of ``(mode, slot)`` (replacing the slot's previous rule)."""
         slot, kind, value = validate(mode, slot, kind, value)
         old = self.at(mode, slot)
         r = SlotRule(old.id if old else "r" + secrets.token_hex(5), mode, slot, kind, value, bool(enabled), "",
-                     self.clock())
-        self.rules = [x for x in self.rules if x is not old] + [r]
-        self._commit()
+                     _number(self.clock(), 0.0, MAX_CREATED, "created"))
+        self._commit([x for x in self.rules if x is not old] + [r])
         return r
 
-    def update(self, rid: str, **kw) -> SlotRule:
+    def update(self, rid: str, strict: bool = True, **kw) -> SlotRule:
         old = self.get(rid)
         if old is None:
             raise KeyError(rid)
@@ -355,20 +402,19 @@ class RulesStore:
             raise ValueError("enabled 必须是 true/false")
         note = "" if enabled else str(kw.get("note", old.note))[:MAX_NOTE]
         r = replace(old, kind=kind, value=value, enabled=enabled, note=note)
-        self.rules = [r if x.id == rid else x for x in self.rules]
-        self._commit()
+        self._commit([r if x.id == rid else x for x in self.rules], strict)
         return r
 
     def delete(self, rid: str) -> SlotRule:
         old = self.get(rid)
         if old is None:
             raise KeyError(rid)
-        self.rules = [x for x in self.rules if x.id != rid]
-        self._commit()
+        self._commit([x for x in self.rules if x.id != rid])
         return old
 
     def disable(self, rid: str, note: str) -> SlotRule | None:
+        """After a manual change on the rule's slot (keyboard): never raises on a write failure."""
         old = self.get(rid)
         if old is None or not old.enabled:
             return old
-        return self.update(rid, enabled=False, note=note)
+        return self.update(rid, strict=False, enabled=False, note=note)

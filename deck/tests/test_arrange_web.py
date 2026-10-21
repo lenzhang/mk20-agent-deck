@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import socket
+import tempfile
 import threading
 import time
 from argparse import Namespace
@@ -43,11 +44,15 @@ def tmux_sessions():
 
 
 class Client:
-    def __init__(self, port, host=None):
-        self.port = port
-        self.host = host or f"127.0.0.1:{port}"
+    """Browser stand-in: one-time link -> session cookie (rotated on page loads) + per-session CSRF token."""
+
+    def __init__(self, srv, host=None):
+        self.srv = srv
+        self.port = srv.port
+        self.host = host or f"127.0.0.1:{self.port}"
         self.token = None
-        self.cookie_name = f"mk20arr_{port}"
+        self.sid = None
+        self.cookie_name = f"mk20arr_{self.port}"
 
     def req(self, method, path, body=None, headers=None, raw=None, host=True):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -61,16 +66,34 @@ class Client:
         c.close()
         return r.status, hdrs, b
 
-    def login(self):
-        st, h, b = self.req("GET", "/")
+    def take_cookie(self, h):
+        m = re.match(rf"{self.cookie_name}=([^;]+);", h.get("set-cookie", ""))
+        if m:
+            self.sid = m.group(1)
+        return m
+
+    def cookie(self):
+        return {"Cookie": f"{self.cookie_name}={self.sid}"}
+
+    def authorize(self):
+        st, h, b = self.req("GET", self.srv.mint_url().split(f":{self.port}", 1)[1])
+        assert st == 200 and self.take_cookie(h), b
+        return h, b
+
+    def page(self):
+        st, h, b = self.req("GET", "/", headers=self.cookie())
         assert st == 200, b
         self.token = re.search(rb'name="mk20-csrf" content="([^"]+)"', b).group(1).decode()
-        assert h["set-cookie"].startswith(f"{self.cookie_name}={self.token};")
+        assert self.take_cookie(h)  # the session id rotates on every page load
         return b, h
+
+    def login(self):
+        self.authorize()
+        return self.page()
 
     def auth(self, **over):
         h = {"Origin": f"http://{self.host}", "X-MK20-CSRF": self.token,
-             "Cookie": f"{self.cookie_name}={self.token}", "Content-Type": "application/json",
+             "Cookie": f"{self.cookie_name}={self.sid}", "Content-Type": "application/json",
              "Sec-Fetch-Site": "same-origin"}
         h.update(over)
         return {k: v for k, v in h.items() if v is not None}
@@ -105,16 +128,17 @@ def web(tmp_path):
     stop = threading.Event()
     loop = threading.Thread(target=d.run, args=(stop,), name="deck-loop", daemon=True)
     loop.start()
-    srv = ArrangeServer(svc, 0, poll_interval=0.05)
+    sock = os.path.join(tempfile.mkdtemp(prefix="arr", dir="/tmp"), "run", "arrange.sock")
+    srv = ArrangeServer(svc, 0, poll_interval=0.05, socket_path=sock)
     assert srv.start()
-    cl = Client(srv.port)
+    cl = Client(srv)
     cl.login()
     # wait for the first background poll so tmux shows live sessions
     t0 = time.time()
     while Mode.TMUX not in d.bg_sessions and time.time() - t0 < 5:
         time.sleep(0.02)
     ns = Namespace(ctl=ctl, ads=ads, svc=svc, store=store, daemon=d, srv=srv, cl=cl, saved=saved, frames=frames,
-                   loop=loop, tmp=tmp_path)
+                   loop=loop, tmp=tmp_path, sock=sock)
     yield ns
     stop.set()
     srv.stop()
@@ -129,16 +153,16 @@ def test_binds_loopback_only(web):
 @pytest.mark.parametrize("host", ["evil.example:{p}", "127.0.0.1", "localhost", "127.0.0.1:1", "[::1]:{p}",
                                   "127.0.0.1:{p}.evil.example", "LOCALHOST:{p}x", "0.0.0.0:{p}"])
 def test_host_header_must_be_loopback_with_port(web, host):
-    cl = Client(web.srv.port, host=host.format(p=web.srv.port))
+    cl = Client(web.srv, host=host.format(p=web.srv.port))
     st, _, b = cl.req("GET", "/")
     assert st == 403 and json.loads(b)["code"] == "host"
-    cl.token = web.cl.token
+    cl.token, cl.sid = web.cl.token, web.cl.sid
     st, _ = cl.post("/api/clear", {"mode": "tmux", "slot": 0})
     assert st == 403
 
 
 def test_localhost_host_is_accepted(web):
-    cl = Client(web.srv.port, host=f"localhost:{web.srv.port}")
+    cl = Client(web.srv, host=f"localhost:{web.srv.port}")
     cl.login()
     assert cl.state()["ok"]
 
@@ -178,28 +202,40 @@ def test_cross_site_fetch_metadata_rejected(web):
     assert st == 403
 
 
-@pytest.mark.parametrize("hdr,cookie", [(None, "ok"), ("ok", None), ("bad", "ok"), ("ok", "bad"),
-                                        ("bad", "bad"), ("", "")])
-def test_csrf_header_and_cookie_both_required(web, hdr, cookie):
-    tok = web.cl.token
-    val = {"ok": tok, "bad": tok[:-2] + ("aa" if not tok.endswith("aa") else "bb"), "": "", None: None}
-    over = {"X-MK20-CSRF": val[hdr], "Cookie": None if cookie is None else f"{web.cl.cookie_name}={val[cookie]}"}
+def _bad(t):
+    return t[:-2] + ("aa" if not t.endswith("aa") else "bb")
+
+
+@pytest.mark.parametrize("hdr,cookie,code", [(None, "ok", "csrf"), ("ok", None, "auth"), ("bad", "ok", "csrf"),
+                                             ("ok", "bad", "auth"), ("bad", "bad", "auth"), ("", "", "auth"),
+                                             ("other", "ok", "csrf"), ("ok", "other", "csrf")])
+def test_session_cookie_and_its_csrf_token_both_required(web, hdr, cookie, code):
+    other = Client(web.srv)
+    other.login()  # a second, valid session: its CSRF token never works with our cookie (and vice versa)
+    tok, sid = web.cl.token, web.cl.sid
+    hv = {"ok": tok, "bad": _bad(tok), "": "", None: None, "other": other.token}[hdr]
+    cv = {"ok": sid, "bad": _bad(sid), "": "", None: None, "other": other.sid}[cookie]
+    over = {"X-MK20-CSRF": hv, "Cookie": None if cv is None else f"{web.cl.cookie_name}={cv}"}
     before = web.ctl.managers[Mode.TMUX].to_dict()
     st, j = web.cl.post("/api/clear", {"mode": "tmux", "slot": 0}, **over)
-    assert st == 403 and j["code"] == "csrf"
+    assert st == 403 and j["code"] == code
     assert web.ctl.managers[Mode.TMUX].to_dict() == before
+    st, _, b = web.cl.req("GET", "/api/state", headers=web.cl.auth(Origin=None, **over))
+    assert st == 403 and json.loads(b)["code"] == code
 
 
-def test_token_of_another_server_instance_is_useless(web):
+def test_session_of_another_server_instance_is_useless(web, tmp_path):
     other = ArrangeServer(web.svc, 0)
-    assert other.token != web.srv.token
-    st, j = web.cl.post("/api/clear", {"mode": "tmux", "slot": 0}, **{"X-MK20-CSRF": other.token,
-                        "Cookie": f"{web.cl.cookie_name}={other.token}"})
-    assert st == 403
+    sid, s = other.auth.create()
+    st, j = web.cl.post("/api/clear", {"mode": "tmux", "slot": 0}, **{"X-MK20-CSRF": s.csrf,
+                        "Cookie": f"{web.cl.cookie_name}={sid}"})
+    assert st == 403 and j["code"] == "auth"
 
 
-def test_state_read_needs_the_token_too(web):
+def test_state_read_needs_session_and_token(web):
     st, h, b = web.cl.req("GET", "/api/state")
+    assert st == 403 and json.loads(b)["code"] == "auth"
+    st, h, b = web.cl.req("GET", "/api/state", headers=web.cl.cookie())
     assert st == 403 and json.loads(b)["code"] == "csrf"
     assert "access-control-allow-origin" not in h
 
@@ -210,7 +246,7 @@ def test_body_limits_and_content_type(web):
     assert st == 413
     p = web.srv.port
     auth = (f"Host: 127.0.0.1:{p}\r\nOrigin: http://127.0.0.1:{p}\r\nX-MK20-CSRF: {web.cl.token}\r\n"
-            f"Cookie: {web.cl.cookie_name}={web.cl.token}\r\nContent-Type: application/json\r\n")
+            f"Cookie: {web.cl.cookie_name}={web.cl.sid}\r\nContent-Type: application/json\r\n")
     assert raw_http(p, f"POST /api/clear HTTP/1.0\r\n{auth}\r\n".encode()).startswith(b"HTTP/1.0 411")
     st, _, b = web.cl.req("POST", "/api/clear", raw=b'{"mode":"tmux","slot":0}',
                           headers=web.cl.auth(**{"Content-Type": "text/plain"}))
@@ -259,10 +295,12 @@ def test_page_headers_csp_nonce_cookie(web):
     assert h["referrer-policy"] == "no-referrer" and h["cache-control"] == "no-store"
     cookie = h["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=Strict" in cookie and "Path=/" in cookie
-    # second load: same token, fresh nonce
-    st, h2, b2 = web.cl.req("GET", "/")
+    assert "Max-Age=2592000" in cookie  # 30 days
+    # second load: same per-session CSRF token, fresh nonce, rotated session id
+    old = web.cl.sid
+    b2, h2 = web.cl.page()
     assert re.search(r"nonce-([^']+)'", h2["content-security-policy"]).group(1) != nonce
-    assert web.cl.token in b2.decode()
+    assert web.cl.sid != old and web.cl.token in b2.decode()
 
 
 def test_page_is_self_contained_chinese_and_uses_keyboard_labels(web):
@@ -323,7 +361,8 @@ def test_move_swaps_pins_persists_and_reaches_the_keyboard(web):
 
 
 @pytest.mark.parametrize("body,code,frag", [
-    ({"mode": "codex_desktop", "slot": 2, "key": "codex_desktop::nope"}, 400, "不存在"),
+    ({"mode": "codex_desktop", "slot": 2, "key": "codex_desktop::nope"}, 409, "不存在"),
+    ({"mode": "codex_desktop", "slot": 2, "key": 7}, 400, "会话"),
     ({"mode": "codex_desktop", "slot": 15, "key": "x"}, 400, "键位"),
     ({"mode": "codex_desktop", "slot": "2", "key": "x"}, 400, "键位"),
     ({"mode": "vim", "slot": 2, "key": "x"}, 400, "模式"),
@@ -386,17 +425,17 @@ def test_rules_crud(web):
     assert st == 404
 
 
-@pytest.mark.parametrize("body,frag", [
-    ({"mode": "codex_desktop", "slot": 1, "kind": "window", "value": "x"}, "tmux"),
-    ({"mode": "tmux", "slot": 1, "kind": "regex", "value": "x"}, "匹配方式"),
-    ({"mode": "tmux", "slot": 1, "kind": "cwd", "value": "deck"}, "绝对路径"),
-    ({"mode": "tmux", "slot": 1, "kind": "tool", "value": "vim"}, "ccai"),
-    ({"mode": "tmux", "slot": 1, "kind": "title", "session": "tmux:x:%9"}, "不存在"),
-    ({"mode": "tmux", "slot": 1, "kind": "title", "value": "x", "enabled": "yes"}, "enabled"),
+@pytest.mark.parametrize("body,code,frag", [
+    ({"mode": "codex_desktop", "slot": 1, "kind": "window", "value": "x"}, 400, "tmux"),
+    ({"mode": "tmux", "slot": 1, "kind": "regex", "value": "x"}, 400, "匹配方式"),
+    ({"mode": "tmux", "slot": 1, "kind": "cwd", "value": "deck"}, 400, "绝对路径"),
+    ({"mode": "tmux", "slot": 1, "kind": "tool", "value": "vim"}, 400, "ccai"),
+    ({"mode": "tmux", "slot": 1, "kind": "title", "session": "tmux:x:%9"}, 409, "不存在"),
+    ({"mode": "tmux", "slot": 1, "kind": "title", "value": "x", "enabled": "yes"}, 400, "enabled"),
 ])
-def test_rule_validation(web, body, frag):
+def test_rule_validation(web, body, code, frag):
     st, j = web.cl.post("/api/rules", body)
-    assert st == 400 and frag in j["error"]
+    assert st == code and frag in j["error"]
     assert web.store.rules == []
 
 
@@ -456,7 +495,7 @@ def test_no_loop_no_change_request_times_out_and_is_cancelled(tmp_path, monkeypa
     srv = ArrangeServer(svc, 0, poll_interval=0.05)
     assert srv.start()
     try:
-        cl = Client(srv.port)
+        cl = Client(srv)
         cl.login()
         st, _, b = cl.req("GET", "/api/state", headers=cl.auth(Origin=None))
         assert st == 503 and json.loads(b)["code"] == "busy"  # no snapshot yet
@@ -501,7 +540,8 @@ def test_stale_snapshot_when_loop_busy(web, monkeypatch):
     snap = web.cl.state()
     assert snap["stale"] is False
     gate = threading.Event()
-    th = threading.Thread(target=lambda: web.svc.calls.submit(lambda d: gate.wait(5), timeout=5), daemon=True)
+    th = threading.Thread(target=lambda: web.svc.calls.submit(lambda d: gate.wait(5), timeout=5, run_timeout=6),
+                          daemon=True)
     th.start()
     time.sleep(0.1)
     try:
@@ -606,22 +646,31 @@ def test_config_web_arrange_port(tmp_path, caplog):
         assert load_config(str(p)).arrange_port == want
 
 
-def test_cli_arrange_opens_the_page(web, tmp_path, capsys):
+def test_cli_arrange_opens_a_one_time_link(web, tmp_path, capsys):
     p = tmp_path / "c.toml"
     p.write_text(f"[web]\narrange_port = {web.srv.port}\n")
     opened = []
-    assert cmd_arrange(Namespace(config=str(p), print_only=False), opener=opened.append) == 0
-    assert opened == [f"http://127.0.0.1:{web.srv.port}/"]
-    assert cmd_arrange(Namespace(config=str(p), print_only=True), opener=opened.append) == 0
-    assert len(opened) == 1 and capsys.readouterr().out.strip().endswith(f"{web.srv.port}/")
+    assert cmd_arrange(Namespace(config=str(p), print_only=False, socket=web.sock), opener=opened.append) == 0
+    assert len(opened) == 1 and opened[0].startswith(f"http://127.0.0.1:{web.srv.port}/auth?t=")
+    out = capsys.readouterr().out
+    assert "auth?t=" not in out  # the token goes to the browser only
+    # the link works once: a fresh browser gets a session, a second use is refused
+    b = Client(web.srv)
+    st, h, _ = b.req("GET", opened[0].split(f":{web.srv.port}", 1)[1])
+    assert st == 200 and b.take_cookie(h)
+    st, _, body = b.req("GET", opened[0].split(f":{web.srv.port}", 1)[1])
+    assert st == 403 and "链接已失效" in body.decode()
+    assert cmd_arrange(Namespace(config=str(p), print_only=True, socket=web.sock), opener=opened.append) == 0
+    assert len(opened) == 1 and "/auth?t=" in capsys.readouterr().out
     p.write_text("[web]\narrange_port = 0\n")
-    assert cmd_arrange(Namespace(config=str(p), print_only=False), opener=opened.append) == 1
+    assert cmd_arrange(Namespace(config=str(p), print_only=False, socket=web.sock), opener=opened.append) == 1
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     free = s.getsockname()[1]
     s.close()
     p.write_text(f"[web]\narrange_port = {free}\n")
-    assert cmd_arrange(Namespace(config=str(p), print_only=False), opener=opened.append) == 1
+    assert cmd_arrange(Namespace(config=str(p), print_only=False, socket=str(tmp_path / "none.sock")),
+                       opener=opened.append) == 1
     assert "没有运行" in capsys.readouterr().out and len(opened) == 1
 
 

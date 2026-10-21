@@ -22,6 +22,10 @@ from .render.canvas import Renderer
 log = logging.getLogger(__name__)
 
 
+# One background poll at a time per process: a previous connection's poll thread (Supervisor makes a new
+# Daemon per connection, sharing the bg adapter instances) can never poll concurrently with the next one.
+_BG_POLL_LOCK = threading.Lock()
+
 OPEN_SETTINGS_EVENT = {"method": "ui.openSettings"}  # mk20-kbd 网页设置 key, exactly this (no payload)
 
 
@@ -100,6 +104,7 @@ class Daemon:
     # Cross-thread hand-off (webui.LoopCalls): the arrange web page queues its changes here; they run on this
     # loop thread inside step() (never from the HTTP thread) and force a frame.
     calls: object | None = None
+    bg_join_s: float = 6.0  # run() waits this long for its background poll thread to finish (adapter timeouts)
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -193,6 +198,10 @@ class Daemon:
     # -------------------------------------------------------------- background (other modes)
     def poll_background_once(self) -> int:
         """Poll every non-current mode once (worker thread or tests); results are queued, not applied."""
+        with _BG_POLL_LOCK:
+            return self._poll_background_locked()
+
+    def _poll_background_locked(self) -> int:
         ads = self.bg_adapters or self.controller.adapters
         current = self.controller.mode
         n = 0
@@ -215,7 +224,7 @@ class Daemon:
 
     def _bg_loop(self, stop: threading.Event, done: threading.Event) -> None:
         wait = self.bg_first_delay_s
-        while not (stop.wait(wait) or done.is_set()):
+        while not (done.wait(wait) or stop.is_set()):  # wakes at once when run() ends
             wait = self.bg_poll_s
             if not self.paused:
                 self.poll_background_once()
@@ -318,13 +327,18 @@ class Daemon:
             self.paused = True
         done = threading.Event()
         if self.bg_poll_s > 0:
-            threading.Thread(target=self._bg_loop, args=(stop, done), name="mk20-bg-poll", daemon=True).start()
+            bg = threading.Thread(target=self._bg_loop, args=(stop, done), name="mk20-bg-poll", daemon=True)
+            bg.start()
+        else:
+            bg = None
         if self.calls is not None:  # wake the loop at once when the web page queues a change
             self.calls.attach(lambda: self.events.put(InputEvent("ui", 0, "wake", t=self.clock())))
         try:
             self._run(stop)
         finally:
             done.set()
+            if bg is not None:  # a reconnect never leaves the old poll thread running next to the new one
+                bg.join(self.bg_join_s)
             if self.calls is not None:
                 self.calls.attach(None)
 

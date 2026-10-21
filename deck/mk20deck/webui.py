@@ -5,27 +5,35 @@ User decision 2026-10-22: arranging slots by config file is too complex — a pa
 user place a session on a key (``SlotManager.place`` = move + pin, swap), unpin / clear a key and manage
 **固定规则** (``rules.py``: directory / tmux window / title / tool → slot).
 
-Threads.  The HTTP server runs in its own daemon thread (stdlib ``ThreadingHTTPServer``) and never touches
+Threads.  The HTTP server runs in its own daemon threads (stdlib ``ThreadingHTTPServer``) and never touches
 the controller, the slot managers or the rules store: every read and write is a job queued on
 ``LoopCalls`` and executed by the deck loop thread (``Daemon.step`` while a keyboard is connected,
 ``Supervisor._wait`` while none is).  A change forces a keyboard frame (it shows within one loop
 iteration, plus a "网页：…" toast).  Reads return a snapshot built on the loop thread; if the loop is busy
 (e.g. mid-handshake) the last snapshot is returned marked ``stale``.
 
-Security (local page, but browsers can be tricked into talking to localhost):
+Bounds (Kimi K3 review, blocker 2): at most ``MAX_CONNECTIONS`` requests in flight (more → 503 at once),
+every request has a hard ``REQUEST_DEADLINE_S`` from accept (a slow trickle is cut off, not just an idle
+socket), ``LoopCalls`` holds at most ``MAX_PENDING`` jobs (full → 503), the loop wake-up is coalesced and one
+loop iteration runs at most ``DRAIN_MAX`` jobs, so the page can never starve the keyboard loop.
 
+Security (local page, but any local process — sandboxed apps too — can talk to 127.0.0.1):
+
+* ``GET /`` without a session shows only "请在 Mac 上运行 mk20deck arrange 打开"; a session comes from a
+  one-time token obtained through a 0600 unix socket (filesystem access required, see ``webauth``) and
+  redeemed at ``/auth?t=…`` (``SameSite=Strict; HttpOnly`` cookie, 30 days, id rotated on page load) with a
+  separate per-session CSRF token;
 * binds 127.0.0.1 only; ``Host`` must be exactly ``127.0.0.1:<port>`` or ``localhost:<port>``
   (DNS rebinding);
 * no CORS headers at all; ``OPTIONS``/``DELETE``/``PATCH``/``HEAD`` → 405;
 * every state change is ``POST``/``PUT`` with a JSON body (``Content-Type: application/json``,
   ``Content-Length`` ≤ 8 KiB, no chunked bodies), ``Origin`` equal to ``http://<Host>``, ``Sec-Fetch-Site``
-  (when sent) ``same-origin``, and the CSRF token in ``X-MK20-CSRF`` *and* the ``SameSite=Strict; HttpOnly``
-  cookie, both compared in constant time to the per-process token issued by ``GET /``;
-  ``GET /api/state`` needs the token too;
+  (when sent) ``same-origin``, a valid session cookie and the session's CSRF token in ``X-MK20-CSRF``
+  (constant-time compare); ``GET /api/state`` needs session + token too;
 * CSP ``default-src 'none'`` with per-response nonces for the inline style / script (no external assets),
   ``frame-ancestors 'none'``, ``nosniff``, ``no-referrer``, ``no-store``, CORP/COOP same-origin;
-* the API exposes session titles, tools, states, tmux window names and directory *names* only — never
-  full paths, summaries, prompts or anything from the device.
+* the API exposes session titles (never a title that is really prompt text: ``Session.title_private``),
+  tools, states, tmux window names and directory *names* only — never full paths, summaries or prompts.
 """
 from __future__ import annotations
 
@@ -38,23 +46,32 @@ import json
 import logging
 import re
 import secrets
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
+from urllib.parse import parse_qs
 
 from .adapters.base import BackendUnavailable
 from .model import MODE_CYCLE, PRIORITY, Mode, Session, State
 from .render.palette import MODE_NAME, MODE_STRIP, STATE_COLOR, STATE_TEXT
-from .rules import KIND_TEXT, KINDS, RULE_TOOLS, RulesStore, dir_name, worktree_root
+from .rules import KIND_TEXT, KINDS, RULE_TOOLS, RulesSaveError, RulesStore, dir_name, worktree_root
 from .slots import N_SLOTS, SlotManager
+from .webauth import SESSION_TTL_S, AuthSocket, AuthStore
 
 log = logging.getLogger(__name__)
 
 MAX_BODY = 8 * 1024
 MAX_PATH = 512
-JOB_TIMEOUT_S = 3.0
+MAX_CONNECTIONS = 8
+REQUEST_DEADLINE_S = 5.0   # from accept to the end of the response, header/body read included
+READ_TIMEOUT_S = 3.0       # per socket read
+JOB_TIMEOUT_S = 3.0        # the loop must pick a job up within this (else cancelled, 503)
+JOB_RUN_S = 1.5            # ... and finish a started one within this
 STATE_TIMEOUT_S = 2.0
+MAX_PENDING = 32
+DRAIN_MAX = 8
 RULE_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,32}$")
 MODE_KINDS = {Mode.DESKTOP: ("cwd", "title", "tool"), Mode.HERDR: ("title", "tool"),
               Mode.TMUX: ("cwd", "window", "title", "tool")}
@@ -63,11 +80,24 @@ _DARK_INK = {State.ERROR, State.THINKING, State.OFFLINE, State.UNKNOWN}
 
 
 class LoopTimeout(Exception):
-    """The deck loop did not pick the job up in time (the job is cancelled, nothing changed)."""
+    """The deck loop did not pick the job up in time (the job is cancelled, nothing changed), or a started
+    job did not finish in time (``started``: it may still take effect)."""
+
+    def __init__(self, started: bool = False) -> None:
+        super().__init__("started" if started else "pending")
+        self.started = started
+
+
+class LoopBusy(Exception):
+    """``MAX_PENDING`` jobs are already queued (503, nothing queued)."""
 
 
 class NotFound(LookupError):
     """API: the rule does not exist (404)."""
+
+
+class Conflict(Exception):
+    """API: the request no longer matches the deck (409): stale page or the mode cannot be read now."""
 
 
 class _Job:
@@ -85,50 +115,76 @@ class LoopCalls:
     """Hand-off from HTTP threads to the deck loop thread.
 
     ``submit`` (any thread) queues ``fn`` and blocks until the loop ran it; ``drain`` (loop thread only) runs
-    everything queued.  A job not started within ``timeout`` is cancelled, so a timed-out request never
-    changes anything later."""
+    at most ``max_items`` queued jobs per call.  A job not started within ``timeout`` is cancelled, so a
+    timed-out request never changes anything later.  The queue is bounded (``LoopBusy``) and the wake-up of
+    the loop is coalesced: one pending wake at a time, re-armed by ``drain`` while jobs are left."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_pending: int = MAX_PENDING) -> None:
+        self.max_pending = max_pending
         self._q: collections.deque[_Job] = collections.deque()
         self._lock = threading.Lock()
         self._ev = threading.Event()
         self._waker: Callable[[], None] | None = None
+        self._wake_pending = False
+        self.wakes = 0
         self.drained = 0
         self.last_thread: int | None = None  # ident of the thread that ran the last job (tests)
 
     def attach(self, waker: Callable[[], None] | None) -> None:
         """The running loop's wake-up (Daemon: an input event), or None when it stops."""
-        self._waker = waker
+        with self._lock:
+            self._waker, self._wake_pending = waker, False
+        if waker is not None and self.pending():
+            self._wake()
 
     def wait(self, timeout: float) -> None:
         self._ev.wait(timeout)
 
-    def submit(self, fn: Callable, timeout: float | None = None):
+    def pending(self) -> int:
+        with self._lock:
+            return sum(1 for j in self._q if j.state == "pending")
+
+    def _wake(self) -> None:
+        with self._lock:
+            w = self._waker
+            if w is None or self._wake_pending:
+                return
+            self._wake_pending = True
+        self.wakes += 1
+        try:
+            w()
+        except Exception:  # noqa: BLE001 — a dead loop only means the job times out
+            pass
+
+    def submit(self, fn: Callable, timeout: float | None = None, run_timeout: float | None = None):
         timeout = JOB_TIMEOUT_S if timeout is None else timeout
+        run_timeout = JOB_RUN_S if run_timeout is None else run_timeout
         job = _Job(fn)
         with self._lock:
+            live = [j for j in self._q if j.state == "pending"]
+            if len(live) != len(self._q):
+                self._q = collections.deque(live)  # forget cancelled jobs
+            if len(self._q) >= self.max_pending:
+                raise LoopBusy()
             self._q.append(job)
         self._ev.set()
-        w = self._waker
-        if w is not None:
-            try:
-                w()
-            except Exception:  # noqa: BLE001 — a dead loop only means the job times out
-                pass
+        self._wake()
         if not job.done.wait(timeout):
             with self._lock:
                 if job.state == "pending":
                     job.state = "cancelled"
                     raise LoopTimeout()
-            if not job.done.wait(30.0):  # started just now: let it finish
-                raise LoopTimeout()
+            if not job.done.wait(run_timeout):
+                raise LoopTimeout(started=True)
         if job.exc is not None:
             raise job.exc
         return job.result
 
-    def drain(self, daemon=None) -> int:
+    def drain(self, daemon=None, max_items: int = DRAIN_MAX) -> int:
+        with self._lock:
+            self._wake_pending = False
         n = 0
-        while True:
+        while n < max_items:
             with self._lock:
                 if not self._q:
                     self._ev.clear()
@@ -147,6 +203,13 @@ class LoopCalls:
                 job.done.set()
             n += 1
             self.drained += 1
+        with self._lock:
+            left = bool(self._q)
+            if not left:
+                self._ev.clear()
+        if left:
+            self._wake()  # the rest runs in the next loop iteration (keyboard frames in between)
+        return n
 
 
 def _hex(rgb) -> str:
@@ -155,6 +218,13 @@ def _hex(rgb) -> str:
 
 def _short(t: str, n: int = 24) -> str:
     return t if len(t) <= n else t[:n] + "…"
+
+
+def web_title(s: Session) -> str:
+    """Title as the API may show it: a title that is really prompt text becomes the id prefix."""
+    if getattr(s, "title_private", False):
+        return s.sid.native[:8]
+    return s.title or "?"
 
 
 class ArrangeService:
@@ -192,7 +262,7 @@ class ArrangeService:
     def _on_override(self, rule, why: str) -> None:
         """A keyboard / web change on a rule slot: the rule is disabled (noted on the page) and saved."""
         when = time.strftime("%m-%d %H:%M", time.localtime(self.wall()))
-        self.store.disable(rule.id, f"{why}（{when}）")
+        self.store.disable(rule.id, f"{why}（{when}）")  # never raises: a write failure becomes a warning
         log.info("slot rule %s (%s S%d) disabled: %s", rule.id, rule.mode.value, rule.slot + 1, why)
         self.push_rules()
 
@@ -225,28 +295,56 @@ class ArrangeService:
                 res = (None, f"读取失败：{type(e).__name__}", self.wall(), now)
             self._idle_bg[m] = res
 
-    def _view(self, m: Mode, daemon) -> tuple[SlotManager, list[Session], bool, str, str]:
-        """(slot manager to show, sessions of the mode, backend ok, reason, data source)."""
+    def batch(self, m: Mode, daemon) -> tuple[list[Session] | None, str, str]:
+        """``(sessions, error, source)``: the one session batch both the page view and changes of mode ``m``
+        use.  ``sessions`` is None when the mode cannot be read now (changes are refused, never applied to
+        an empty list).  Sources: live (current mode), background (other modes, bg poll), stale (the mode
+        was live more recently than its last bg poll), none (no data yet)."""
         ctl = self.ctl
         mgr = ctl.managers[m]
         if m == ctl.mode:
             ok, reason = ctl.backend[m]
-            return mgr, list(mgr.sessions.values()), ok, reason, "live"
+            return (list(mgr.sessions.values()) if ok else None), reason, "live"
         bg = self._bg(daemon).get(m)
         lp = ctl.last_poll_wall.get(m)
         if bg is None or (lp is not None and lp > bg[2]):
-            # no background result yet, or the mode was live more recently (just switched away from it)
+            if lp is None:
+                return None, "还没有读到会话（后台约每 10 秒读一次）", "none"
             ok, reason = ctl.backend[m]
-            return mgr.preview(None), list(mgr.sessions.values()), ok, reason, "stale"
-        sessions, err = bg[0], bg[1]
-        if sessions is None:
-            return mgr.preview(None), [], False, err or "不可用", "background"
-        sessions = [s for s in sessions if s.sid.key() not in mgr.excluded]
-        return mgr.preview(sessions), sessions, True, "", "background"
+            return (list(mgr.sessions.values()) if ok else None), reason, "stale"
+        if bg[0] is None:
+            return None, bg[1] or "不可用", "background"
+        return [s for s in bg[0] if s.sid.key() not in mgr.excluded], "", "background"
 
-    def known_sessions(self, m: Mode, daemon) -> dict[str, Session]:
-        _, sessions, _, _, _ = self._view(m, daemon)
-        return {s.sid.key(): s for s in sessions}
+    def _view(self, m: Mode, daemon) -> tuple[SlotManager, list[Session], bool, str, str]:
+        """(slot manager to show, sessions of the mode, backend ok, reason, data source)."""
+        mgr = self.ctl.managers[m]
+        sessions, err, source = self.batch(m, daemon)
+        if m == self.ctl.mode:
+            ok, reason = self.ctl.backend[m]
+            return mgr, list(mgr.sessions.values()), ok, reason, source
+        if sessions is None:
+            return mgr.preview(None), [], source == "none", err, source
+        return mgr.preview(sessions), sessions, True, "", source
+
+    def _prepare(self, m: Mode, daemon, body: dict, slot: int | None = None) -> tuple[SlotManager, dict]:
+        """The real manager of mode ``m``, brought to the same state the page saw (same batch as the
+        preview), plus the batch by key.  Refuses when the mode cannot be read or the page is stale."""
+        sessions, err, _ = self.batch(m, daemon)
+        if sessions is None:
+            raise Conflict(f"{MODE_NAME[m]} 现在读不到会话（{err}），暂不能修改")
+        mgr = self.ctl.managers[m]
+        if m != self.ctl.mode:
+            mgr.update(sessions)  # what the preview showed; persisted with the change
+        if slot is not None and "expect" in body:
+            e = mgr.slots[slot]
+            cur = e.key if (e is not None and not e.lost) else None
+            want = body.get("expect")
+            if want is not None and not isinstance(want, str):
+                raise ValueError("expect 无效")
+            if cur != want:
+                raise Conflict(f"S{slot + 1} 已经变了，请看最新的页面后再试")
+        return mgr, {s.sid.key(): s for s in sessions}
 
     # ------------------------------------------------------------------ snapshot
     def snapshot(self, daemon=None) -> dict:
@@ -284,7 +382,7 @@ class ArrangeService:
             e = vm.slots[i]
             r = rule_at.get(i)
             item = {"slot": i, "name": f"S{i + 1}", "pinned": False, "by_rule": False, "selected": False,
-                    "rule": self._rule_json(r, vm, by_key) if r else None}
+                    "key": None, "rule": self._rule_json(r, vm, by_key) if r else None}
             if e is None:
                 w = vm.waiting.get(i)
                 if w is not None:
@@ -302,7 +400,7 @@ class ArrangeService:
                              "state_text": STATE_TEXT[State.UNKNOWN]})
             slots.append(item)
         order = sorted(sessions, key=lambda s: (slot_of.get(s.sid.key(), N_SLOTS), -PRIORITY[s.state],
-                                                -s.updated_ms, s.title))
+                                                -s.updated_ms, web_title(s)))
         return {
             "mode": m.value, "name": MODE_NAME[m], "current": m == self.ctl.mode, "ok": ok, "reason": reason,
             "source": source, "overflow": vm.overflow, "kinds": list(MODE_KINDS[m]),
@@ -314,7 +412,7 @@ class ArrangeService:
 
     @staticmethod
     def _session_fields(s: Session) -> dict:
-        d = {"title": s.title or "?", "tool": s.tool.value, "dir": dir_name(s.cwd), "state": s.state.value,
+        d = {"title": web_title(s), "tool": s.tool.value, "dir": dir_name(s.cwd), "state": s.state.value,
              "state_text": STATE_TEXT[s.state]}
         if s.sid.mode == Mode.TMUX:
             d["window"] = s.window
@@ -328,7 +426,7 @@ class ArrangeService:
             status, who = "disabled", ""
         elif e is not None and e.rule == r.id:
             s = vm.sessions.get(e.key) or by_key.get(e.key)
-            status, who = "placed", (s.title if s else "?")
+            status, who = "placed", (web_title(s) if s else "?")
         elif r.slot in vm.waiting:
             status, who = "waiting", ""
         else:
@@ -352,7 +450,7 @@ class ArrangeService:
     def _mode(body: dict) -> Mode:
         try:
             return Mode(body.get("mode"))
-        except ValueError:
+        except (ValueError, TypeError):
             raise ValueError("模式无效") from None
 
     @staticmethod
@@ -365,27 +463,32 @@ class ArrangeService:
     def api_move(self, body: dict, daemon=None) -> dict:
         m, slot = self._mode(body), self._slot(body)
         key = body.get("key")
-        if not isinstance(key, str) or key not in self.known_sessions(m, daemon):
-            raise ValueError("会话已不存在，请刷新")
-        msg = self.ctl.managers[m].place(key, slot, "网页")
-        return self._after(m, msg, daemon)
+        if not isinstance(key, str):
+            raise ValueError("会话无效")
+        mgr, known = self._prepare(m, daemon, body, slot)
+        if key not in known:
+            raise Conflict("会话已不存在，请刷新")
+        return self._after(m, mgr.place(key, slot, "网页"), daemon)
 
     def api_unpin(self, body: dict, daemon=None) -> dict:
         m, slot = self._mode(body), self._slot(body)
-        return self._after(m, self.ctl.managers[m].unpin(slot, "网页"), daemon)
+        mgr, _ = self._prepare(m, daemon, body, slot)
+        return self._after(m, mgr.unpin(slot, "网页"), daemon)
 
     def api_clear(self, body: dict, daemon=None) -> dict:
         m, slot = self._mode(body), self._slot(body)
-        return self._after(m, self.ctl.managers[m].clear(slot, "网页"), daemon)
+        mgr, _ = self._prepare(m, daemon, body, slot)
+        return self._after(m, mgr.clear(slot, "网页"), daemon)
 
     def _rule_value(self, m: Mode, kind, body: dict, daemon) -> str:
         """Explicit ``value`` or, with ``session``, derived from that session on the Mac side (a directory
         rule takes the session's worktree / cwd path, which the page never sees)."""
         if body.get("session") is None:
             return body.get("value")
-        s = self.known_sessions(m, daemon).get(body.get("session"))
+        sessions, err, _ = self.batch(m, daemon)
+        s = {x.sid.key(): x for x in sessions or []}.get(body.get("session"))
         if s is None:
-            raise ValueError("所选会话已不存在，请刷新")
+            raise Conflict("所选会话已不存在，请刷新" if sessions is not None else f"{MODE_NAME[m]} 现在读不到会话（{err}）")
         if kind == "cwd":
             if not s.cwd:
                 raise ValueError("该会话没有目录信息")
@@ -394,6 +497,8 @@ class ArrangeService:
             return s.window or s.tmux_session
         if kind == "tool":
             return s.tool.value
+        if getattr(s, "title_private", False):
+            raise ValueError("该会话没有标题（只有提示词），不能用作标题规则")
         return s.title
 
     def api_rule_put(self, body: dict, daemon=None) -> dict:
@@ -434,11 +539,48 @@ class ArrangeService:
 
 
 # ---------------------------------------------------------------------- HTTP
+_BUSY_BODY = json.dumps({"ok": False, "error": "连接太多，请稍后重试", "code": "busy"}, ensure_ascii=False).encode()
+_BUSY_RESPONSE = (b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json; charset=utf-8\r\n"
+                  b"Content-Length: " + str(len(_BUSY_BODY)).encode() + b"\r\nCache-Control: no-store\r\n"
+                  b"Connection: close\r\n\r\n" + _BUSY_BODY)
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     request_queue_size = 16
     app: "ArrangeServer"
+
+    def __init__(self, *a, max_connections: int = MAX_CONNECTIONS, **kw) -> None:
+        self._slots = threading.BoundedSemaphore(max_connections)
+        self.rejected = 0
+        super().__init__(*a, **kw)
+
+    def process_request(self, request, client_address):
+        """At most ``max_connections`` handler threads; beyond that: an immediate 503, no thread."""
+        if not self._slots.acquire(blocking=False):
+            self.rejected += 1
+            try:
+                request.setblocking(False)
+                request.send(_BUSY_RESPONSE)
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def handle_error(self, request, client_address):  # a cut-off client is not worth a traceback
+        log.debug("arrange http: request from %s failed", client_address, exc_info=True)
 
 
 class _Reject(Exception):
@@ -447,17 +589,55 @@ class _Reject(Exception):
         self.status, self.error, self.code = status, error, code
 
 
+_NOAUTH_PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>MK20 会话安排</title></head>
+<body><h1>MK20 会话安排</h1><p>请在 Mac 上运行 <code>mk20deck arrange</code> 打开（安全起见）。</p>
+<p><code>python -m mk20deck arrange</code> 会用默认浏览器打开一个一次性的链接。</p></body></html>"""
+_AUTH_BAD_PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>MK20 会话安排</title></head>
+<body><h1>链接已失效</h1><p>这个链接只能用一次，并且 60 秒内有效。请在 Mac 上重新运行
+<code>mk20deck arrange</code>。</p></body></html>"""
+_AUTH_OK_PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>MK20 会话安排</title>
+<meta http-equiv="refresh" content="0;url=/"></head><body><p>已授权，正在打开…… <a href="/">继续</a></p></body></html>"""
+
+
 class _Handler(BaseHTTPRequestHandler):
     server: _Server
     server_version = "mk20deck-arrange"
     sys_version = ""
-    timeout = 10  # socket timeout: a stalled client never holds a thread for long
+    timeout = READ_TIMEOUT_S  # per read; the whole request is bounded by REQUEST_DEADLINE_S (setup)
 
     def version_string(self) -> str:
         return self.server_version
 
     def log_message(self, fmt, *args):  # quiet (stderr is the launchd log)
         log.debug("arrange http: " + fmt, *args)
+
+    # -------------------------------------------------------------- deadline
+    def setup(self) -> None:
+        super().setup()
+        self._t0 = time.monotonic()
+        self._deadline = threading.Timer(REQUEST_DEADLINE_S, self._expire)
+        self._deadline.daemon = True
+        self._deadline.start()
+
+    def _expire(self) -> None:
+        """Hard per-request deadline: a client that trickles bytes is cut off (reads fail, thread ends)."""
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def finish(self) -> None:
+        self._deadline.cancel()
+        try:
+            super().finish()
+        except OSError:
+            pass
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (OSError, ValueError):  # cut off by the deadline / client gone
+            self.close_connection = True
 
     # -------------------------------------------------------------- responses
     def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
@@ -482,6 +662,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, obj: dict, extra: dict | None = None) -> None:
         self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8",
                    extra)
+
+    def _html(self, status: int, text: str, extra: dict | None = None) -> None:
+        self._send(status, text.encode("utf-8"), "text/html; charset=utf-8", extra)
 
     def _discard(self) -> None:
         """Read (and drop) a small unread request body before closing, so the client gets our error response
@@ -519,10 +702,11 @@ class _Handler(BaseHTTPRequestHandler):
     def app(self) -> "ArrangeServer":
         return self.server.app
 
-    def _path(self) -> str:
+    def _path(self) -> tuple[str, str]:
         if len(self.path) > MAX_PATH:
             raise _Reject(414, "地址过长")
-        return self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
+        return path, query
 
     def _check_host(self) -> str:
         hosts = self.headers.get_all("Host") or []
@@ -541,9 +725,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise _Reject(403, "Origin 不匹配", "origin")
         self._check_fetch_site()
 
-    def _check_csrf(self) -> None:
-        tok = self.app.token.encode()
-        hdr = (self.headers.get("X-MK20-CSRF") or "").encode("utf-8", "replace")
+    def _cookie(self) -> str:
         cookie = http.cookies.SimpleCookie()
         for raw in self.headers.get_all("Cookie") or []:
             try:
@@ -551,10 +733,19 @@ class _Handler(BaseHTTPRequestHandler):
             except http.cookies.CookieError:
                 pass
         m = cookie.get(self.app.cookie_name)
-        ck = (m.value if m is not None else "").encode("utf-8", "replace")
-        ok = hmac.compare_digest(hdr, tok) & hmac.compare_digest(ck, tok)  # no short circuit
-        if not ok:
+        return m.value if m is not None else ""
+
+    def _session(self):
+        return self.app.auth.lookup(self._cookie())
+
+    def _check_session_csrf(self):
+        s = self._session()
+        if s is None:
+            raise _Reject(403, "未授权或会话已过期：请在 Mac 上运行 mk20deck arrange", "auth")
+        hdr = (self.headers.get("X-MK20-CSRF") or "").encode("utf-8", "replace")
+        if not hmac.compare_digest(hdr, s.csrf.encode()):
             raise _Reject(403, "页面令牌无效或已过期，请刷新页面", "csrf")
+        return s
 
     def _body(self) -> dict:
         if self.headers.get("Transfer-Encoding") is not None:
@@ -579,7 +770,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise _Reject(400, "请求体不完整")
         try:
             obj = json.loads(raw.decode("utf-8")) if raw else {}
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             raise _Reject(400, "JSON 无效") from None
         if not isinstance(obj, dict):
             raise _Reject(400, "JSON 必须是对象")
@@ -587,16 +778,24 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _run(self, fn: Callable):
         try:
-            return self.app.service.calls.submit(fn, JOB_TIMEOUT_S)
-        except LoopTimeout:
+            return self.app.service.calls.submit(fn)
+        except LoopBusy:
+            raise _Reject(503, "键盘程序忙，请稍后重试", "busy") from None
+        except LoopTimeout as e:
+            if e.started:
+                raise _Reject(503, "键盘程序忙：改动可能已生效，请刷新确认", "busy") from None
             raise _Reject(503, "键盘程序忙（可能正在连接），请稍后重试", "busy") from None
         except NotFound as e:
             raise _Reject(404, str(e) or "不存在") from None
+        except Conflict as e:
+            raise _Reject(409, str(e), "conflict") from None
+        except RulesSaveError as e:
+            raise _Reject(500, str(e), "save") from None
         except (ValueError, IndexError) as e:
             raise _Reject(400, str(e) or "参数无效") from None
 
     # -------------------------------------------------------------- methods
-    GET_ROUTES = ("/", "/api/state", "/favicon.ico")
+    GET_ROUTES = ("/", "/auth", "/api/state", "/favicon.ico")
 
     def _allowed(self, path: str) -> str:
         if path in self.GET_ROUTES:
@@ -612,7 +811,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._body_read = False
         try:
             host = self._check_host()
-            path = self._path()
+            path, query = self._path()
             allowed = self._allowed(path)
             if not allowed:
                 raise _Reject(404, "没有这个地址")
@@ -622,37 +821,54 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(405, {"ok": False, "error": f"只允许 {allowed}"}, {"Allow": allowed})
                 return
             if allowed == "GET":
-                self._get(path)
+                self._get(path, query)
             else:
                 self._check_origin(host)
-                self._check_csrf()
+                self._check_session_csrf()
                 self._mutate(path, self._body())
         except _Reject as e:
             self._fail(e)
+        except (OSError, ValueError) as e:  # socket cut off (deadline) / client gone: nothing to answer
+            log.debug("arrange http: %s", e)
+            self.close_connection = True
         except Exception:  # noqa: BLE001 — never kill the server thread on a bug
             log.exception("arrange web: request failed")
             self._fail(_Reject(500, "内部错误（见 mk20deck 日志）"))
 
-    def _get(self, path: str) -> None:
+    def _get(self, path: str, query: str) -> None:
         if path == "/favicon.ico":
             self._send(204, b"", "text/plain")
             return
+        if path == "/auth":
+            t = (parse_qs(query, max_num_fields=4).get("t") or [""])[0]
+            if not self.app.auth.redeem(t):
+                self._html(403, _AUTH_BAD_PAGE)
+                return
+            sid, _ = self.app.auth.create()
+            log.info("会话安排网页：已授权一个浏览器会话")
+            self._html(200, _AUTH_OK_PAGE, {"Set-Cookie": self.app.cookie(sid)})
+            return
         if path == "/":
+            s = self._session()
+            if s is None:
+                self._html(403, _NOAUTH_PAGE)
+                return
+            sid = self.app.auth.rotate(s)
             nonce = secrets.token_urlsafe(16)
-            body = self.app.page(nonce).encode("utf-8")
+            body = self.app.page(nonce, s.csrf).encode("utf-8")
             csp = (f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
                    "connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; "
                    "frame-ancestors 'none'")
-            cookie = f"{self.app.cookie_name}={self.app.token}; Path=/; HttpOnly; SameSite=Strict"
-            self._send(200, body, "text/html; charset=utf-8", {"Content-Security-Policy": csp, "Set-Cookie": cookie})
+            self._send(200, body, "text/html; charset=utf-8",
+                       {"Content-Security-Policy": csp, "Set-Cookie": self.app.cookie(sid)})
             return
         # /api/state
         self._check_fetch_site()
-        self._check_csrf()
+        self._check_session_csrf()
         svc = self.app.service
         try:
             snap = svc.calls.submit(lambda d: svc.snapshot(d), STATE_TIMEOUT_S)
-        except LoopTimeout:
+        except (LoopTimeout, LoopBusy):
             cached = svc.cache
             if cached is None:
                 raise _Reject(503, "键盘程序忙（可能正在连接），请稍后重试", "busy") from None
@@ -686,7 +902,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._body_read = False
         try:
             self._check_host()
-            path = self._path()
+            path, _ = self._path()
         except _Reject as e:
             self._fail(e)
             return
@@ -699,14 +915,20 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class ArrangeServer:
-    """The HTTP side.  ``start`` returns False (one warning, daemon keeps running) if the port is taken."""
+    """The HTTP side + the local authorization channel.  ``start`` returns False (one warning, the daemon keeps
+    running) if the port is taken."""
 
-    def __init__(self, service: ArrangeService, port: int, host: str = "127.0.0.1", poll_interval: float = 0.5) -> None:
+    def __init__(self, service: ArrangeService, port: int, host: str = "127.0.0.1", poll_interval: float = 0.5,
+                 sessions_path: str | None = None, socket_path: str | None = None,
+                 max_connections: int = MAX_CONNECTIONS) -> None:
         self.service = service
-        self.poll_interval = poll_interval  # serve_forever shutdown check
         self.host = host
         self.port = port
-        self.token = secrets.token_urlsafe(32)
+        self.poll_interval = poll_interval  # serve_forever shutdown check
+        self.max_connections = max_connections
+        self.auth = AuthStore(sessions_path)
+        self.socket_path = socket_path
+        self.auth_socket: AuthSocket | None = None
         self.httpd: _Server | None = None
         self.thread: threading.Thread | None = None
         self.allowed_hosts: frozenset[str] = frozenset()
@@ -716,9 +938,17 @@ class ArrangeServer:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/"
 
+    def mint_url(self) -> str:
+        """A one-time authorization link (60 s, single use) — for ``mk20deck arrange`` and in-process callers
+        such as a future keyboard link."""
+        return f"http://127.0.0.1:{self.port}/auth?t={self.auth.mint()}"
+
+    def cookie(self, sid: str) -> str:
+        return f"{self.cookie_name}={sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age={int(SESSION_TTL_S)}"
+
     def start(self) -> bool:
         try:
-            httpd = _Server((self.host, self.port), _Handler)
+            httpd = _Server((self.host, self.port), _Handler, max_connections=self.max_connections)
         except OSError as e:
             log.warning("会话安排网页未启动：%s:%s 不可用（%s）；守护进程照常运行", self.host, self.port,
                         e.strerror or e)
@@ -731,25 +961,33 @@ class ArrangeServer:
         self.thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": self.poll_interval},
                                        name="mk20-arrange-web", daemon=True)
         self.thread.start()
-        log.info("会话安排网页：%s", self.url)
+        if self.socket_path:
+            self.auth_socket = AuthSocket(self.socket_path, self.mint_url)
+            if not self.auth_socket.start():
+                self.auth_socket = None
+        log.info("会话安排网页：%s（用 mk20deck arrange 打开）", self.url)
         return True
 
     def stop(self) -> None:
+        if self.auth_socket is not None:
+            self.auth_socket.stop()
+            self.auth_socket = None
         if self.httpd is not None:
             self.httpd.shutdown()
             self.httpd.server_close()
             self.httpd = None
 
-    def page(self, nonce: str) -> str:
-        return render_page(nonce, self.token)
+    def page(self, nonce: str, csrf: str) -> str:
+        return render_page(nonce, csrf)
 
 
-def start_arrange_server(service: ArrangeService, port: int) -> ArrangeServer | None:
+def start_arrange_server(service: ArrangeService, port: int, sessions_path: str | None = None,
+                         socket_path: str | None = None) -> ArrangeServer | None:
     """``[web] arrange_port``: 0 = off; a busy port logs one warning and returns None."""
     if not port:
         log.info("会话安排网页已关闭（[web] arrange_port = 0）")
         return None
-    srv = ArrangeServer(service, port)
+    srv = ArrangeServer(service, port, sessions_path=sessions_path, socket_path=socket_path)
     return srv if srv.start() else None
 
 
@@ -955,7 +1193,7 @@ function deadToken() {
   tokenDead = true;
   // mk20deck restarted (new token): reload once to get a fresh page + cookie, never in a loop
   if (!sessionStorage.getItem('mk20-reloaded')) { sessionStorage.setItem('mk20-reloaded', '1'); location.reload(); return; }
-  showErr('页面令牌已失效（mk20deck 重启过），请刷新本页。');
+  showErr('授权已失效：请在 Mac 上运行 mk20deck arrange 重新打开。');
 }
 async function poll() {
   if (tokenDead) return;
@@ -965,7 +1203,7 @@ async function poll() {
     showErr(S.stale ? '键盘程序忙，显示的是上次的状态…' : '');
     render();
   } catch (e) {
-    if (e.code === 'csrf') deadToken();
+    if (e.code === 'csrf' || e.code === 'auth') deadToken();
     else showErr('连不上 mk20deck：' + e.message + '（2 秒后重试）');
     setConn(null);
   } finally { if (!tokenDead) setTimeout(poll, 2000); }
@@ -985,7 +1223,8 @@ async function act(method, path, body) {
     if (j.state) { S = j.state; render(); }
     toast(j.message || '完成');
   } catch (e) {
-    if (e.code === 'csrf') deadToken();
+    if (e.code === 'csrf' || e.code === 'auth') deadToken();
+    else if (e.code === 'conflict') { try { S = await api('GET', '/api/state'); render(); } catch (e2) { /* next poll */ } }
     toast(e.message, true);
   } finally { busy = false; document.body.style.removeProperty('cursor'); }
 }
@@ -1108,7 +1347,7 @@ function renderPanel() {
     row.appendChild(info);
     const put = h('button', 'btn pri', x.slot === sel ? '已在此键' : '放到这里');
     put.disabled = x.slot === sel && s.pinned;
-    put.onclick = () => act('POST', '/api/move', {mode: tab, slot: sel, key: x.key});
+    put.onclick = () => act('POST', '/api/move', {mode: tab, slot: sel, key: x.key, expect: s.key});
     const use = h('button', 'btn', '用作规则');
     use.onclick = () => { src = x.key; prefill(); renderPanel(); };
     row.appendChild(put); row.appendChild(use);
@@ -1151,8 +1390,9 @@ $('f-save').onclick = () => {
   if (!body.session && !body.value) { toast('请填写匹配值，或点会话的“用作规则”', true); return; }
   act('POST', '/api/rules', body);
 };
-$('p-unpin').onclick = () => act('POST', '/api/unpin', {mode: tab, slot: sel});
-$('p-clear').onclick = () => act('POST', '/api/clear', {mode: tab, slot: sel});
+function slotKey() { const md = modeData(); return md && sel !== null ? md.slots[sel].key : null; }
+$('p-unpin').onclick = () => act('POST', '/api/unpin', {mode: tab, slot: sel, expect: slotKey()});
+$('p-clear').onclick = () => act('POST', '/api/clear', {mode: tab, slot: sel, expect: slotKey()});
 $('p-close').onclick = () => { sel = null; src = null; render(); };
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sel !== null) { sel = null; src = null; render(); } });
 poll();
