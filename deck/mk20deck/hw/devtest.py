@@ -297,6 +297,7 @@ class DevTest:
     # Option-mode digit keys (document col,row) this host granted via ui.hidKeys.  devtest itself never sends
     # ui.hidKeys (and every ui.hello clears a map), so this stays empty: digit HID from those keys is a leak.
     granted_option_keys: frozenset = frozenset()
+    bottom_row_answer: str | None = None  # interactive: did ⌫/⏎/Esc delete/newline/cancel in the text window (y/n/s)
 
     # -------------------------------------------------- plumbing
     def _sec(self, name: str, status: str, **kw) -> dict:
@@ -753,6 +754,10 @@ class DevTest:
                     f"key:{col},{row}", f"按下并松开 黄色高亮键（第{row}行 第{col}列）"
                     + (f"（预期 HID：{exp[1]}）" if exp else "")
                     + (f"；不按则 {self.opts.step_timeout:.0f} 秒后自动跳过" if self.opts.headless else ""), (col, row))
+        if not self.opts.headless and self.host_pages and any(
+                not results[k]["ok"] for k in (f"{c},{r}" for c, r in HOST_HID_DOCS) if k in results):
+            # No HID monitor here: the user saw the text window (keys_intro), only they can confirm the bottom row.
+            self.bottom_row_answer = self.prompter.ask("keys_bottom_row", "底排 ⌫/⏎/Esc 是否分别在文本窗口里删除/换行/取消？")
         self._keys_section(results)
 
     def _keys_section(self, results: dict) -> None:
@@ -766,16 +771,25 @@ class DevTest:
             r.pop("cdc_exempt", None)
             if r["ok"]:
                 continue
-            ex = self._cdc_exempt(tuple(map(int, k.split(","))), *r["window"]) if r.get("window") else None
+            doc = tuple(map(int, k.split(",")))
+            ex = self._cdc_exempt(doc, *r["window"]) if r.get("window") else None
             if ex:
                 r["cdc_exempt"] = ex
-            if ex and (not monitored or r.get("hid_as_expected")):
-                (hid_keys if ex == "allowed" and monitored else unconfirmed).append(k)
-            else:
+            if not ex:
                 missing.append(k)
+            elif monitored:
+                if r.get("hid_as_expected"):
+                    (hid_keys if ex == "allowed" else unconfirmed).append(k)
+                else:
+                    missing.append(k)
+            else:  # interactive: only what the user saw on the Mac decides
+                seen = self._seen_typing(doc)
+                (hid_keys if seen else missing if seen is False else unconfirmed).append(k)
         manual = ({"needs_manual_confirmation": "这些键在 L1/L4 实时页只向 Mac 输入、无 CDC 事件；未能确认实时页"
                                                 "（前后普通键事件）/固件 ≥ 1.5 或确已输入：" + "、".join(unconfirmed)}
                   if unconfirmed else {})
+        if self.bottom_row_answer is not None:
+            manual["bottom_row_answer"] = self.bottom_row_answer
         lb = self.lay.fw_base if self.lay is not None else None
         kc_form = {k: r["fw"][1] for k, r in results.items() if r["fw"] and r["fw"][0] == "kc"}
         if kc_form:
@@ -847,6 +861,15 @@ class DevTest:
         self._sec("hid_leak", {"y": "fail", "n": "pass"}.get(a, "skip"), answer=a, rule=HID_RULE,
                   allowed_hid=self.allowed_hid(), host_pages=self.host_pages, note=LEAK_NOTE)
 
+    def _seen_typing(self, doc) -> bool | None:
+        """Interactive answers about keys that only type on the live page: the PTT by the IME question, the bottom
+        row by keys_bottom_row -- which counts only with proof of fw >= 1.5 (else it stays unconfirmed)."""
+        if tuple(doc) == PTT_DOC:
+            return self.report["sections"].get("ptt", {}).get("ime_triggered")
+        if not self.fw_bottom_hid:
+            return None
+        return {"y": True, "n": False}.get(self.bottom_row_answer or "")
+
     def _settle(self) -> None:
         """Re-judge the sections whose live-page evidence can come from later steps (keys, PTT)."""
         k = self.report["sections"].get("keys")
@@ -877,17 +900,28 @@ class DevTest:
         any CDC event of a key/knob that may not produce that HID type is a leak (``rest``; correlated -> fail).
         Only then is it exempted: inside the guided step of a key that may type (or next to only such keys' own
         CDC edges) it is that key's ``expected`` HID, ``unconfirmed`` (bottom row without fw/live-page proof) or
-        ``wrong_type`` (any other HID type during that key's step -> fail).  Everything else stays in ``rest``."""
+        ``wrong_type`` (any other HID type during that key's step -> fail).  Everything else stays in ``rest``.
+        A leak that would otherwise have been the step key's own HID is also listed in ``fast_follow`` with its gap
+        to the other key's event: a user pressing the next key < NEAR_S after the previous one looks the same."""
         steps = self._hid_steps()
         evs = [(t, self._doc(a, b)) for t, a, b, _ in key_evs]
-        out: dict = {"expected": {}, "unconfirmed": {}, "wrong_type": {}, "rest": []}
+        out: dict = {"expected": {}, "unconfirmed": {}, "wrong_type": {}, "rest": [], "fast_follow": []}
+
+        def name(d) -> str:
+            return f"{d[0]},{d[1]}" if d else "keycode"
+
         for t, n in samples:
-            near = [d for te, d in evs if abs(t - te) <= NEAR_S]
-            if any(not self._may_type(d, n) for d in near):
-                out["rest"].append((t, n))
-                continue
             step = next((x for x in steps if x[0] <= t <= x[1]), None)
-            doc, win = (step[2], step[:2]) if step else (min(near) if near else None, (t, t))
+            near = [(te, d) for te, d in evs if abs(t - te) <= NEAR_S]
+            blockers = [(te, d) for te, d in near if not self._may_type(d, n)]
+            if blockers:
+                out["rest"].append((t, n))
+                if step and self._may_type(step[2], n):
+                    te, d = min(blockers, key=lambda x: abs(t - x[0]))
+                    out["fast_follow"].append({"key": name(step[2]), "after": name(d), "type": n,
+                                               "gap_s": round(t - te, 3)})
+                continue
+            doc, win = (step[2], step[:2]) if step else (min(d for _, d in near) if near else None, (t, t))
             if doc is None:
                 out["rest"].append((t, n))
                 continue
@@ -928,6 +962,10 @@ class DevTest:
         extra = {}
         if c["correlated"] or cls["wrong_type"]:
             st = "fail"
+            why = [f"相关泄漏 {c['correlated']} 个", f"允许键步骤内错类型 {sum(map(len, cls['wrong_type'].values()))} 个"]
+            if cls["fast_follow"]:  # safe direction, but say how to tell a real leak from a fast user
+                why.insert(0, "若该键紧跟上一个按键（<0.35 s），请放慢重测（间隔见 fast_follow）")
+            extra["reason"] = "；".join(why)
         elif c["uncorrelated"] or hid_only or knob_hid:
             st = "warn"  # activity not tied to an MK20 press (Mac keyboard/mouse?) — check samples
         elif cls["unconfirmed"]:
@@ -944,10 +982,11 @@ class DevTest:
                   expected_hid=sum(cls["expected"].values()), expected_hid_by_key=cls["expected"],
                   unconfirmed_hid_by_key=cls["unconfirmed"], wrong_type_by_key=cls["wrong_type"],
                   rule=HID_RULE, allowed_hid=self.allowed_hid(), host_pages=self.host_pages,
-                  fw_bottom_row_hid=self.fw_bottom_hid, live_page_seen=live,
+                  fw_bottom_row_hid=self.fw_bottom_hid, live_page_seen=live, fast_follow=cls["fast_follow"],
                   limitation="只能看到“有无 HID 事件及类型”，看不到字符与来源设备；先归因：与任一不允许该类型的键/旋钮的 CDC 事件"
                              "相距 ±0.35 s（跨步骤）即判泄漏；再豁免：允许键在自己引导步骤内的预期类型 HID；同一步骤内其他类型→fail；"
-                             "期间若有人用 Mac 键盘会产生不相关样本(→warn)",
+                             "类型级盲区：与允许键同类型、晚到 >0.35 s 落入允许键步骤的泄漏，以及 PTT 窗内同类 flagsChanged 泄漏，"
+                             "无法与预期 HID 区分（计为 expected）；期间若有人用 Mac 键盘会产生不相关样本(→warn)",
                   note=note, **extra)
 
     def t_ptt(self) -> None:
@@ -1227,7 +1266,7 @@ def _brief(name: str, s: dict) -> str:
         if name == "via":
             return f"VIA v{s['protocol_version']} {s['layers']} 层 {s['matrix']['rows']}×{s['matrix']['cols']}，备份 {s['backup']}"
         if name == "hid_leak":
-            return s.get("note", "")[:80]
+            return (s.get("reason") or s.get("note", ""))[:80]
     except (KeyError, TypeError, ValueError):
         pass
     return ""

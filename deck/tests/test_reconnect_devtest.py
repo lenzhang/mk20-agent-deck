@@ -661,6 +661,27 @@ def test_hid_rule_cross_step_leak_is_attributed_not_exempted(tmp_path):
     assert r["2,4"]["window"][0] < hid.samples[0][0] < r["2,4"]["window"][1]  # really inside the allowed step
     assert leak["status"] == "fail" and leak["correlated"] == 1, leak
     assert leak["expected_hid_by_key"] == {"2,4": 1}  # 2,4's own Backspace, 0.45 s after the 5,3 release
+    # indistinguishable from a fast user: the fail says so and records the gap for the re-test
+    ff = leak["fast_follow"]
+    assert [(f["key"], f["after"], f["type"]) for f in ff] == [("2,4", "5,3", "keyDown")] and 0 < ff[0]["gap_s"] < 0.35
+    assert "请放慢重测" in leak["reason"]
+
+
+def test_hid_rule_fast_user_gets_a_retest_hint(tmp_path):
+    """Backspace pressed 0.15 s after the previous key's release: attributed to that key (safe direction), but the
+    fail tells the user to re-test slower and records the gap."""
+    state, hid = _fw15(), FakeHid()
+    acts = _live_walk(state, hid)
+    acts["key:2,1"] = lambda: (_tap(state, 1, 0), time.sleep(0.15), hid.add("keyDown"))  # = the fast ⌫ press
+    acts["key:2,4"] = lambda: None
+    rep = _walk(tmp_path, state, acts, hid, keys=("2,1", "2,4", "5,4"))
+    leak = rep["sections"]["hid_leak"]
+    assert leak["status"] == "fail" and leak["correlated"] == 1 and leak["expected_hid"] == 0
+    assert leak["reason"].startswith("若该键紧跟上一个按键（<0.35 s），请放慢重测")
+    (ff,) = leak["fast_follow"]
+    assert ff["key"] == "2,4" and ff["after"] == "2,1" and 0.1 <= ff["gap_s"] < 0.35
+    from mk20deck.hw.devtest import render_markdown
+    assert "请放慢重测" in render_markdown(rep)
 
 
 def test_hid_rule_stock_ptt_release_just_after_its_step_is_its_own(tmp_path):
@@ -808,3 +829,38 @@ def test_interactive_leak_question_states_the_rule(tmp_path, ui):
     assert "PTT（右 Option）" in asked["hid_leak"]
     assert ("底排 ⌫/⏎/Esc" in asked["hid_leak"]) is ui and ("底排 ⌫/⏎/Esc" in asked["keys_intro"]) is ui
     assert ("2,4" in leak["allowed_hid"]) is ui and rep["sections"]["keys"]["results"]["2,4"]["hid_expected"] is ui
+
+
+@pytest.mark.parametrize("hid_keys,answer,status", [(True, "y", "pass"), (True, "n", "fail"), (False, "y", "manual"),
+                                                    (True, "s", "manual")])
+def test_interactive_bottom_row_question_decides_the_consumed_keys(tmp_path, hid_keys, answer, status):
+    """Interactive mode has no HID monitor: the live page's ⌫/⏎/Esc send no CDC event, so the user's answer
+    decides them -- only with proof of fw >= 1.5 (ui.hidKeys); without it they stay unconfirmed (manual)."""
+    asked = {}
+
+    class Ask(ScriptedPrompter):
+        def ask(self, step, question, choices="yn"):
+            asked[step] = question
+            return super().ask(step, question, choices)
+
+    state = _fw15(hid_keys)
+    acts = {"key:2,1": lambda: _tap(state, 1, 0), "key:5,4": lambda: _tap(state, 4, 3)}  # bottom row: no CDC
+    opts = DevTestOptions(fps_seconds=0.2, ack_frames=2, step_timeout=0.4, only=("keys", "hid_leak"),
+                          key_subset=("2,1", "2,4", "3,4", "4,4", "5,4"))
+    rep = DevTest(opts, Ask(acts, answers={"hid_leak": "n", "keys_bottom_row": answer}), str(tmp_path),
+                  find_ports=lambda: ["/dev/mock"], open_transport=lambda p: state["dev"]).run()
+    keys = rep["sections"]["keys"]
+    assert asked["keys_bottom_row"] == "底排 ⌫/⏎/Esc 是否分别在文本窗口里删除/换行/取消？"
+    assert keys["status"] == status and keys["bottom_row_answer"] == answer, keys
+    bottom = ["2,4", "3,4", "4,4"]
+    assert {"pass": keys["hid_only_expected"], "fail": keys["missing"], "manual": keys["unconfirmed"]}[status] == bottom
+
+
+def test_interactive_bottom_row_question_not_asked_without_host_pages(tmp_path):
+    state = {"dev": MockDevice(), "present": True}
+    prompter = ScriptedPrompter({"key:2,4": lambda: _tap(state, 1, 3)}, answers={"hid_leak": "n"})
+    opts = DevTestOptions(fps_seconds=0.2, ack_frames=2, step_timeout=0.3, only=("keys", "hid_leak"),
+                          key_subset=("2,4",))
+    rep = DevTest(opts, prompter, str(tmp_path), find_ports=lambda: ["/dev/mock"],
+                  open_transport=lambda p: state["dev"]).run()
+    assert ("ask", "keys_bottom_row") not in prompter.log and "bottom_row_answer" not in rep["sections"]["keys"]
