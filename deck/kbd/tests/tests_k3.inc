@@ -401,10 +401,13 @@ static void test_writers(void)
     long tb = t_ms(); fill_tile(&s, 5, 0x5A5A);
     CHECK(screen_wait_idle(&s, 150) == -1);
     /* back-off: ~20 ms per retry, no spin. Under sanitizers on a loaded host the writer may get fewer slots in a fixed
-     * window (was flaky: e=1 in 150 ms), so wait (bounded) for two retries and bound the rate by the elapsed time. */
-    do { screen_stats(&s, w, &e, &d); if (e >= 2) break; usleep(10000); } while (t_ms() - tb < 2000);
+     * window (was flaky: e=1 in 150 ms), so wait (bounded) for two retries and bound the rate by the elapsed time.
+     * d==1 is sampled between attempts: during an attempt the writer has taken the panel (dirty=0, busy) until the
+     * failure re-dirties it, so wait for both instead of asserting on one racy snapshot (was flaky: d=0 under ASan). */
+    do { screen_stats(&s, w, &e, &d); if (e >= 2 && d == 1) break; usleep(5000); } while (t_ms() - tb < 2000);
     long el = t_ms() - tb;
     CHECK(e >= 2 && d == 1);
+    if (!(e >= 2 && d == 1)) fprintf(stderr, "  missing-fb back-off: e=%u d=%d after %ld ms\n", (unsigned)e, d, el);
     CHECK((long)e <= el / 10 + 3);
     if ((long)e > el / 10 + 3) fprintf(stderr, "  retry spin: %u retries in %ld ms\n", (unsigned)e, el);
     FILE *f = fopen(path, "w"); fclose(f);
