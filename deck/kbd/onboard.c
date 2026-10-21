@@ -440,11 +440,17 @@ void onboard_tick(kbd_t *k, int64_t now)
         o->agent_was = agent_active(k); o->render |= 1u << 19;
     }
     if (o->suspend) {
+        /* Bounded: 5 s with no key/knob event at all resyncs the held state, so a GD32 key-up lost while
+         * suspended (edge-triggered reports, no state resync) cannot leave L1/L4 dead. Safe: a key's up
+         * still releases to its press-time owner (release_key does not consult `pressed`); swallowed
+         * presses have owner 0; a knob held that long has already had its long-press decision. */
+        if (now - o->input_at >= 5000 && (o->pressed || o->knob_down[0] || o->knob_down[1])) {
+            o->pressed = 0; o->knob_down[0] = o->knob_down[1] = 0;
+            if (o->ui.down[0]) ui_knob(&o->ui,1,UI_UP,now);
+            fprintf(stderr, "mk20-kbd: e-stop pause: no input for 5 s, held state resynced\n");
+        }
         int held = o->pressed != 0 || o->knob_down[0] || (o->knob_down[1] && k->k2.reports_release);
-        /* Bounded: 5 s with no key/knob event at all also resumes, so a GD32 key-up lost while suspended
-         * cannot leave L1 dead. Safe: swallowed presses keep owner 0 (their late up stays swallowed) and
-         * pre-stop presses still release to their original owner. */
-        if ((!held && now - o->input_at >= 1000) || now - o->input_at >= 5000) { o->suspend = 0; o->render |= 1u << 19; }
+        if (!held && now - o->input_at >= 1000) { o->suspend = 0; o->render |= 1u << 19; }
     }
     if (o->grace_shown && !grace(o,now)) { o->grace_shown = 0; o->render = ALL_PANELS; }
     status_sync(k);

@@ -424,8 +424,10 @@ static void ux_suspend_lost_up(void)
     key(&k,3,1);  /* pressed while suspended; the GD32 loses its key-up (and fb20's) */
     live(&k,1000); key(&k,1,1); key(&k,1,0); int n=ux_frames(p[0],frames,ids,64);
     CHECK(!ux_count(frames,n,"keyStateChanged")); /* "held" keys: still suspended after 1 s */
-    live(&k,4000); /* 5 s without any key/knob event: bounded fallback resumes forwarding */
+    knob(&k,100,1); /* K1 down whose up is lost too */
+    live(&k,4000); /* 5 s without any key/knob event: held state resynced, forwarding resumes */
     key(&k,1,1); key(&k,1,0); n=ux_frames(p[0],frames,ids,64); CHECK(ux_count(frames,n,"keyStateChanged")==2);
+    CHECK(onboard_current(&k)==ONBOARD_L1); /* the stale K1 down did not turn into a long-press -> HOME */
     key(&k,3,0); n=ux_frames(p[0],frames,ids,64); CHECK(!ux_count(frames,n,"keyStateChanged")); /* late up of a swallowed press */
     close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
 }
