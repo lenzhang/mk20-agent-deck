@@ -1,6 +1,6 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-21 11:27 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-21 11:54 SGT
 
 ## 1. 当前状态
 
@@ -17,6 +17,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-21 11:54** mk20deck Kimi K3 评审 GO（hooks 不影响 Claude 权限/不存内容、设备无法让 Mac 打开任意 URL、tmux 无注入）；唯一 MAJOR（心跳按 ack 计时导致设备侧间隔=周期+RTT）已改为按实际写出时间计时，另修 hooks 安装原子写/python3 检查（release/1.4.0 a0d6537，已重新部署）。真机：上一连接 1421 个心跳全部接受、0 拒绝、0 超时；Mac 屏幕睡眠时设备停在 L1 显示「Mac 已休眠」（jpg_ok 持续增长、jpg_bad 0）。四条线（rc3 / 界面 / 网页 / mk20deck）交叉评审全部 GO。剩余生产门槛：1.4.0 24 h soak（10-22 11:24 到期，已设到期自动判定）+ 用户亲手验证 fb20 模式键 / fb19 打开网页 / L1 PTT / K1 跳「需要我」。会话内每 2 h 自动巡检 soak 与 Mac 服务。
 - **10-21 11:27** **1.4.0-rc1 已装机并确认 good**（11:15，slot A，1.3.1 保留回退；tar sha256 b3071a20…1e04，tag v1.4.0-rc1）。验收 12/12 + 1.4 专项：网页默认运行、错误 Host 403、键盘配对码 0600 + 配对成功 + 配对后删除、无 CSRF/跨源写 403、维护操作走通、退出后 401；**开机自动进 L1 实机通过**（无任何按键，jpg_ok>0）。装机时发现并修复 mk20deck 两个问题：Mac 屏幕睡眠时设备重启后不重连、暂停时未重发「Mac 已休眠」画面（ebe8814 及后续，已重新部署）。Kimi K3：界面 r1/r2 NO-GO → 修复（急停后暂停转发 + 5 s 兜底重同步、fb20 租约竞态、状态探针移到工作线程、急停常驻提示、安全模式显示配对码）→ r3 GO；网页 GO（5 个 MINOR 已修）。make test 全绿（tests 863 / agent 398 / onboard 11348 / kbd 4018×2 / ui 41396）。1.4.0 上 24 h soak 11:24 开始。交接文档已重写（HANDOFF.md）。
 - **10-21 10:19** Mac 端 mk20deck 已部署为 launchd 常驻服务（~/mk20-deploy，固定在 feature/deck-attention 7babf2b；配置 ~/.config/mk20-agent-deck/config.toml：terminal_app=Ghostty、tmux 新会话=ccai sg）：经 usb0 桥连接，ui.hello + 心跳被 1.3.1 接受，已识别真实 Codex Desktop 线程。**在 1.3.1 上进主界面：HOME 按「会话 L1」**（1.4.0 起开机自动进）。Claude hooks（「哪个 agent 需要我」）已装入 ~/.claude/settings-glm.json（ccai 所有模式的源头）与 settings.json，备份 *.bak-mk20-20261021-095159；新会话生效。崩溃循环验收 PASS（3 次 SIGKILL → 安全模式 reason=crash-loop，自检只 WARN、HID 可用 → exit-safe-mode 钩子恢复；tools/mk20-crashloop-gate.sh，72d24a9）。1.3.1 soak 11.5 h：0 重启、0 真实崩溃（5 次为验收诱发）、0 复合设备丢失、ping 0 丢包、mk20-kbd RSS 2.3 MB 不涨；soak 报的 126 次 kd-restart 是 soak 工具 pgrep 自匹配 bug（716f5d4 已修）。Kimi K3：rc3 GO；网页单一入口 GO（5 个 MINOR 修复中）；界面修订 NO-GO（e-stop 后转发、租约竞态、devstat 在安全主循环做 I/O、急停指示）→ 修复中。release/1.4.0（网页 + mk20deck）make test 全绿（tests 861 / agent 396）。PRD v1.4 草案 §15（待批准）。
 - **10-20 22:56** 1.3.1 上机后续：① 全量测试在本机（dev-mbp，colima + mk20-build:trixie，BusyBox 1.27.2，测试 PATH 只含设备上真有的命令）**715 通过 / 0 失败**；先前 46 个失败全是镜像缺 procps（pkill），构建镜像与 BusyBox 1.27.2 配方已入库 deck/tools/build-image（e9fb269）。② soak 改为 K4 规则（原先要求 kd=1，K4 上每个样本都会判失败；37b455d），24 h soak 已在 1.3.1 上开跑（22:31，~/mk20-backup/soak/soak-20261020-223110.*），首样本 ok。③ 「usb-storage 每 23 s 复位」：1-1 实际是 Realtek 无线网卡（0bda:b711），1.3.x 默认不启动 mk20-router，开机 20 min 复位 0 次——当前版本不再出现；router 本身问题保留。④ 交互评审（Claude 子代理）+ Kimi K3 交叉验证（codex 满载不可用）：11 证实 / 3 部分 / 0 驳回；另发现物理键盘无法切换 Desktop/herdr/tmux 模式。⑤ 设置入口盘点：1.3.1 上普通用户没有可用的设置通道（LS「应用」恒失败、网页默认关且配对坏），HOME 20 格中 8 格数据设备已有却显示 unknown。⑥ 用户决定：键盘网页 http://172.30.250.2:8780 为唯一设置入口，按键只显示；「网页设置」键按下由 Mac 端自动打开网页（不做二维码：网页只在 USB 链路上可达）。进行中（各自 worktree）：feature/deck-ui-hello（mk20deck ui.hello/心跳 + ui.openSettings）、feature/fw-ux（HOME 真实状态、开机 Mac 在线进 L1、右下角键还给「模式」、只读设置页、配对码显示）、feature/web-settings（网页默认开启、配对修复、维护页、单一 provider 目录、deck/SETTINGS.md）。合并后出 1.4.0，过 Kimi 交叉评审 + 上机验收 + 崩溃循环 + 24 h soak。
