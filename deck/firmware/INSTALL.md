@@ -94,8 +94,8 @@ historical UI behavior; K4 itself never starts stock KD.
 
 At >=3 exits in 300 s supervision latches `--safe-mode`: static error pages,
 GD32 typing/local PTT HID and K2 e-stop, with ECM/usb0 and adb preserved. Rescue is
-safe mode + usb0 admin web + adb + loader A/B. Web handlers are a separate U3
-implementation; the K4 hooks are available over adb now. See
+safe mode + usb0 admin web + adb + loader A/B. The default-on usb0 web
+(`FEATURE_WEB=1`) has a maintenance page that publishes these hooks; adb works too. See
 [MAINT-HOOKS.md](MAINT-HOOKS.md) for fixed-name `restart-kbd`, `exit-safe-mode`,
 validated `debug` and the read-only state snapshot. There is no stock-KD switch or
 hidden key combo; old `use-kd`, `mk20-use-kd`, `state/kbd-fallback` files are ignored.
@@ -115,13 +115,16 @@ ignored with a warning (`mk20d config` shows the effective values).
 | `FEATURE_COMPOSITE` `FEATURE_HID` `FEATURE_ADB` | 1 | 0/1 |
 | `FEATURE_KBD` | 1 (1.3.0) | 0/1; **developer-only opt-out** at 0, also env `MK20_KBD=0`; never starts KD, panels unpainted with no router/UI |
 | `FEATURE_ROUTER` | 1 | Legacy standalone router, only with developer kbd opt-out; does not paint panels |
-| `FEATURE_AGENT_CTL` `FEATURE_HID_SCROLL` `FEATURE_K2_ESTOP` `FEATURE_K2_RELEASE` | 0 | 0/1; optional agent socket/descriptor/release-capability knobs; K4 kbd always retains K2 e-stop |
+| `FEATURE_WEB` | 1 | 0/1; usb0 settings/maintenance web `http://<device .2>:8780` (`mk20-agent --web`, supervised by `mk20d web`; pairing code shown on the keyboard). FAT `mk20-no-web` / env `MK20_WEB=0` force 0. It cannot enable the agent. User guide: [../SETTINGS.md](../SETTINGS.md) |
+| `FEATURE_AGENT` | 0 | 0/1; developer opt-in: adds the agent task runtime to the same web process once `/run/mk20/kbd.sock` exists (needs `FEATURE_AGENT_CTL=1`). Run-level permission is still a physical keyboard allow. FAT `mk20-no-agent` / env `MK20_AGENT=0` force 0 |
+| `FEATURE_AGENT_CTL` | 0 | 0/1; mk20-kbd opens the agent control socket `/run/mk20/kbd.sock` (env `MK20_AGENT_CTL`); not needed for the settings web |
+| `FEATURE_HID_SCROLL` `FEATURE_K2_ESTOP` `FEATURE_K2_RELEASE` | 0 | 0/1; optional descriptor/release-capability knobs; K4 kbd always retains K2 e-stop |
 | `BRIDGE_PORT` | 17890 | 1024–65535 |
 | `FLAP_DROPS` / `FLAP_WINDOW_S` | 5 / 60 | 2–50 / 10–600 |
 | `LOG_MAX_KB` / `LOG_KEEP` | 256 / 3 | 16–4096 / 1–9 |
 
 Flag files on the FAT (`/mnt/SDCARD/…`) override the config: `mk20-no-composite`, `mk20-no-adb`,
-`mk20-gadget-nohid`. See RECOVERY.md for the rescue flags.
+`mk20-gadget-nohid`, `mk20-no-web`, `mk20-no-agent`. See RECOVERY.md for the rescue flags.
 
 ## 5. Mac setup (M4, firmware 1.1.0+)
 

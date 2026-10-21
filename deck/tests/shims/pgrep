@@ -2,11 +2,12 @@
 # mock: prints $MOCK_DIR/pgrep.out lines (pids) if present
 # keyed mode ($MOCK_DIR/pgrep.keyed): KeyboardDevice -> pgrep.kd; mk20-kbd/mk20-router ->
 # pgrep.kbd/pgrep.router if present (including empty = absent), otherwise real live test processes.
-# Anything else -> pgrep.out. Keep these process lists independent.
+# mk20-agent (usb0 web) -> pgrep.agent if present. Anything else -> pgrep.out. Keep these lists independent.
 if [ -f "$MOCK_DIR/pgrep.keyed" ]; then
   pat=""; for a in "$@"; do pat=$a; done
   case "$pat" in
     *KeyboardDevice*) f=$MOCK_DIR/pgrep.kd;;
+    *mk20-agent*) f=$MOCK_DIR/pgrep.agent; [ -f "$f" ] || f=$MOCK_DIR/pgrep.out;;
     *mk20-kbd*|*mk20-router*)
       case "$pat" in *mk20-kbd*) f=$MOCK_DIR/pgrep.kbd;; *) f=$MOCK_DIR/pgrep.router;; esac
       if [ ! -f "$f" ]; then

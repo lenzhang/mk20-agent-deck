@@ -28,8 +28,8 @@ ScreenKey host app (wiki images `MK20_Software_edid_*.jpg`, `MK10_Software_edid_
 
 ## 2. Design principles taken from stock
 1. **Secrets never on device** (stock types the Wi-Fi password in the host app). Our page shows a
-   "Mac/网页" key and a hint: API keys and Wi-Fi passwords are set from the Mac or a local web page
-   (`http://172.30.250.1:8780`, placeholder).
+   "Mac/网页" key and a hint: API keys and Wi-Fi passwords are set in the keyboard's own web page
+   (`http://172.30.250.2:8780`, opened in a Mac browser; see `deck/SETTINGS.md`).
 2. **Sub-screen split into K1 / K2 halves** (stock "Encoder 214×142" regions) for permanent knob hints.
 3. **Wheel = move, press = confirm** (Waveshare OSD convention): K2 rotate moves the focus ring through
    the current list, K2 press confirms; K1 rotate adjusts the focused numeric value; K1 press shows the

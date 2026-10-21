@@ -133,6 +133,8 @@ def test_health_status_not_degraded_by_router(dev, rel, g1, kbd_enabled):
     (dev.mock / "pgrep.kd").write_text("")
     (dev.mock / "pgrep.kbd").write_text("456\n" if kbd_enabled else "")
     (dev.mock / "pgrep.router").write_text("")
+    (dev.mock / "pgrep.agent").write_text("789\n")   # default-on usb0 web (FEATURE_WEB=1) is part of a healthy device
+    dev.p("tmp/mk20/gadget.env").write_text("MK20_ECM_IP=172.30.250.2\n")
     if kbd_enabled:
         status = dev.p("run/mk20/kbd.status"); status.parent.mkdir(parents=True, exist_ok=True)
         status.write_text(json.dumps({"knob_ok": 6, "panels_written": 21, "write_errors": 0}))
@@ -152,7 +154,7 @@ def test_health_status_not_degraded_by_router(dev, rel, g1, kbd_enabled):
 
 def test_boot_launch_gated(dev, rel, g1):
     r, log = run_boot(dev, rel)
-    assert "supervisor launched" in log
+    assert "INFO mk20d router v=9.9.9 supervisor launched" in log   # not the (default-on) web supervisor line
     dev.p("mnt/SDCARD/mk20-no-router").write_text("")
     r, log = run_boot(dev, rel)
     assert "not started (mode=composite" in log and "enabled=0" in log

@@ -27,7 +27,8 @@ int httpd_expired(int64_t start, int64_t now);
 int httpd_authorized(const char *header, const char token[65]);
 int httpd_token(const char *path, char token[65]);
 int httpd_random_hex(char *out, size_t bytes);
-/* Numeric IPv4, explicit address only. no_device is restricted to loopback. */
+/* Numeric IPv4, explicit address only. no_device is restricted to loopback; a device
+ * (usb0) address is a unicast host .2 outside 0/8, 127/8, 169.254/16 and >=224/4. */
 int httpd_address(const char *listen, int no_device, char host[128]);
 int httpd_listen(const char *listen, int no_device);
 typedef struct {
@@ -37,6 +38,8 @@ typedef struct {
     void (*tick)(void *);
     void (*disconnect)(void *, uint64_t);
     void (*attach_pump)(void *, void (*)(void *), void *);
+    /* Optional: nonzero when tick() has no time-driven work, so an empty pump may block. */
+    int (*idle)(void *);
 } http_handler_t;
 /* connected_fd is a socketpair test seam, -1 for accept(). Owns supplied fds. */
 typedef struct { int listener; const int *fds; size_t count; http_handler_t handler; } http_service_t;

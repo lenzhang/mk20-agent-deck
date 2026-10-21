@@ -36,32 +36,58 @@ remain failures under bind-denying sandboxes; `-k 'not real_socket'` explicitly
 selects the supplemental IPC checks. See [NOTES-agent-a6.md](NOTES-agent-a6.md)
 for limits, acceptance evidence and registration snippets (not executed).
 
-A7 adds `build/mk20-agent --web` at `http://172.30.250.2:8780/` and `/chat`.
-`--mcp --web` (either order) shares one cooperative HTTP pump, keyboard client,
-policy loop and task slot. The listeners share four connection slots. The web
-listener requires Linux `SO_BINDTODEVICE("usb0")` and the exact default address;
-there is no fallback. Host testing requires the explicit pair
-`--web-listen 127.0.0.1:PORT --web-no-bindtodevice`.
+A7 adds `build/mk20-agent --web` at `http://172.30.250.2:8780/` and `/chat`; it is
+the default-on usb0 settings/maintenance web (`FEATURE_WEB=1`, supervised by `mk20d web`,
+user guide [../SETTINGS.md](../SETTINGS.md)).
 
-Pair using `POST /pair/start`, then `POST /pair {"code":"…"}` with the code
-physically displayed by the keyboard. A missing/refused/nonrendered display returns
-`display_unavailable`; **the current keyboard rule engine refuses control-page
-writes, so production pairing stays unavailable until the separate keyboard track
-provides that display**. The code is never returned by HTTP or logged. Sessions
-use HttpOnly/SameSite=Strict cookies and separate CSRF tokens, held only in memory.
-Every non-GET requires the canonical device Origin or `Sec-Fetch-Site: same-origin`;
-paired mutations also need `X-CSRF-Token`. A supplied Origin must always be exactly
-`http://172.30.250.2:8780`, including when testing with the loopback override.
+- **Modes.** `--web` alone is settings/maintenance only: no keyboard client, no VNC or
+  model runtime inputs (`--vnc-*`, `--provider/--net` are refused), and the task API
+  answers `agent_disabled`. `--kbd-sock`/`--mcp` add the agent runtime (mk20d does this
+  only with `FEATURE_AGENT=1` and `/run/mk20/kbd.sock`). The web cannot enable the agent;
+  run-level permission stays a physical keyboard allow. An idle settings-only process
+  blocks in `poll()` (250 ms) instead of the 5 ms pump.
+- **Listener.** `--web-listen A.B.C.2:8780` is the usb0 address mk20d reads from
+  `/tmp/mk20/gadget.env` (`MK20_ECM_IP`, so a configured `ECM_SUBNET` works). Linux
+  `SO_BINDTODEVICE("usb0")`, a unicast `.2` outside 0/8, 127/8, 169.254/16 and >=224/4,
+  and port 8780 are required; there is no fallback. Host testing requires the explicit
+  pair `--web-listen 127.0.0.1:PORT --web-no-bindtodevice`.
+- **DNS rebinding / CSRF.** Every request's `Host` must equal the bound numeric
+  `IP:8780`, and a supplied `Origin` must equal `http://IP:8780` (403 otherwise, pages
+  included). Every non-GET needs that Origin or `Sec-Fetch-Site: same-origin`; paired
+  mutations also need `X-CSRF-Token`. Sessions are HttpOnly/SameSite=Strict cookies plus
+  a separate CSRF token, in memory only (two sessions, 30 min idle, 12 h absolute).
+  `GET /api/session` returns the CSRF token to a same-origin paired tab.
+- **Pairing.** `POST /pair/start` writes a 6-digit code (rejection-sampled from
+  /dev/urandom) to `--web-pair-file` (default `/run/mk20/pair-code`, which mk20-kbd
+  displays): exactly `code=NNNNNN\nexpires_uptime=<uptime s + 300>\n`, mode 0600,
+  `.pair-code.<random>.tmp` + rename, in a directory owned by the service and not
+  group/other-writable (`--web-uptime-file`, default `/proc/uptime`, is a test seam).
+  The file is removed on pairing, expiry, exhaustion, lockout, startup and exit. A code
+  allows 5 wrong attempts; at most 6 new codes per 10 min; 10 wrong codes in 10 min lock
+  pairing for 10 min (`429 rate_limited` with `retry_after_s`). A repeated start keeps
+  the live code and its attempt count. The code is never returned by HTTP or logged.
 
 After pairing:
 
-- `POST /secret/{provider|vnc} {"value":"…"}` returns only set/length;
+- `POST /secret/{provider|vnc} {"value":"…"}` returns only `{"set":true}` (no length);
   `GET` returns set status only; `DELETE` removes it. No secret read endpoint exists.
-- `PUT /config/net` and `/config/provider` accept the `agentcfg.py` device schemas;
-  `GET` returns validated configuration and key paths only. Unknown fields, foreign
-  direct routes, arbitrary proxies, provider URLs and key paths are refused.
+- `GET /api/catalogue`: provider/model choices from the generated table
+  `src/web_providers.inc` (`../tools/gen-providers.py` from `../share/providers.json`,
+  the same source as `kbd/providers.inc`; `make test` runs `--check`), the secret names
+  and the proxy hosts of the single proxy-host rule (usb0 peer `.1`, `172.30.250.1`,
+  `10.20.0.1`, `169.254.7.1`; board profile also `127.0.0.1`).
+- `PUT /api/provider {"provider","model"}` derives URL/route/key path from the catalogue;
+  `PUT /config/net` and `/config/provider` accept the `agentcfg.py` device schemas
+  (new writes need a supported provider and a catalogue model; an older saved model
+  still loads). `GET` returns validated configuration and key paths only. Writes take
+  the `.apply-lock` process lock (409 `busy` if kbd holds it), persist
+  `.apply-in-progress` before replacing the file and clear it only after the directory
+  fsync; while the marker exists readers fail closed (`409 apply_incomplete`).
   `POST /test` performs a device-side provider reachability check over that route.
-- `POST /api/tasks {"goal":"…"}` queues while disabled as `waiting_allow`.
+- `GET /api/status` and `POST /api/maint/{restart-kbd|exit-safe-mode|debug}`: the
+  maintenance page, see [../firmware/MAINT-HOOKS.md](../firmware/MAINT-HOOKS.md)
+  (`--web-health-file`, `--web-maint-dir`, `--web-debug-file`).
+- Agent mode only: `POST /api/tasks {"goal":"…"}` queues while disabled as `waiting_allow`.
   `GET /api/tasks/{id}` returns state/steps/fixed summaries and retained shot numbers.
   `GET /api/tasks/{id}/steps/{n}/shot.jpg` reads the five-entry memory ring.
   `POST /api/tasks/{id}/pause|resume|stop` controls the task; Stop revokes keyboard
@@ -78,7 +104,7 @@ Production action safety still requires the A5 trusted window detector and measu
 calibration. No web operation grants permission or accepts physical confirmation.
 
 `make test` includes the sanitized A7 C suite and builds `mk20-agent-web-test`.
-That fixture alone accepts injected pairing/HTTP/model fds, synthetic trusted window
+That fixture alone accepts injected HTTP/model fds, synthetic trusted window
 hints and a test clock override; its SSE interval is accelerated to test backpressure.
 `python -m pytest deck/agent/tests/test_web.py` includes enabled real TCP/Unix gates
 and socketpair supplements. See [NOTES-agent-a7.md](NOTES-agent-a7.md) for the

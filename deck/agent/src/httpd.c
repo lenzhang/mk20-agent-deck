@@ -149,8 +149,10 @@ static int address(const char *s, int no_device, struct sockaddr_in *a, char hos
     unsigned port = 0; for (const char *p = colon; *p; p++) { if (*p < '0' || *p > '9' || port > 6553) return -1; port = port*10+(unsigned)(*p-'0'); } if (!port || port > 65535) return -1;
     memset(a,0,sizeof *a); a->sin_family = AF_INET; a->sin_port = htons((uint16_t)port);
     if (inet_pton(AF_INET,b,&a->sin_addr) != 1 || !a->sin_addr.s_addr || (ntohl(a->sin_addr.s_addr) >> 24) >= 224) return -1;
-    int loopback = (ntohl(a->sin_addr.s_addr) >> 24) == 127;
-    if ((no_device && !loopback) || (!no_device && strcmp(b,"172.30.250.2"))) return -1;
+    uint32_t ip = ntohl(a->sin_addr.s_addr); int loopback = (ip >> 24) == 127;
+    /* Same rule as mk20lib v_subnet + the device's .2 (ECM_IP), so a configured ECM_SUBNET works. */
+    int device = (ip >> 24) && !loopback && (ip >> 16) != 0xa9fe && (ip & 0xff) == 2;
+    if ((no_device && !loopback) || (!no_device && !device)) return -1;
     snprintf(host,128,"%.15s:%u",b,port); return 0; /* inet_pton-validated IPv4: <=15 chars */
 }
 int httpd_address(const char *s, int no_device, char host[128]) { struct sockaddr_in a; return address(s,no_device,&a,host); }
@@ -314,11 +316,17 @@ int httpd_run_services(const http_service_t *services, size_t count, volatile si
     while (!*stop && !server.failed) {
         for (size_t i = 0; i < count; i++) if (services[i].handler.tick) services[i].handler.tick(services[i].handler.ctx);
         pump(&server);
-        int open = 0;
-        for (size_t i = 0; i < count; i++) if (services[i].listener >= 0) open = 1;
-        for (int i = 0; i < HTTPD_CONNECTIONS; i++) if (c[i].fd >= 0) open = 1;
+        int open = 0, clients = 0, idle = 1;
+        for (size_t i = 0; i < count; i++) { if (services[i].listener >= 0) open = 1; if (!services[i].handler.idle || !services[i].handler.idle(services[i].handler.ctx)) idle = 0; }
+        for (int i = 0; i < HTTPD_CONNECTIONS; i++) if (c[i].fd >= 0) open = clients = 1;
         if (!open) break;
-        (void)poll(NULL,0,5);
+        if (idle && !clients) {
+            /* Nothing to drive and nobody connected: sleep in poll() on the listeners
+             * (an always-on settings service should not wake 200 times a second). */
+            struct pollfd l[2]; nfds_t n = 0;
+            for (size_t i = 0; i < count; i++) if (services[i].listener >= 0) l[n++] = (struct pollfd){services[i].listener,POLLIN,0};
+            (void)poll(l,n,250);
+        } else (void)poll(NULL,0,5);
     }
     goto end;
 bad:

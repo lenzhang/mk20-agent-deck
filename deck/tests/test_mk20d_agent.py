@@ -1,4 +1,4 @@
-"""A8b host-only agent integration. Run the real mk20d in an isolated fake root.
+"""A8b host-only agent integration + usb0 web supervision. Run the real mk20d in an isolated fake root.
 
 Linux uses BusyBox when available. Darwin adapters supply only missing host utilities
 (flock, proc uptime, stat -c); no USB/network/device operation runs. kbd.sock is an
@@ -119,13 +119,10 @@ def dev(tmp_path):
             pass
 
 
-@pytest.fixture
-def agent(dev, rel, g1):
-    conf(dev, "FEATURE_AGENT=1\n")
+def fake_agent(dev, rel, g1, ip="172.30.250.2"):
     (g1 / "configs/c.1/ecm.usb0").mkdir()
-    sock = dev.p("run/mk20/kbd.sock")
-    sock.parent.mkdir(parents=True)
-    sock.touch()
+    dev.p("tmp/mk20/gadget.env").write_text(f"MK20_ECM_IP={ip}\nMK20_ECM_MASK=255.255.255.0\n")
+    dev.p("run/mk20").mkdir(parents=True, exist_ok=True)
     b = rel / "bin/mk20-agent"
     b.write_text(f'''#!{sys.executable}
 import json,os,signal,sys,time
@@ -143,7 +140,30 @@ if (m/'crash').exists():
 while True: time.sleep(0.05)
 ''')
     b.chmod(0o755)
+
+
+def web_args(dev, ip="172.30.250.2"):
+    return ["--web", "--web-listen", f"{ip}:8780", "--web-config-dir", str(dev.p("data/mk20/agent")),
+            "--web-secrets-dir", str(dev.p("data/mk20/secrets")), "--web-pair-file", str(dev.p("run/mk20/pair-code")),
+            "--web-health-file", str(dev.p("tmp/mk20/health.json")), "--web-maint-dir", str(dev.p("tmp/mk20/maint")),
+            "--web-debug-file", str(dev.p("data/mk20/state/maint/debug.conf"))]
+
+
+@pytest.fixture
+def agent(dev, rel, g1):
+    # Legacy agent-only semantics (web explicitly off): runs only with kbd.sock.
+    conf(dev, "FEATURE_AGENT=1\nFEATURE_WEB=0\n")
+    fake_agent(dev, rel, g1)
+    sock = dev.p("run/mk20/kbd.sock")
+    sock.touch()
     return sock
+
+
+@pytest.fixture
+def web(dev, rel, g1):
+    # Release defaults: FEATURE_WEB=1, FEATURE_AGENT=0, no keyboard control socket.
+    fake_agent(dev, rel, g1, ip="172.30.9.2")
+    return dev
 
 
 def calls(dev):
@@ -171,8 +191,7 @@ def test_agent_single_instance_priority_and_stop(dev, rel, agent):
     assert wait(lambda: calls(dev))
     assert dev.run(rel / "sbin/mk20d", "agent", timeout=5).returncode == 0
     assert len(calls(dev)) == 1
-    assert calls(dev)[0]["args"] == ["--web", "--kbd-sock", str(agent), "--web-config-dir",
-                                     str(dev.p("data/mk20/agent")), "--web-secrets-dir", str(dev.p("data/mk20/secrets"))]
+    assert calls(dev)[0]["args"] == web_args(dev) + ["--kbd-sock", str(agent)]
     log = dev.read("tmp/mk20/agent.log")
     if "agent priority: nice=10 verified" in log:
         assert calls(dev)[0]["nice"] == 10
@@ -205,7 +224,7 @@ def test_agent_kill_switch_stops_live_child(dev, rel, agent, how):
     p = dev.start(rel / "sbin/mk20d", "agent")
     assert wait(lambda: calls(dev))
     if how == "conf":
-        conf(dev, "FEATURE_AGENT=0\n")
+        conf(dev, "FEATURE_AGENT=0\nFEATURE_WEB=0\n")
     else:
         dev.p("mnt/SDCARD/mk20-no-agent").touch()
     assert p.wait(8) == 0 and not (dev.mock / "agent.pid").exists()
@@ -335,9 +354,10 @@ def test_maint_trims_agent_log_in_place(dev, rel, g1):
     assert p.wait(5) == -signal.SIGTERM
 
 
-@pytest.mark.parametrize("enabled,binary", [(False, True), (True, False), (True, True)])
-def test_boot_agent_launch_is_optional_and_detached(dev, rel, g1, enabled, binary):
-    conf(dev, f"FEATURE_AGENT={int(enabled)}\nFEATURE_ROUTER=0\n")
+@pytest.mark.parametrize("enabled,web_on,binary", [(False, False, True), (True, False, False), (True, False, True),
+                                                   (False, True, True), (False, True, False)])
+def test_boot_agent_launch_is_optional_and_detached(dev, rel, g1, enabled, web_on, binary):
+    conf(dev, f"FEATURE_AGENT={int(enabled)}\nFEATURE_WEB={int(web_on)}\nFEATURE_ROUTER=0\n")
     b = rel / "bin/mk20-agent"
     if binary:
         b.write_text("#!/bin/sh\nexit 0\n")
@@ -348,7 +368,7 @@ def test_boot_agent_launch_is_optional_and_detached(dev, rel, g1, enabled, binar
     ld.write_text('echo "$*" > "$MK20_ROOT/tmp/mk20/confirmed"\n')
     r, log = run_boot(dev, rel)
     assert r.returncode == 0
-    assert ("INFO mk20d agent v=9.9.9 supervisor launched" in log) == (enabled and binary)
+    assert ("INFO mk20d web v=9.9.9 supervisor launched" in log) == ((enabled or web_on) and binary)
     assert dev.read("tmp/mk20/confirmed") == "confirm 9.9.9"
     assert not dev.p("mnt/SDCARD/cmd-reboot").exists()
 
@@ -430,7 +450,7 @@ def test_agent_manifest_uses_regular_loader_check(dev, damage):
 
 
 def test_boot_confirms_despite_agent_crashes(dev, rel, agent):
-    conf(dev, "FEATURE_AGENT=1\nFEATURE_ROUTER=0\n")
+    conf(dev, "FEATURE_AGENT=1\nFEATURE_WEB=0\nFEATURE_ROUTER=0\n")
     dev.p("data/mk20/state").mkdir(parents=True, exist_ok=True)
     dev.p("data/mk20/state/pending").write_text("9.9.9\n")
     (dev.mock / "crash").touch()
@@ -443,3 +463,125 @@ def test_boot_confirms_despite_agent_crashes(dev, rel, agent):
     assert dev.run(rel / "sbin/mk20d", "selftest").returncode == 0
     assert dev.read("tmp/mk20/gadget.args") == "--boot"
     assert not dev.p("mnt/SDCARD/cmd-reboot").exists()
+
+
+
+# ---------------- usb0 settings web (FEATURE_WEB, default on) ----------------
+
+@pytest.mark.parametrize("config,env,fat,want", [
+    ("", {}, False, "1"), ("FEATURE_WEB=0\n", {}, False, "0"), ("FEATURE_WEB=yes\n", {}, False, "1"),
+    ("", {"MK20_WEB": "0"}, False, "0"), ("FEATURE_WEB=1\n", {"MK20_WEB": "1"}, True, "0"),
+])
+def test_web_flags(dev, rel, config, env, fat, want):
+    conf(dev, config)
+    if fat:
+        dev.p("mnt/SDCARD/mk20-no-web").touch()
+    out = dev.run(rel / "sbin/mk20d", "config", env=env)
+    c = dict(x.split("=", 1) for x in out.stdout.splitlines())
+    assert out.returncode == 0 and c["FEATURE_WEB"] == want
+    assert c["FEATURE_AGENT"] == "0" and c["FEATURE_AGENT_CTL"] == "0"  # the web never turns the agent on
+
+
+def test_web_default_on_without_agent_or_kbd_socket(dev, rel, web):
+    p = dev.start(rel / "sbin/mk20d", "web")
+    assert wait(lambda: calls(dev))
+    # Bound to the gadget.env usb0 address (configurable ECM_SUBNET), no keyboard socket, no agent.
+    assert calls(dev)[0]["args"] == web_args(dev, "172.30.9.2")
+    assert not dev.p("run/mk20/kbd.sock").exists()
+    assert "INFO mk20d web v=9.9.9 mode=web url=http://172.30.9.2:8780" in dev.read("data/mk20/logs/mk20d.log")
+    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+    assert h["web"] == dict(enabled=True, running=True, url="http://172.30.9.2:8780")
+    assert h["agent"]["enabled"] is False
+    st = dev.run(rel / "sbin/mk20d", "selftest").stdout
+    assert "INFO web running (http://172.30.9.2:8780)" in st and "INFO agent disabled" in st
+    assert dev.run(rel / "sbin/mk20d", "agent", timeout=5).returncode == 0  # legacy name: same single instance
+    assert len(calls(dev)) == 1
+    dev.p("tmp/mk20-agent-stop").touch()
+    assert p.wait(8) == 0 and not (dev.mock / "agent.pid").exists()
+
+
+@pytest.mark.parametrize("how", ["conf", "fat", "env"])
+def test_web_kill_switches(dev, rel, web, how):
+    if how == "env":
+        r = dev.run(rel / "sbin/mk20d", "web", env={"MK20_WEB": "0"}, timeout=5)
+        assert r.returncode == 0 and not calls(dev)
+        return
+    p = dev.start(rel / "sbin/mk20d", "web")
+    assert wait(lambda: calls(dev))
+    if how == "conf":
+        conf(dev, "FEATURE_WEB=0\n")
+    else:
+        dev.p("mnt/SDCARD/mk20-no-web").touch()
+    assert p.wait(8) == 0 and not (dev.mock / "agent.pid").exists()
+    assert "INFO mk20d web v=9.9.9 stop (disabled/stop file)" in dev.read("data/mk20/logs/mk20d.log")
+
+
+@pytest.mark.parametrize("damage", ["composite", "missing", "symlink", "ip-not-device", "ip-garbage"])
+def test_web_waits_for_usb0_address(dev, rel, g1, web, damage):
+    genv = dev.p("tmp/mk20/gadget.env")
+    if damage == "composite":
+        (g1 / "configs/c.1/ecm.usb0").rmdir()
+    elif damage == "missing":
+        genv.unlink()
+    elif damage == "symlink":
+        real = dev.tmp / "elsewhere.env"; real.write_text(genv.read_text()); genv.unlink(); genv.symlink_to(real)
+    else:
+        genv.write_text("MK20_ECM_IP=172.30.250.3\n" if damage == "ip-not-device" else "MK20_ECM_IP=$(reboot).2\n")
+    p = dev.start(rel / "sbin/mk20d", "web")
+    time.sleep(2.5)
+    assert p.poll() is None and not calls(dev)
+    if damage == "composite":
+        (g1 / "configs/c.1/ecm.usb0").mkdir()
+    else:
+        genv.unlink(missing_ok=True); genv.write_text("MK20_ECM_IP=172.30.9.2\n")
+    assert wait(lambda: calls(dev), 12)
+    assert calls(dev)[0]["args"][:3] == ["--web", "--web-listen", "172.30.9.2:8780"]
+    dev.p("tmp/mk20-agent-stop").touch()
+    assert p.wait(8) == 0
+
+
+def test_web_adds_agent_runtime_only_with_feature_and_socket(dev, rel, web):
+    conf(dev, "FEATURE_AGENT=1\n")
+    p = dev.start(rel / "sbin/mk20d", "web")
+    assert wait(lambda: calls(dev))
+    assert "--kbd-sock" not in calls(dev)[0]["args"]   # FEATURE_AGENT=1 but no kbd.sock: settings web only
+    sock = dev.p("run/mk20/kbd.sock"); sock.touch()
+    assert wait(lambda: len(calls(dev)) == 2, 6)
+    assert calls(dev)[1]["args"] == web_args(dev, "172.30.9.2") + ["--kbd-sock", str(sock)]
+    sock.unlink()
+    assert wait(lambda: len(calls(dev)) == 3, 6) and "--kbd-sock" not in calls(dev)[2]["args"]
+    assert not dev.p("tmp/mk20/agent-crash.times").exists()   # mode changes are not crashes
+    dev.p("tmp/mk20-agent-stop").touch()
+    assert p.wait(8) == 0
+
+
+def test_web_crash_restarts_with_backoff(dev, rel, web):
+    (dev.mock / "crash").touch()
+    p = dev.start(rel / "sbin/mk20d", "web")
+    log = dev.p("tmp/mk20/agent.log")
+    assert wait(lambda: log.exists() and log.read_text().count("retry in") >= 3, 20)
+    delays = [int(x.split("retry in ")[1][:-1]) for x in log.read_text().splitlines() if "retry in " in x]
+    assert delays[:3] == [1, 2, 4] and len(calls(dev)) >= 3
+    assert len(dev.read("tmp/mk20/agent-crash.times").split()) >= 3
+    st = dev.run(rel / "sbin/mk20d", "selftest").stdout
+    assert "WARN web crash loop (3+ exits in 300s)" in st
+    (dev.mock / "crash").unlink()
+    dev.p("tmp/mk20-agent-stop").touch()
+    assert p.wait(10) == 0
+
+
+def test_web_selftest_and_health_never_fail(dev, rel, g1, web):
+    dev.p("data/mk20/state").mkdir(parents=True, exist_ok=True)
+    dev.p("data/mk20/state/pending").write_text("9.9.9\n")
+    r = dev.run(rel / "sbin/mk20d", "selftest")
+    lines = [x for x in r.stdout.splitlines() if " web " in f" {x} "]
+    assert lines == ["WARN web not running (http://172.30.9.2:8780)"]
+    assert not any(x.startswith("FAIL") and "web" in x for x in r.stdout.splitlines())
+    conf(dev, "FEATURE_WEB=0\n")
+    r2 = dev.run(rel / "sbin/mk20d", "selftest")
+    assert "INFO web disabled" in r2.stdout and r2.returncode == r.returncode
+    # health release block names the active A/B slot for the maintenance page
+    slots = dev.p("data/mk20/slots"); slots.mkdir(parents=True)
+    (slots / "A").write_text("gen=3\nversion=9.9.8\n"); (slots / "B").write_text("gen=4\nversion=9.9.9\n")
+    h = json.loads(dev.run(rel / "sbin/mk20d", "health").stdout)
+    assert h["release"]["slot"] == "B" and h["release"]["pending"] == "9.9.9" and h["web"]["enabled"] is False

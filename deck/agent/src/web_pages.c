@@ -1,69 +1,169 @@
 #include "web.h"
-/* Static local pages; CSP hashes cover the exact inline script/style bytes. */
-static const char page0[] =
-"<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Agent configuration</title><style>body{font:17px system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;background:#f5f6f8;color:#182331}fieldset,section,details{background:white;border:1px solid #ccd3de;border-radius:8px;padding:1rem;margin:1rem 0}label{display:block;margin:.8rem 0}input,select,textarea,button{font:inherit;padding:.55rem;max-width:100%;box-sizing:border-box}textarea{width:100%}button{margin:.3rem .3rem .3rem 0;cursor:pointer}button#stop{background:#a21818;color:white}img{width:100%;height:auto}small{color:#46556a}nav a{margin-right:1rem}#message{white-space:pre-wrap;background:#e7edf7;padding:1rem}code{overflow-wrap:anywhere}h1,h2{line-height:1.2}li{margin:.4rem 0}</style><body><nav><a href=\"/\">Configuration</a><a href=\"/chat\">Tasks</a></nav><h1>Agent configuration</h1><p id=\"message\" role=\"status\">Pair this browser to continue.</p><fieldset><legend>Pair this browser</legend><p>Start pairing, then read the one-time code on the keyboard secondary screen. This page never displays the code. Pairing requires the keyboard display to confirm that it rendered the code.</p><button id=\"start\">Show pairing code on keyboard</button><label>Six-digit code <input id=\"code\" inputmode=\"numeric\" pattern=\"[0-9]{6}\" maxlength=\"6\" autocomplete=\"off\"></label><button id=\"pair\">Pair</button><small>The code expires in five minutes and allows five wrong attempts. A paired session lasts at most twelve hours, expires after thirty minutes of inactivity, and is lost when the device restarts.</small></fieldset><section><h2>Secrets</h2><label>Name <select id=\"secret-name\"><option>qwen</option><option>glm</option><option>glm-coding</option><option>kimi</option><option>deepseek</option><option>openai</option><option>anthropic</option><option>gemini</option><option>vnc</option></select></label><label>New value <input id=\"secret\" type=\"password\" autocomplete=\"new-password\" maxlength=\"4096\"></label><button id=\"save-secret\">Save secret</button><button id=\"secret-status\">Check set status</button><button id=\"delete-secret\">Delete secret</button><p>Use the VNC entry for the desktop sharing password. Provider entries write only that provider\u2019s key file. Values must be 1\u20134096 bytes and cannot contain a NUL, carriage return, or line feed. Paste the value without a trailing newline.</p></section>\n"
-"<section><h2>Network route</h2><label>Profile <select id=\"profile\"><option value=\"mac_proxy\">Mac proxy</option><option value=\"board_wifi\">Board Wi-Fi</option></select></label><label>Mac HTTP CONNECT port <input id=\"port\" type=\"number\" min=\"1\" max=\"65535\" value=\"7890\"></label><label>Board proxy URL (optional) <input id=\"board-proxy\" placeholder=\"http://127.0.0.1:7890\"></label><button id=\"save-net\">Save network</button><p>The Mac profile uses 172.30.250.1, then 10.20.0.1 and 169.254.7.1 at the selected port. It never falls back to a direct connection. The board profile permits domestic direct traffic; foreign traffic needs a proxy or is blocked. Foreign direct routes are refused.</p><p>The proxy must already be reachable. This page does not change a proxy\u2019s configuration, install a Mac forwarder, or prove the public exit address. A failed proxy request stays failed rather than being sent directly.</p></section>\n"
-"<section><h2>Provider</h2><label>Provider <select id=\"provider\"><option>qwen</option><option>glm</option><option>glm-coding</option><option>kimi</option><option>deepseek</option><option>openai</option><option>anthropic</option><option>gemini</option></select></label><label>Model <input id=\"model\" value=\"qwen-vl-max\" maxlength=\"128\"></label><button id=\"save-provider\">Save provider</button><button id=\"test\">Test connection from device</button><p>Provider URLs and key paths are fixed by the provider registry. A model name must be supported by the selected provider. The runtime uses the OpenAI-compatible chat/completions format; listing a provider does not promise that every model supports vision and tools.</p><p>The connection test uses the saved device route and returns reachability, latency, and a short error class. A provider HTTP response confirms reachability, including authentication errors; it does not prove that a model can complete a task. Keep the selected provider\u2019s key up to date.</p></section><section><h2>Permission and privacy</h2><p>Pairing gives this browser access to configuration, secret status, and tasks over the USB link. Agent input permission belongs to the physical keyboard. Neither this page nor the API can switch permission on, clear the emergency-stop latch, or accept a confirmation. Use the keyboard allow control when you intend to authorize input.</p><p>Keep the keyboard connected to a computer you control. The service uses the dedicated USB address and does not use an Internet service to host these pages. No fonts, analytics, scripts, images, or libraries are loaded from another site. Requests and responses are marked no-store.</p><p>Secrets are stored on the device with owner-only file permissions. The API accepts replacement values and deletion, and reports whether a value is present. There is no endpoint that reads a secret back to this browser. The password field is cleared after each save attempt. A saved length confirms the bytes accepted; it does not reveal a saved value.</p><p>Pairing cookies are restricted to this site and are unavailable to page scripts. State changes also require a CSRF token and a same-origin request. If a page reports unauthorized, start pairing again. Closing a progress stream does not stop a task; press Stop to revoke input.</p></section><script>\"use strict\";\n"
-"let csrf=sessionStorage.getItem(\"mk20-csrf\")||\"\", task=\"\", stream=null;\n"
+#include "mbedtls/base64.h"
+#include "mbedtls/sha256.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+/* Static local pages, one inline <style> and one shared inline <script>. The CSP
+ * carries SHA-256 hashes computed from these exact bytes at first use. */
+static const char style[] =
+"body{font:16px system-ui,-apple-system,\"PingFang SC\",sans-serif;max-width:860px;margin:1.5rem auto;padding:0 1rem;background:#f5f6f8;color:#182331}fieldset,section{background:#fff;border:1px solid #ccd3de;border-radius:8px;padding:1rem;margin:1rem 0}label{display:block;margin:.7rem 0}input,select,textarea,button{font:inherit;padding:.5rem;max-width:100%;box-sizing:border-box}input[type=checkbox]{padding:0;margin-right:.4rem}textarea{width:100%}button{margin:.3rem .3rem .3rem 0;cursor:pointer}button.danger{background:#a21818;color:#fff}img{width:100%;height:auto}small{color:#46556a}nav a{margin-right:1rem}#message{white-space:pre-wrap;background:#e7edf7;padding:.8rem 1rem;border-radius:6px}dl{display:grid;grid-template-columns:max-content 1fr;gap:.3rem 1rem;margin:.5rem 0}dt{color:#46556a}dd{margin:0;overflow-wrap:anywhere}li{margin:.3rem 0}h1,h2{line-height:1.2}";
+static const char script[] =
+"'use strict';\n"
+"let csrf=sessionStorage.getItem('mk20-csrf')||'',task='',stream=null,catalogue=null,agent=false;\n"
 "const el=id=>document.getElementById(id);\n"
-"function message(s){el(\"message\").textContent=s;}\n"
-"async function api(path,method=\"GET\",body){\n"
-" const headers={}; if(method!==\"GET\"){headers[\"X-CSRF-Token\"]=csrf;headers[\"Content-Type\"]=\"application/json\";}\n"
-" const r=await fetch(path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),credentials:\"same-origin\",cache:\"no-store\"});\n"
-" const data=await r.json(); if(!r.ok)throw Error(data.error||`Request failed (${r.status})`);return data;\n"
+"function message(s){el('message').textContent=s;}\n"
+"const errors={unauthorized:'未配对或配对已过期，请重新配对。',forbidden:'请求被拒绝：请直接用设备地址打开本页。',rate_limited:'尝试太频繁，请稍后再试',display_unavailable:'键盘暂时无法显示配对码。',busy:'设备忙，请稍后再试。',config:'设置无效。',storage:'写入设备存储失败。',apply_incomplete:'上次保存没有完成，请重新保存。',maint_unavailable:'维护通道不可用（键盘监督进程未运行）。',agent_disabled:'本设备未启用 agent。',confirm:'操作未确认。',rejected:'任务被拒绝。'};\n"
+"async function api(path,method='GET',body){\n"
+" const headers={};if(method!=='GET'){headers['X-CSRF-Token']=csrf;headers['Content-Type']='application/json';}\n"
+" const r=await fetch(path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin',cache:'no-store'});\n"
+" let data={};try{data=await r.json();}catch(e){}\n"
+" if(!r.ok){let m=errors[data.error]||('请求失败（'+r.status+'）');if(data.retry_after_s)m+='（'+data.retry_after_s+' 秒后）';const e=Error(m);e.status=r.status;throw e;}\n"
+" return data;\n"
 "}\n"
-"function on(id,fn){const e=el(id);if(e)e.addEventListener(\"click\",async ev=>{ev.preventDefault();try{await fn();}catch(err){message(err.message);}});}\n"
-"on(\"start\",async()=>{await api(\"/pair/start\",\"POST\",{});message(\"Read the six digits on the keyboard secondary screen. The code expires after five minutes.\");});\n"
-"on(\"pair\",async()=>{const input=el(\"code\");try{const d=await api(\"/pair\",\"POST\",{code:input.value});csrf=d.csrf;sessionStorage.setItem(\"mk20-csrf\",csrf);message(\"Paired for this browser. Keyboard permission is still controlled on the keyboard.\");}finally{input.value=\"\";}});\n"
-"on(\"save-secret\",async()=>{const input=el(\"secret\");try{const d=await api(\"/secret/\"+el(\"secret-name\").value,\"POST\",{value:input.value});message(\"Saved \u00b7 length \"+d.len);}finally{input.value=\"\";}});\n"
-"on(\"secret-status\",async()=>{const d=await api(\"/secret/\"+el(\"secret-name\").value);message(d.set?\"Secret is set.\":\"Secret is not set.\");});\n"
-"on(\"delete-secret\",async()=>{await api(\"/secret/\"+el(\"secret-name\").value,\"DELETE\");message(\"Deleted.\");});\n"
-"on(\"save-net\",async()=>{const profile=el(\"profile\").value,port=Number(el(\"port\").value),board=el(\"board-proxy\").value.trim();\n"
-" if(!Number.isInteger(port)||port<1||port>65535)throw Error(\"Port must be 1\u201365535.\");\n"
-" const hosts=[\"172.30.250.1\",\"10.20.0.1\",\"169.254.7.1\"];\n"
-" const net=profile===\"mac_proxy\"?{version:1,profile,proxy:{url:`http://${hosts[0]}:${port}`,fallbacks:hosts.slice(1).map(h=>`http://${h}:${port}`)},routes:{domestic:\"proxy\",foreign:\"proxy\"}}:{version:1,profile,proxy:{url:board||null,fallbacks:[]},routes:{domestic:\"direct\",foreign:board?\"proxy\":\"blocked\"}};\n"
-" await api(\"/config/net\",\"PUT\",net);message(\"Network configuration saved.\");});\n"
-"const providers={qwen:[\"https://dashscope.aliyuncs.com/compatible-mode/v1\",true],glm:[\"https://open.bigmodel.cn/api/paas/v4\",true],\"glm-coding\":[\"https://open.bigmodel.cn/api/coding/paas/v4\",true],kimi:[\"https://api.moonshot.cn/v1\",true],deepseek:[\"https://api.deepseek.com/v1\",true],openai:[\"https://api.openai.com/v1\",false],anthropic:[\"https://api.anthropic.com/v1\",false],gemini:[\"https://generativelanguage.googleapis.com/v1beta/openai\",false]};\n"
-"on(\"save-provider\",async()=>{const provider=el(\"provider\").value,[base_url,domestic]=providers[provider];await api(\"/config/provider\",\"PUT\",{version:1,provider,model:el(\"model\").value,base_url,domestic,route:domestic?\"domestic\":\"foreign\",api_key_file:`/data/mk20/secrets/${provider}.key`});message(\"Provider saved.\");});\n"
-"on(\"test\",async()=>{message(\"Testing from the device\u2026\");const d=await api(\"/test\",\"POST\",{});message((d.ok?\"Reachable\":\"Failed: \"+d.error_class)+\" \u00b7 \"+d.latency_ms+\" ms\");});\n"
-"function progress(d){if(!d.id)return;task=d.id;el(\"task-id\").value=task;el(\"state\").textContent=d.state;const list=el(\"steps\");list.replaceChildren();for(const action of d.actions){const li=document.createElement(\"li\");li.textContent=action;list.appendChild(li);}if(d.shots.length){const n=Math.max(...d.shots);el(\"shot\").src=`/api/tasks/${task}/steps/${n}/shot.jpg`;el(\"shot\").hidden=false;}else{el(\"shot\").removeAttribute(\"src\");el(\"shot\").hidden=true;}}\n"
-"on(\"submit\",async()=>{const d=await api(\"/api/tasks\",\"POST\",{goal:el(\"goal\").value});progress(d);message(d.state===\"waiting_allow\"?\"Waiting for physical keyboard allow.\":\"Task accepted.\");if(stream)stream.close();stream=new EventSource(\"/api/events\");stream.addEventListener(\"task\",ev=>progress(JSON.parse(ev.data)));stream.onerror=()=>message(\"Progress connection interrupted. Pair again if the session expired; refresh to query the task.\");});\n"
-"on(\"refresh\",async()=>{task=el(\"task-id\").value;if(!/^t[0-9]+$/.test(task))throw Error(\"Enter the task id.\");progress(await api(\"/api/tasks/\"+task));});\n"
-"for(const action of [\"pause\",\"resume\",\"stop\"])on(action,async()=>{if(!task)throw Error(\"Select a task first.\");progress(await api(`/api/tasks/${task}/${action}`,\"POST\",{}));message(action===\"stop\"?\"Stopped. Only physical keyboard allow can authorize work again.\":action===\"pause\"?\"Hold requested before the next observation or action.\":\"Resumed.\");});\n"
-"window.addEventListener(\"pagehide\",()=>{if(stream)stream.close();});\n"
-"</script></body></html>"
-;
-static const char page1[] =
-"<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Agent tasks</title><style>body{font:17px system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;background:#f5f6f8;color:#182331}fieldset,section,details{background:white;border:1px solid #ccd3de;border-radius:8px;padding:1rem;margin:1rem 0}label{display:block;margin:.8rem 0}input,select,textarea,button{font:inherit;padding:.55rem;max-width:100%;box-sizing:border-box}textarea{width:100%}button{margin:.3rem .3rem .3rem 0;cursor:pointer}button#stop{background:#a21818;color:white}img{width:100%;height:auto}small{color:#46556a}nav a{margin-right:1rem}#message{white-space:pre-wrap;background:#e7edf7;padding:1rem}code{overflow-wrap:anywhere}h1,h2{line-height:1.2}li{margin:.4rem 0}</style><body><nav><a href=\"/\">Configuration</a><a href=\"/chat\">Tasks</a></nav><h1>Agent tasks</h1><p id=\"message\" role=\"status\">Pair this browser to continue.</p><fieldset><legend>Pair this browser</legend><p>Start pairing, then read the one-time code on the keyboard secondary screen. This page never displays the code. Pairing requires the keyboard display to confirm that it rendered the code.</p><button id=\"start\">Show pairing code on keyboard</button><label>Six-digit code <input id=\"code\" inputmode=\"numeric\" pattern=\"[0-9]{6}\" maxlength=\"6\" autocomplete=\"off\"></label><button id=\"pair\">Pair</button><small>The code expires in five minutes and allows five wrong attempts. A paired session lasts at most twelve hours, expires after thirty minutes of inactivity, and is lost when the device restarts.</small></fieldset><section><h2>New task</h2><label>Goal <textarea id=\"goal\" rows=\"4\" maxlength=\"4096\" placeholder=\"Describe a task\"></textarea></label><button id=\"submit\">Submit task</button><p>A disabled agent accepts one queued task and waits for physical keyboard allow. There is one shared slot across the web API and MCP. A busy response means another task or direct call still owns it.</p></section><section><h2>Progress</h2><label>Task id <input id=\"task-id\" maxlength=\"23\" placeholder=\"t1\"></label><button id=\"refresh\">Refresh</button><p id=\"state\" role=\"status\">No task selected</p><button id=\"pause\">Pause</button><button id=\"resume\">Resume</button><button id=\"stop\">Stop / revoke input</button><ol id=\"steps\"></ol><img id=\"shot\" alt=\"Most recent scaled task observation\" hidden></section>\n"
-"<section><h2>How task control works</h2><p>Submit creates an in-memory task id. If the keyboard has not allowed agent input, the task shows waiting_allow. It cannot capture, plan, or act until a keyboard allow event is received. Queued goals are not persisted across a process restart.</p><p>Pause requests a hold before the next observation or before the next action starts. An action already in progress completes under its existing deadline and safety guards. Confirmation deadlines, input lease renewal, emergency stop, and task wall-time limits continue while paused. Resume removes the hold and keeps the same task budget.</p><p>Stop invokes the keyboard emergency-stop path, revokes input, and marks the task stopped. It is also available while the agent is waiting for permission. Resuming cannot clear a stop latch; authorization must be restored physically on the keyboard, then a new task may be submitted.</p><p>Progress includes fixed action names and a count. Typed text and the task goal are not copied into progress summaries or server logs. Screenshot previews are scaled JPEG observations, retained only in a five-image memory ring. Older observations return not found. Previews are freed when a task ends or stops, when a new task replaces it, or when the process exits. Review screenshots while the task is live or paused.</p><p>The task uses the same policy, calibration, confirmation, budget, and keyboard lease checks as autonomous tasks and MCP actions. A missing trusted window detector or invalid calibration fails closed. A model suggestion does not grant authority to type into secure input or perform a prohibited action.</p><p>Live progress uses a same-origin event stream. Two streams may be active at once. Slow clients are disconnected rather than accumulating an unbounded backlog. Use Refresh to inspect a known task id after reconnecting. An expired browser session must pair again before accessing task details or previews.</p></section><section><h2>Permission and privacy</h2><p>Pairing gives this browser access to configuration, secret status, and tasks over the USB link. Agent input permission belongs to the physical keyboard. Neither this page nor the API can switch permission on, clear the emergency-stop latch, or accept a confirmation. Use the keyboard allow control when you intend to authorize input.</p><p>Keep the keyboard connected to a computer you control. The service uses the dedicated USB address and does not use an Internet service to host these pages. No fonts, analytics, scripts, images, or libraries are loaded from another site. Requests and responses are marked no-store.</p><p>Secrets are stored on the device with owner-only file permissions. The API accepts replacement values and deletion, and reports whether a value is present. There is no endpoint that reads a secret back to this browser. The password field is cleared after each save attempt. A saved length confirms the bytes accepted; it does not reveal a saved value.</p><p>Pairing cookies are restricted to this site and are unavailable to page scripts. State changes also require a CSRF token and a same-origin request. If a page reports unauthorized, start pairing again. Closing a progress stream does not stop a task; press Stop to revoke input.</p></section><section><h2>Review a task before allowing input</h2><p>Describe the intended outcome clearly. Give the agent one bounded task at a time, and make the relevant application visible on the shared desktop before authorizing input. Avoid putting passwords, payment details, or recovery codes into the goal. Use the secret form for provider credentials and the VNC password.</p><p>Pairing and submitting a task are separate from allowing input. You can prepare a task while the keyboard is disabled, inspect its waiting status, and then decide whether to allow it at the keyboard. A second submission will be rejected until the live slot is stopped or completed. The page cannot resolve a request that needs physical confirmation on your behalf.</p><p>Stay near the keyboard while a task acts. Read each physical confirmation before accepting it. If the application changes unexpectedly, a secure input appears, or the task moves toward an unintended operation, press Stop here or use the keyboard emergency-stop control. The keyboard remains the authority even if the browser disconnects.</p><p>A progress action name records an attempted step. It does not prove that the target application accepted the input or that the task achieved the intended result. Review the visible application after completion. The screenshot is the observation made before a step, rather than a continuous desktop video or a guarantee of the current screen.</p></section><section><h2>Understand waiting and terminal states</h2><p><strong>waiting_allow</strong> means a task occupies the queue but has not started. Physical allow may make it runnable. A paused queued task also needs Resume before it starts. Repeated clicks on Resume cannot grant keyboard permission.</p><p><strong>observing</strong> means the runtime is obtaining the next scaled desktop frame. <strong>planning</strong> means a model request is in progress. <strong>acting</strong> means the next action has passed through the local policy checks. A step that requires confirmation waits for the physical keyboard response under a deadline.</p><p><strong>paused</strong> means a hold has been requested. It takes effect at the next safe boundary before an observation or a new action. A network request or an action that already started may still finish. Stop provides immediate revocation when a hold is not sufficient.</p><p><strong>done</strong> means the model ended the task. <strong>error</strong> means a required capture, model, policy, transport, or execution check failed. <strong>stopped</strong> means execution ended through a stop, denial, or another safety condition. Treat these as reasons to review the desktop before submitting another task.</p><p>Task budgets continue during a pause. A long hold can reach the task wall-time limit, and a pending physical confirmation can time out. Resume preserves the original task and its remaining budget. It does not restart a failed task or bypass a safety decision.</p></section><section><h2>Reconnect and inspect</h2><p>If live progress stops updating, use the task id shown above with Refresh. The task is held by the agent process, so closing the tab or losing the event stream does not by itself mean that the task has stopped. Stop the task explicitly when you intend to revoke input.</p><p>If Refresh reports unauthorized, pair this browser again. Sessions are held only in device memory and expire after inactivity or the absolute session limit. A restart invalidates all paired browsers and removes the in-memory task store and screenshot ring. A prior task id cannot retrieve a task after that restart.</p><p>If a screenshot is unavailable, it may have been replaced by a newer observation in the five-image ring, the task may have ended, or a new task may have replaced the previous task. Screenshots are not saved to device storage. This page never requests the user clipboard or reads a secret back from the configuration API.</p><p>If the connection test fails, return to Configuration and check the saved profile, proxy address, port, provider, and key status. A Mac proxy profile requires the proxy to be reachable from the USB link. A failed proxy route is not retried as a direct provider connection. Change only settings you intend to use, then test again before authorizing a task.</p></section><script>\"use strict\";\n"
-"let csrf=sessionStorage.getItem(\"mk20-csrf\")||\"\", task=\"\", stream=null;\n"
-"const el=id=>document.getElementById(id);\n"
-"function message(s){el(\"message\").textContent=s;}\n"
-"async function api(path,method=\"GET\",body){\n"
-" const headers={}; if(method!==\"GET\"){headers[\"X-CSRF-Token\"]=csrf;headers[\"Content-Type\"]=\"application/json\";}\n"
-" const r=await fetch(path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),credentials:\"same-origin\",cache:\"no-store\"});\n"
-" const data=await r.json(); if(!r.ok)throw Error(data.error||`Request failed (${r.status})`);return data;\n"
+"function on(id,fn){const e=el(id);if(e)e.addEventListener('click',async ev=>{ev.preventDefault();try{await fn();}catch(err){message(err.message);}});}\n"
+"function option(sel,value,text,disabled){const o=document.createElement('option');o.value=value;o.textContent=text;o.disabled=!!disabled;sel.appendChild(o);}\n"
+"function shown(v){return v===null||v===undefined||v===''?'—':String(v);}\n"
+"function row(dl,k,v){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=k;dd.textContent=shown(v);dl.append(dt,dd);}\n"
+"function kb(v){return v===null||v===undefined?null:v>=10240?Math.round(v/1024)+' MiB':v+' KiB';}\n"
+"function duration(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return(d?d+' 天 ':'')+h+' 小时 '+m+' 分';}\n"
+"function fillModels(){const m=el('model');if(!m||!catalogue)return;const p=catalogue.providers.find(x=>x.id===el('provider').value);m.replaceChildren();if(p)for(const x of p.models)option(m,x.id,x.id+(x.vision?'（视觉）':''));}\n"
+"async function loadSettings(){\n"
+" if(!el('provider'))return;\n"
+" catalogue=await api('/api/catalogue');\n"
+" const ps=el('provider'),ss=el('secret-name');ps.replaceChildren();ss.replaceChildren();\n"
+" for(const p of catalogue.providers)option(ps,p.id,p.label+(p.supported?'':'（暂不支持）'),!p.supported);\n"
+" for(const s of catalogue.secrets)option(ss,s,s==='vnc'?'vnc（屏幕共享密码）':s);\n"
+" el('hosts').textContent=catalogue.mac_hosts.join('、');\n"
+" let saved=null;try{saved=await api('/config/provider');}catch(e){}\n"
+" if(saved&&catalogue.providers.some(p=>p.id===saved.provider&&p.supported))ps.value=saved.provider;\n"
+" fillModels();\n"
+" if(saved){const known=[...el('model').options].some(o=>o.value===saved.model);if(known)el('model').value=saved.model;else if(saved.model)message('已保存的模型 '+saved.model+' 不在内置目录中，请重新选择并保存。');}\n"
+" try{const n=await api('/config/net'),u=n.proxy&&n.proxy.url;el('profile').value=n.profile;if(n.profile==='mac_proxy'&&u){const m=/:([0-9]+)$/.exec(u);if(m)el('port').value=m[1];}else if(u)el('board-proxy').value=u;}catch(e){if(e.status===409)message(e.message);}\n"
 "}\n"
-"function on(id,fn){const e=el(id);if(e)e.addEventListener(\"click\",async ev=>{ev.preventDefault();try{await fn();}catch(err){message(err.message);}});}\n"
-"on(\"start\",async()=>{await api(\"/pair/start\",\"POST\",{});message(\"Read the six digits on the keyboard secondary screen. The code expires after five minutes.\");});\n"
-"on(\"pair\",async()=>{const input=el(\"code\");try{const d=await api(\"/pair\",\"POST\",{code:input.value});csrf=d.csrf;sessionStorage.setItem(\"mk20-csrf\",csrf);message(\"Paired for this browser. Keyboard permission is still controlled on the keyboard.\");}finally{input.value=\"\";}});\n"
-"on(\"save-secret\",async()=>{const input=el(\"secret\");try{const d=await api(\"/secret/\"+el(\"secret-name\").value,\"POST\",{value:input.value});message(\"Saved \u00b7 length \"+d.len);}finally{input.value=\"\";}});\n"
-"on(\"secret-status\",async()=>{const d=await api(\"/secret/\"+el(\"secret-name\").value);message(d.set?\"Secret is set.\":\"Secret is not set.\");});\n"
-"on(\"delete-secret\",async()=>{await api(\"/secret/\"+el(\"secret-name\").value,\"DELETE\");message(\"Deleted.\");});\n"
-"on(\"save-net\",async()=>{const profile=el(\"profile\").value,port=Number(el(\"port\").value),board=el(\"board-proxy\").value.trim();\n"
-" if(!Number.isInteger(port)||port<1||port>65535)throw Error(\"Port must be 1\u201365535.\");\n"
-" const hosts=[\"172.30.250.1\",\"10.20.0.1\",\"169.254.7.1\"];\n"
-" const net=profile===\"mac_proxy\"?{version:1,profile,proxy:{url:`http://${hosts[0]}:${port}`,fallbacks:hosts.slice(1).map(h=>`http://${h}:${port}`)},routes:{domestic:\"proxy\",foreign:\"proxy\"}}:{version:1,profile,proxy:{url:board||null,fallbacks:[]},routes:{domestic:\"direct\",foreign:board?\"proxy\":\"blocked\"}};\n"
-" await api(\"/config/net\",\"PUT\",net);message(\"Network configuration saved.\");});\n"
-"const providers={qwen:[\"https://dashscope.aliyuncs.com/compatible-mode/v1\",true],glm:[\"https://open.bigmodel.cn/api/paas/v4\",true],\"glm-coding\":[\"https://open.bigmodel.cn/api/coding/paas/v4\",true],kimi:[\"https://api.moonshot.cn/v1\",true],deepseek:[\"https://api.deepseek.com/v1\",true],openai:[\"https://api.openai.com/v1\",false],anthropic:[\"https://api.anthropic.com/v1\",false],gemini:[\"https://generativelanguage.googleapis.com/v1beta/openai\",false]};\n"
-"on(\"save-provider\",async()=>{const provider=el(\"provider\").value,[base_url,domestic]=providers[provider];await api(\"/config/provider\",\"PUT\",{version:1,provider,model:el(\"model\").value,base_url,domestic,route:domestic?\"domestic\":\"foreign\",api_key_file:`/data/mk20/secrets/${provider}.key`});message(\"Provider saved.\");});\n"
-"on(\"test\",async()=>{message(\"Testing from the device\u2026\");const d=await api(\"/test\",\"POST\",{});message((d.ok?\"Reachable\":\"Failed: \"+d.error_class)+\" \u00b7 \"+d.latency_ms+\" ms\");});\n"
-"function progress(d){if(!d.id)return;task=d.id;el(\"task-id\").value=task;el(\"state\").textContent=d.state;const list=el(\"steps\");list.replaceChildren();for(const action of d.actions){const li=document.createElement(\"li\");li.textContent=action;list.appendChild(li);}if(d.shots.length){const n=Math.max(...d.shots);el(\"shot\").src=`/api/tasks/${task}/steps/${n}/shot.jpg`;el(\"shot\").hidden=false;}else{el(\"shot\").removeAttribute(\"src\");el(\"shot\").hidden=true;}}\n"
-"on(\"submit\",async()=>{const d=await api(\"/api/tasks\",\"POST\",{goal:el(\"goal\").value});progress(d);message(d.state===\"waiting_allow\"?\"Waiting for physical keyboard allow.\":\"Task accepted.\");if(stream)stream.close();stream=new EventSource(\"/api/events\");stream.addEventListener(\"task\",ev=>progress(JSON.parse(ev.data)));stream.onerror=()=>message(\"Progress connection interrupted. Pair again if the session expired; refresh to query the task.\");});\n"
-"on(\"refresh\",async()=>{task=el(\"task-id\").value;if(!/^t[0-9]+$/.test(task))throw Error(\"Enter the task id.\");progress(await api(\"/api/tasks/\"+task));});\n"
-"for(const action of [\"pause\",\"resume\",\"stop\"])on(action,async()=>{if(!task)throw Error(\"Select a task first.\");progress(await api(`/api/tasks/${task}/${action}`,\"POST\",{}));message(action===\"stop\"?\"Stopped. Only physical keyboard allow can authorize work again.\":action===\"pause\"?\"Hold requested before the next observation or action.\":\"Resumed.\");});\n"
-"window.addEventListener(\"pagehide\",()=>{if(stream)stream.close();});\n"
-"</script></body></html>"
-;
-const char *web_page(int chat) { return chat ? page1 : page0; }
-const char *web_csp(void) { return "default-src 'self'; script-src 'sha256-2X3mkdLUpUKSjH7hLzitJOgJfbN1yaFMJDijOT/TS9s='; style-src 'sha256-haCdiICwTKa8JzAqN4d6o9nIpju3BFo2buizJC1pbPc='; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"; }
+"async function loadStatus(){\n"
+" if(!el('status'))return;\n"
+" const s=await api('/api/status'),dl=el('status'),r=s.release||{},k=s.kbd||{},m=s.maint||{},st=m.state||{},t=s.selftest||{};\n"
+" dl.replaceChildren();\n"
+" row(dl,'固件版本',s.version);row(dl,'当前槽位',r.slot);row(dl,'已确认版本',r.good);row(dl,'待确认版本',r.pending);row(dl,'上次回滚',r.last_rollback);\n"
+" row(dl,'运行时间',typeof s.uptime_s==='number'?duration(s.uptime_s):null);row(dl,'usb0 地址',s.usb0_ip);\n"
+" const mode=st.mode||k.mode;row(dl,'键盘程序',(mode==='safe'?'安全模式':mode==='normal'?'正常':shown(mode))+(k.running===false?'（未运行）':''));\n"
+" row(dl,'键盘程序异常退出',typeof st.restarts==='number'?st.restarts:k.restarts);\n"
+" row(dl,'可用内存',kb(s.mem_avail_kb));row(dl,'FAT 剩余',kb(s.fat_free_kb));row(dl,'/data 剩余',kb(s.data_free_kb));\n"
+" row(dl,'自检',typeof t.pass==='boolean'?(t.pass?'通过':'失败')+'（PASS '+t.pass_count+' / WARN '+t.warn_count+' / FAIL '+t.fail_count+'）':null);\n"
+" row(dl,'状态快照',s.health?s.health_age_s+' 秒前（mk20d health，约 5 分钟更新）':'暂无');\n"
+" const ul=el('problems');ul.replaceChildren();for(const p of t.problems||[]){const li=document.createElement('li');li.textContent=p;ul.appendChild(li);}\n"
+" const pending=(m.pending||[]).join('、');\n"
+" el('kbd-state').textContent=(mode==='safe'?'安全模式':mode==='normal'?'正常':'未知')+(pending?'；等待处理：'+pending:'')+(typeof m.debug_verbose==='boolean'?'；详细日志：'+(m.debug_verbose?'开':'关'):'')+(m.available?'':'；维护通道不可用');\n"
+" if(typeof m.debug_verbose==='boolean')el('verbose').checked=m.debug_verbose;\n"
+"}\n"
+"async function session(){\n"
+" let d;try{d=await api('/api/session');}catch(e){if(e.status===401){message('请先配对：点“在键盘上显示配对码”。');return;}throw e;}\n"
+" csrf=d.csrf;sessionStorage.setItem('mk20-csrf',csrf);agent=d.agent;\n"
+" const nav=el('nav-chat');if(nav)nav.hidden=!agent;const off=el('agent-off');if(off)off.hidden=agent;\n"
+" message('已配对。');await loadSettings();await loadStatus();\n"
+"}\n"
+"on('start',async()=>{const d=await api('/pair/start','POST',{});message('请看键盘屏幕上的 6 位配对码（'+Math.max(1,Math.ceil(d.expires_in_s/60))+' 分钟内有效）。');});\n"
+"on('pair',async()=>{const input=el('code');try{const d=await api('/pair','POST',{code:input.value});csrf=d.csrf;sessionStorage.setItem('mk20-csrf',csrf);}finally{input.value='';}await session();});\n"
+"on('refresh-status',loadStatus);\n"
+"if(el('provider'))el('provider').addEventListener('change',fillModels);\n"
+"on('save-provider',async()=>{await api('/api/provider','PUT',{provider:el('provider').value,model:el('model').value});message('模型已保存。');});\n"
+"on('test',async()=>{message('正在从设备测试连接…');const d=await api('/test','POST',{});message((d.ok?'可以连通':'连接失败：'+d.error_class)+' · '+d.latency_ms+' ms');});\n"
+"on('save-secret',async()=>{const input=el('secret');try{await api('/secret/'+el('secret-name').value,'POST',{value:input.value});message('已保存。');}finally{input.value='';}});\n"
+"on('secret-status',async()=>{const d=await api('/secret/'+el('secret-name').value);message(d.set?'已设置。':'未设置。');});\n"
+"on('delete-secret',async()=>{if(!confirm('删除 '+el('secret-name').value+' 的密钥？'))return;await api('/secret/'+el('secret-name').value,'DELETE');message('已删除。');});\n"
+"on('save-net',async()=>{\n"
+" const profile=el('profile').value,port=Number(el('port').value),board=el('board-proxy').value.trim(),hosts=catalogue?catalogue.mac_hosts:[];\n"
+" if(profile==='mac_proxy'&&(!Number.isInteger(port)||port<1||port>65535))throw Error('端口必须是 1–65535。');\n"
+" if(profile==='mac_proxy'&&!hosts.length)throw Error('设置目录尚未加载，请刷新页面。');\n"
+" const net=profile==='mac_proxy'?{version:1,profile,proxy:{url:'http://'+hosts[0]+':'+port,fallbacks:hosts.slice(1).map(h=>'http://'+h+':'+port)},routes:{domestic:'proxy',foreign:'proxy'}}:{version:1,profile,proxy:{url:board||null,fallbacks:[]},routes:{domestic:'direct',foreign:board?'proxy':'blocked'}};\n"
+" await api('/config/net','PUT',net);message('网络设置已保存。');});\n"
+"async function maint(action,extra,question){\n"
+" if(!confirm(question))return;\n"
+" await api('/api/maint/'+action,'POST',Object.assign({confirm:action},extra||{}));\n"
+" message('已提交，等待键盘监督进程处理…');setTimeout(()=>loadStatus().catch(e=>message(e.message)),1500);\n"
+"}\n"
+"on('restart-kbd',()=>maint('restart-kbd',null,'重启键盘程序？按键和屏幕会中断几秒。'));\n"
+"on('exit-safe-mode',()=>maint('exit-safe-mode',null,'退出安全模式，并以正常模式重启键盘程序？'));\n"
+"on('save-debug',()=>{const v=el('verbose').checked;return maint('debug',{verbose:v},(v?'打开':'关闭')+'详细调试日志？下次键盘程序启动时生效。');});\n"
+"function progress(d){if(!d.id)return;task=d.id;el('task-id').value=task;el('state').textContent=d.state;const list=el('steps');list.replaceChildren();for(const a of d.actions){const li=document.createElement('li');li.textContent=a;list.appendChild(li);}if(d.shots.length){const n=Math.max(...d.shots);el('shot').src='/api/tasks/'+task+'/steps/'+n+'/shot.jpg';el('shot').hidden=false;}else{el('shot').removeAttribute('src');el('shot').hidden=true;}}\n"
+"on('submit',async()=>{const d=await api('/api/tasks','POST',{goal:el('goal').value});progress(d);message(d.state==='waiting_allow'?'等待键盘上的实体允许。':'任务已接受。');if(stream)stream.close();stream=new EventSource('/api/events');stream.addEventListener('task',ev=>progress(JSON.parse(ev.data)));stream.onerror=()=>message('进度连接中断。会话过期请重新配对；也可以按“刷新”查询任务。');});\n"
+"on('refresh',async()=>{task=el('task-id').value;if(!/^t[0-9]+$/.test(task))throw Error('请输入任务 ID。');progress(await api('/api/tasks/'+task));});\n"
+"for(const action of ['pause','resume','stop'])on(action,async()=>{if(!task)throw Error('请先选择任务。');progress(await api('/api/tasks/'+task+'/'+action,'POST',{}));message(action==='stop'?'已停止。只有键盘上的实体允许才能再次授权。':action==='pause'?'将在下一次观察或动作前暂停。':'已继续。');});\n"
+"window.addEventListener('pagehide',()=>{if(stream)stream.close();});\n"
+"session().catch(err=>message(err.message));\n";
+static const char body0[] =
+"<nav><a href='/'>设置与维护</a><a id='nav-chat' href='/chat' hidden>Agent 任务</a></nav>\n"
+"<h1>MK20 键盘设置</h1>\n"
+"<p id='message' role='status'>正在连接设备…</p>\n"
+"<fieldset id='pairing'><legend>配对这个浏览器</legend>\n"
+"<p>点下面的按钮后，键盘屏幕会显示 6 位配对码。本页不会显示配对码；配对码 5 分钟内有效，最多输错 5 次。</p>\n"
+"<button id='start'>在键盘上显示配对码</button>\n"
+"<label>配对码 <input id='code' inputmode='numeric' pattern='[0-9]{6}' maxlength='6' autocomplete='off'></label>\n"
+"<button id='pair'>配对</button>\n"
+"<p><small>配对只在设备内存中保存：30 分钟无操作、12 小时或设备重启后需要重新配对。</small></p></fieldset>\n"
+"<section><h2>设备状态</h2><button id='refresh-status'>刷新</button><dl id='status'></dl><ul id='problems'></ul></section>\n"
+"<section><h2>模型</h2>\n"
+"<label>模型商 <select id='provider'></select></label>\n"
+"<label>模型 <select id='model'></select></label>\n"
+"<button id='save-provider'>保存模型</button><button id='test'>从设备测试连接</button>\n"
+"<p><small>模型商和模型列表来自固件内置目录（share/providers.json）。连接测试走已保存的网络线路，只说明能否连通。</small></p></section>\n"
+"<section><h2>API 密钥</h2>\n"
+"<label>用于 <select id='secret-name'></select></label>\n"
+"<label>新的值 <input id='secret' type='password' autocomplete='new-password' maxlength='4096'></label>\n"
+"<button id='save-secret'>保存</button><button id='secret-status'>是否已设置</button><button id='delete-secret'>删除</button>\n"
+"<p><small>密钥只写入设备（文件权限 0600），网页和接口都不会读回、显示或报告长度。vnc 一项是 Mac 屏幕共享密码。</small></p></section>\n"
+"<section><h2>网络</h2>\n"
+"<label>线路 <select id='profile'><option value='mac_proxy'>经 Mac 代理（USB）</option><option value='board_wifi'>键盘 Wi-Fi</option></select></label>\n"
+"<label>Mac 代理端口 <input id='port' type='number' min='1' max='65535' value='7890'></label>\n"
+"<label>键盘 Wi-Fi 代理（可选） <input id='board-proxy' placeholder='http://127.0.0.1:7890'></label>\n"
+"<button id='save-net'>保存网络</button>\n"
+"<p><small>经 Mac 代理时依次尝试 <span id='hosts'>—</span> 的这个端口。代理失败不会改为直连；境外流量不允许直连。</small></p></section>\n"
+"<section><h2>维护</h2>\n"
+"<p>键盘程序：<span id='kbd-state'>未知</span></p>\n"
+"<button id='restart-kbd'>重启键盘程序</button><button id='exit-safe-mode'>退出安全模式</button>\n"
+"<label><input type='checkbox' id='verbose'>详细调试日志（下次键盘程序启动时生效）</label><button id='save-debug'>应用调试设置</button>\n"
+"<p><small>每个操作都会先请你确认，由键盘监督进程约 1 秒内处理。本页没有重启设备或回滚固件的按钮。</small></p></section>\n"
+"<section><h2>权限与隐私</h2><p><small>本服务只在 USB 网卡（usb0）上提供，不加载任何外部资源。配对不会授予 agent 权限：agent 默认关闭，只能在键盘上实体允许。所有修改都需要已配对的会话和同源请求。</small></p></section>\n";
+static const char body1[] =
+"<nav><a href='/'>设置与维护</a><a id='nav-chat' href='/chat' hidden>Agent 任务</a></nav>\n"
+"<h1>Agent 任务</h1>\n"
+"<p id='message' role='status'>正在连接设备…</p>\n"
+"<p id='agent-off' hidden>本设备未启用 agent（默认关闭）。这里只能查看；设置请回到“设置与维护”。</p>\n"
+"<fieldset id='pairing'><legend>配对这个浏览器</legend>\n"
+"<p>点下面的按钮后，键盘屏幕会显示 6 位配对码。本页不会显示配对码；配对码 5 分钟内有效，最多输错 5 次。</p>\n"
+"<button id='start'>在键盘上显示配对码</button>\n"
+"<label>配对码 <input id='code' inputmode='numeric' pattern='[0-9]{6}' maxlength='6' autocomplete='off'></label>\n"
+"<button id='pair'>配对</button></fieldset>\n"
+"<section><h2>新任务</h2><label>目标 <textarea id='goal' rows='4' maxlength='4096' placeholder='描述一个任务'></textarea></label><button id='submit'>提交任务</button>\n"
+"<p><small>提交后任务处于 waiting_allow：只有在键盘上实体允许后才会观察和操作。网页不能开启权限、解除急停或代替实体确认。</small></p></section>\n"
+"<section><h2>进度</h2><label>任务 ID <input id='task-id' maxlength='23' placeholder='t1'></label><button id='refresh'>刷新</button>\n"
+"<p id='state' role='status'>未选择任务</p><button id='pause'>暂停</button><button id='resume'>继续</button><button id='stop' class='danger'>停止 / 撤销输入</button>\n"
+"<ol id='steps'></ol><img id='shot' alt='最近一次任务截图（缩放）' hidden></section>\n"
+"<section><h2>说明</h2><p><small>进度只包含固定的动作名；任务目标和输入文字不会写入进度或日志。截图只保存在内存中的 5 张环形缓冲里。关闭页面不会停止任务，请按“停止”。</small></p></section>\n";
+static const char head[] = "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>";
+char *web_page(int chat, size_t *len)
+{
+    const char *title = chat ? "MK20 Agent 任务" : "MK20 键盘设置", *body = chat ? body1 : body0;
+    size_t cap = strlen(head)+strlen(title)+strlen(style)+strlen(body)+strlen(script)+64;
+    char *out = malloc(cap); if (!out) return NULL;
+    int n = snprintf(out,cap,"%s%s</title><style>%s</style><body>%s<script>%s</script></body></html>",head,title,style,body,script);
+    if (n < 0 || (size_t)n >= cap) { free(out); return NULL; }
+    *len = (size_t)n; return out;
+}
+static int digest(const char *s, char out[45])
+{
+    unsigned char h[32]; size_t n = 0;
+    if (mbedtls_sha256((const unsigned char *)s,strlen(s),h,0) || mbedtls_base64_encode((unsigned char *)out,45,&n,h,sizeof h) || n != 44) return -1;
+    out[44] = 0; return 0;
+}
+const char *web_csp(void)
+{
+    static char csp[512];
+    if (!*csp) {
+        char js[45], css[45];
+        if (digest(script,js) || digest(style,css)) return "default-src 'none'; frame-ancestors 'none'";
+        snprintf(csp,sizeof csp,"default-src 'self'; script-src 'sha256-%s'; style-src 'sha256-%s'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",js,css);
+    }
+    return csp;
+}
