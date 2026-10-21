@@ -20,7 +20,9 @@ NO_RED = (248, 113, 113)    # 不行 Esc glyph
 
 # Expected fps caps (PRD §7.3) — shared global budget, never per-key guarantees.
 FPS = {
-    State.IDLE: 2, State.THINKING: 6, State.RUNNING: 6, State.NEEDS_INPUT: 4, State.NEEDS_APPROVAL: 4,
+    # Only "needs me" states move (user 2026-10-22: blinking idle sessions read as "needs me"). Idle is static;
+    # running/thinking keep a small progress bar / dots, never a pulsing border or a moving face.
+    State.IDLE: 0, State.THINKING: 6, State.RUNNING: 6, State.NEEDS_INPUT: 4, State.NEEDS_APPROVAL: 4,
     State.DONE_UNREAD: 8, State.ERROR: 8,
 }
 DONE_POP_S = 1.0   # done_unread: 8 fps pop, then 2 fps glow
@@ -183,7 +185,7 @@ def render_agent(kv: KeyView, age: float, t: float, animations: bool) -> Image.I
 
     # --- mascot -------------------------------------------------------------
     ms = 58
-    draw_mascot(img, (S - ms) // 2 - 10 + ox, 8 + inset // 2, ms, kv.tool, st, phase)
+    draw_mascot(img, (S - ms) // 2 - 10 + ox, 8 + inset // 2, ms, kv.tool, st, phase if st in ATTENTION_STATES else 0.0)
 
     # --- state badge (top-right) ---------------------------------------------
     br = 15

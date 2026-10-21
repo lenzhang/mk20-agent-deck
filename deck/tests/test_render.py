@@ -131,3 +131,13 @@ def test_l1_canvas_has_fifteen_session_faces():
     for i in range(15):
         k = lay.key_rect(i % 5 + 1, i // 5 + 1)
         assert diff(img.crop((k.x, k.y, k.x + k.w, k.y + k.h)), empty) > 1.0, i  # every slot occupied
+
+
+def test_only_needs_me_states_animate():
+    """User 2026-10-22: idle sessions pulsing looked like "needs me". Idle/unknown are static."""
+    def kv(st, attention=False):
+        return KeyView(col=1, row=1, role=Role.AGENT, state=st, attention=attention)
+    assert key_fps(kv(State.IDLE), 10.0, True) == 0
+    assert key_fps(kv(State.UNKNOWN), 10.0, True) == 0
+    assert key_fps(kv(State.NEEDS_INPUT, attention=True), 10.0, True) > 0
+    assert key_fps(kv(State.NEEDS_INPUT, attention=False), 10.0, True) == 0   # only one attention animation
