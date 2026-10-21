@@ -37,6 +37,7 @@ typedef struct ctl_s {
     int64_t (*clock_ms)(void *ctx); void *clock_ctx; /* injectable; defaults to CLOCK_MONOTONIC */
     void (*safety_tick)(void *ctx, int64_t now_ms); void *safety_ctx; /* keyboard's K2 + ctl tick; no HID service */
     int allowed, estopped;
+    int stop_agent;          /* sticky: an e-stop found the agent allowed or leased; cleared by re-allow */
     uint32_t token, next_token, last_seq; int holder; int64_t expiry_ms; char owner[32];
     char stop_reason[32];
     struct { char state[20], input[4], summary[CTL_SUMMARY_CAP]; int progress, dirty; } ui;

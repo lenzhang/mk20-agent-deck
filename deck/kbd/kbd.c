@@ -3,6 +3,7 @@
 #include "ctl.h"
 #include "onboard.h"
 #include "ui_font.h"
+#include "devstat.h"
 #include <errno.h>
 #include <poll.h>
 #include <time.h>
@@ -19,6 +20,44 @@ int64_t kbd_now(kbd_t *k)
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
+/* Static rescue text; the usb0 IP and the web pairing code come from the status worker. */
+static void safe_panels(kbd_t *k)
+{
+    uint16_t *px = k->safe_px;
+    for (int i = 0; i < PANEL_COUNT; i++) {
+        int w = PANELS[i].w, h = PANELS[i].h;
+        memset(px, 0, (size_t)w * h * 2);
+        ui_font_draw(px,w,h,2,4,"MK20 SAFE MODE",0xffff,w-4);
+        ui_font_draw(px,w,h,2,25,"restart loop",0xffff,w-4);
+        ui_font_draw(px,w,h,2,50,"admin:",0xffff,w-4);
+        ui_font_draw(px,w,h,2,70,k->safe_ip,0xffff,w-4);
+        ui_font_draw(px,w,h,2,90,":8780",0xffff,w-4);
+        if (*k->safe_pair) {
+            char line[40]; snprintf(line, sizeof line, "%s%s", PANELS[i].is_key ? "配对码 " : "网页配对码 ", k->safe_pair);
+            ui_font_draw(px,w,h,2,108,line,0xffe0,w-4);
+        }
+        screen_set_tile565(&k->scr,PANELS[i].fb,0,0,w,h,px);
+    }
+}
+int kbd_safe_status_start(kbd_t *k)
+{
+    if (!k->safe_mode || k->safe_ds) return -1;
+    k->safe_ds = devstat_new_env();
+    if (k->safe_ds && devstat_start(k->safe_ds)) { devstat_free(k->safe_ds); k->safe_ds = NULL; }
+    return k->safe_ds ? 0 : -1;
+}
+static void safe_status(kbd_t *k)
+{
+    ds_result_t r; int stale = k->safe_stale, got = devstat_take(k->safe_ds, &r, &stale);
+    if (!got && stale == k->safe_stale) return;
+    if (got) {
+        snprintf(k->safe_ip, sizeof k->safe_ip, "%s", r.ip);
+        snprintf(k->safe_pair_raw, sizeof k->safe_pair_raw, "%s", r.pair);
+    }
+    k->safe_stale = stale;
+    snprintf(k->safe_pair, sizeof k->safe_pair, "%s", stale ? "" : k->safe_pair_raw); /* expiry unverifiable when stale */
+    safe_panels(k); /* only changed panels are queued (screen diff) */
+}
 static int init_core(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version, int safe)
 {
     memset(k, 0, sizeof *k);
@@ -27,20 +66,11 @@ static int init_core(kbd_t *k, const char *fbdir, const char *bl_dir, const char
     snprintf(k->bl_dir, sizeof k->bl_dir, "%s", bl_dir ? bl_dir : "");
     if (screen_init(&k->scr, fbdir)) return -1;
     if (safe) {
-        /* One bounded scratch panel, embedded ASCII font. No host parser/canvas/decoder or on-board UI. */
-        uint16_t *px = calloc((size_t)428 * 142, 2);
-        if (!px) { screen_free(&k->scr); return -1; }
-        for (int i = 0; i < PANEL_COUNT; i++) {
-            int w = PANELS[i].w, h = PANELS[i].h;
-            memset(px, 0, (size_t)w * h * 2);
-            ui_font_draw(px,w,h,2,4,"MK20 SAFE MODE",0xffff,w-4);
-            ui_font_draw(px,w,h,2,25,"restart loop",0xffff,w-4);
-            ui_font_draw(px,w,h,2,50,"admin:",0xffff,w-4);
-            ui_font_draw(px,w,h,2,70,"172.30.250.2",0xffff,w-4);
-            ui_font_draw(px,w,h,2,90,":8780",0xffff,w-4);
-            screen_set_tile565(&k->scr,PANELS[i].fb,0,0,w,h,px);
-        }
-        free(px); return 0;
+        /* One bounded scratch panel, embedded font. No host parser/canvas/decoder or on-board UI. */
+        k->safe_px = calloc((size_t)428 * 142, 2);
+        if (!k->safe_px) { screen_free(&k->scr); return -1; }
+        snprintf(k->safe_ip, sizeof k->safe_ip, "172.30.250.2");
+        safe_panels(k); return 0;
     }
     if (host_parser_init(&k->hp, (1u << 20) + HOST_HDR + 4)) { screen_free(&k->scr); return -1; }
     k->canvas = calloc((size_t)CANVAS_W * CANVAS_H, 2);
@@ -55,6 +85,7 @@ int kbd_init_safe(kbd_t *k, const char *fbdir, const char *bl_dir, const char *v
 void kbd_free(kbd_t *k)
 {
     onboard_free(k);
+    devstat_free(k->safe_ds); k->safe_ds = NULL; free(k->safe_px); k->safe_px = NULL;
     screen_free(&k->scr); host_parser_free(&k->hp); free(k->canvas); k->canvas = NULL;
 }
 
@@ -75,6 +106,7 @@ void kbd_service(kbd_t *k, int64_t now)
     if (k->onboard) kbd_host_drain(k);
     onboard_service(k,now);
     if (k->onboard) kbd_safety_tick(k,kbd_now(k));
+    if (k->safe_mode && k->safe_ds) safe_status(k);
 }
 
 static void host_write(kbd_t *k)

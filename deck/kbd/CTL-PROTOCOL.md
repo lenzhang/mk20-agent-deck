@@ -141,7 +141,7 @@ on all pages, and PTT face/bind (row3,col0 / fb16) on agent pages are reserved.
 Draw/text/bind on reserved targets returns `reserved`, even with a temporary grant.
 fb21 draw rectangles intersecting y112..141 are reserved. fb21 text implicitly
 addresses only the y0..111 body viewport; future rendering must clip there. Permitted
-text/draw validation currently returns rendered:false without pixel mutation. Pressing fb20 invokes e-stop on every page. System/control visuals and the
+text/draw validation currently returns rendered:false without pixel mutation. Pressing fb20 invokes e-stop on every page while the keyboard agent is allowed or holds a lease (always on HOME/LS/L5/agent pages); with the agent disabled, fb20 on the Mac host pages L1/L4 is forwarded to the host as its mode key (2026-10-20). K2 hold/triple always stops. `stop_agent` (internal) remembers whether an e-stop found the agent allowed or leased; it drives the keyboard's persistent stop notice and is cleared only by the physical re-allow. A keyboard fail-safe stop with reason `fb20_held` is raised if the agent becomes allowed/leased while fb20 is held as the Mac's key. System/control visuals and the
 footer are composed locally; agent `screen.draw`/`screen.text` still return
 `rendered:false` and never supply safety visuals.
 

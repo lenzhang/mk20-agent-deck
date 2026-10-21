@@ -4,6 +4,36 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
+## Unreleased (feature/fw-ux, on top of 1.3.1; no version bump yet)
+
+On-device UX revision of `bin/mk20-kbd` (rebuilt static armhf; other binaries byte-identical).
+`firmware/VERSION` stays **1.3.1** until the integrator bumps it; `sbin/mk20d` is unchanged
+(it already exports `MK20_VERSION`/`MK20_REL` and writes `/tmp/mk20/gadget.env`).
+
+- HOME shows real status instead of "unknown" (new `kbd/devstat.c`: firmware version, usb0 IP,
+  USB/Mac link, WiFi interface presence, net/provider config and marker, key presence/permissions
+  only — key content is never read). Navigation tiles get a chevron, no value line.
+- LS is read-only; the usb0 web page `http://172.30.250.2:8780` is the only settings entry. fb19
+  网页设置 shows the URL and, with the Mac ONLINE, sends `{"method":"ui.openSettings"}` (<=1/3 s).
+- Boot follows the Mac to L1 once if it comes ONLINE before any key/knob input.
+- fb20 on L1/L4 is the Mac mode key unless the keyboard agent is allowed/leased (then e-stop);
+  K2 hold/triple always e-stops; an e-stop stays on L1/L4 (Mac PTT released, 10 s footer banner).
+- Page-switch grace window swallows keys; confirmation requests no longer auto-switch to L5.
+- Live L1/L4 publish the host's full 142-px sub-screen; the device footer appears only for
+  attention (pairing code, stop, confirmation, stale Mac, held PTT, GD32 mapping warning).
+- Web pairing code from `/run/mk20/pair-code` (0600, <=64 B, <=600 s ahead) shown on every page.
+- Follow-up (cross-review): status probes on a worker thread only (snapshot mailbox, stale after
+  10 s, bounded shutdown); host forwarding pauses after an e-stop on L1/L4 until all released + 1 s;
+  fb20-held/agent-activation race -> host up then e-stop; persistent "智能体已急停" notice when the
+  agent was active; grace window also swallows K1/K2 short and is capped; safe mode shows the usb0
+  IP and the web pairing code.
+
+Host validation only (Docker mk20-build:trixie, gcc 14): `make -C kbd test` (test_kbd 4018 ASan
++ 4018 TSan, onboard 11337, safe mode 2 scenarios, e2e OK incl. stalled-host and blocked-status-
+worker stop latencies), `make -C kbd ui-test` (ui 41396 checks, 85/170 conformance, 330 byte-exact
+goldens), onboard TSan 11337, `tests_sim` 34 passed, release-binary/docs/mk20d-kbd pytest. **No device
+acceptance claimed.** See kbd/UI.md "On-device UX revision" and ONBOARD-UI-PLAN.md decisions.
+
 ## 1.3.1-rc3 (K4 field fix)
 
 `firmware/VERSION` is **1.3.1**; build id **rc3**: `sh tools/mk20-release-build.sh firmware out rc3`.

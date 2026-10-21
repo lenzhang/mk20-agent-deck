@@ -17,7 +17,7 @@ B=$D/firmware/release/bin
 "$CC" $F "-ffile-prefix-map=$D=." "-fdebug-prefix-map=$D=." -o "$B/mk20-router.new" "$D/router/mk20_router.c"
 K=$D/kbd   # same sources/flags as kbd/Makefile `armhf` (+ -Werror via $F)
 "$CC" $F "-ffile-prefix-map=$D=." "-fdebug-prefix-map=$D=." -std=c99 -D_DEFAULT_SOURCE -o "$B/mk20-kbd.new" "$K/mk20_kbd.c" "$K/gd32.c" "$K/gd32io.c" "$K/host.c" "$K/panels.c" \
-  "$K/screen.c" "$K/jpeg.c" "$K/kbd.c" "$K/hid.c" "$K/ctl.c" "$K/ctlscr.c" "$K/k2estop.c" "$K/onboard.c" "$K/ui.c" "$K/ui_font.c" "$K/ui_font_render.c" "$K/uicfg.c" -pthread
+  "$K/screen.c" "$K/jpeg.c" "$K/kbd.c" "$K/hid.c" "$K/ctl.c" "$K/ctlscr.c" "$K/k2estop.c" "$K/onboard.c" "$K/devstat.c" "$K/ui.c" "$K/ui_font.c" "$K/ui_font_render.c" "$K/uicfg.c" -pthread
 # Reuse the agent source/crypto lists and vendor-specific flags verbatim.
 # A fresh object tree prevents stale host/sanitizer objects entering a release.
 A=$(mktemp -d "$D/agent/build-release.XXXXXX")

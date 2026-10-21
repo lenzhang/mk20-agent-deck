@@ -168,7 +168,7 @@ def test_release_binaries_match_source(tmp_path):
                (DECK / "agent/SOURCE_DATE_EPOCH").read_text().strip()))
     kbd = [str(DECK / "kbd" / f) for f in (
         "mk20_kbd.c", "gd32.c", "gd32io.c", "host.c", "panels.c", "screen.c", "jpeg.c", "kbd.c", "hid.c", "ctl.c", "ctlscr.c", "k2estop.c",
-        "onboard.c", "ui.c", "ui_font.c", "ui_font_render.c", "uicfg.c")] + ["-pthread"]
+        "onboard.c", "devstat.c", "ui.c", "ui_font.c", "ui_font_render.c", "uicfg.c")] + ["-pthread"]
     for name, src in (("ttygs_tcp_bridge", [str(DECK / "m2-scripts/bridge/ttygs_tcp_bridge.c")]),
                       ("mk20-router", [str(DECK / "router/mk20_router.c")]), ("mk20-kbd", kbd)):
         out = tmp_path / name

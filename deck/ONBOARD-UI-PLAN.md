@@ -1,6 +1,21 @@
 # On-board UI plan (2026-10-19)
 
 Status: user-approved design; U1 host foundation and U2 host integration implemented (2026-10-19); U3–U7 pending.
+**Decision changes 2026-10-20 (user, on-device UX revision, branch feature/fw-ux; details in kbd/UI.md):**
+(1) Boot -> L1 once when the Mac becomes ONLINE before any key/knob input (otherwise Home);
+(2) fb20 on L1/L4 is forwarded to the Mac as its mode key unless the keyboard agent is active
+(allowed or leased) — then, and on every other page, it is the e-stop; K2 hold/triple is always the
+e-stop, and an e-stop no longer leaves L1/L4; (3) LS is read-only and the usb0 web page
+`http://172.30.250.2:8780` is the single settings/key/test entry (fb19 sends `ui.openSettings`);
+(4) no automatic switch to L5 on a confirmation request (badge on fb6 + sub-screen line); (5) the
+host owns the full fb21 sub-screen on live L1/L4 unless a safety/attention footer is needed; (6) a
+page-switch grace window swallows keys until a fresh frame or 2 s; (7) the web pairing code from
+`/run/mk20/pair-code` is shown in the device footer on every page.
+**Follow-up 2026-10-21 (cross-review):** after any e-stop on L1/L4, host forwarding (keys and knobs)
+pauses until everything is released and 1 s is quiet; fb20 held as a host key when the agent becomes
+active -> host up, then e-stop; status probes run on a worker thread only (stale after 10 s); a stop of
+an active agent shows a persistent footer notice until re-allowed/acknowledged on L5; safe mode shows the
+usb0 IP and the pairing code.
 The keyboard must be fully usable without the Mac app. This supersedes the earlier
 “no Mac helper” decision with **optional helper, never required** (2026-10-19).
 No AirPlay. Network access uses only the explicitly selected egress: Mac proxy is
@@ -49,8 +64,8 @@ new route/host-generation metadata must be explicitly documented when added.
 
 | Route | Mac absent | Mac present |
 |---|---|---|
-| Home (boot default) | On-board | On-board; attach never forces navigation |
-| LS settings | On-board | On-board; host cannot replace it |
+| Home (boot default) | On-board | On-board; attach never forces navigation, except once: first ONLINE after boot with no input yet -> L1 (2026-10-20) |
+| LS settings (read-only since 2026-10-20) | On-board | On-board; host cannot replace it |
 | L5 agent / confirmations | On-board | On-board; agent supplies state, never the control visuals |
 | L1 sessions / L4 modes | On-board “Mac offline” placeholder | Host content with on-board reserved key and fb21 safety/voice strip |
 | Agent-owned page >=3 | On-board renderer + validated agent content | Same; host frames cannot enter it |
@@ -119,17 +134,23 @@ host/agent body drawing is clipped to y=0..111. Local pages use the same footer.
 | row / fb range | col1 | col2 | col3 | col4 | col5 |
 |---|---|---|---|---|---|
 | 1 / 1–5 | Link status | Proxy status | Agent state | Firmware version | Settings -> LS |
-| 2 / 6–10 | Agent -> L5 | Sessions -> L1 | Modes -> L4 | Selected profile | Provider/model |
+| 2 / 6–10 | 智能体页 -> L5 | Agent 会话 -> L1 | 模式切换 -> L4 | Selected profile | Provider/model |
 | 3 / 11–15 | USB IP | WiFi status | Config status | Key set/missing | Device info -> LS/info |
-| 4 / 16–20 | Voice target/status (read-only) | Task status | Home (current) | Web/key setup hint | **E-stop** |
+| 4 / 16–20 | Voice target/status (read-only) | Task status | Home (current) | 网页设置: usb0 URL, ui.openSettings | **E-stop** |
 
 Read-only cells have no action. fw/kernel/GD32 version and link state come from
-available local release/status data; unknown is “unknown”, never the old sim's
-hardcoded fw1.1.4/GD32 V2.32 presented as a live measurement. No new GD32 query.
+available local release/status data (2026-10-20: `kbd/devstat.c`); unavailable is a dim
+“—” (never the literal “unknown”), never the old sim's hardcoded fw1.1.4/GD32 V2.32
+presented as a live measurement. No new GD32 query. Navigation tiles have no value line.
 fb21: home title, link/proxy/agent state, current error; footer split into 214-pixel
 K1/K2 hints plus permanent voice-target label.
 
 ### LS (settings)
+
+**2026-10-20: LS is read-only.** It shows the current values (same data as HOME status) in
+the tabs 网络/模型/密钥/连接测试/设备信息; fb16 返回, fb18 主页, fb19 网页设置; there is no draft,
+Apply, Undo, field editor or on-key Test. The usb0 web page is the single editor. The text
+below describes the original editable design and the retained `uicfg.c` writer contract.
 
 | row / fb range | col1 | col2 | col3 | col4 | col5 |
 |---|---|---|---|---|---|
@@ -177,7 +198,8 @@ K1 adjust/K2 select hints with embedded ⟲⟳; voice target “键盘 agent (L5
 | 4 / 16–20 | **Hold: keyboard-agent PTT** | Recording/ASR status | New-goal status | Web tasks hint | **E-stop** |
 
 The whole L5 page is system-owned. fb16/doc(1,4) is reserved PTT on L5 and
-agent-owned pages; fb20/doc(5,4), API row3,col4 is e-stop on **every** page.
+agent-owned pages; fb20/doc(5,4), API row3,col4 is e-stop on **every** page (2026-10-20:
+except L1/L4 while the keyboard agent is inactive, where it is the Mac's mode key).
 Agent-owned pages reserve both faces, both binds, and the fb21 safety/voice strip;
 even a temporary screen grant cannot override them or home/LS/L5. Extend the current
 `reserved` validation to enforce this; existing code reserves only control page/fb20.
@@ -198,16 +220,18 @@ unavailable”; the reserved key and pause state still work, with no fake transc
 | L1/L4 row2 fb6–10 | Session5 | Session6 | Session7 | Session8 | Decline |
 | L1 row3 fb11–15 | Skill1 | Skill2 | Skill3 | Skill4 | Send |
 | L4 row3 fb11–15 | Codex Desktop | herdr | tmux | Back L1 | Send |
-| L1/L4 row4 fb16–20 | Mac PTT | Stop session | New session | Focus | **E-stop** |
+| L1/L4 row4 fb16–20 | Mac PTT | Stop session | New session | Focus | Mac mode key; **E-stop** while the keyboard agent is active |
 | Offline row1 fb1–5 | Mac offline | Link state | Last-seen age | Reconnect state | Settings |
 | Offline row2 fb6–10 | Home | Agent L5 | blank | blank | blank |
 | Offline row3 fb11–15 | blank | blank | blank | blank | blank |
-| Offline row4 fb16–20 | Mac PTT unavailable | blank | Home | Setup help | **E-stop** |
+| Offline row4 fb16–20 | Mac PTT unavailable | blank | Home | Setup URL | Mode key (inert); **E-stop** while the agent is active |
 
-The current host Mode key at doc(5,4) moves to short K2 (L1 <-> L4), since fb20
-becomes reserved everywhere. Keep existing host roles otherwise. fb21 host body can
-show session details; an on-board footer always states “语音目标: Mac / Right Option”
-and current safety status. Offline Mac PTT emits no HID. Host reconnect cannot
+~~The current host Mode key at doc(5,4) moves to short K2 (L1 <-> L4), since fb20
+becomes reserved everywhere.~~ Superseded 2026-10-20: fb20 stays the host's mode key on
+L1/L4 unless the keyboard agent is active (short K2 still toggles L1 <-> L4). Keep existing host roles otherwise. fb21 host body can
+show session details; ~~an on-board footer always states “语音目标: Mac / Right Option”
+and current safety status~~ (2026-10-20: the host owns all 142 rows unless an attention
+footer is due: pairing code, stop banner, confirmation, stale Mac, held PTT, GD32 mapping). Offline Mac PTT emits no HID. Host reconnect cannot
 select a session or execute a stale key press automatically.
 
 ## 3. Input, state machine and safety
@@ -218,7 +242,7 @@ select a session or execute a stale key press automatically.
 | K1 long >=1 s | Global Home, consumed locally (replaces old long-to-L4); cancel draft needs explicit discard before leaving LS |
 | K2 slots103/104/105 | press/ccw/cw; local focus/select, host scroll, short press L1/L4 toggle; action only on release below hold threshold |
 | K2 hold >=1000 ms | Global latched e-stop, fires while down; no short action on release |
-| fb20 all routes | Immediate latched e-stop; host/agent cannot draw or bind it |
+| fb20 | Immediate latched e-stop on HOME/LS/L5/agent pages, and on L1/L4 while the keyboard agent is allowed/leased; host/agent cannot draw or bind it then. L1/L4 with the agent inactive: forwarded Mac mode key (2026-10-20) |
 | fb16 on L5/agent pages | Board PTT, consumed locally, cannot be rebound; never sends Right Option |
 | fb16 on L1/L4 online | Existing Mac Right Option down/up; revokes agent lease as before |
 
@@ -245,7 +269,7 @@ operation is added. No socket/MCP/host operation can call `ctl_set_allowed()`.
 
 | Event | State/action |
 |---|---|
-| Boot/restart | Home; allowed=0; no lease/grant; no automatic task resume |
+| Boot/restart | Home; allowed=0; no lease/grant; no automatic task resume; first ONLINE before any input -> L1 once (2026-10-20) |
 | Physical L5 Allow | `ctl_set_allowed(c,1)` clears stop latch explicitly; idle; lease still must be acquired |
 | Acquire/renew | Existing connection-bound token, default TTL3000 ms (200..10000); monotonic int64 deadlines |
 | Ordinary human key / Mac PTT | `ctl_human_input()` -> revoke(reason human), purge pending actions, all-up; human takes over |
@@ -255,8 +279,8 @@ operation is added. No socket/MCP/host operation can call `ctl_set_allowed()`.
 | ASR unavailable/empty/fails | No new goal; show error, resume prior goal only when PTT was its sole pause cause and the original lease remains valid; preserve preexisting manual pause |
 | PTT without lease/while disabled | May capture/queue goal only after ASR exists; never enables/acquires by itself; disabled/stopped does not record |
 | TTL expires/client disconnect/disable during PTT | Existing revoke/all-up wins; cancel capture/transcription/resume generation; no reacquire on release |
-| E-stop (key/K2/socket) | `ctl_estop()` -> cancel pending confirmation, revoke, purge, all-up (50 ms write budget), allowed=0, latch stopped, clear grant/binds, home/system page with stop banner; cancel ASR/network work |
-| Confirmation | Existing deadline and >=300 ms shown guard; PTT cancels pending confirmation, later risky actions request a new one |
+| E-stop (key/K2/socket) | `ctl_estop()` -> cancel pending confirmation, revoke, purge, all-up (50 ms write budget), allowed=0, latch stopped, clear grant/binds, home/system page with stop banner (2026-10-20: L1/L4 stay, Mac PTT released, 10 s footer banner); cancel ASR/network work |
+| Confirmation | Existing deadline and >=300 ms shown guard; PTT cancels pending confirmation, later risky actions request a new one; never navigates (2026-10-20): fb6 badge + sub-screen/footer line, user enters L5 |
 | Agent failure/takeover | Show error/human status; dead client lease revoked; reconnect cannot inherit token or pages; only explicit local action resumes/re-allows |
 
 If ASR is asynchronous, “release resumes with new goal” means actions resume only
@@ -554,6 +578,7 @@ policy uses zero cloud dials. Existing GD32 allow-list tests remain mandatory.
 |---|---|
 | **U1 — on-board renderer foundation, host only** | **Implemented 2026-10-19.** C99 HOME/LS state/rendering to caller RGB565 panels; fixed ASCII/CJK/icons and visible replacement; focus/selection/draft count, bounded host/port/preferences editors, network double Apply and discard confirmation, fake int64 knob clock, fb20 e-stop face/state only, injected fake Test. Shared catalogue + stale generator check (glm-coding endpoints/models), Python legacy API/positions retained, directory fsync; WiFi route semantics unchanged. C writer: configurable canonical root, 0700/0600, no-follow exclusive temps, full writes/fsync/rename/dir-fsync, process lock/commit marker, symlink validation and injected faults. Byte conformance for every preset/model/profile plus custom hosts; actual llm_provider_load/netcfg_load acceptance; 13 scenes / 286 exact P6 goldens (lossless gzip), explicit make ui-golden only. make ui-test / onboard-ui-test offline with ASan/UBSan; optional static armhf compile when toolchain exists. See kbd/UI.md for contracts/font sources/licenses and validation counts. **Originally deferred to U2, now completed:** C-backend simulator adapter and cases/onboard.json; see the U2 row and kbd/UI.md. Existing sim regressions retained. Main-loop/ownership and ctl safety are implemented by U2 below; full PTT and physical status remain U4/U7; consumer marker coordination, explicit D1′ mode selection, capability gating and real device Test are U3. No device integration or acceptance claimed. |
 | **U2 — loop integration and ownership** | **Implemented host-only 2026-10-19.** Default replacement --run boots C HOME with internal safety/allowed=0; K4 release 1.3.0 now defaults to this replacement; stock KD is never started by K4 (see KD-REPLACE-PLAN §8). Route ids map to ctl 0/1/2/>=3 without renumbering. One compositor gates host JPEG/tile publication by route/epoch, preserves reserved fb20/fb16/footer, rejects agent grants on on-board pages, poisons old partial/complete receive work, and requires fresh full frames. Optional strict cmd101 hello/heartbeat/page negotiation, monotonic accepted generation, 3-s/5-s hysteresis and legacy frame liveness/getInfo re-entry; no attach navigation or cached recovery. Bounded nonblocking ack output, background JPEG decode with shared canvas, incremental/rate-capped panel rendering and echo-wait safety service; confirmation shown only after successful writer completion. Fake-fd/clock integration: 599 ASan/UBSan checks, same checks TSan-clean; 1,130 U1 checks / 286 unchanged goldens / 170 exact config files; 35 simulator tests (24 prior + nine C cases + two adapter checks); 2,324 ctl checks; 92 Python regressions. Requested full make test reaches 3,999 core checks: 3,985 pass / 14 environment failures, exactly reproduced from pristine HEAD; no full-suite pass claimed. See kbd/UI.md for commands, agent timeout retry, limits and counts. C-backed CLI/browser replay and onboard.json complete the U1 deferred adapter. Production durable Apply/Test remain visibly unavailable until U3; full pause/voice remains U4/U6. No hardware or network actions; **no device acceptance claimed**. |
+| **UX-1 — on-device UX revision (2026-10-20)** | **Implemented host-only on feature/fw-ux.** Real HOME/LS status via bounded `kbd/devstat.c` probes (no key reads), read-only LS + web as the single settings entry with `ui.openSettings`, boot auto-L1 once, fb20 host mode key unless the agent is active, e-stop stays on L1/L4, grace window, no auto-L5, host-owned sub-screen with attention footer, pairing-code badge. Tests: kbd/UI.md and firmware/RELEASE.md “Unreleased”. **No device acceptance claimed.** |
 | **U3 — device-side config/test service** | Shared commit lock/marker and consumer snapshot reload; add config/key/test pages to the existing `mk20-agent --web`, the ONLY usb0 admin web service at `172.30.250.2:8780` (AGENT-BUILD-PLAN §3.8b), with root-bound write-only key/config handling; no second server on 8780; selected direct/proxy route enforcement in netcfg/net consumers, test worker using net.c/llm.c; injected offline tests prove per-error classes, 10 s deadline/cancel, zero unselected-route or proxy-to-direct fallback dials, coherent crash recovery, key redaction and no agent-loop block. Later authorized device test must use the selected profile; Mac absent with explicitly selected USB WiFi direct or proxy must be possible. **Maintenance entry (user decision 2026-10-19, KD-REPLACE-PLAN K4):** the same `mk20-agent --web` (`http://172.30.250.2:8780`) gains a maintenance page — debug toggles, exit safe mode, view logs, restart mk20-kbd — token/usb0-only like the key page, never printing keys. K4 implements the file contract in [firmware/MAINT-HOOKS.md](firmware/MAINT-HOOKS.md): atomic `restart-kbd`, `exit-safe-mode`, allow-listed `debug`, read-only runtime `state.json`; U3 wires the web handlers to it. Optional mirror in Mac mk20deck config. No on-keyboard hidden key combo; no switch back to stock KD. |
 | **U4 — L5, reserved PTT and e-stop** | Render allow/confirm/pause/state page; implement/document pause gate + events/errors as explicit CTL protocol extension; reserve fb16/fb20 and voice target now, ASR may still be unavailable. Fake-clock tests prove held PTT renews same lease while actions stop, ordinary/L1 PTT revokes, TTL/disable/stop wins, >=300 ms confirmation, cold-start K2 capability handling. No remote enable or key override. |
 | **U5 — optional Mac fast paths** | USB-address-only authenticated screenshot/AX endpoints with permissions/errors/limits, per-display/window geometry; agent fast-path->VNC->UVC chooser integrated with feature/uvc dependency. Offline fakes prove ordering, demotion/promotion, stale-coordinate rejection, no-helper operation and no AirPlay. Mac runtime permissions/actual capture remain a later authorized acceptance step. |

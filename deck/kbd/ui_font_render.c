@@ -42,3 +42,26 @@ void ui_font_draw(uint16_t *p,int w,int h,int x,int y,const char *s,uint16_t c,i
         used+=g->width;
     }
 }
+int ui_font_width(const char *s)
+{
+    int n=0;
+    while (*s) { const ui_glyph_t *g=lookup(ui_font_next(&s)); n+=g?g->width:16; }
+    return n;
+}
+void ui_font_draw_scaled(uint16_t *p,int w,int h,int x,int y,const char *s,uint16_t c,int max_width,int scale)
+{
+    if (scale<=1) { ui_font_draw(p,w,h,x,y,s,c,max_width); return; }
+    if (!p || w<=0 || h<=0 || max_width<=0) return;
+    int used=0, fits=ui_font_width(s)*scale<=max_width;
+    while (*s) {
+        const ui_glyph_t *g=lookup(ui_font_next(&s)); if (!g) g=lookup(0xfffd);
+        if (!g) return;
+        if (!fits && used+(g->width+16)*scale>max_width) { g=lookup(0x2026); s=""; if (!g) return; }
+        if (used+g->width*scale>max_width) return;
+        for (int yy=0;yy<16*scale;yy++) for (int xx=0;xx<g->width*scale;xx++) {
+            int px=x+used+xx,py=y+yy;
+            if (px>=0&&py>=0&&px<w&&py<h&&(g->rows[yy/scale]&(0x8000u>>(xx/scale)))) p[py*w+px]=c;
+        }
+        used+=g->width*scale;
+    }
+}
