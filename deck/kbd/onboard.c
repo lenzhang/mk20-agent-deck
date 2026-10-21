@@ -441,7 +441,10 @@ void onboard_tick(kbd_t *k, int64_t now)
     }
     if (o->suspend) {
         int held = o->pressed != 0 || o->knob_down[0] || (o->knob_down[1] && k->k2.reports_release);
-        if (!held && now - o->input_at >= 1000) { o->suspend = 0; o->render |= 1u << 19; }
+        /* Bounded: 5 s with no key/knob event at all also resumes, so a GD32 key-up lost while suspended
+         * cannot leave L1 dead. Safe: swallowed presses keep owner 0 (their late up stays swallowed) and
+         * pre-stop presses still release to their original owner. */
+        if ((!held && now - o->input_at >= 1000) || now - o->input_at >= 5000) { o->suspend = 0; o->render |= 1u << 19; }
     }
     if (o->grace_shown && !grace(o,now)) { o->grace_shown = 0; o->render = ALL_PANELS; }
     status_sync(k);

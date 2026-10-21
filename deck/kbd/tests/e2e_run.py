@@ -13,6 +13,18 @@ BIN = os.path.join(HERE, "..", "mk20-kbd")
 fails = 0
 heartbeat_fd = None
 heartbeat_at = 0.0
+
+def sock_ready(path):
+    """bind() runs under umask 077 (0700), then chmod 0600, then listen(): wait for the final mode so a
+    loaded CI host cannot observe the bind->listen window (was a flaky "kbd.sock 0600"/ECONNREFUSED)."""
+    try:
+        if os.stat(path).st_mode & 0o777 != 0o600:
+            return False
+    except OSError:
+        return False
+    time.sleep(0.05)   # chmod -> listen is back-to-back in ctl_listen()
+    return True
+
 def check(cond, what):
     global fails
     if not cond:
@@ -86,7 +98,7 @@ def stalled_host_safety(tmp):
         cs = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); cs.settimeout(2)
         try:
             end = time.monotonic() + 3
-            while not os.path.exists(sockp) and time.monotonic() < end: time.sleep(0.01)
+            while not sock_ready(sockp) and time.monotonic() < end: time.sleep(0.01)
             cs.connect(sockp)
             with cs.makefile("rwb", buffering=0) as cf:
                 def rq(obj):
@@ -156,7 +168,7 @@ def blocked_status_worker(tmp):
         cs = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); cs.settimeout(2)
         try:
             end = time.monotonic() + 3
-            while not os.path.exists(sockp) and time.monotonic() < end: time.sleep(0.01)
+            while not sock_ready(sockp) and time.monotonic() < end: time.sleep(0.01)
             cs.connect(sockp)
             with cs.makefile("rwb", buffering=0) as cf:
                 def rq(obj):
@@ -349,7 +361,7 @@ def main():
         p, gm, hm, fb, st, keep = start(tmp, ["--no-gd32-write", "--no-host", "--ctl", sockp, "--ctl-allow"], hid=hidc)
         import socket as _s
         t0 = time.time()
-        while not os.path.exists(sockp) and time.time() - t0 < 3: time.sleep(0.05)
+        while not sock_ready(sockp) and time.time() - t0 < 3: time.sleep(0.05)
         check(os.path.exists(sockp) and (os.stat(sockp).st_mode & 0o777) == 0o600, "kbd.sock 0600")
         cs = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM); cs.connect(sockp); cf = cs.makefile("rwb", buffering=0)
         def rq(obj):
@@ -392,7 +404,7 @@ def main():
         # lease expiry + human preempt
         p, gm, hm, fb, st, keep = start(tmp, ["--no-gd32-write", "--no-host", "--ctl", sockp, "--ctl-allow"], hid=hidc)
         t0 = time.time()
-        while not os.path.exists(sockp) and time.time() - t0 < 3: time.sleep(0.05)
+        while not sock_ready(sockp) and time.time() - t0 < 3: time.sleep(0.05)
         cs = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM); cs.connect(sockp); cf = cs.makefile("rwb", buffering=0)
         drain()
         tok = rq({"op": "lease.acquire", "ttl_ms": 300})["token"]
@@ -410,7 +422,7 @@ def main():
         p, gm, hm, fb, st, keep = start(tmp, ["--no-gd32-write", "--no-host", "--ctl", sockp, "--ctl-allow",
                                             "--k2-estop", "--k2-release"], hid=hidc)
         t0 = time.monotonic()
-        while not os.path.exists(sockp) and time.monotonic() - t0 < 3: time.sleep(0.05)
+        while not sock_ready(sockp) and time.monotonic() - t0 < 3: time.sleep(0.05)
         cs = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM); cs.settimeout(2); cs.connect(sockp); cf = cs.makefile("rwb", buffering=0)
         drain()
         tok = rq({"op": "lease.acquire", "ttl_ms": 3000})["token"]

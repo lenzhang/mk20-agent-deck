@@ -414,6 +414,21 @@ static void ux_suspend(void)
     live(&k,0); key(&k,1,1); key(&k,1,0); n=ux_frames(p[0],frames,ids,64); CHECK(ux_count(frames,n,"keyStateChanged")==2);
     k.hid=c.hid=NULL; close(hp[0]); close(hp[1]); close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
 }
+static void ux_suspend_lost_up(void)
+{
+    char frames[64][192]; uint32_t ids[64];
+    kbd_t k; ctl_t c; r2_online(&k,&c);
+    int p[2]; CHECK(!pipe(p)); CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(p[1],F_SETFL,O_NONBLOCK)); k.host_fd=p[1];
+    ctl_set_allowed(&c,1); live(&k,0); ux_frames(p[0],frames,ids,64);
+    key(&k,20,1); CHECK(c.estopped && onboard_current(&k)==ONBOARD_L1);
+    key(&k,3,1);  /* pressed while suspended; the GD32 loses its key-up (and fb20's) */
+    live(&k,1000); key(&k,1,1); key(&k,1,0); int n=ux_frames(p[0],frames,ids,64);
+    CHECK(!ux_count(frames,n,"keyStateChanged")); /* "held" keys: still suspended after 1 s */
+    live(&k,4000); /* 5 s without any key/knob event: bounded fallback resumes forwarding */
+    key(&k,1,1); key(&k,1,0); n=ux_frames(p[0],frames,ids,64); CHECK(ux_count(frames,n,"keyStateChanged")==2);
+    key(&k,3,0); n=ux_frames(p[0],frames,ids,64); CHECK(!ux_count(frames,n,"keyStateChanged")); /* late up of a swallowed press */
+    close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
+}
 static void ux_fb20_race(void)
 {
     char frames[64][192]; uint32_t ids[64]; char up[160]; host_json_key_state(up,sizeof up,4,3,0);
@@ -514,5 +529,5 @@ static void ux_safe_mode(void)
 static void round4_regressions(void)
 {
     ux_status(); ux_pair(); ux_fb20(); ux_grace(); ux_auto_l1(); ux_confirm(); ux_open_settings();
-    ux_worker_blocked(); ux_suspend(); ux_fb20_race(); ux_notice(); ux_minors(); ux_safe_mode();
+    ux_worker_blocked(); ux_suspend(); ux_suspend_lost_up(); ux_fb20_race(); ux_notice(); ux_minors(); ux_safe_mode();
 }
