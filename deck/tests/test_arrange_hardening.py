@@ -7,6 +7,12 @@ M2 non-current modes: preview vs old manager    -> same batch for view and chang
 M3 rules save failure reported success          -> transactional store, non-2xx
 M4 huge ``created`` crashed startup              -> validated numbers, per-entry quarantine
 M5 old background poll thread not joined        -> bounded join + one bg poll at a time
+
+Re-review of eb145f2 (2026-10-22):
+R1 one-time URL in `open` argv (ps)             -> 0600 link file in the 0700 run dir, only its path in argv
+R2 token in the open-failure log                -> logs drop everything after /auth?
+R3 several tabs vs the 8-connection cap         -> HTTP/1.1 keep-alive (+ quiet page back-off on "busy")
+R4 flaky foreign-uid refusal (EPIPE)            -> reply-then-half-close-and-drain, tolerant client
 """
 import json
 import os
@@ -31,10 +37,10 @@ from mk20deck.model import Mode, Session, SessionId, State, Tool
 from mk20deck.render.canvas import Renderer
 from mk20deck.rules import RulesSaveError, RulesStore
 from mk20deck.sim import full_adapters
-from mk20deck.webauth import AuthSocket, AuthStore, request_url
+from mk20deck.webauth import AuthSocket, AuthStore, request_link_file, request_url
 from mk20deck.webui import ArrangeServer, ArrangeService, LoopBusy, LoopCalls
 
-from test_arrange_web import Client, mode, raw_http, tmux_sessions
+from test_arrange_web import Client, link_url, mode, raw_http, tmux_sessions
 
 
 def short_dir():
@@ -172,9 +178,12 @@ def test_auth_socket_refuses_a_foreign_uid(monkeypatch):
     assert a.start()
     try:
         monkeypatch.setattr(webauth, "_peer_uid", lambda conn: 4242)
-        with pytest.raises(ConnectionError, match="uid"):
-            request_url(path)
-        assert a.refused == 1 and a.served == 0
+        for _ in range(10):  # deterministic: the refusal line always arrives (no EPIPE / reset race)
+            with pytest.raises(ConnectionError, match="uid"):
+                request_url(path)
+            with pytest.raises(ConnectionError, match="uid"):
+                request_link_file(path)
+        assert a.refused == 20 and a.served == 0
         monkeypatch.setattr(webauth, "_peer_uid", lambda conn: os.getuid())
         assert request_url(path).startswith("http://127.0.0.1:1/")
     finally:
@@ -218,8 +227,16 @@ def test_sessions_persist_hashed_0600_and_bad_file_is_ignored(tmp_path):
 
 
 # ====================================================================== B2: bounds
+def wait_slots_free(srv, n, timeout=3.0):
+    t0 = time.monotonic()
+    while srv.httpd._slots._value < n and time.monotonic() - t0 < timeout:  # earlier connections closing
+        time.sleep(0.01)
+    assert srv.httpd._slots._value == n
+
+
 def test_connection_cap_answers_503_beyond_the_limit(deck):
     w = deck(max_connections=2)
+    wait_slots_free(w.srv, 2)
     hogs = []
     for _ in range(2):
         s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
@@ -227,7 +244,7 @@ def test_connection_cap_answers_503_beyond_the_limit(deck):
         hogs.append(s)
     time.sleep(0.2)
     third = raw_http(w.srv.port, f"GET /favicon.ico HTTP/1.0\r\nHost: 127.0.0.1:{w.srv.port}\r\n\r\n".encode())
-    assert third.startswith(b"HTTP/1.0 503") and b'"busy"' in third
+    assert third.startswith(b"HTTP/1.1 503") and b'"busy"' in third
     assert w.srv.httpd.rejected >= 1
     for s in hogs:
         s.close()
@@ -571,3 +588,216 @@ def test_background_polls_never_overlap_across_daemon_generations():
         t.join(5)
     assert shared[Mode.TMUX].max_active == 1 and shared[Mode.HERDR].max_active == 1
     assert len(shared[Mode.TMUX].threads) == 6
+
+
+# ====================================================================== R1: no token in any argv
+def _cfg(tmp_path, port):
+    p = tmp_path / "c.toml"
+    p.write_text(f"[web]\narrange_port = {port}\n")
+    return str(p)
+
+
+def test_open_gets_a_private_link_file_path_never_the_token(deck, tmp_path, capsys):
+    from mk20deck.cli import cmd_arrange
+    w = deck()
+    opened = []
+    assert cmd_arrange(Namespace(config=_cfg(tmp_path, w.srv.port), print_only=False, socket=w.sock),
+                       opener=opened.append) == 0
+    (path,) = opened
+    run_dir = os.path.dirname(w.sock)
+    assert os.path.dirname(path) == run_dir and os.path.basename(path).startswith("open-")
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600 and stat.S_IMODE(os.stat(run_dir).st_mode) == 0o700
+    url = link_url(path)
+    token = url.split("/auth?t=", 1)[1]
+    assert len(token) >= 40 and token not in path and token not in capsys.readouterr().out
+    c = Client(w.srv)
+    st, h, _ = c.req("GET", url.split(f":{w.srv.port}", 1)[1])
+    assert st == 200 and c.take_cookie(h)
+    assert not os.path.exists(path)  # redeemed -> deleted
+
+
+def test_macos_open_argv_is_only_the_webloc_path(deck, tmp_path, monkeypatch):
+    import plistlib
+    import subprocess
+    import sys
+    from mk20deck import daemon as D
+    from mk20deck.cli import cmd_arrange
+    w = deck()
+    argv = []
+    monkeypatch.setattr(sys, "platform", "darwin")  # also makes the daemon write a .webloc
+    monkeypatch.setattr(D.subprocess, "run", lambda a, **k: argv.append(list(a)) or
+                        subprocess.CompletedProcess(a, 0, b"", b""))
+    assert cmd_arrange(Namespace(config=_cfg(tmp_path, w.srv.port), print_only=False, socket=w.sock)) == 0
+    assert len(argv) == 1 and argv[0][0] == "open" and len(argv[0]) == 2
+    path = argv[0][1]
+    assert path.endswith(".webloc") and "auth" not in path and "t=" not in path
+    url = plistlib.loads(open(path, "rb").read())["URL"]
+    assert url.startswith(f"http://127.0.0.1:{w.srv.port}/auth?t=") and url.split("t=")[1] not in " ".join(argv[0])
+
+
+def test_link_files_are_deleted_on_expiry_stop_and_start_up(deck, tmp_path):
+    w = deck()
+    path, page = request_link_file(w.sock)
+    assert page == w.srv.url and os.path.exists(path)
+    real = w.srv.auth.clock
+    w.srv.auth.clock = lambda: real() + webauth.OTP_TTL_S + 1
+    try:
+        t0 = time.monotonic()
+        while os.path.exists(path) and time.monotonic() - t0 < 3:  # the socket thread prunes ~5x per second
+            time.sleep(0.05)
+        assert not os.path.exists(path)
+    finally:
+        w.srv.auth.clock = real
+    # an outstanding file goes away when the server stops
+    p2, _ = request_link_file(w.sock)
+    w.srv.stop()
+    assert not os.path.exists(p2)
+    # stale files of an earlier run are removed at start-up (not other files)
+    run_dir = os.path.dirname(w.sock)
+    for n in ("open-old.webloc", "open-x.html", "keep.txt"):
+        open(os.path.join(run_dir, n), "w").write("x")
+    srv = ArrangeServer(w.svc, 0, socket_path=w.sock)
+    assert srv.start()
+    try:
+        assert sorted(os.listdir(run_dir)) == ["arrange.sock", "keep.txt"]
+    finally:
+        srv.stop()
+
+
+def test_redeeming_a_stale_token_also_removes_its_file(tmp_path):
+    d = os.path.join(short_dir(), "run")
+    a = AuthStore(link_dir=d)
+    path = a.mint_file(lambda t: "http://127.0.0.1:1/auth?t=" + t, kind="html")
+    tok = link_url(path).split("t=")[1]
+    real = a.clock
+    a.clock = lambda: real() + webauth.OTP_TTL_S + 1
+    assert a.redeem(tok) is False and not os.path.exists(path)
+    w = a.mint_file(lambda t: "http://127.0.0.1:1/auth?t=" + t, kind="webloc")
+    import plistlib
+    assert plistlib.loads(open(w, "rb").read())["URL"].startswith("http://127.0.0.1:1/auth?t=")
+    for _ in range(webauth.MAX_OTP + 4):  # dropped tokens (MAX_OTP churn) never leave files behind
+        a.mint_file(lambda t: "http://127.0.0.1:1/auth?t=" + t, kind="html")
+    assert len(os.listdir(d)) <= webauth.MAX_OTP
+
+
+# ====================================================================== R2: never log the token
+def test_open_failure_logs_never_show_the_token(monkeypatch, caplog):
+    import logging
+    import subprocess
+    import sys
+    from mk20deck import daemon as D
+    url = "http://127.0.0.1:8781/auth?t=" + "S3CR3T" * 8
+
+    def boom(a, **k):
+        raise subprocess.TimeoutExpired(a, 5)  # its message would contain the argv
+
+    with caplog.at_level(logging.INFO, logger="mk20deck.daemon"):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(D.subprocess, "run", boom)
+        assert D.open_url(url) is False
+        monkeypatch.setattr(D.subprocess, "run", lambda a, **k: subprocess.CompletedProcess(a, 1, b"", b""))
+        assert D.open_url(url) is False
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert D.open_url(url) is False
+    assert "S3CR3T" not in caplog.text and caplog.text.count("127.0.0.1:8781/auth?…") == 3
+
+
+# ====================================================================== R3: keep-alive, several tabs
+def test_several_tabs_polling_reuse_connections_and_never_hit_the_cap(deck):
+    import http.client
+    w = deck()
+    before = w.srv.httpd.accepted
+    statuses = []
+    stop = threading.Event()
+
+    def tab(post=False):
+        c = http.client.HTTPConnection("127.0.0.1", w.srv.port, timeout=5)
+        h = w.cl.auth(Origin=None)
+        h["Host"] = w.cl.host
+        n = 0
+        while not stop.is_set():
+            if post and n == 3:
+                hp = dict(w.cl.auth(), Host=w.cl.host)
+                c.request("POST", "/api/clear", body=b'{"mode": "codex_desktop", "slot": 14}', headers=hp)
+            else:
+                c.request("GET", "/api/state", headers=h)
+            r = c.getresponse()
+            r.read()
+            statuses.append(r.status)
+            n += 1
+            time.sleep(0.25)
+        c.close()
+
+    ths = [threading.Thread(target=tab, args=(i == 0,), daemon=True) for i in range(6)]
+    for t in ths:
+        t.start()
+    time.sleep(2.5)
+    stop.set()
+    for t in ths:
+        t.join(5)
+    assert len(statuses) >= 6 * 6 and set(statuses) == {200}, set(statuses)
+    assert w.srv.httpd.rejected == 0
+    assert w.srv.httpd.accepted - before <= 6 + 2  # one connection per tab, reused
+
+
+def test_idle_keep_alive_connection_is_closed(deck, monkeypatch):
+    monkeypatch.setattr(webui, "READ_TIMEOUT_S", 0.5)
+    w = deck()
+    s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+    s.sendall(f"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:{w.srv.port}\r\n\r\n".encode())
+    first = s.recv(4096)
+    assert first.startswith(b"HTTP/1.1 204") and b"Connection: close" not in first  # kept alive
+    t0 = time.monotonic()
+    assert s.recv(4096) == b""  # the server closes the idle connection ...
+    assert time.monotonic() - t0 < 2.0  # ... after READ_TIMEOUT_S
+    s.close()
+
+
+def test_a_change_that_may_have_happened_is_not_reported_as_retryable(deck, monkeypatch):
+    w = deck()
+    monkeypatch.setattr(webui, "JOB_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(webui, "JOB_RUN_S", 0.2)
+    orig = w.store.put
+
+    def slow_put(*a, **k):
+        time.sleep(0.8)
+        return orig(*a, **k)
+
+    w.store.put = slow_put
+    st, j = w.cl.post("/api/rules", {"mode": "codex_desktop", "slot": 4, "kind": "title", "value": "慢"})
+    assert st == 503 and j["code"] == "maybe"  # the page retries only "busy" (refused before running)
+    t0 = time.monotonic()
+    while not w.store.rules and time.monotonic() - t0 < 3:
+        time.sleep(0.05)
+    assert w.store.rules and w.store.rules[0].value == "慢"  # it did happen
+
+
+def test_page_retries_quietly_only_on_busy(deck):
+    page = Client(deck().srv)
+    page.login()
+    js = page.page()[0].decode()
+    assert "e.code !== 'busy'" in js and "fails < 3" in js  # quiet back-off; "maybe" is never retried
+
+
+# ====================================================================== R4: refusal is always delivered
+def test_client_maps_an_abrupt_refusal_to_a_refusal():
+    """A server that answers and closes without reading (the old behaviour): the client still reports a
+    refusal (the reply, or "closed without a reply"), never a raw BrokenPipe."""
+    path = os.path.join(short_dir(), "abrupt.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(8)
+
+    def serve():
+        for _ in range(10):
+            c, _ = srv.accept()
+            c.sendall(b'{"ok": false, "error": "uid"}\n')
+            c.close()
+
+    th = threading.Thread(target=serve, daemon=True)
+    th.start()
+    for _ in range(10):
+        with pytest.raises(ConnectionError, match="daemon refused"):
+            request_url(path)
+    th.join(5)
+    srv.close()

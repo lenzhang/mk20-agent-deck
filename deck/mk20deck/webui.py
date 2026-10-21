@@ -12,9 +12,10 @@ the controller, the slot managers or the rules store: every read and write is a 
 iteration, plus a "网页：…" toast).  Reads return a snapshot built on the loop thread; if the loop is busy
 (e.g. mid-handshake) the last snapshot is returned marked ``stale``.
 
-Bounds (Kimi K3 review, blocker 2): at most ``MAX_CONNECTIONS`` requests in flight (more → 503 at once),
-every request has a hard ``REQUEST_DEADLINE_S`` from accept (a slow trickle is cut off, not just an idle
-socket), ``LoopCalls`` holds at most ``MAX_PENDING`` jobs (full → 503), the loop wake-up is coalesced and one
+Bounds (Kimi K3 review, blocker 2): at most ``MAX_CONNECTIONS`` connections (more → 503 at once); HTTP/1.1
+keep-alive so a few open tabs polling every 2 s reuse their connection instead of hitting the cap; a
+keep-alive connection idle for ``READ_TIMEOUT_S`` is closed; every request has a hard ``REQUEST_DEADLINE_S``
+from its first byte (a slow trickle is cut off, not just an idle socket), ``LoopCalls`` holds at most ``MAX_PENDING`` jobs (full → 503), the loop wake-up is coalesced and one
 loop iteration runs at most ``DRAIN_MAX`` jobs, so the page can never starve the keyboard loop.
 
 Security (local page, but any local process — sandboxed apps too — can talk to 127.0.0.1):
@@ -39,6 +40,7 @@ from __future__ import annotations
 
 import collections
 import hmac
+import os
 import html
 import http.client
 import http.cookies
@@ -65,8 +67,8 @@ log = logging.getLogger(__name__)
 MAX_BODY = 8 * 1024
 MAX_PATH = 512
 MAX_CONNECTIONS = 8
-REQUEST_DEADLINE_S = 5.0   # from accept to the end of the response, header/body read included
-READ_TIMEOUT_S = 3.0       # per socket read
+REQUEST_DEADLINE_S = 5.0   # from a request's first byte to the end of its response, header/body read included
+READ_TIMEOUT_S = 4.0       # per socket read; also the idle limit of a keep-alive connection between requests
 JOB_TIMEOUT_S = 3.0        # the loop must pick a job up within this (else cancelled, 503)
 JOB_RUN_S = 1.5            # ... and finish a started one within this
 STATE_TIMEOUT_S = 2.0
@@ -540,7 +542,7 @@ class ArrangeService:
 
 # ---------------------------------------------------------------------- HTTP
 _BUSY_BODY = json.dumps({"ok": False, "error": "连接太多，请稍后重试", "code": "busy"}, ensure_ascii=False).encode()
-_BUSY_RESPONSE = (b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json; charset=utf-8\r\n"
+_BUSY_RESPONSE = (b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json; charset=utf-8\r\n"
                   b"Content-Length: " + str(len(_BUSY_BODY)).encode() + b"\r\nCache-Control: no-store\r\n"
                   b"Connection: close\r\n\r\n" + _BUSY_BODY)
 
@@ -554,6 +556,7 @@ class _Server(ThreadingHTTPServer):
     def __init__(self, *a, max_connections: int = MAX_CONNECTIONS, **kw) -> None:
         self._slots = threading.BoundedSemaphore(max_connections)
         self.rejected = 0
+        self.accepted = 0
         super().__init__(*a, **kw)
 
     def process_request(self, request, client_address):
@@ -567,6 +570,7 @@ class _Server(ThreadingHTTPServer):
                 pass
             self.shutdown_request(request)
             return
+        self.accepted += 1
         try:
             super().process_request(request, client_address)
         except BaseException:
@@ -603,7 +607,8 @@ class _Handler(BaseHTTPRequestHandler):
     server: _Server
     server_version = "mk20deck-arrange"
     sys_version = ""
-    timeout = READ_TIMEOUT_S  # per read; the whole request is bounded by REQUEST_DEADLINE_S (setup)
+    protocol_version = "HTTP/1.1"  # keep-alive: tabs polling every 2 s reuse one connection each
+    timeout = READ_TIMEOUT_S  # per read (setup re-reads the module value); requests: REQUEST_DEADLINE_S
 
     def version_string(self) -> str:
         return self.server_version
@@ -613,21 +618,38 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- deadline
     def setup(self) -> None:
+        self.timeout = READ_TIMEOUT_S
+        self._deadline: threading.Timer | None = None
         super().setup()
-        self._t0 = time.monotonic()
+
+    def handle_one_request(self) -> None:
+        """Wait (idle, at most READ_TIMEOUT_S) for the next request's first byte, then give the whole request a
+        hard REQUEST_DEADLINE_S: a client that trickles bytes is cut off (reads fail, the thread ends)."""
+        try:
+            if not self.rfile.peek(1):
+                self.close_connection = True  # client closed its keep-alive connection
+                return
+        except (OSError, ValueError):
+            self.close_connection = True  # idle keep-alive limit / reset
+            return
         self._deadline = threading.Timer(REQUEST_DEADLINE_S, self._expire)
         self._deadline.daemon = True
         self._deadline.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self._deadline.cancel()
 
     def _expire(self) -> None:
-        """Hard per-request deadline: a client that trickles bytes is cut off (reads fail, thread ends)."""
+        self.close_connection = True
         try:
             self.connection.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
 
     def finish(self) -> None:
-        self._deadline.cancel()
+        if self._deadline is not None:
+            self._deadline.cancel()
         try:
             super().finish()
         except OSError:
@@ -651,6 +673,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("X-MK20-Arrange", "1")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         if "Content-Security-Policy" not in (extra or {}):
@@ -782,8 +806,8 @@ class _Handler(BaseHTTPRequestHandler):
         except LoopBusy:
             raise _Reject(503, "键盘程序忙，请稍后重试", "busy") from None
         except LoopTimeout as e:
-            if e.started:
-                raise _Reject(503, "键盘程序忙：改动可能已生效，请刷新确认", "busy") from None
+            if e.started:  # not "busy": the page must not retry a change that may have happened
+                raise _Reject(503, "键盘程序忙：改动可能已生效，请刷新确认", "maybe") from None
             raise _Reject(503, "键盘程序忙（可能正在连接），请稍后重试", "busy") from None
         except NotFound as e:
             raise _Reject(404, str(e) or "不存在") from None
@@ -926,7 +950,7 @@ class ArrangeServer:
         self.port = port
         self.poll_interval = poll_interval  # serve_forever shutdown check
         self.max_connections = max_connections
-        self.auth = AuthStore(sessions_path)
+        self.auth = AuthStore(sessions_path, link_dir=os.path.dirname(socket_path) if socket_path else None)
         self.socket_path = socket_path
         self.auth_socket: AuthSocket | None = None
         self.httpd: _Server | None = None
@@ -942,6 +966,10 @@ class ArrangeServer:
         """A one-time authorization link (60 s, single use) — for ``mk20deck arrange`` and in-process callers
         such as a future keyboard link."""
         return f"http://127.0.0.1:{self.port}/auth?t={self.auth.mint()}"
+
+    def mint_file(self) -> str:
+        """A one-time link in a 0600 file of the 0700 run directory; returns the path for ``open``."""
+        return self.auth.mint_file(lambda t: f"http://127.0.0.1:{self.port}/auth?t={t}")
 
     def cookie(self, sid: str) -> str:
         return f"{self.cookie_name}={sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age={int(SESSION_TTL_S)}"
@@ -962,8 +990,11 @@ class ArrangeServer:
                                        name="mk20-arrange-web", daemon=True)
         self.thread.start()
         if self.socket_path:
-            self.auth_socket = AuthSocket(self.socket_path, self.mint_url)
-            if not self.auth_socket.start():
+            self.auth_socket = AuthSocket(self.socket_path, self.mint_url, mint_file=self.mint_file,
+                                          page_url=self.url, on_tick=self.auth.prune)
+            if self.auth_socket.start():
+                self.auth.clear_links()  # stale link files of an earlier run (we own the run dir now)
+            else:
                 self.auth_socket = None
         log.info("会话安排网页：%s（用 mk20deck arrange 打开）", self.url)
         return True
@@ -972,6 +1003,7 @@ class ArrangeServer:
         if self.auth_socket is not None:
             self.auth_socket.stop()
             self.auth_socket = None
+            self.auth.clear_links()
         if self.httpd is not None:
             self.httpd.shutdown()
             self.httpd.server_close()
@@ -1150,7 +1182,7 @@ border-radius:10px;font-weight:600;box-shadow:0 6px 20px #0008;max-width:80vw}
 const C = __CONSTS__;
 const TOKEN = document.querySelector('meta[name="mk20-csrf"]').content;
 const $ = (id) => document.getElementById(id);
-let S = null, tab = null, sel = null, src = null, busy = false, tokenDead = false;
+let S = null, tab = null, sel = null, src = null, busy = false, tokenDead = false, fails = 0;
 const KHINT = {cwd: '目录前缀：会话目录等于它或在它下面。点“用作规则”取所选会话的目录（网页只显示目录名），也可输入 /… 或 ~/… 路径。',
   window: 'tmux 窗口名或会话名，完全一致；含 * ? 时按通配符匹配。',
   title: '标题包含这段文字（不区分大小写），适合 Codex 桌面线程。',
@@ -1200,13 +1232,15 @@ async function poll() {
   try {
     S = await api('GET', '/api/state');
     sessionStorage.removeItem('mk20-reloaded');
+    fails = 0;
     showErr(S.stale ? '键盘程序忙，显示的是上次的状态…' : '');
     render();
   } catch (e) {
+    fails += 1;
     if (e.code === 'csrf' || e.code === 'auth') deadToken();
-    else showErr('连不上 mk20deck：' + e.message + '（2 秒后重试）');
-    setConn(null);
-  } finally { if (!tokenDead) setTimeout(poll, 2000); }
+    else if ((e.code === 'busy' || !e.code) && fails < 3) { /* transient (busy / dropped): retry quietly */ }
+    else { showErr('连不上 mk20deck：' + e.message + '（稍后重试）'); setConn(null); }
+  } finally { if (!tokenDead) setTimeout(poll, fails ? Math.min(2000 * fails, 8000) : 2000); }
 }
 function setConn(s) {
   const c = $('conn');
@@ -1219,7 +1253,11 @@ async function act(method, path, body) {
   if (busy) return;
   busy = true; document.body.style.setProperty('cursor', 'progress');
   try {
-    const j = await api(method, path, body);
+    let j = null;
+    for (let i = 0; ; i++) {  // "busy" = refused before anything happened: safe to retry; never "maybe"
+      try { j = await api(method, path, body); break; }
+      catch (e) { if (e.code !== 'busy' || i >= 2) throw e; await new Promise((r) => setTimeout(r, 400 * (i + 1))); }
+    }
     if (j.state) { S = j.state; render(); }
     toast(j.message || '完成');
   } catch (e) {

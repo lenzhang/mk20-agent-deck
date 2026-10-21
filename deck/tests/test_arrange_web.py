@@ -112,6 +112,16 @@ def mode(snap, m):
     return next(x for x in snap["modes"] if x["mode"] == m)
 
 
+def link_url(path):
+    """What the browser reads from a link file (.webloc plist or .html meta refresh)."""
+    import html as _html
+    import plistlib
+    raw = open(path, "rb").read()
+    if path.endswith(".webloc"):
+        return plistlib.loads(raw)["URL"]
+    return _html.unescape(re.search(rb'http-equiv="refresh" content="0;url=([^"]+)"', raw).group(1).decode())
+
+
 @pytest.fixture
 def web(tmp_path):
     ads = full_adapters()
@@ -182,7 +192,7 @@ def raw_http(port, data: bytes) -> bytes:
 
 def test_missing_or_duplicate_host_rejected(web):
     p = web.srv.port
-    assert raw_http(p, b"GET / HTTP/1.0\r\n\r\n").startswith(b"HTTP/1.0 403")
+    assert raw_http(p, b"GET / HTTP/1.0\r\n\r\n").startswith(b"HTTP/1.1 403")
     dup = f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nHost: evil:{p}\r\nConnection: close\r\n\r\n".encode()
     assert raw_http(p, dup).split(b"\r\n", 1)[0].endswith(b"403 Forbidden")
 
@@ -247,7 +257,7 @@ def test_body_limits_and_content_type(web):
     p = web.srv.port
     auth = (f"Host: 127.0.0.1:{p}\r\nOrigin: http://127.0.0.1:{p}\r\nX-MK20-CSRF: {web.cl.token}\r\n"
             f"Cookie: {web.cl.cookie_name}={web.cl.sid}\r\nContent-Type: application/json\r\n")
-    assert raw_http(p, f"POST /api/clear HTTP/1.0\r\n{auth}\r\n".encode()).startswith(b"HTTP/1.0 411")
+    assert raw_http(p, f"POST /api/clear HTTP/1.0\r\n{auth}\r\n".encode()).startswith(b"HTTP/1.1 411")
     st, _, b = web.cl.req("POST", "/api/clear", raw=b'{"mode":"tmux","slot":0}',
                           headers=web.cl.auth(**{"Content-Type": "text/plain"}))
     assert st == 415
@@ -262,7 +272,7 @@ def test_body_limits_and_content_type(web):
         web.cl.auth(), **{"Transfer-Encoding": "chunked"}))
     assert st == 411
     hdr = f"POST /api/clear HTTP/1.0\r\n{auth}Content-Length: 999999999\r\n\r\n".encode()
-    assert raw_http(p, hdr).startswith(b"HTTP/1.0 413")
+    assert raw_http(p, hdr).startswith(b"HTTP/1.1 413")
     st, _, _ = web.cl.req("GET", "/" + "a" * 600)
     assert st == 414
 
@@ -651,14 +661,17 @@ def test_cli_arrange_opens_a_one_time_link(web, tmp_path, capsys):
     p.write_text(f"[web]\narrange_port = {web.srv.port}\n")
     opened = []
     assert cmd_arrange(Namespace(config=str(p), print_only=False, socket=web.sock), opener=opened.append) == 0
-    assert len(opened) == 1 and opened[0].startswith(f"http://127.0.0.1:{web.srv.port}/auth?t=")
+    assert len(opened) == 1 and os.path.basename(opened[0]).startswith("open-")  # a file path, no token
+    url = link_url(opened[0])
+    assert url.startswith(f"http://127.0.0.1:{web.srv.port}/auth?t=") and url.split("t=")[1] not in opened[0]
     out = capsys.readouterr().out
     assert "auth?t=" not in out  # the token goes to the browser only
     # the link works once: a fresh browser gets a session, a second use is refused
     b = Client(web.srv)
-    st, h, _ = b.req("GET", opened[0].split(f":{web.srv.port}", 1)[1])
+    st, h, _ = b.req("GET", url.split(f":{web.srv.port}", 1)[1])
     assert st == 200 and b.take_cookie(h)
-    st, _, body = b.req("GET", opened[0].split(f":{web.srv.port}", 1)[1])
+    assert not os.path.exists(opened[0])  # the link file is gone once redeemed
+    st, _, body = b.req("GET", url.split(f":{web.srv.port}", 1)[1])
     assert st == 403 and "链接已失效" in body.decode()
     assert cmd_arrange(Namespace(config=str(p), print_only=True, socket=web.sock), opener=opened.append) == 0
     assert len(opened) == 1 and "/auth?t=" in capsys.readouterr().out
