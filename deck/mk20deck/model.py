@@ -97,6 +97,8 @@ class Session:
     state_reason: str = ""  # why the state is what it is (shown on sub-screen)
     updated_ms: int = 0
     done_marker: str = ""  # identity of the completion that produced done_unread
+    window: str = ""  # tmux window name (slot rules "tmux 窗口名")
+    tmux_session: str = ""  # tmux session name (slot rules match it too)
 
 
 @dataclass

@@ -14,6 +14,7 @@ is **not** implemented (not approved).
 | `adapters/tmux.py`, `adapters/herdr.py` | tmux (generation identity; state from Claude/codex hook records, else unknown) / herdr stub |
 | `agentstate.py` | read side of the hook state records (`agent-state/*.json`), pane/process-tree matching |
 | `slots.py`, `controller.py` | slot manager (15 sticky slots, strict-higher replace, pins, per-mode memory, 8-slot state migration), gestures, roles L1/L4 (see Key layout) |
+| `rules.py`, `webui.py` | slot rules (固定规则, `slot-rules.json`) and the local 会话安排 web page on 127.0.0.1:8781 (see 会话安排网页) |
 | `render/` | key & sub-screen renderer, ≤8 fps global cap, single attention animation |
 | `daemon.py`, `cli.py` | daemon loop, heartbeat, offline frame on exit, CLI; device event `ui.openSettings` (网页设置 key) opens `[deck] web_url` (Mac config only, IP/localhost, max once per 3 s) |
 | `sim.py` | headless screenshots + interactive web sim |
@@ -64,6 +65,47 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
   A5..A8 → S6..S9.
 - Screenshots: `python -m mk20deck sim-shots --scenario layout --out <dir>` (pick up / place: `--scenario move`).
 
+## 会话安排网页
+哪个会话在哪个键，用网页安排（不用写配置文件）。mk20deck 守护进程自己提供这个页面：
+**http://127.0.0.1:8781/**（`python -m mk20deck arrange` 用默认浏览器打开；`--print` 只打印地址）。
+端口在 `config.toml` 的 `[web] arrange_port`（默认 8781，`0` = 关闭）；端口被占用时只记一条警告，守护进程照常运行、
+没有网页。键盘没接时页面照样能用（显示 “键盘未连接”，打开页面期间每 2 秒刷新当前模式）。
+
+- **页面**：三个模式各一个标签（Codex 桌面 / herdr / tmux），键盘当前模式标 “键盘当前”。3×5 网格和键盘 L1 前三排
+  一样（S1–S15），每个键显示标题、工具、状态（与键盘同色同字：待审批/待输入/出错/完成未读/运行/思考/空闲/未知/空槽）、
+  钉住和规则标记；每 2 秒刷新。非当前模式的网格来自后台轮询（约 10 秒），是 “切过去后键盘会显示的样子”。
+- **点一个键 → 右侧面板**：列出该模式现有的会话（标题、工具、目录名或 tmux 窗口、状态、在哪个键）。
+  “放到这里” = 键盘的拿起/放下：移过去并钉住，目标键已有会话则互换（不在键上的会话：原来钉住的占用者挪到第一个空键并保持钉住，
+  没钉住的交回自动填充）；“取消钉住”；“清空此键”（交回自动填充，没有别的会话等着上键时可能又放回原会话）。
+- **固定规则**（每个模式每个键最多一条）：匹配方式 **目录**（会话目录等于它或在它下面；“用作规则” 取所选会话的 worktree
+  根目录 / cwd——完整路径只在 Mac 进程里，网页只显示目录名；也可输入 `/…`、`~/…`）、**tmux 窗口名**（tmux 窗口名或会话名，
+  完全一致，含 `* ? [` 时按通配符）、**标题包含**（不区分大小写，适合 Codex 桌面线程标题）、**工具**（ccai / codex / kimi）。
+  可启用/停用、替换、删除。
+- **规则语义**：每次轮询先应用规则——优先级 **规则 > 手动钉住 > 自动填充**。匹配的会话放在规则的键上并钉住；
+  没有匹配会话时这个键显示 “等待：<规则>”（键盘上 “等待：<值>”），并且保留，自动填充不会用它。
+  一个会话匹配多条规则 → 放在编号最小的键；多个会话匹配同一条规则 → 最近活动的那个占这个键，其余照常自动填充
+  （完全并列时保持现状，不来回跳）。规则挤走的手动钉住挪到规则会话原来的键（互换）或第一个空键，钉住保留。
+  **在键盘上（或网页上）手动改动规则键——移入、移出、切换钉住、取消钉住、清空——会停用那条规则**，页面写明原因和时间，
+  例如 “已停用：键盘把 S1 移到此键（10-22 14:03）”；重新启用即可恢复。停用/删除规则时，会话留在原键，变成普通钉住。
+- **存储**：`~/.config/mk20-agent-deck/slot-rules.json`（遵循 `MK20DECK_HOME`），`version: 1`，原子写入
+  （临时文件 + fsync + rename）、权限 0600。文件损坏 → 规则全部忽略，页面顶部和键盘副屏都提示，绝不崩溃；
+  下一次保存前把坏文件改名为 `slot-rules.json.bad-<时间>`，不会悄悄覆盖。规则在网页关闭（端口 0）时照样生效。
+- **线程**：HTTP 服务（标准库 `ThreadingHTTPServer`，守护线程）从不直接改控制器 / 槽位：每个读写都排队到
+  deck 主循环线程执行（键盘连着时在 `Daemon.step` 里，没连时在 `Supervisor` 的等待里），改动后立刻强制出一帧，
+  键盘上还会弹 “网页：…” 提示。主循环忙（例如正在握手）超过 3 秒 → 返回 “请稍后重试”，该请求作废、之后也不会执行。
+- **安全**：只绑定 127.0.0.1；`Host` 必须正好是 `127.0.0.1:<端口>` 或 `localhost:<端口>`（防 DNS rebinding）；
+  无任何 CORS 头，`OPTIONS`/`DELETE`/`PATCH`/`HEAD` 一律 405；改动只能 `POST`/`PUT` JSON（`Content-Type:
+  application/json`，`Content-Length` ≤ 8 KiB，不接受分块），`Origin` 必须等于 `http://<Host>`，`Sec-Fetch-Site`
+  （若有）必须 `same-origin`，CSRF 令牌（`GET /` 写在页面里，并设 `SameSite=Strict; HttpOnly` cookie；每次进程启动新生成）
+  请求头和 cookie 都要与之恒定时间比较一致；读状态 `GET /api/state` 也要令牌。CSP `default-src 'none'`，内联样式/脚本用
+  每次响应的 nonce，无外部资源；`frame-ancestors 'none'`、`nosniff`、`no-referrer`、`no-store`。接口只给标题、工具、状态、
+  tmux 窗口名和目录**名**，不给完整路径、摘要或提示词。
+- **接口**（都要令牌）：`GET /api/state`；`POST /api/move {mode, slot, key}`、`POST /api/unpin {mode, slot}`、
+  `POST /api/clear {mode, slot}`；`POST /api/rules {mode, slot, kind, value | session, enabled}`（建立/替换该键的规则），
+  `PUT /api/rules/<id> {enabled?, kind?, value? | session?}`，`POST /api/rules/<id>/delete`。`slot` 是 0–14（S1–S15）。
+- 开发：`python -m mk20deck sim-serve --arrange-port 8782` 对着模拟数据开这个页面（规则写到临时文件）。
+  键盘设备网页以后会加一个指向这里的链接（固件侧，不在本模块）。
+
 ## Dev
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e . pytest
@@ -72,6 +114,7 @@ python3 -m venv .venv && .venv/bin/pip install -e . pytest
 .venv/bin/python -m mk20deck sim-serve        # http://127.0.0.1:8765 (--source real on the Mac)
 python3 -m mk20deck probe-codex [--json]      # read-only Codex Desktop snapshot (Mac)
 python3 -m mk20deck probe-tmux [--json]       # read-only tmux panes + hook-derived states (Mac)
+python3 -m mk20deck arrange [--print]         # open the 会话安排 page of the running daemon (127.0.0.1:8781)
 .venv/bin/python -m mk20deck sim-shots --scenario attention --out ../artifacts/attention
 .venv/bin/python -m mk20deck [--config ~/.config/mk20-agent-deck/config.toml] run [--port /dev/cu.usbmodemXXX]
 .venv/bin/python -m mk20deck launchd-plist > ~/Library/LaunchAgents/com.leo.mk20-agent-deck.plist

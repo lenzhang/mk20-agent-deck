@@ -96,6 +96,10 @@ class Daemon:
     bg_first_delay_s: float = 1.0
     bg_results: "queue.Queue[tuple]" = field(default_factory=queue.Queue)
     bg_polls: int = 0
+    bg_sessions: dict = field(default_factory=dict)  # mode -> (sessions | None, error, t0) of the last bg poll
+    # Cross-thread hand-off (webui.LoopCalls): the arrange web page queues its changes here; they run on this
+    # loop thread inside step() (never from the HTTP thread) and force a frame.
+    calls: object | None = None
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -222,6 +226,7 @@ class Daemon:
                 m, sessions, err, t0 = self.bg_results.get_nowait()
             except queue.Empty:
                 return
+            self.bg_sessions[m] = (sessions, err, t0)
             self.controller.apply_background(m, sessions, err, t0)
 
     # -------------------------------------------------------------- loop
@@ -233,6 +238,8 @@ class Daemon:
                 self._apply(self.events.get_nowait())
             except queue.Empty:
                 break
+        if self.calls is not None and self.calls.drain(self):
+            force = True  # an arrange-page change: show it on the keyboard now
         self._drain_background()
         self.controller.tick()
         if now >= self._next_poll:
@@ -312,10 +319,14 @@ class Daemon:
         done = threading.Event()
         if self.bg_poll_s > 0:
             threading.Thread(target=self._bg_loop, args=(stop, done), name="mk20-bg-poll", daemon=True).start()
+        if self.calls is not None:  # wake the loop at once when the web page queues a change
+            self.calls.attach(lambda: self.events.put(InputEvent("ui", 0, "wake", t=self.clock())))
         try:
             self._run(stop)
         finally:
             done.set()
+            if self.calls is not None:
+                self.calls.attach(None)
 
     def _run(self, stop: threading.Event) -> None:
         while not stop.is_set():
@@ -332,6 +343,8 @@ class Daemon:
                 stop.wait(self.power_interval)
                 while not self.events.empty():  # drop input while the Mac sleeps
                     self.events.get_nowait()
+                if self.calls is not None:
+                    self.calls.drain(self)  # arrange-page changes still apply (shown after wake)
                 continue
             self.step()
             try:

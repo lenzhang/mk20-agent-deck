@@ -214,6 +214,7 @@ class Controller:
         self.log: list[str] = []
         self.action_count = 0
         self.settings = settings or SettingsPage()
+        self.rules_warning = ""  # slot-rules.json problem (set by webui.ArrangeService), shown on the sub-screen
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -658,7 +659,7 @@ class Controller:
                     kv.moving = mv is not None and mv.src == kr.index
                     if e is None:
                         kv.state = State.OFFLINE if not ok else State.UNASSIGNED
-                        kv.label = "离线" if not ok else "空槽"
+                        kv.label = "离线" if not ok else (mgr.waiting_label(kr.index) or "空槽")  # 等待：<rule>
                     elif e.lost:
                         kv.state, kv.lost, kv.pinned, kv.label = State.UNASSIGNED, True, True, "失联钉扎"
                     else:
@@ -707,6 +708,8 @@ class Controller:
             pinned = sum(1 for e in mgr.slots if e and e.pinned)
             pin_info = f"钉扎 {pinned}/{N_SLOTS} · 长按拿起，点自己=钉扎/解除 · S1–S5 在 L1"
         note = f"单击只选中 · 置前不可用：{caps.focus.split('，')[0]}" if (ok and caps.focus) else None
+        if self.rules_warning:
+            note = self.rules_warning + (f" · {note}" if note else "")
         sub = SubView(
             page=self.page, mode=self.mode, mode_ok=ok, mode_reason=reason, session=sel,
             toast=self.toast[0] if self.toast else None,

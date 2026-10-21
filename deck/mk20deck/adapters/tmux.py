@@ -187,6 +187,8 @@ class TmuxAdapter(ModeAdapter):
                 summary=f"{sess}:{widx} {wname} {pane_id} · {cmd}",
                 source_note=("hook 关联" if rec else "命名约定发现" if named else "显式登记" if registered
                              else "命令线索发现"),
+                window=wname,
+                tmux_session=sess,
             )
             if rec is not None:
                 hooked += 1
