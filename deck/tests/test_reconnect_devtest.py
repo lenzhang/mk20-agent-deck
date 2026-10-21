@@ -100,6 +100,36 @@ def test_daemon_display_sleep_pauses_and_wake_reconnects():
     assert not d.paused and not ctl.presses
 
 
+class _DeadLink:
+    connected = False
+    lost_reason = "读取失败（拔线？）"
+
+    def show_jpeg(self, jpeg):
+        return False
+
+
+def test_daemon_notices_link_loss_while_display_asleep():
+    clk = FakeClock()
+    d = Daemon(_ctl(clk), Renderer(DeviceLayout.default()), None, clock=clk, sink=lambda j: None, power=FakePower())
+    d.paused = True
+    d.link = _DeadLink()
+    with pytest.raises(ConnectionError, match="拔线"):
+        d._run(threading.Event())  # must not spin paused forever on a dead link (keyboard rebooted while away)
+
+
+def test_new_connection_starts_paused_when_display_already_asleep():
+    class AsleepPower(FakePower):
+        display_asleep = True
+
+    clk = FakeClock()
+    frames = []
+    d = Daemon(_ctl(clk), Renderer(DeviceLayout.default()), None, clock=clk, sink=frames.append, power=AsleepPower())
+    stop = threading.Event()
+    stop.set()
+    d.run(stop)
+    assert d.paused and len(frames) == 1  # only the "Mac 已休眠" frame, no live frames while asleep
+
+
 # ------------------------------------------------------------------ supervisor
 def test_supervisor_reconnects_after_unplug():
     cfg = DeckConfig()
