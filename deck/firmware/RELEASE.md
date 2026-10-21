@@ -4,11 +4,19 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
-## Unreleased (feature/fw-ux, on top of 1.3.1; no version bump yet)
+## 1.4.0-rc1 (UX revision + single settings entry)
+
+`firmware/VERSION` is **1.4.0**; build id **rc1**: `sh tools/mk20-release-build.sh firmware out rc1`.
+Three tracks merged on release/1.4.0: on-device UX (`bin/mk20-kbd`), the usb0 settings web as the only
+settings entry (`bin/mk20-agent --web`, default on via FEATURE_WEB=1, agent still off; mk20d supervises
+it; see deck/SETTINGS.md), and the Mac side (mk20deck `ui.hello`/`ui.heartbeat`, `ui.openSettings`,
+"which agent needs me" hook states, K1 = next agent that needs me). Cross-reviews: Kimi K3 GO on all
+three (deck/reviews/1.4.0/). PRD v1.4 §15 lists the interaction changes.
+
+### On-device UX (`bin/mk20-kbd`)
 
 On-device UX revision of `bin/mk20-kbd` (rebuilt static armhf; other binaries byte-identical).
-`firmware/VERSION` stays **1.3.1** until the integrator bumps it; `sbin/mk20d` is unchanged
-(it already exports `MK20_VERSION`/`MK20_REL` and writes `/tmp/mk20/gadget.env`).
+mk20-kbd reads `MK20_VERSION` (exported by mk20d) and `/tmp/mk20/gadget.env` for HOME status.
 
 - HOME shows real status instead of "unknown" (new `kbd/devstat.c`: firmware version, usb0 IP,
   USB/Mac link, WiFi interface presence, net/provider config and marker, key presence/permissions
@@ -133,6 +141,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
+| 1.4.0 | 2026-10-21 | **1.4.0-rc1**: on-device UX revision (real HOME status, read-only LS, fb19 opens the web on the Mac, boot follows the Mac to L1, fb20 = Mac mode key on L1/L4 unless the keyboard agent is active, e-stop host pause with bounded resync, status probes on a worker thread, full host sub-screen, pairing code incl. safe mode); usb0 settings web default-on as the only settings entry (pairing via /run/mk20/pair-code, maintenance page, catalogue-driven provider/model); Mac mk20deck heartbeat + needs-me hook states. |
 | 1.3.1 | 2026-10-20 | **1.3.1-rc3**, build id `rc3`: K4 field fix — device BusyBox has no `stat`: kbd status age and maintenance hook link-count checks used `stat -c` and always failed on hardware (rc2 never confirmed, rolled back to 1.2.1); now `date -r` / `ls -ld`, negative age is stale, test shim removes `stat`. Binaries unchanged. |
 | 1.3.0 | 2026-10-20 | **1.3.0-rc1**, build id `rc1`: K4 default mk20-kbd, no stock-KD starts/overrides, crash-loop safe mode, maintenance file hooks, unchanged verified one-switch A/B installer; no rootfs writes. Web handlers/device acceptance separate. |
 | 1.0.0 | 2026-10-18 | M1: first release layout (A/B slots, MANIFEST, loader, rescue tier) |
