@@ -4,10 +4,12 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
-## Unreleased (1.5.0)
+## 1.5.0-rc1 (user's L1 layout: 15 sessions + voice/delete/send/Esc row)
 
-Not built as a release yet: `firmware/VERSION` stays **1.4.3** until the 1.5.0 bump. Branch feature/l1v2-hid
-(from release/1.4.0 @ 7d28d6a = 1.4.3-rc4); the Mac side of the same layout is mk20deck on feature/l1-layout-v2.
+`firmware/VERSION` is **1.5.0**; build id **rc1**. release/1.5.0 = 1.4.3-rc4 + feature/l1v2-hid (device HID keys)
++ feature/l1-layout-v2 (mk20deck: 15 session slots, single tap = select + bring to front, L4 row1 = DESK HERD TMUX
+＋新会话 回L1) + L4 local Back moved from fb14 to fb5 (fb14 is session S14 now). PRD delta:
+deck/docs/PRD-1.5-L1-LAYOUT.md.
 
 ### L1/L4 bottom row = Mac keyboard keys (`bin/mk20-kbd`)
 
@@ -248,6 +250,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
+| 1.5.0 | 2026-10-22 | **1.5.0-rc1**: user layout — L1 rows 1–3 = 15 sessions (tap = switch), bottom row 按住说话 / ⌫ 删除 (HID Backspace) / ⏎ 发送·可以 (Return) / ✗ 不行 (Escape) / 模式; L4 row1 DESK HERD TMUX ＋新会话 回L1 (local Back fb14 -> fb5); fb17–19 holds cut at 10 s. |
 | 1.4.3 | 2026-10-21 | **1.4.3-rc4**: physical key-LCD order. Logical key L (col c, row r) is `/dev/fb((4-c)*4+r+1)` (column-major from the top-right, photo of 1.4.2 L1), not /dev/fbL: every page was displayed permuted (display != function). `panel_t.dev` (one table in kbd/panels.c) is used only to open the node and to derive the SPI bus; input, UI, host protocol and getInfo stay logical. `--pattern` labels R/C + fbN. Only `bin/mk20-kbd` changed. |
 | 1.4.2 | 2026-10-21 | **1.4.2-rc3**: debug adbd log on tmpfs capped (append + mk20d maint trim, was unbounded ~1 MB/h under adb polling). |
 | 1.4.1 | 2026-10-21 | **1.4.1-rc2**: `/run/mk20` on a 512 KiB tmpfs mounted first thing in boot (mk20-kbd wrote kbd.status 1/s to the TF-card overlay from its e-stop/HID main loop: wear + stall risk; files no longer survive reboots); refuses when a writer or its supervisor lock is live; health `run_tmpfs`, selftest INFO/WARN only; stale-status line carries uptime; soak records selftest WARN lines. Only `sbin/mk20d` changed. |

@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <time.h>
+#define L4_BACK_FB 5   /* user layout 2026-10-21: L4 row1 = DESK HERD TMUX 新会话 回L1 */
 
 #define ALL_PANELS ((1u << PANEL_COUNT) - 1)
 #define RESERVED ((1u << 19) | (1u << 20))
@@ -582,7 +583,8 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
     if (host_route(o) && o->health == HOST_SUSPECT) return 1;
     if (host_route(o) && o->health == HOST_ONLINE && o->fresh) {
         o->key_owner[fb-1] = 1;
-        if (o->route == ONBOARD_L4 && fb == 14) { o->key_owner[fb-1]=4; return 1; }
+        /* L4 "回 L1" is decided locally on release: fb5 (row1,col5) in the 2026-10-21 layout (was fb14). */
+        if (o->route == ONBOARD_L4 && fb == L4_BACK_FB) { o->key_owner[fb-1]=4; return 1; }
         if (col == k->ptt_col && row == k->ptt_row) {
             o->key_owner[fb-1] = 2;
             if (k->hid) hid_set_mod(k->hid,HID_MOD_RALT,1);

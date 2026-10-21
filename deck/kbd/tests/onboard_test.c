@@ -219,8 +219,9 @@ static void unread_receive_work(void) {
     now+=300; jpeg(&k); onboard_route(&k,ONBOARD_L4); jpeg(&k);
     for(int i=0;i<1000 && !onboard_tile_allowed(&k,1,0,1);i++) { now++; kbd_service(&k,now); usleep(1000); }
     CHECK(onboard_tile_allowed(&k,1,0,1)); CHECK(onboard_current(&k)==ONBOARD_L4);
-    key(&k,14,1); CHECK(onboard_current(&k)==ONBOARD_L4);
-    key(&k,14,0); CHECK(onboard_current(&k)==ONBOARD_L1 && !onboard_tile_allowed(&k,1,0,1));
+    key(&k,14,1); key(&k,14,0); CHECK(onboard_current(&k)==ONBOARD_L4);   /* fb14 = session S14 now: no local Back */
+    key(&k,5,1); CHECK(onboard_current(&k)==ONBOARD_L4);   /* L4 回 L1 = fb5 (2026-10-21 layout) */
+    key(&k,5,0); CHECK(onboard_current(&k)==ONBOARD_L1 && !onboard_tile_allowed(&k,1,0,1));
     free(wire); free(rx); close(sv[0]); close(sv[1]); k.host_fd=-1; kbd_free(&k);
 }
 static void in_flight_replacement(void) {
