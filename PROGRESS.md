@@ -1,6 +1,6 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-20 22:56 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-21 10:19 SGT
 
 ## 1. 当前状态
 
@@ -11,12 +11,13 @@
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
 | UVC 采集卡 | feature/uvc | 02f1d41 | UHC07P = MS2130，USB 2.0 下仅 MJPEG；待上机 |
-| 设备 | — | — | fw 1.3.1（good，slot B）；1.2.1 为回退；24 h soak 运行中（22:31 起） |
+| 设备 | — | — | fw 1.3.1（good，slot B）；1.2.1 为回退；soak 运行中（22:31 起）；Mac 端 mk20deck 常驻（launchd） |
 
 rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191afadab6c26644d30a2e870a46b06dc92a9b5c73bad0a4e9019e4f4f`。
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-21 10:19** Mac 端 mk20deck 已部署为 launchd 常驻服务（~/mk20-deploy，固定在 feature/deck-attention 7babf2b；配置 ~/.config/mk20-agent-deck/config.toml：terminal_app=Ghostty、tmux 新会话=ccai sg）：经 usb0 桥连接，ui.hello + 心跳被 1.3.1 接受，已识别真实 Codex Desktop 线程。**在 1.3.1 上进主界面：HOME 按「会话 L1」**（1.4.0 起开机自动进）。Claude hooks（「哪个 agent 需要我」）已装入 ~/.claude/settings-glm.json（ccai 所有模式的源头）与 settings.json，备份 *.bak-mk20-20261021-095159；新会话生效。崩溃循环验收 PASS（3 次 SIGKILL → 安全模式 reason=crash-loop，自检只 WARN、HID 可用 → exit-safe-mode 钩子恢复；tools/mk20-crashloop-gate.sh，72d24a9）。1.3.1 soak 11.5 h：0 重启、0 真实崩溃（5 次为验收诱发）、0 复合设备丢失、ping 0 丢包、mk20-kbd RSS 2.3 MB 不涨；soak 报的 126 次 kd-restart 是 soak 工具 pgrep 自匹配 bug（716f5d4 已修）。Kimi K3：rc3 GO；网页单一入口 GO（5 个 MINOR 修复中）；界面修订 NO-GO（e-stop 后转发、租约竞态、devstat 在安全主循环做 I/O、急停指示）→ 修复中。release/1.4.0（网页 + mk20deck）make test 全绿（tests 861 / agent 396）。PRD v1.4 草案 §15（待批准）。
 - **10-20 22:56** 1.3.1 上机后续：① 全量测试在本机（dev-mbp，colima + mk20-build:trixie，BusyBox 1.27.2，测试 PATH 只含设备上真有的命令）**715 通过 / 0 失败**；先前 46 个失败全是镜像缺 procps（pkill），构建镜像与 BusyBox 1.27.2 配方已入库 deck/tools/build-image（e9fb269）。② soak 改为 K4 规则（原先要求 kd=1，K4 上每个样本都会判失败；37b455d），24 h soak 已在 1.3.1 上开跑（22:31，~/mk20-backup/soak/soak-20261020-223110.*），首样本 ok。③ 「usb-storage 每 23 s 复位」：1-1 实际是 Realtek 无线网卡（0bda:b711），1.3.x 默认不启动 mk20-router，开机 20 min 复位 0 次——当前版本不再出现；router 本身问题保留。④ 交互评审（Claude 子代理）+ Kimi K3 交叉验证（codex 满载不可用）：11 证实 / 3 部分 / 0 驳回；另发现物理键盘无法切换 Desktop/herdr/tmux 模式。⑤ 设置入口盘点：1.3.1 上普通用户没有可用的设置通道（LS「应用」恒失败、网页默认关且配对坏），HOME 20 格中 8 格数据设备已有却显示 unknown。⑥ 用户决定：键盘网页 http://172.30.250.2:8780 为唯一设置入口，按键只显示；「网页设置」键按下由 Mac 端自动打开网页（不做二维码：网页只在 USB 链路上可达）。进行中（各自 worktree）：feature/deck-ui-hello（mk20deck ui.hello/心跳 + ui.openSettings）、feature/fw-ux（HOME 真实状态、开机 Mac 在线进 L1、右下角键还给「模式」、只读设置页、配对码显示）、feature/web-settings（网页默认开启、配对修复、维护页、单一 provider 目录、deck/SETTINGS.md）。合并后出 1.4.0，过 Kimi 交叉评审 + 上机验收 + 崩溃循环 + 24 h soak。
 - **10-20 22:12** K4 rc3（1.3.1）安装通过：loader confirmed good，验收 12/12（K4 规则 kd=0 + mk20-kbd normal），KD 未运行，21/21 屏、旋钮 6/6、0 内核告警；1.2.1 保留为回退。此前唯一的 FAIL 是判定脚本把 post-kbd.txt 里前一段 kbd.status JSON 当 state.json 解析（已修，重判 PASS）。证据 deck/reviews/k4-install/k4-rc3-install-20261020-220751/
 - **10-20 22:10** K4 rc3（1.3.1）：安装/验收未过：FAIL 1 K4: maint state.json normal, 0 restarts（证据 deck/reviews/k4-install/k4-rc3-install-20261020-220751/）
