@@ -15,7 +15,7 @@ def test_c_backend_home_pixels_and_browser_frame():
         reference = Path(__file__).resolve().parents[1] / "kbd/tests/golden/ui/home-offline/fb01.ppm.gz"
         with gzip.open(reference, "rb") as f:
             expected = Image.open(io.BytesIO(f.read())).convert("RGB")
-        assert sim.key_image("A1").tobytes() == expected.tobytes()
+        assert sim.key_image("S1").tobytes() == expected.tobytes()
         assert Image.open(io.BytesIO(sim.frame)).size == (640, 656)
     finally:
         sim.close()

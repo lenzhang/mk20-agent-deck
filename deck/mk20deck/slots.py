@@ -1,4 +1,10 @@
-"""Per-mode slot manager: 8 sticky slots, pinning, overflow (PRD §6.3, G13/G32/G35, AC15)."""
+"""Per-mode slot manager: 15 sticky slots, pinning, overflow (PRD §6.3, G13/G32/G35, AC15).
+
+PRD 1.5 L1 layout (2026-10-21): slots S1..S15 fill rows 1-3 of the 5x4 key grid, slot index
+``i`` sits at document ``(col, row) = (i % 5 + 1, i // 5 + 1)``.  The old layout had 8 slots
+in a 4-column block (A1..A8 at ``(i % 4 + 1, i // 4 + 1)``); ``from_dict`` migrates such state
+files position-preserving (A1..A4 → S1..S4, A5..A8 → S6..S9) so pins keep their physical key.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,7 +12,14 @@ from typing import Iterable
 
 from .model import PRIORITY, Session, State
 
-N_SLOTS = 8
+N_SLOTS = 15
+SLOT_COLS = 5
+LEGACY_N_SLOTS, LEGACY_COLS = 8, 4  # state files written before PRD 1.5 (no "n_slots" field)
+
+
+def legacy_index(i: int) -> int:
+    """Old 8-slot index (4 per row) → new index at the same physical key."""
+    return (i // LEGACY_COLS) * SLOT_COLS + i % LEGACY_COLS
 
 
 @dataclass
@@ -138,6 +151,7 @@ class SlotManager:
     # ------------------------------------------------------------------
     def to_dict(self) -> dict:
         return {
+            "n_slots": N_SLOTS,
             "slots": [None if e is None else {"key": e.key, "pinned": e.pinned} for e in self.slots],
             "selected": self.selected,
             "excluded": sorted(self.excluded),
@@ -146,11 +160,19 @@ class SlotManager:
     @classmethod
     def from_dict(cls, d: dict) -> "SlotManager":
         """Restore after restart.  Unpinned entries are re-verified on the next
-        ``update`` (dropped if gone); pinned ones become lost pins if unverifiable."""
+        ``update`` (dropped if gone); pinned ones become lost pins if unverifiable.
+
+        A file without ``n_slots`` is the pre-1.5 8-slot layout: its entries move to the
+        slot under the same physical key (``legacy_index``); new slots start empty."""
         sm = cls()
-        for i, e in enumerate((d.get("slots") or [])[:N_SLOTS]):
-            if e and e.get("key"):
-                sm.slots[i] = SlotEntry(e["key"], bool(e.get("pinned")))
+        raw = d.get("slots") or []
+        legacy = "n_slots" not in d
+        seen: set[str] = set()
+        for i, e in enumerate(raw[:LEGACY_N_SLOTS] if legacy else raw[:N_SLOTS]):
+            if not isinstance(e, dict) or not e.get("key") or e["key"] in seen:
+                continue
+            seen.add(e["key"])
+            sm.slots[legacy_index(i) if legacy else i] = SlotEntry(str(e["key"]), bool(e.get("pinned")))
         sm.selected = d.get("selected")
         sm.excluded = set(d.get("excluded") or [])
         return sm

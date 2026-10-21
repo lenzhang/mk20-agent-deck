@@ -60,12 +60,13 @@ def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
         d.text((x, 92), fit(d, summ, f12, W - x - 10), font=f12, fill=(190, 194, 200))
     else:
         d.text((x - 90, 40), "未选中", font=font(24, bold=True), fill=TEXT)
-        hint = "选中项已消失，请重新选择" if sv.selection_lost else "单击 Agent 键选中；双击/聚焦键置前"
-        d.text((x - 90, 74), hint, font=f12, fill=DIM)
-        if sv.pin_info:
-            d.text((x - 90, 92), sv.pin_info, font=f12, fill=DIM)
+        hint = "选中项已消失，请重新选择" if sv.selection_lost else "单击会话键：选中并置前 · 长按钉扎 · 转 K1 挑待处理"
+        d.text((x - 90, 74), fit(d, hint, f12, W - 30), font=f12, fill=DIM)
+        line2 = sv.pin_info if sv.page == "L4" else (sv.note or "")
+        if line2:
+            d.text((x - 90, 92), fit(d, line2, f12, W - 30), font=f12, fill=DIM)
 
-    # bottom: status-limited reason (AC11) + overflow + skill note
+    # bottom: status-limited reason (AC11) + overflow + note
     yb = 120
     lim = sv.limited or ""
     over = f"+{sv.overflow}" if sv.overflow else ""
@@ -75,10 +76,10 @@ def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
     d.text((12, yb), fit(d, lim, f12, W - 30 - ow), font=f12, fill=AMBER)
     if over:
         d.text((W - 10 - ow, yb - 1), over, font=font(13, bold=True), fill=TEXT)
-    if sv.skill_note and s is not None and sv.page != "L4":
-        d.text((x, 106), fit(d, "技能键：" + sv.skill_note, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
+    if sv.note and s is not None and sv.page != "L4":
+        d.text((x, 106), fit(d, sv.note, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
     if sv.page == "L4" and s is not None and sv.pin_info:
-        d.text((x, 106), sv.pin_info, font=font(11), fill=(150, 160, 190))
+        d.text((x, 106), fit(d, sv.pin_info, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
 
     if sv.toast:
         f = font(16, bold=True)

@@ -1,8 +1,8 @@
 [
  {
-  "name": "double_tap_focus_30ms_jitter",
+  "name": "tap_focus_30ms_jitter",
   "group": "latency",
-  "desc": "30 ms 输入 + 10 ms 路由（带抖动）下双击仍判为聚焦",
+  "desc": "30 ms 输入 + 10 ms 路由（带抖动）下单击仍判为「选中并置前」，连按两次置前两次",
   "latency": {
    "input_ms": 30,
    "input_jitter_ms": 15,
@@ -14,14 +14,14 @@
   },
   "steps": [
    {
-    "press": "A1",
+    "press": "S1",
     "hold": 40
    },
    {
     "wait": 100
    },
    {
-    "press": "A1",
+    "press": "S1",
     "hold": 40
    },
    {
@@ -30,16 +30,16 @@
    {
     "expect": {
      "agent_calls": {
-      "focus": 1
+      "focus": 2
      }
     }
    }
   ]
  },
  {
-  "name": "double_tap_focus_80ms_jitter",
+  "name": "tap_focus_80ms_jitter",
   "group": "latency",
-  "desc": "80±40 ms 输入延迟下双击仍判为聚焦（FIFO 保序）",
+  "desc": "80±40 ms 输入延迟下单击仍判为置前（FIFO 保序）",
   "latency": {
    "input_ms": 80,
    "input_jitter_ms": 40,
@@ -51,14 +51,7 @@
   },
   "steps": [
    {
-    "press": "A1",
-    "hold": 40
-   },
-   {
-    "wait": 100
-   },
-   {
-    "press": "A1",
+    "press": "S1",
     "hold": 40
    },
    {
@@ -66,6 +59,7 @@
    },
    {
     "expect": {
+     "selected": true,
      "agent_calls": {
       "focus": 1
      }
@@ -118,9 +112,9 @@
   ]
  },
  {
-  "name": "stop_short_80ms_jitter",
+  "name": "tap_150ms_80ms_jitter_not_pin",
   "group": "latency",
-  "desc": "80±40 ms 延迟下停止键短按（150 ms）不会被误判为长按",
+  "desc": "80±40 ms 延迟下会话键短按（150 ms）不会被误判为长按钉扎",
   "latency": {
    "input_ms": 80,
    "input_jitter_ms": 40,
@@ -132,10 +126,7 @@
   },
   "steps": [
    {
-    "press": "A1"
-   },
-   {
-    "press": "STOP",
+    "press": "S1",
     "hold": 150
    },
    {
@@ -144,7 +135,22 @@
    {
     "expect": {
      "agent_calls": {
-      "stop": 0
+      "focus": 1
+     }
+    }
+   },
+   {
+    "press": "S2",
+    "hold": 700
+   },
+   {
+    "wait": 300
+   },
+   {
+    "expect": {
+     "toast_contains": "已钉扎",
+     "agent_calls": {
+      "focus": 1
      }
     }
    }

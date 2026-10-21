@@ -60,6 +60,7 @@ class DeckConfig:
     # NOTES-protocol-re-2026-10-17.md "Official app test".  false/"off" disables.
     backlight: int | None = 80
     ptt_fallback_b: bool = False  # PRD §6.5: B only after IME verification; not implemented in P0
+    # Not bound to any key since the PRD 1.5 L1 layout; kept for config compatibility.
     skills: list[Skill] = field(default_factory=lambda: [Skill(l, p) for l, p in DEFAULT_SKILLS])
     codex: CodexDesktopConfig = field(default_factory=CodexDesktopConfig)
     tmux: TmuxConfig = field(default_factory=TmuxConfig)
@@ -138,7 +139,13 @@ def load_config(path: str | None = None) -> DeckConfig:
     cfg.max_fps = min(float(cfg.max_fps), 8.0)  # PRD §7.4 hard ceiling
     cfg.state_path = os.path.expanduser(cfg.state_path)
     if "skills" in d:
-        sk = [Skill(str(s["label"]), str(s["prompt"])) for s in d["skills"][:4]]
+        # PRD 1.5 L1 layout: no skill keys any more.  [[skills]] is still parsed (adapters keep
+        # skill()) so old config files load unchanged; a malformed table is ignored, never fatal.
+        try:
+            sk = [Skill(str(s["label"]), str(s["prompt"])) for s in d["skills"][:4]]
+        except (KeyError, TypeError):
+            log.warning("config [[skills]] malformed (ignored; skill keys were removed in the 1.5 layout)")
+            sk = []
         if len(sk) == 4:
             cfg.skills = sk
     cx = d.get("codex_desktop", {})

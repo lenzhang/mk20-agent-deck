@@ -20,6 +20,6 @@ def test_case(case):
 def test_failure_reports_step_expected_actual_and_screen():
     from mk20sim.cases import Case
 
-    r = run_case(Case("bad", "meta", "", [{"press": "A1"}, {"expect": {"page": "L4"}}]))
+    r = run_case(Case("bad", "meta", "", [{"press": "S1"}, {"expect": {"page": "L4"}}]))
     assert not r.ok and r.failure.step == 2 and r.failure.expected == "L4" and r.failure.actual == "L1"
     assert r.screen_png_b64

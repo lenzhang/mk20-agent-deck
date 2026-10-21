@@ -40,6 +40,6 @@ binary = "herdr"
 # "5,0" = "K1:press"
 # "6,0" = "K1:cw"
 
-# [[skills]]  # exactly four entries to override (label + prompt)
+# [[skills]]  # legacy: the 1.5 key layout has no skill keys; still accepted (four entries) and ignored
 # label = "审 PR"
 # prompt = "请审查当前分支相对主干的改动……"

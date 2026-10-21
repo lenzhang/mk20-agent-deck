@@ -72,27 +72,28 @@ def mic(d, cx, cy, s, col):
     d.line([(cx - s * 0.18, cy + s * 0.42), (cx + s * 0.18, cy + s * 0.42)], fill=col, width=w)
 
 
-def square(d, cx, cy, s, col):
-    d.rounded_rectangle([cx - s * 0.3, cy - s * 0.3, cx + s * 0.3, cy + s * 0.3], radius=s * 0.06, fill=col)
-
-
 def plus(d, cx, cy, s, col):
     w = max(2, int(s * 0.14))
     d.line([(cx - s * 0.38, cy), (cx + s * 0.38, cy)], fill=col, width=w)
     d.line([(cx, cy - s * 0.38), (cx, cy + s * 0.38)], fill=col, width=w)
 
 
-def target(d, cx, cy, s, col):
+def backspace(d, cx, cy, s, col):
+    """⌫: a left-pointing key cap with an × inside."""
     w = max(2, int(s * 0.08))
-    d.ellipse([cx - s * 0.36, cy - s * 0.36, cx + s * 0.36, cy + s * 0.36], outline=col, width=w)
-    d.ellipse([cx - s * 0.1, cy - s * 0.1, cx + s * 0.1, cy + s * 0.1], fill=col)
-    for a, b in (((0, -0.5), (0, -0.25)), ((0, 0.25), (0, 0.5)), ((-0.5, 0), (-0.25, 0)), ((0.25, 0), (0.5, 0))):
-        d.line([(cx + s * a[0], cy + s * a[1]), (cx + s * b[0], cy + s * b[1])], fill=col, width=w)
+    l, r, t, b = cx - s * 0.46, cx + s * 0.42, cy - s * 0.28, cy + s * 0.28
+    d.polygon([(l, cy), (l + s * 0.26, t), (r, t), (r, b), (l + s * 0.26, b)], outline=col, width=w)
+    xc, k = cx + s * 0.08, s * 0.13
+    d.line([(xc - k, cy - k), (xc + k, cy + k)], fill=col, width=w)
+    d.line([(xc - k, cy + k), (xc + k, cy - k)], fill=col, width=w)
 
 
-def send(d, cx, cy, s, col):
-    d.polygon([(cx - s * 0.42, cy - s * 0.34), (cx + s * 0.44, cy), (cx - s * 0.42, cy + s * 0.34),
-               (cx - s * 0.24, cy)], fill=col)
+def enter(d, cx, cy, s, col):
+    """⏎: down-then-left return arrow."""
+    w = max(3, int(s * 0.11))
+    x_r, y_t, y_m, x_l = cx + s * 0.34, cy - s * 0.36, cy + s * 0.12, cx - s * 0.22
+    d.line([(x_r, y_t), (x_r, y_m), (x_l, y_m)], fill=col, width=w, joint="curve")
+    d.polygon([(cx - s * 0.46, y_m), (x_l + s * 0.04, y_m - s * 0.22), (x_l + s * 0.04, y_m + s * 0.22)], fill=col)
 
 
 def window(d, cx, cy, s, col):
@@ -125,43 +126,9 @@ def back(d, cx, cy, s, col):
               fill=col)
 
 
-def branch(d, cx, cy, s, col):
-    w = max(2, int(s * 0.08))
-    d.line([(cx - s * 0.2, cy - s * 0.38), (cx - s * 0.2, cy + s * 0.38)], fill=col, width=w)
-    d.arc([cx - s * 0.2, cy - s * 0.3, cx + s * 0.3, cy + s * 0.1], 270, 90, fill=col, width=w)
-    for x, y in ((-0.2, -0.38), (-0.2, 0.38), (0.25, -0.3)):
-        d.ellipse([cx + s * x - s * 0.09, cy + s * y - s * 0.09, cx + s * x + s * 0.09, cy + s * y + s * 0.09],
-                  fill=col)
-
-
-def bug(d, cx, cy, s, col):
-    w = max(2, int(s * 0.07))
-    d.ellipse([cx - s * 0.22, cy - s * 0.25, cx + s * 0.22, cy + s * 0.38], fill=col)
-    d.ellipse([cx - s * 0.13, cy - s * 0.42, cx + s * 0.13, cy - s * 0.18], fill=col)
-    for y in (-0.08, 0.1, 0.28):
-        d.line([(cx - s * 0.42, cy + s * y), (cx + s * 0.42, cy + s * y)], fill=col, width=w)
-
-
-def cycle(d, cx, cy, s, col):
-    w = max(2, int(s * 0.1))
-    d.arc([cx - s * 0.36, cy - s * 0.36, cx + s * 0.36, cy + s * 0.36], 200, 340, fill=col, width=w)
-    d.arc([cx - s * 0.36, cy - s * 0.36, cx + s * 0.36, cy + s * 0.36], 20, 160, fill=col, width=w)
-    d.polygon([(cx + s * 0.36, cy - s * 0.02), (cx + s * 0.22, cy - s * 0.2), (cx + s * 0.48, cy - s * 0.2)], fill=col)
-    d.polygon([(cx - s * 0.36, cy + s * 0.02), (cx - s * 0.22, cy + s * 0.2), (cx - s * 0.48, cy + s * 0.2)], fill=col)
-
-
-def doc(d, cx, cy, s, col):
-    w = max(2, int(s * 0.07))
-    d.polygon([(cx - s * 0.3, cy - s * 0.42), (cx + s * 0.14, cy - s * 0.42), (cx + s * 0.3, cy - s * 0.26),
-               (cx + s * 0.3, cy + s * 0.42), (cx - s * 0.3, cy + s * 0.42)], outline=col, width=w)
-    for y in (-0.12, 0.06, 0.24):
-        d.line([(cx - s * 0.18, cy + s * y), (cx + s * 0.18, cy + s * y)], fill=col, width=w)
-
-
 def pin(d, x, y, s, col):
     d.ellipse([x, y, x + s * 0.6, y + s * 0.6], fill=col)
     d.polygon([(x + s * 0.12, y + s * 0.45), (x + s * 0.48, y + s * 0.45), (x + s * 0.3, y + s)], fill=col)
 
 
-SKILL_ICONS = (branch, bug, cycle, doc)
 MODE_ICONS = {"codex_desktop": window, "herdr": flock, "tmux": split}
