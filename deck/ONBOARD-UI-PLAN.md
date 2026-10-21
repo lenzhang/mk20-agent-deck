@@ -11,6 +11,11 @@ e-stop, and an e-stop no longer leaves L1/L4; (3) LS is read-only and the usb0 w
 host owns the full fb21 sub-screen on live L1/L4 unless a safety/attention footer is needed; (6) a
 page-switch grace window swallows keys until a fresh frame or 2 s; (7) the web pairing code from
 `/run/mk20/pair-code` is shown in the device footer on every page.
+**Follow-up 2026-10-21 (cross-review):** after any e-stop on L1/L4, host forwarding (keys and knobs)
+pauses until everything is released and 1 s is quiet; fb20 held as a host key when the agent becomes
+active -> host up, then e-stop; status probes run on a worker thread only (stale after 10 s); a stop of
+an active agent shows a persistent footer notice until re-allowed/acknowledged on L5; safe mode shows the
+usb0 IP and the pairing code.
 The keyboard must be fully usable without the Mac app. This supersedes the earlier
 “no Mac helper” decision with **optional helper, never required** (2026-10-19).
 No AirPlay. Network access uses only the explicitly selected egress: Mac proxy is

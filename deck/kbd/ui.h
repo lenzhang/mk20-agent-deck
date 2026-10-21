@@ -28,6 +28,7 @@ typedef struct {
     int profile;                      /* -1 default (Mac proxy), 0 mac_proxy, 1 board_wifi, -2 unknown */
     int provider, model;              /* catalogue indices; -1 default, -2 unknown */
     int ip_default, task, confirm;    /* task: ctl ui.state index 0..7, -1 none */
+    int stale;                        /* status worker silent > 10 s: values are the last known */
     char fw[24], kbd[24], ip[16], proxy[64], pair[7];
     char route_dom[8], route_for[8];  /* "direct"/"proxy"/"blocked" or "" (default) */
 } ui_status_t;
@@ -41,7 +42,7 @@ typedef struct {
     ui_status_t st;
     /* footer context, set by the compositor (not by keys) */
     enum ui_context ctx;
-    int health_stale, ptt_held, incompatible, stop_banner;
+    int health_stale, ptt_held, incompatible, stop_banner, stop_notice;
 } ui_t;
 void ui_init(ui_t *u);
 void ui_status_defaults(ui_status_t *s);

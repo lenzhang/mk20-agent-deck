@@ -108,6 +108,7 @@ static void safety(void) {
     now++; kbd_service(&k,now); CHECK(c.estopped && onboard_current(&k)==ONBOARD_L1 && c.screen.current==2); /* stays */
     knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L1); /* no short toggle */
     ctl_set_allowed(&c,1); kbd_service(&k,now); onboard_route(&k,ONBOARD_L1);
+    now+=1000; kbd_service(&k,now); /* host forwarding/knobs resume 1 s after the stop's last input */
     knob(&k,103,1); now+=20; knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L4);
     knob(&k,100,1); now+=1000; kbd_service(&k,now); knob(&k,100,0); CHECK(onboard_current(&k)==ONBOARD_HOME);
     /* Unknown release capability: first hold cannot fire; three presses do. */

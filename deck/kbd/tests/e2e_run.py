@@ -140,6 +140,56 @@ def stalled_host_safety(tmp):
             cs.close()
             for fd in (hr, gm, hm, *keep): os.close(fd)
 
+def blocked_status_worker(tmp):
+    """The status worker sleeps 5 s before every probe (MK20_KBD_PROBE_DELAY_MS, test-only):
+    socket e-stop -> all-up and the K2-hold deadline must be unchanged (no filesystem I/O on
+    the poll/safety loop), and shutdown stays bounded with the worker stuck."""
+    import socket
+    env = dict(os.environ, MK20_KBD_PROBE_DELAY_MS="5000")
+    for stop in ("socket", "k2_hold"):
+        case = os.path.join(tmp, "blocked-" + stop); os.mkdir(case)
+        hidp = os.path.join(case, "hid"); os.mkfifo(hidp)
+        hr = os.open(hidp, os.O_RDONLY | os.O_NONBLOCK)
+        sockp = os.path.join(case, "kbd.sock")
+        p, gm, hm, fb, st, keep = start(case, ["--no-gd32-write", "--no-host", "--ctl", sockp, "--ctl-allow",
+                                               "--k2-estop", "--k2-release"], env=env, hid=hidp)
+        cs = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); cs.settimeout(2)
+        try:
+            end = time.monotonic() + 3
+            while not os.path.exists(sockp) and time.monotonic() < end: time.sleep(0.01)
+            cs.connect(sockp)
+            with cs.makefile("rwb", buffering=0) as cf:
+                def rq(obj):
+                    cf.write((json.dumps(obj) + "\n").encode())
+                    while True:
+                        j = json.loads(cf.readline())
+                        if "ev" not in j: return j
+                def reports(n, timeout):
+                    got = b""; end = time.monotonic() + timeout
+                    while len(got) < n:
+                        r, _, _ = select.select([hr], [], [], max(0, end - time.monotonic()))
+                        if not r: break
+                        got += os.read(hr, 4096)
+                    return got
+                check(reports(9, 1) == b"\x01" + bytes(8), f"blocked worker {stop}: startup all-up")
+                tok = rq({"op": "lease.acquire", "ttl_ms": 5000})["token"]
+                check(rq({"op": "act", "token": tok, "seq": 1, "kind": "key", "usage": 4, "down": 1})["ok"], "blocked worker: hold key")
+                check(reports(9, 1) == bytes([1, 0, 0, 4, 0, 0, 0, 0, 0]), "blocked worker: agent key down")
+                time.sleep(0.3)  # the worker is asleep inside a probe now
+                t0 = time.monotonic()
+                if stop == "socket": cf.write(b'{"op":"estop"}\n')
+                else: os.write(gm, gd32_frame([0x16, 1, 103, 103, 0, 0]))
+                hold = 1000 if stop == "k2_hold" else 0
+                got = reports(9, (hold + 300) / 1000); dt = (time.monotonic() - t0) * 1000
+                check(got == b"\x01" + bytes(8) and hold - 50 <= dt <= hold + 100,
+                      f"blocked status worker {stop}: all-up {got.hex()} in {dt:.1f} ms")
+                print(f"e2e: status worker blocked 5 s/probe: {stop} -> all-up in {dt:.1f} ms")
+        finally:
+            t1 = time.monotonic(); p.send_signal(signal.SIGTERM); p.wait(4)
+            check(p.returncode == 0 and time.monotonic() - t1 < 3, f"bounded shutdown with a stuck worker rc={p.returncode}")
+            cs.close()
+            for fd in (hr, gm, hm, *keep): os.close(fd)
+
 def main():
     global heartbeat_fd, heartbeat_at
     with tempfile.TemporaryDirectory() as tmp:
@@ -386,6 +436,7 @@ def main():
         cf.close(); cs.close(); p.send_signal(signal.SIGTERM); p.wait(3)
         os.close(hrc)
         stalled_host_safety(tmp)
+        blocked_status_worker(tmp)
 
         # read-only modes: flag and kill file
         kill = os.path.join(tmp, "nowrite")

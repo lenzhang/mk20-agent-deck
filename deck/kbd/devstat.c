@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static const int period[DS_PROBES] = {DS_PAIR_PERIOD_MS, DS_PERIOD_MS, DS_PERIOD_MS, DS_PERIOD_MS,
@@ -319,37 +320,154 @@ static void probe_version(devstat_t *d, ds_result_t *r)
         line = nl ? nl+1 : NULL;
     }
 }
-static void (*const probes[DS_PROBES])(devstat_t *, ds_result_t *) = {probe_pair, probe_udc, probe_gadget,
-    probe_wlan, probe_net, probe_provider, probe_marker, probe_secret, probe_version};
-void devstat_init(devstat_t *d, const char *root, const char *pair_path, const char *version, const char *rel)
+void devstat_defaults(ds_result_t *r)
 {
-    memset(d, 0, sizeof *d);
+    /* Defaults match an unconfigured device until the first probes run. */
+    memset(r, 0, sizeof *r);
+    r->udc = DS_UDC_UNKNOWN; r->profile = r->provider = r->model = -1; r->key = DS_KEY_MISSING;
+    set_str(r->ip, sizeof r->ip, "172.30.250.2");
+}
+static int64_t mono_ms(void)
+{ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
+devstat_t *devstat_new(const char *root, const char *pair_path, const char *version, const char *rel)
+{
+    devstat_t *d = calloc(1, sizeof *d);
+    if (!d) return NULL;
     set_str(d->root, sizeof d->root, root && strlen(root) < sizeof d->root ? root : "");
     if (pair_path && *pair_path) set_str(d->pair_path, sizeof d->pair_path, strlen(pair_path) < sizeof d->pair_path ? pair_path : "");
     else join(d->pair_path, sizeof d->pair_path, d->root, "/run/mk20/pair-code");
     if (version && strlen(version) < sizeof d->env_version && charset(version, "._+-")) set_str(d->env_version, sizeof d->env_version, version);
     if (rel && *rel && join(d->manifest, sizeof d->manifest, rel, "/MANIFEST")) d->manifest[0] = 0;
-    /* Defaults match an unconfigured device until the first probes run. */
-    d->r.udc = DS_UDC_UNKNOWN; d->r.profile = d->r.provider = d->r.model = -1; d->r.key = DS_KEY_MISSING;
-    set_str(d->r.ip, sizeof d->r.ip, "172.30.250.2");
+    devstat_defaults(&d->work); d->box = d->work; d->stale_ms = DS_STALE_MS;
+    pthread_mutex_init(&d->mu, NULL); pthread_cond_init(&d->cv, NULL); pthread_cond_init(&d->done, NULL);
+    return d;
 }
-void devstat_init_env(devstat_t *d)
+devstat_t *devstat_new_env(void)
 {
-    devstat_init(d, getenv("MK20_ROOT"), getenv("MK20_KBD_PAIR_CODE"), getenv("MK20_VERSION"), getenv("MK20_REL"));
+    devstat_t *d = devstat_new(getenv("MK20_ROOT"), getenv("MK20_KBD_PAIR_CODE"), getenv("MK20_VERSION"), getenv("MK20_REL"));
+    const char *delay = getenv("MK20_KBD_PROBE_DELAY_MS");
+    if (d && delay && *delay) { long v = strtol(delay, NULL, 10); d->delay_ms = v > 0 && v <= 60000 ? (int)v : 0; }
+    return d;
 }
-void devstat_kick(devstat_t *d) { for (int i = 0; i < DS_PROBES; i++) if (period[i]) d->next[i] = 0; }
-int devstat_poll(devstat_t *d, int64_t now, int all)
+static void (*const probes[DS_PROBES])(devstat_t *, ds_result_t *) = {probe_pair, probe_udc, probe_gadget,
+    probe_wlan, probe_net, probe_provider, probe_marker, probe_secret, probe_version};
+/* Worker-private: run every due probe on d->work. Returns 1 when a result changed. */
+static int run_due(devstat_t *d, int64_t now, int all)
 {
-    ds_result_t before; int ran = 0;
-    memcpy(&before, &d->r, sizeof before);
-    for (int i = 0; i < DS_PROBES && (all || !ran); i++) {
-        if (d->next[i] == INT64_MAX || now < d->next[i]) continue;
-        probes[i](d, &d->r);
+    ds_result_t before; memcpy(&before, &d->work, sizeof before);
+    for (int i = 0; i < DS_PROBES; i++) {
+        if (d->next[i] == INT64_MAX || (!all && now < d->next[i])) continue;
+        if (d->hook) d->hook(d->hook_ctx, i);
+        if (d->delay_ms) { struct timespec t = {d->delay_ms / 1000, (long)(d->delay_ms % 1000) * 1000000L}; nanosleep(&t, NULL); }
+        probes[i](d, &d->work);
         d->next[i] = period[i] ? now + period[i] : INT64_MAX;
-        ran = 1;
     }
-    d->buf[0] = 0; /* never keep file text around longer than a probe */
-    if (!memcmp(&before, &d->r, sizeof before)) return 0;
-    d->gen++;
-    return 1;
+    memset(d->buf, 0, 64); /* never keep file text around longer than a probe */
+    return memcmp(&before, &d->work, sizeof before) != 0;
+}
+int devstat_run(devstat_t *d, int64_t now, int all)
+{
+    int changed = run_due(d, now, all);
+    if (changed) { d->box = d->work; d->gen++; }
+    d->seq++;
+    return changed;
+}
+static void *worker(void *ctx)
+{
+    devstat_t *d = ctx;
+    pthread_mutex_lock(&d->mu);
+    while (!d->stop) {
+        int64_t now = mono_ms(), next = INT64_MAX;
+        for (int i = 0; i < DS_PROBES; i++) if (d->next[i] < next) next = d->next[i];
+        if (!d->kick && next > now) {
+            int64_t wait = next - now > 1000 ? 1000 : next - now; /* relative: wall-clock jumps are harmless */
+            struct timespec t; clock_gettime(CLOCK_REALTIME, &t);
+            t.tv_sec += wait / 1000; t.tv_nsec += (long)(wait % 1000) * 1000000L;
+            if (t.tv_nsec >= 1000000000L) { t.tv_sec++; t.tv_nsec -= 1000000000L; }
+            pthread_cond_timedwait(&d->cv, &d->mu, &t);
+            continue;
+        }
+        int all = d->kick; d->kick = 0; d->running = 1; d->running_all = all;
+        pthread_mutex_unlock(&d->mu);
+        int changed = run_due(d, now, all); /* file I/O happens only here, unlocked */
+        pthread_mutex_lock(&d->mu);
+        d->running = 0;
+        if (changed) { d->box = d->work; d->gen++; }
+        d->seq++; d->published_ms = mono_ms(); if (all) d->kicks_done++;
+        pthread_cond_broadcast(&d->done);
+    }
+    d->exited = 1; pthread_cond_broadcast(&d->done);
+    int orphan = d->orphan;
+    pthread_mutex_unlock(&d->mu);
+    if (orphan) { /* devstat_free() gave up waiting: the late worker releases the object */
+        pthread_mutex_destroy(&d->mu); pthread_cond_destroy(&d->cv); pthread_cond_destroy(&d->done); free(d);
+    }
+    return NULL;
+}
+int devstat_start(devstat_t *d)
+{
+    if (!d || d->started) return -1;
+    d->published_ms = mono_ms(); d->kick = 1;
+    if (pthread_create(&d->th, NULL, worker, d)) return -1;
+    d->started = 1;
+    return 0;
+}
+void devstat_free(devstat_t *d)
+{
+    if (!d) return;
+    if (d->started) {
+        pthread_mutex_lock(&d->mu);
+        d->stop = 1; pthread_cond_signal(&d->cv);
+        struct timespec t; clock_gettime(CLOCK_REALTIME, &t); t.tv_sec += 1;
+        while (!d->exited) if (pthread_cond_timedwait(&d->done, &d->mu, &t)) break;
+        int exited = d->exited; pthread_t th = d->th;
+        if (!exited) d->orphan = 1; /* stuck in a read: never block shutdown; the worker frees d */
+        pthread_mutex_unlock(&d->mu);
+        if (!exited) { pthread_detach(th); return; }
+        pthread_join(th, NULL);
+    }
+    pthread_mutex_destroy(&d->mu); pthread_cond_destroy(&d->cv); pthread_cond_destroy(&d->done);
+    free(d);
+}
+int devstat_take(devstat_t *d, ds_result_t *out, int *stale)
+{
+    int copied = 0;
+    if (!d || pthread_mutex_trylock(&d->mu)) return 0; /* never wait on the worker */
+    if (d->gen != d->taken_gen) { *out = d->box; d->taken_gen = d->gen; copied = 1; }
+    *stale = d->started && mono_ms() - d->published_ms > d->stale_ms;
+    pthread_mutex_unlock(&d->mu);
+    return copied;
+}
+int devstat_take_wait(devstat_t *d, ds_result_t *out, int *stale)
+{
+    int copied = 0;
+    if (!d) return 0;
+    pthread_mutex_lock(&d->mu);
+    if (d->gen != d->taken_gen) { *out = d->box; d->taken_gen = d->gen; copied = 1; }
+    *stale = d->started && mono_ms() - d->published_ms > d->stale_ms;
+    pthread_mutex_unlock(&d->mu);
+    return copied;
+}
+int devstat_kick(devstat_t *d)
+{
+    if (!d || pthread_mutex_trylock(&d->mu)) return -1;
+    d->kick = 1; pthread_cond_signal(&d->cv);
+    pthread_mutex_unlock(&d->mu);
+    return 0;
+}
+int devstat_sync(devstat_t *d, int timeout_ms)
+{
+    if (!d || !d->started) return -1;
+    pthread_mutex_lock(&d->mu);
+    /* A kicked cycle already running may predate the caller's change: wait for the next. */
+    uint32_t want = d->kicks_done + (d->running && d->running_all ? 2u : 1u);
+    d->kick = 1; pthread_cond_signal(&d->cv);
+    struct timespec t; clock_gettime(CLOCK_REALTIME, &t);
+    t.tv_sec += timeout_ms / 1000; t.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (t.tv_nsec >= 1000000000L) { t.tv_sec++; t.tv_nsec -= 1000000000L; }
+    int rc = 0;
+    while (!d->exited && d->kicks_done < want)
+        if (pthread_cond_timedwait(&d->done, &d->mu, &t)) { rc = -1; break; }
+    pthread_mutex_unlock(&d->mu);
+    return rc;
 }

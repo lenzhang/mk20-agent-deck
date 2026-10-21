@@ -67,6 +67,10 @@ static void footer_tests(void)
     u.st.confirm=0; u.health_stale=1; u.ctx=UI_CTX_HOST; CHECK(ui_footer_attention(&u));
     u.health_stale=0; u.ptt_held=1; CHECK(ui_footer_attention(&u)); u.ctx=UI_CTX_LS; CHECK(!ui_footer_attention(&u));
     u.ptt_held=0; u.incompatible=1; CHECK(ui_footer_attention(&u)); u.incompatible=0;
+    /* Persistent agent e-stop notice: every page, and it replaces the 10 s banner. */
+    u.stop_notice=1; for (int c=UI_CTX_HOME;c<=UI_CTX_AGENT;c++) { u.ctx=(enum ui_context)c; CHECK(ui_footer_attention(&u)); }
+    u.stop_notice=0; u.ctx=UI_CTX_LS;
+    CHECK(ui_font_coverage("配对码 ") && ui_font_coverage(UI_LABELS[UI_PAIR])); /* safe-mode rescue text */
     char url[64]; ui_web_url(&u,url,sizeof url); CHECK(!strcmp(url,"http://172.30.250.2:8780"));
     strcpy(u.st.ip,"10.1.2.3"); ui_web_url(&u,url,sizeof url); CHECK(!strcmp(url,"http://10.1.2.3:8780"));
     /* The footer band differs with and without a pairing code; the body never changes. */
@@ -77,6 +81,9 @@ static void footer_tests(void)
     /* Missing status never renders as an alarm: a default HOME and a configured one differ. */
     ui_init(&u); CHECK(!ui_render_panel(&u,14,a,128*128));
     u.st.key=UI_KEYST_SET; CHECK(!ui_render_panel(&u,14,b,128*128)); CHECK(memcmp(a,b,128*128*2));
+    /* A stale status snapshot keeps the value but renders it differently (dim + 读取超时). */
+    u.st.key=UI_KEYST_SET; CHECK(!ui_render_panel(&u,14,a,128*128)); u.st.stale=1; CHECK(!ui_render_panel(&u,14,b,128*128));
+    CHECK(memcmp(a,b,128*128*2)); u.st.stale=0;
     free(a); free(b);
 }
 static void font_tests(void)

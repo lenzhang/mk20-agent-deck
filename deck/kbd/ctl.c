@@ -195,6 +195,7 @@ void ctl_confirm_key(ctl_t *c, int ok, int64_t now)
 void ctl_estop(ctl_t *c, const char *reason, int64_t now_ms)
 {
     (void)now_ms;
+    if (c->allowed || c->token) c->stop_agent = 1;
     ctl_screen_reset(c);
     confirm_result(c, 0, "estop");
     lease_revoke(c, "estop", 1);
@@ -215,7 +216,7 @@ void ctl_human_input(ctl_t *c, int64_t now_ms)
 void ctl_set_allowed(ctl_t *c, int on)
 {
     c->allowed = on ? 1 : 0;
-    if (on) { c->estopped = 0; c->stop_reason[0] = 0; }
+    if (on) { c->estopped = 0; c->stop_reason[0] = 0; c->stop_agent = 0; }
     else { ctl_screen_reset(c); confirm_result(c, 0, "disabled"); lease_revoke(c, "disabled", 0); }
 }
 

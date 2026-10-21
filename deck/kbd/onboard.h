@@ -26,4 +26,8 @@ enum onboard_route onboard_current(const struct kbd_s *k);
 enum onboard_health onboard_health(const struct kbd_s *k);
 /* Status probe roots (tests/simulator); production uses devstat_init_env(). */
 void onboard_status_root(struct kbd_s *k, const char *root, const char *pair_path, const char *version, const char *rel);
+struct devstat_s;
+void onboard_status_set(struct kbd_s *k, struct devstat_s *d); /* takes ownership; starts the worker */
+/* Tests only (blocking): one full status cycle published and copied. */
+int onboard_status_wait(struct kbd_s *k, int timeout_ms);
 #endif

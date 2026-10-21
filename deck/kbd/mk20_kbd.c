@@ -115,7 +115,7 @@ static int run(const struct run_opts *o)
     kbd_t k;
     if ((o->safe_mode ? kbd_init_safe : kbd_init)(&k, o->fb, o->bl, KBD_VERSION)) { fprintf(stderr, "mk20-kbd: init failed\n"); return 1; }
     if (!o->safe_mode && onboard_enable(&k)) { fprintf(stderr,"mk20-kbd: on-board UI init failed\n"); kbd_free(&k); return 1; }
-    if (o->safe_mode) kbd_set_backlight(&k, 50);
+    if (o->safe_mode) { kbd_set_backlight(&k, 50); kbd_safe_status_start(&k); } /* usb0 IP + web pairing code */
     k.k2_estop = 1; k2_estop_init(&k.k2, o->k2_release);
     k.ptt_col = o->ptt_col; k.ptt_row = o->ptt_row;
     hid_init(&g_hid, o->hid, o->hid_stop);

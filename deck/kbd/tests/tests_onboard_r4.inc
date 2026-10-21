@@ -37,7 +37,8 @@ static void ux_tree(void)
         "data/mk20/agent","data/mk20/secrets","run/mk20","proc"};
     for (size_t i=0;i<sizeof dirs/sizeof *dirs;i++) ux_mkdirs(dirs[i]);
 }
-static void settle(kbd_t *k) { now+=2000; pump(k); }
+/* The status worker runs on real time: wait for one full published cycle, then render. */
+static void settle(kbd_t *k) { CHECK(!onboard_status_wait(k,5000)); now+=250; pump(k); }
 /* Every cmd101 frame queued to the host: payloads copied out for exact comparison. */
 static int ux_frames(int fd, char out[][192], uint32_t ids[], int max)
 {
@@ -104,14 +105,14 @@ static void ux_status(void)
     ux_put("sys/kernel/config/usb_gadget/g1/UDC","\n",0644); settle(&k); CHECK(s->link==UI_LINK_USB_DOWN);
     ux_rm("tmp/mk20/gadget.env"); settle(&k); CHECK(!strcmp(s->ip,"172.30.250.2") && s->ip_default);
     /* Version fallback: MANIFEST of the active release. */
-    devstat_t d; snprintf(p,sizeof p,"%s/tmp",ux_root); ux_put("tmp/MANIFEST","name=mk20\nversion=1.3.2-rc1\nfile=bin/mk20-kbd\n",0644);
-    devstat_init(&d,ux_root,NULL,NULL,p); devstat_poll(&d,0,1); CHECK(!strcmp(d.r.version,"1.3.2-rc1"));
-    devstat_init(&d,ux_root,NULL,"bad version!",p); devstat_poll(&d,0,1); CHECK(!strcmp(d.r.version,"1.3.2-rc1"));
+    snprintf(p,sizeof p,"%s/tmp",ux_root); ux_put("tmp/MANIFEST","name=mk20\nversion=1.3.2-rc1\nfile=bin/mk20-kbd\n",0644);
+    devstat_t *d=devstat_new(ux_root,NULL,NULL,p); CHECK(d!=NULL); devstat_run(d,0,1); CHECK(!strcmp(d->box.version,"1.3.2-rc1")); devstat_free(d);
+    d=devstat_new(ux_root,NULL,"bad version!",p); devstat_run(d,0,1); CHECK(!strcmp(d->box.version,"1.3.2-rc1")); devstat_free(d);
     ux_rm("tmp/MANIFEST");
-    /* One probe per call outside page entry; all due probes when kicked. */
-    devstat_init(&d,ux_root,NULL,"9",NULL); devstat_poll(&d,0,0); CHECK(!*d.r.version);
-    for (int i=0;i<DS_PROBES;i++) devstat_poll(&d,0,0);
-    CHECK(!strcmp(d.r.version,"9"));
+    /* Periodic probes: nothing is due before its period, the one-shot version never repeats. */
+    d=devstat_new(ux_root,NULL,"9",NULL); devstat_run(d,0,0); CHECK(!strcmp(d->box.version,"9"));
+    uint32_t seq=d->seq, gen=d->gen; devstat_run(d,1999,0); CHECK(d->seq==seq+1 && d->gen==gen && d->next[DS_PAIR]==1999+DS_PAIR_PERIOD_MS);
+    CHECK(d->next[DS_VERSION]==INT64_MAX); devstat_free(d);
     /* LS is read-only: every key and knob leaves the configuration files untouched. */
     struct stat before, after; snprintf(p,sizeof p,"%s/data/mk20/agent/provider.json",ux_root); CHECK(!stat(p,&before));
     key(&k,5,1); key(&k,5,0); pump(&k); CHECK(onboard_current(&k)==ONBOARD_LS);
@@ -142,7 +143,7 @@ static void ux_pair(void)
     onboard_status_root(&k,ux_root,NULL,NULL,NULL);
     ux_put("proc/uptime","1000.50 2000.00\n",0444);
     ux_put("run/mk20/pair-code","code=482916\nexpires_uptime=1300\n",0600);
-    now+=250; pump(&k);
+    settle(&k);
     const ui_t *u=onboard_ui(&k);
     CHECK(!strcmp(u->st.pair,"482916"));
     /* Live host page: the attention footer replaces only rows 112..141, and host
@@ -150,28 +151,30 @@ static void ux_pair(void)
     CHECK(host_rows(&k,21,0,112) && !host_rows(&k,21,112,142));
     CHECK(onboard_tile_allowed(&k,21,0,1) && !onboard_tile_allowed(&k,21,111,2));
     /* Expiry (uptime passes it) removes the badge within one second; host footer returns. */
-    ux_put("proc/uptime","1300.01 2000.00\n",0444); now+=1000; pump(&k); pump(&k);
+    ux_put("proc/uptime","1300.01 2000.00\n",0444); settle(&k); pump(&k);
     CHECK(!*u->st.pair && host_rows(&k,21,0,142) && onboard_tile_allowed(&k,21,111,2));
     /* Strict file: mode, symlink, size, content. */
     ux_put("proc/uptime","1000\n",0444);
-    ux_put("run/mk20/pair-code","code=482916\nexpires_uptime=1300\n",0644); now+=1000; pump(&k); CHECK(!*u->st.pair);
-    ux_put("run/mk20/pair-code","code=482916\nexpires_uptime=1300\n",0600); now+=1000; pump(&k); CHECK(!strcmp(u->st.pair,"482916"));
+    ux_put("run/mk20/pair-code","code=482916\nexpires_uptime=1300\n",0644); settle(&k); CHECK(!*u->st.pair);
+    ux_put("run/mk20/pair-code","code=482916\nexpires_uptime=1300\n",0600); settle(&k); CHECK(!strcmp(u->st.pair,"482916"));
     char big[80]; memset(big,'1',sizeof big-1); big[sizeof big-1]=0; memcpy(big,"code=482916\nexpires_uptime=",27);
-    ux_put("run/mk20/pair-code",big,0600); now+=1000; pump(&k); CHECK(!*u->st.pair);
+    ux_put("run/mk20/pair-code",big,0600); settle(&k); CHECK(!*u->st.pair);
     char p[512], t[512]; snprintf(p,sizeof p,"%s/run/mk20/pair-code",ux_root); snprintf(t,sizeof t,"%s/run/mk20/real-code",ux_root);
     ux_put("run/mk20/real-code","code=482916\nexpires_uptime=1300\n",0600); unlink(p); CHECK(!symlink(t,p));
-    now+=1000; pump(&k); CHECK(!*u->st.pair);
-    ux_rm("run/mk20/pair-code"); now+=1000; pump(&k); CHECK(!*u->st.pair);
+    settle(&k); CHECK(!*u->st.pair);
+    ux_rm("run/mk20/pair-code"); settle(&k); CHECK(!*u->st.pair);
     /* Environment override for the pairing path (tests/integration). */
     setenv("MK20_KBD_PAIR_CODE",t,1); setenv("MK20_ROOT",ux_root,1);
-    devstat_t d; devstat_init_env(&d); CHECK(!strcmp(d.pair_path,t) && !strcmp(d.root,ux_root));
-    devstat_poll(&d,0,0); CHECK(!strcmp(d.r.pair,"482916"));
-    unsetenv("MK20_KBD_PAIR_CODE"); setenv("MK20_ROOT","/nonexistent-u2-status",1);
+    setenv("MK20_KBD_PROBE_DELAY_MS","25",1);
+    devstat_t *d=devstat_new_env(); CHECK(d && !strcmp(d->pair_path,t) && !strcmp(d->root,ux_root) && d->delay_ms==25);
+    d->delay_ms=0; devstat_run(d,0,1); CHECK(!strcmp(d->box.pair,"482916")); devstat_free(d);
+    setenv("MK20_KBD_PROBE_DELAY_MS","999999",1); d=devstat_new_env(); CHECK(d && !d->delay_ms); devstat_free(d);
+    unsetenv("MK20_KBD_PROBE_DELAY_MS"); unsetenv("MK20_KBD_PAIR_CODE"); setenv("MK20_ROOT","/nonexistent-u2-status",1);
     /* Every page shows it: HOME and LS through ui.c, L5 through the compositor footer. */
     ux_put("run/mk20/pair-code","code=482916\nexpires_uptime=1300\n",0600);
-    onboard_route(&k,ONBOARD_L5); now+=1000; pump(&k); CHECK(ui_footer_attention(onboard_ui(&k)));
+    onboard_route(&k,ONBOARD_L5); settle(&k); CHECK(ui_footer_attention(onboard_ui(&k)));
     uint16_t with[428*30]; memcpy(with,k.scr.pending[20]+428*112,sizeof with);
-    ux_rm("run/mk20/pair-code"); now+=1000; pump(&k); CHECK(memcmp(with,k.scr.pending[20]+428*112,sizeof with));
+    ux_rm("run/mk20/pair-code"); settle(&k); CHECK(memcmp(with,k.scr.pending[20]+428*112,sizeof with));
     kbd_free(&k); ux_cleanup();
 }
 static void ux_fb20(void)
@@ -194,7 +197,8 @@ static void ux_fb20(void)
     live(&k,0);
     CHECK(onboard_ui(&k)->stop_banner && !host_rows(&k,21,112,142) && host_rows(&k,21,0,112));
     CHECK(host_rows(&k,20,0,128)); /* agent now disabled: the host's mode key is back */
-    live(&k,10000); CHECK(onboard_health(&k)==HOST_ONLINE && !onboard_ui(&k)->stop_banner && host_rows(&k,21,0,142));
+    /* The agent was allowed at the stop: the notice persists (the 10 s banner alone would expire). */
+    live(&k,10000); CHECK(onboard_health(&k)==HOST_ONLINE && !onboard_ui(&k)->stop_banner && onboard_ui(&k)->stop_notice && !host_rows(&k,21,112,142));
     /* Lease held (allowed implied): e-stop. K2 hold: e-stop, also on L1. */
     ctl_set_allowed(&c,1); req(&c,"{\"op\":\"lease.acquire\",\"ttl_ms\":3000}","token"); CHECK(c.token);
     key(&k,20,1); CHECK(c.estopped && !c.token && onboard_current(&k)==ONBOARD_L1); key(&k,20,0);
@@ -320,7 +324,195 @@ static void ux_open_settings(void)
     CHECK(!ux_count(frames,n,"openSettings") && ux_count(frames,n,"keyStateChanged")==2);
     close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
 }
+
+/* ---- Kimi K3 review follow-up (2026-10-21) ---- */
+static pthread_mutex_t gate_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gate_cv = PTHREAD_COND_INITIALIZER;
+static int gate_open, gate_hits, gate_left;
+/* Worker-side hook: the net.json probe "hangs" until the test opens the gate. */
+static void gate_hook(void *ctx, int probe)
+{
+    (void)ctx; if (probe != DS_NET) return;
+    pthread_mutex_lock(&gate_mu); gate_hits++; pthread_cond_broadcast(&gate_cv);
+    while (!gate_open) pthread_cond_wait(&gate_cv,&gate_mu);
+    gate_left++; pthread_cond_broadcast(&gate_cv); pthread_mutex_unlock(&gate_mu);
+}
+static int64_t real_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (int64_t)t.tv_sec*1000+t.tv_nsec/1000000; }
+static void gate_wait_hits(int n)
+{
+    pthread_mutex_lock(&gate_mu); struct timespec t; clock_gettime(CLOCK_REALTIME,&t); t.tv_sec+=5;
+    while (gate_hits<n) if (pthread_cond_timedwait(&gate_cv,&gate_mu,&t)) break;
+    CHECK(gate_hits>=n); pthread_mutex_unlock(&gate_mu);
+}
+static void ux_worker_blocked(void)
+{
+    kbd_t k; ctl_t c; init(&k,&c); ux_tree();
+    ux_put("proc/uptime","1000\n",0444); ux_put("run/mk20/pair-code","code=482916\nexpires_uptime=1300\n",0600);
+    devstat_t *d=devstat_new(ux_root,NULL,"1.3.1",NULL); CHECK(d!=NULL);
+    d->hook=gate_hook; d->stale_ms=300; gate_open=0; gate_hits=gate_left=0;
+    onboard_status_set(&k,d); gate_wait_hits(1); /* worker is now stuck inside a probe */
+    int hp[2]; CHECK(!pipe(hp)); CHECK(!fcntl(hp[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(hp[1],F_SETFL,O_NONBLOCK));
+    hid_t h; hid_init(&h,"/nonexistent",NULL); hid_attach_fd(&h,hp[1]); k.hid=c.hid=&h;
+    uint8_t rep[64]; while (read(hp[0],rep,sizeof rep)>0) {}
+    /* The poll/safety loop never waits on the worker: services stay fast. */
+    int64_t t0=real_ms(); for (int i=0;i<200;i++) { now+=5; kbd_service(&k,now); }
+    CHECK(real_ms()-t0 < 200);
+    /* E-stop latency (fb20 on HOME with an active agent and a held key) is unchanged. */
+    ctl_set_allowed(&c,1); req(&c,"{\"op\":\"lease.acquire\",\"ttl_ms\":3000}","token");
+    CHECK(!hid_key(&h,4,1)); while (read(hp[0],rep,sizeof rep)>0) {}
+    t0=real_ms(); key(&k,20,1); int64_t dt=real_ms()-t0;
+    CHECK(c.estopped && dt < 50); ssize_t n=read(hp[0],rep,sizeof rep); CHECK(n>=9 && rep[3]==0); key(&k,20,0);
+    /* K2 hold e-stop fires from the deadline while the worker is still stuck. */
+    ctl_set_allowed(&c,1); knob(&k,103,1); now+=1000; t0=real_ms(); kbd_service(&k,now);
+    CHECK(c.estopped && real_ms()-t0 < 50); knob(&k,103,0);
+    /* Stale after 300 ms (real time): last values kept, pairing code withdrawn. */
+    struct timespec ts={0,400000000}; nanosleep(&ts,NULL); now+=250; pump(&k);
+    CHECK(onboard_ui(&k)->st.stale && !*onboard_ui(&k)->st.pair);
+    /* Shutdown with the worker still stuck is bounded (orphaned worker frees itself later). */
+    k.hid=c.hid=NULL; t0=real_ms(); kbd_free(&k); CHECK(real_ms()-t0 < 1500);
+    pthread_mutex_lock(&gate_mu); gate_open=1; pthread_cond_broadcast(&gate_cv);
+    struct timespec t; clock_gettime(CLOCK_REALTIME,&t); t.tv_sec+=5;
+    while (gate_left<1) if (pthread_cond_timedwait(&gate_cv,&gate_mu,&t)) break;
+    pthread_mutex_unlock(&gate_mu); nanosleep(&ts,NULL); /* let the orphan finish and free */
+    close(hp[0]); close(hp[1]);
+    /* Unstuck worker: the snapshot becomes fresh again. */
+    init(&k,&c); d=devstat_new(ux_root,NULL,"1.3.1",NULL); d->hook=gate_hook; d->stale_ms=300; onboard_status_set(&k,d);
+    settle(&k); CHECK(!onboard_ui(&k)->st.stale && !strcmp(onboard_ui(&k)->st.pair,"482916"));
+    kbd_free(&k); ux_cleanup();
+}
+static void ux_suspend(void)
+{
+    char frames[64][192]; uint32_t ids[64];
+    kbd_t k; ctl_t c; r2_online(&k,&c);
+    int p[2]; CHECK(!pipe(p)); CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(p[1],F_SETFL,O_NONBLOCK)); k.host_fd=p[1];
+    int hp[2]; CHECK(!pipe(hp)); CHECK(!fcntl(hp[1],F_SETFL,O_NONBLOCK));
+    hid_t h; hid_init(&h,"/nonexistent",NULL); hid_attach_fd(&h,hp[1]); k.hid=c.hid=&h;
+    ctl_set_allowed(&c,1); live(&k,0); ux_frames(p[0],frames,ids,64);
+    key(&k,16,1); CHECK(h.mods==HID_MOD_RALT); /* Mac PTT held */
+    key(&k,20,1); CHECK(c.estopped && !h.mods && onboard_current(&k)==ONBOARD_L1);
+    /* Panic presses right after the stop: fb20 again, other keys, knobs; nothing reaches the host. */
+    key(&k,20,0); key(&k,20,1); key(&k,20,0); key(&k,1,1); key(&k,5,1); key(&k,1,0); key(&k,5,0);
+    knob(&k,105,1); knob(&k,103,1); now+=20; knob(&k,103,0); knob(&k,100,1); now+=20; knob(&k,100,0);
+    int n=ux_frames(p[0],frames,ids,64);
+    CHECK(!ux_count(frames,n,"keyStateChanged") && onboard_current(&k)==ONBOARD_L1);
+    CHECK(!host_rows(&k,20,0,128)); /* fb20 is the e-stop meanwhile */
+    /* fb16 is still physically held: 1 s passes, still suspended, no RALT re-press. */
+    live(&k,1000); CHECK(!h.mods);
+    key(&k,1,1); key(&k,1,0); n=ux_frames(p[0],frames,ids,64); CHECK(!ux_count(frames,n,"keyStateChanged"));
+    key(&k,16,0); CHECK(!h.mods);
+    /* Less than 1 s after the last input: still swallowed (and the press restarts the wait). */
+    now+=500; beat(&k); key(&k,2,1); key(&k,2,0); n=ux_frames(p[0],frames,ids,64); CHECK(!ux_count(frames,n,"keyStateChanged"));
+    /* All released and 1 s quiet: forwarding resumes, fb20 is the host's mode key again. */
+    live(&k,0); key(&k,1,1); key(&k,1,0); n=ux_frames(p[0],frames,ids,64); CHECK(ux_count(frames,n,"keyStateChanged")==2);
+    CHECK(host_rows(&k,20,0,128));
+    key(&k,16,1); CHECK(h.mods==HID_MOD_RALT); key(&k,16,0); CHECK(!h.mods);
+    /* K2 hold and socket e-stops suspend forwarding too. */
+    knob(&k,103,1); now+=1000; kbd_service(&k,now); CHECK(c.estopped); knob(&k,103,0);
+    key(&k,1,1); key(&k,1,0); n=ux_frames(p[0],frames,ids,64); CHECK(!ux_count(frames,n,"keyStateChanged"));
+    live(&k,0); ctl_set_allowed(&c,1); req(&c,"{\"op\":\"estop\"}","true"); kbd_service(&k,now);
+    key(&k,1,1); key(&k,1,0); n=ux_frames(p[0],frames,ids,64); CHECK(!ux_count(frames,n,"keyStateChanged"));
+    live(&k,0); key(&k,1,1); key(&k,1,0); n=ux_frames(p[0],frames,ids,64); CHECK(ux_count(frames,n,"keyStateChanged")==2);
+    k.hid=c.hid=NULL; close(hp[0]); close(hp[1]); close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
+}
+static void ux_fb20_race(void)
+{
+    char frames[64][192]; uint32_t ids[64]; char up[160]; host_json_key_state(up,sizeof up,4,3,0);
+    for (int lease=0;lease<2;lease++) {
+        kbd_t k; ctl_t c; r2_online(&k,&c);
+        int p[2]; CHECK(!pipe(p)); CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(p[1],F_SETFL,O_NONBLOCK)); k.host_fd=p[1];
+        key(&k,20,1); int n=ux_frames(p[0],frames,ids,64); CHECK(n==1 && strstr(frames[0],"true")); /* host owns fb20 */
+        ctl_set_allowed(&c,1);
+        if (lease) req(&c,"{\"op\":\"lease.acquire\",\"ttl_ms\":3000}","token");
+        kbd_safety_tick(&k,now); /* ctl's post-dispatch safety tick in production */
+        n=ux_frames(p[0],frames,ids,64);
+        CHECK(n==1 && !strcmp(frames[0],up)); /* the host got fb20's up first */
+        CHECK(c.estopped && !c.allowed && !c.token && c.stop_agent && onboard_current(&k)==ONBOARD_L1);
+        now+=250; pump(&k); CHECK(!host_rows(&k,20,0,128)); /* redrawn as the e-stop face */
+        key(&k,20,0); n=ux_frames(p[0],frames,ids,64); CHECK(!ux_count(frames,n,"keyStateChanged"));
+        close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
+    }
+}
+static void ux_notice(void)
+{
+    kbd_t k; ctl_t c; r2_online(&k,&c);
+    /* Agent inactive at the stop: 10 s banner only. */
+    knob(&k,103,1); now+=1000; kbd_service(&k,now); knob(&k,103,0); CHECK(c.estopped && !c.stop_agent);
+    live(&k,0); CHECK(onboard_ui(&k)->stop_banner && !onboard_ui(&k)->stop_notice);
+    live(&k,10000); CHECK(!onboard_ui(&k)->stop_banner && host_rows(&k,21,0,142));
+    /* Agent allowed at the stop: persistent notice on every page until acknowledged on L5. */
+    ctl_set_allowed(&c,1); key(&k,20,1); key(&k,20,0); CHECK(c.estopped && c.stop_agent);
+    live(&k,12000); CHECK(onboard_ui(&k)->stop_notice && !host_rows(&k,21,112,142));
+    enum onboard_route pages[]={ONBOARD_HOME,ONBOARD_LS,ONBOARD_L5};
+    for (int i=0;i<3;i++) { onboard_route(&k,pages[i]); now+=250; pump(&k); CHECK(ui_footer_attention(onboard_ui(&k)) && onboard_ui(&k)->stop_notice); }
+    CHECK(onboard_ui(&k)->st.agent==UI_AGENT_STOPPED); /* HOME fb3 keeps 急停中 */
+    key(&k,11,1); key(&k,11,0); now+=250; pump(&k); CHECK(!onboard_ui(&k)->stop_notice && c.estopped); /* acknowledged */
+    /* A new stop of an active agent re-arms it; re-allow on L5 clears it. */
+    key(&k,1,1); key(&k,1,0); CHECK(c.allowed); onboard_route(&k,ONBOARD_L5);
+    key(&k,20,1); key(&k,20,0); now+=250; pump(&k); CHECK(onboard_ui(&k)->stop_notice && onboard_current(&k)==ONBOARD_HOME);
+    key(&k,6,1); key(&k,6,0); key(&k,1,1); key(&k,1,0); now+=250; pump(&k);
+    CHECK(c.allowed && !c.estopped && !onboard_ui(&k)->stop_notice);
+    kbd_free(&k);
+}
+static void ux_minors(void)
+{
+    char frames[64][192]; uint32_t ids[64];
+    /* (a) not live (SUSPECT/offline), agent inactive: fb20 is a "K2 长按急停" placeholder and inert. */
+    kbd_t k; ctl_t c; r2_online(&k,&c);
+    int p[2]; CHECK(!pipe(p)); CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(p[1],F_SETFL,O_NONBLOCK)); k.host_fd=p[1];
+    CHECK(host_rows(&k,20,0,128)); now+=3000; kbd_service(&k,now); pump(&k);
+    CHECK(onboard_health(&k)==HOST_SUSPECT && !host_rows(&k,20,0,128));
+    uint16_t face[128*128]; memcpy(face,k.scr.pending[19],sizeof face);
+    key(&k,20,1); key(&k,20,0); CHECK(!c.estopped); int n=ux_frames(p[0],frames,ids,64); CHECK(!ux_count(frames,n,"keyStateChanged"));
+    onboard_loss(&k); pump(&k); CHECK(!memcmp(face,k.scr.pending[19],sizeof face)); /* same face offline */
+    key(&k,20,1); key(&k,20,0); CHECK(!c.estopped);
+    close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
+    /* (b) grace: K1/K2 short are swallowed; chained switches cannot extend it past 2 s. */
+    r2_online(&k,&c); CHECK(!pipe(p)); CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(p[1],F_SETFL,O_NONBLOCK)); k.host_fd=p[1];
+    knob(&k,103,1); now+=20; knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L4); ux_frames(p[0],frames,ids,64);
+    knob(&k,103,1); now+=20; knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L4); /* K2 short swallowed */
+    knob(&k,100,1); now+=20; knob(&k,100,0); n=ux_frames(p[0],frames,ids,64); CHECK(!n); /* K1 short: no effort tap */
+    now+=700; beat(&k); json(&k,"{\"method\":\"ui.page\",\"page\":\"L1\",\"generation\":77}"); CHECK(onboard_current(&k)==ONBOARD_L1);
+    now+=700; beat(&k); key(&k,5,1); key(&k,5,0); CHECK(onboard_current(&k)==ONBOARD_L1); /* still inside the first 2 s */
+    now+=700; beat(&k); pump(&k); key(&k,5,1); key(&k,5,0); CHECK(onboard_current(&k)==ONBOARD_LS); /* capped: over */
+    close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
+    /* (c) openSettings rate limit counts the attempt even when the send fails. */
+    static const char want[]="{\"method\":\"ui.openSettings\"}";
+    init(&k,&c); ux_online_home(&k); CHECK(!pipe(p)); CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(p[1],F_SETFL,O_NONBLOCK)); k.host_fd=p[1];
+    r2_saturate(&k,p[1]); unsigned errors=k.st.host_tx_errors;
+    key(&k,19,1); key(&k,19,0); CHECK(k.st.host_tx_errors>errors); /* attempted, refused by the full queue */
+    for (int i=0;i<200;i++) { uint8_t junk[4096]; kbd_host_drain(&k); while (read(p[0],junk,sizeof junk)>0) {} }
+    now+=1000; beat(&k); now+=1000; beat(&k); ux_frames(p[0],frames,ids,64);
+    key(&k,19,1); key(&k,19,0); n=ux_frames(p[0],frames,ids,64); CHECK(!ux_count(frames,n,"openSettings"));
+    now+=1000; beat(&k); ux_frames(p[0],frames,ids,64);
+    key(&k,19,1); key(&k,19,0); n=ux_frames(p[0],frames,ids,64); CHECK(n==1 && !strcmp(frames[0],want));
+    close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
+}
+/* Safe mode: usb0 IP and the web pairing code from the worker snapshot. */
+static void ux_safe_mode(void)
+{
+    ux_tree();
+    ux_put("tmp/mk20/gadget.env","MK20_ECM_IP=172.30.250.9\n",0600);
+    ux_put("proc/uptime","1000\n",0444); ux_put("run/mk20/pair-code","code=482916\nexpires_uptime=1300\n",0600);
+    setenv("MK20_ROOT",ux_root,1);
+    kbd_t k; CHECK(!kbd_init_safe(&k,"/nonexistent-u2","","test")); k.clock_ms=clock_ms;
+    uint16_t before[428*142]; memcpy(before,k.scr.pending[20],sizeof before);
+    CHECK(!kbd_safe_status_start(&k));
+    int64_t t0=real_ms();
+    while (strcmp(k.safe_pair,"482916") && real_ms()-t0<5000) { kbd_service(&k,now); usleep(2000); }
+    CHECK(!strcmp(k.safe_ip,"172.30.250.9") && !strcmp(k.safe_pair,"482916"));
+    CHECK(memcmp(before,k.scr.pending[20],sizeof before)); /* IP + code drawn */
+    ux_rm("run/mk20/pair-code"); t0=real_ms();
+    while (*k.safe_pair && real_ms()-t0<5000) { kbd_service(&k,now); usleep(2000); }
+    CHECK(!*k.safe_pair);
+    kbd_free(&k); setenv("MK20_ROOT","/nonexistent-u2-status",1); ux_cleanup();
+    /* Without files the rescue panels are the unchanged static defaults. */
+    CHECK(!kbd_init_safe(&k,"/nonexistent-u2","","test")); memcpy(before,k.scr.pending[20],sizeof before);
+    CHECK(!kbd_safe_status_start(&k)); t0=real_ms();
+    while (real_ms()-t0<300) { kbd_service(&k,now); usleep(2000); }
+    CHECK(!memcmp(before,k.scr.pending[20],sizeof before) && !strcmp(k.safe_ip,"172.30.250.2")); kbd_free(&k);
+}
 static void round4_regressions(void)
 {
     ux_status(); ux_pair(); ux_fb20(); ux_grace(); ux_auto_l1(); ux_confirm(); ux_open_settings();
+    ux_worker_blocked(); ux_suspend(); ux_fb20_race(); ux_notice(); ux_minors(); ux_safe_mode();
 }

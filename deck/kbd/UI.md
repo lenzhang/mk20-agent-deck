@@ -4,9 +4,15 @@
 
 Host-validated only (Docker, fake clock/files); **no device acceptance claimed**.
 
-- **HOME status is real, not "unknown".** `devstat.c` probes, from the main loop after
-  HID service and never from the safety tick, at most one small file per call (every
-  2 s, the pairing code every 1 s, all at once on HOME/LS entry): `MK20_VERSION`
+- **HOME status is real, not "unknown".** `devstat.c` probes on **one low-priority worker
+  thread** (every 2 s, the pairing code every 1 s, all at once on HOME/LS entry). The
+  poll/safety loop never touches the filesystem: it copies the latest immutable snapshot
+  from a mutex mailbox with `pthread_mutex_trylock` (never waits; a busy lock just means
+  "next loop"). A stuck read only makes the snapshot stale: after 10 s without a completed
+  cycle the last values are shown dimmed with "读取超时", the sub-screen says so and the
+  pairing code is withdrawn (its expiry cannot be verified). Shutdown waits at most ~1 s for
+  the worker; a worker stuck in a read is detached and frees itself when the read returns.
+  `MK20_KBD_PROBE_DELAY_MS` (test-only, <=60000) sleeps before every probe. Probes: `MK20_VERSION`
   (mk20d) or `version=` in `$MK20_REL/MANIFEST` (fb4); `MK20_ECM_IP` in
   `/tmp/mk20/gadget.env`, default 172.30.250.2 marked "默认地址" (fb11, fb19, URLs);
   UDC state via configfs `g1/UDC` + `/sys/class/udc/<udc>/state` (fb1);
@@ -18,8 +24,8 @@ Host-validated only (Docker, fake clock/files); **no device acceptance claimed**
   Key content is never opened, read or logged. Reads are `O_NOFOLLOW|O_NONBLOCK`, regular
   files only, size-capped (16 KiB config, 64 B pairing, 1 KiB gadget.env), with a strict
   bounded JSON walk (duplicate keys, escapes in captured ids and unknown catalogue ids are
-  invalid). No allocation after the first UDC lookup. `MK20_ROOT` prefixes every probe
-  path (tests); `ui.c` remains I/O-free and receives a `ui_status_t` snapshot.
+  invalid). `MK20_ROOT` prefixes every probe path (tests); `ui.c` remains I/O-free and
+  receives a `ui_status_t` snapshot.
 - fb3 智能体 shows 未启用/已禁用/已允许/急停中 from ctl; fb17 the ctl `ui.state` (无任务 when
   idle/disabled); fb2 代理状态 "未测试" (there is no device probe); fb16 语音目标 "Mac 输入法 /
   会话页按住" (on L1/L4 the PTT key sends Right Option; agent ASR is unavailable).
@@ -38,7 +44,8 @@ Host-validated only (Docker, fake clock/files); **no device acceptance claimed**
   K2 ⟲⟳ item). There is no draft, Apply, Undo, editor or on-key Test. `uicfg.c`
   (serializer/validator/writer) stays for its conformance tests but is unreachable from keys.
 - **fb19 网页设置** shows the URL (large on the sub-screen). On HOME and LS a press sends,
-  only while the host is ONLINE and at most once per 3 s, exactly one device-initiated
+  only while the host is ONLINE and at most once per 3 s (counted from each attempt, also
+  when the send fails), exactly one device-initiated
   cmd101 event `{"method":"ui.openSettings"}` (frame id 0xFFFFFFFF like keyStateChanged,
   no URL or payload: the Mac builds the URL itself) and toasts "已在 Mac 上打开设置网页";
   otherwise nothing is sent and the toast says "Mac 端未运行：在 Mac 浏览器打开" + URL.
@@ -46,16 +53,37 @@ Host-validated only (Docker, fake clock/files); **no device acceptance claimed**
   legacy host's full frames, decoded on the boot HOME only for this purpose) happens on
   HOME and no key/knob event has arrived since boot, the route changes to L1 once. Any
   physical input, any later loss/e-stop/reconnect, or ONLINE on another page consumes it.
+  Legacy hosts (no ui.hello) qualify only with the normal legacy liveness rule: three
+  decoded full frames, consecutive ones 1.0..1.5 s apart, spanning >=2 s. An idle legacy
+  host that sends one frame every 2 s (mk20deck `heartbeat_s` default 2.0) never becomes
+  ONLINE, so for it the auto-L1 needs ui.hello/ui.heartbeat (tested with both).
 - **fb20.** On L1/L4 with the keyboard agent inactive (not allowed, no lease), fb20 is the
   Mac's mode key: its face is host content and presses are forwarded like any host key
   (inert while the host page is not live). With the agent allowed or leased, and on
   HOME/LS/L5/agent pages always, fb20 is the e-stop. K2 hold (or the press-only triple
-  fallback) is always the e-stop. An e-stop on L1/L4 stays on the page: ctl revokes the
-  lease and sends all-up, a held Mac PTT is released, the ctl page stays 2, and a stop
-  line is shown in the footer for 10 s (HOME keeps showing 急停中 until re-allowed on L5).
+  fallback) is always the e-stop. While the host page is not live (SUSPECT or offline
+  placeholder) and the agent is inactive, fb20 is inert and its face reads "K2 长按急停".
+  An e-stop on L1/L4 stays on the page: ctl revokes the lease and sends all-up, a held Mac
+  PTT is released (a still-held fb16 cannot re-press it), the ctl page stays 2.
+- **Host forwarding pause after an e-stop on L1/L4** (fb20, K2 hold/triple or socket): no
+  key or knob event reaches the host, and nothing navigates (K1/K2 short and K1 hold
+  included), until every key/knob is up **and** 1 s passed without input. Presses in that
+  time are swallowed with their matching ups; presses made before the stop keep their
+  press-time owner (the host still gets those ups). fb20 is the e-stop meanwhile (face and
+  action). K2 counts as held only once its release capability is known.
+- **fb20 held while the agent becomes active.** If `allowed`/a lease appears while fb20 is
+  down and owned by the host, the host first gets fb20's up, then the keyboard e-stops
+  (reason `fb20_held`, fail safe) and fb20 is redrawn as the e-stop face.
+- **E-stop indication.** If the e-stop found the agent allowed or leased (ctl `stop_agent`),
+  "智能体已急停 · 到智能体页重新允许" stays in the footer of every page (a live host page
+  keeps the device footer for it) until the user re-allows on L5 (fb1) or acknowledges on L5
+  (fb11 "知道了" while no confirmation is pending); a new stop of an active agent re-arms it.
+  Otherwise L1/L4 show the 10 s stop banner. HOME fb3 keeps "急停中" while latched.
 - **Grace window.** After a host-page switch while ONLINE, until a fresh full frame or 2 s,
-  every key is swallowed (no navigation, no host event); the placeholder hides its
-  navigation labels. Offline placeholders keep their labelled navigation keys.
+  every key and K1/K2 short press is swallowed (no navigation, no host event); the
+  placeholder hides its navigation labels. Chained switches (e.g. a host `ui.page` during
+  the window) never extend it beyond 2 s from the first switch. Offline placeholders keep
+  their labelled navigation keys; K1 hold (HOME) stays available.
 - **No auto-L5.** A confirmation request never changes the page or releases a held Mac
   PTT. HOME fb6 shows "待确认", HOME/LS show "智能体请求确认 → 进入智能体页", host/agent
   pages get a footer line; the user enters L5. Deadlines/guards are unchanged.
@@ -68,6 +96,10 @@ Host-validated only (Docker, fake clock/files); **no device acceptance claimed**
   shows "网页配对码 NNNNNN" in the device footer on every page while `expires_uptime` is
   in the future (and at most 600 s ahead of `/proc/uptime`); symlinks, other modes/owners,
   oversize or malformed text are ignored. `MK20_KBD_PAIR_CODE` overrides the path.
+- **Safe mode** (static rescue panels) also starts the status worker: the admin line shows
+  the usb0 IP from `gadget.env` (fallback 172.30.250.2) and, while valid, "配对码 NNNNNN"
+  (fb21: "网页配对码 NNNNNN"), so the web page (including its "exit safe mode") can be paired.
+  Panels are redrawn from the snapshot only when it changes; no filesystem I/O on the loop.
 
 Validation (Docker `mk20-build:trixie`, gcc 14): see the report in RELEASE.md "Unreleased".
 

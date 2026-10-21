@@ -22,11 +22,16 @@ On-device UX revision of `bin/mk20-kbd` (rebuilt static armhf; other binaries by
 - Live L1/L4 publish the host's full 142-px sub-screen; the device footer appears only for
   attention (pairing code, stop, confirmation, stale Mac, held PTT, GD32 mapping warning).
 - Web pairing code from `/run/mk20/pair-code` (0600, <=64 B, <=600 s ahead) shown on every page.
+- Follow-up (cross-review): status probes on a worker thread only (snapshot mailbox, stale after
+  10 s, bounded shutdown); host forwarding pauses after an e-stop on L1/L4 until all released + 1 s;
+  fb20-held/agent-activation race -> host up then e-stop; persistent "智能体已急停" notice when the
+  agent was active; grace window also swallows K1/K2 short and is capped; safe mode shows the usb0
+  IP and the web pairing code.
 
 Host validation only (Docker mk20-build:trixie, gcc 14): `make -C kbd test` (test_kbd 4018 ASan
-+ 4018 TSan, onboard 10163, safe mode 2 scenarios, e2e OK incl. stalled-host stop latencies),
-`make -C kbd ui-test` (ui 41377 checks, 85/170 conformance, 330 byte-exact goldens),
-onboard TSan 10163, `tests_sim` 34 passed, release-binary/docs/mk20d-kbd pytest. **No device
++ 4018 TSan, onboard 11337, safe mode 2 scenarios, e2e OK incl. stalled-host and blocked-status-
+worker stop latencies), `make -C kbd ui-test` (ui 41396 checks, 85/170 conformance, 330 byte-exact
+goldens), onboard TSan 11337, `tests_sim` 34 passed, release-binary/docs/mk20d-kbd pytest. **No device
 acceptance claimed.** See kbd/UI.md "On-device UX revision" and ONBOARD-UI-PLAN.md decisions.
 
 ## 1.3.1-rc3 (K4 field fix)

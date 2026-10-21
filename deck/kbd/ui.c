@@ -235,6 +235,11 @@ static uint16_t item_text(const ui_t *u, enum item it, char *v, size_t vc, char 
     }
 #undef V
 #undef S
+    /* Snapshot from the status worker is old: keep the last values, but say so. */
+    if (s->stale && it != IT_AGENT && it != IT_TASK && it != IT_VOICE && it != IT_PROXY && it != IT_KEYWRITE &&
+        it != IT_KEYREAD && it != IT_TESTRUN && !(it == IT_LINK && s->link >= UI_LINK_PROBING)) {
+        snprintf(sub,sc,"%s",L(UI_STALE)); col = DIM;
+    }
     return col;
 }
 /* Status tile: secondary label, primary value, dim optional second line. */
@@ -282,6 +287,7 @@ static void sub_screen(const ui_t *u, uint16_t *p, int w, int h)
         if (u->toast != UI_NONE) msg = u->toast;
         else if (s->confirm) { msg = UI_SUB_CONFIRM; mc = AMBER; }
         else if (u->stopped) { msg = UI_SUB_STOPPED; mc = AMBER; }
+        else if (s->stale) { msg = UI_SUB_STALE_STATUS; mc = AMBER; }
         else if (s->link == UI_LINK_ONLINE) msg = UI_SUB_READY;
         else if (s->link == UI_LINK_USB_DOWN || s->link == UI_LINK_USB_SLEEP) msg = UI_SUB_USB_DOWN;
         else if (s->link == UI_LINK_PROBING) msg = UI_SUB_PROBING;
@@ -321,7 +327,9 @@ static int footer_lines(const ui_t *u, const char *line[2], char buf[2][64], uin
         snprintf(buf[0],sizeof buf[0],"%s%s",L(UI_PAIR),u->st.pair);
         ADD(buf[0],AMBER); attention = 1;
     }
-    if (u->ctx == UI_CTX_HOST && u->stop_banner) { ADD(L(UI_SUB_STOPPED),AMBER); attention = 1; }
+    /* Agent was active at the stop: persistent on every page until re-allowed/acknowledged. */
+    if (u->stop_notice) { ADD(L(UI_SUB_STOP_NOTICE),AMBER); attention = 1; }
+    else if (u->ctx == UI_CTX_HOST && u->stop_banner) { ADD(L(UI_SUB_STOPPED),AMBER); attention = 1; }
     if ((u->ctx == UI_CTX_HOST || u->ctx == UI_CTX_AGENT) && u->st.confirm) { ADD(L(UI_SUB_CONFIRM),AMBER); attention = 1; }
     if (u->ctx == UI_CTX_HOST && u->health_stale) { ADD(L(UI_SUB_STALE),AMBER); attention = 1; }
     if (u->ctx == UI_CTX_HOST && u->ptt_held) { ADD(L(UI_FT_PTT),GREEN); attention = 1; }

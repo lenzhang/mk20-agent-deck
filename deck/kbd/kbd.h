@@ -20,6 +20,8 @@ typedef struct kbd_s {
     int host_fd;          /* -1 = no host link (local mode) */
     int host_tx_stuck;    /* last reply timed out: next ones fail fast until a write succeeds */
     int safe_mode;        /* static rescue panels; no host/UI/agent features */
+    struct devstat_s *safe_ds; uint16_t *safe_px; /* safe mode: usb0 IP + web pairing code (worker) */
+    char safe_ip[16], safe_pair_raw[7], safe_pair[7]; int safe_stale;
     int local_ui;         /* 1 = draw key feedback locally (no-host mode) */
     screen_t scr;
     host_parser hp;
@@ -43,6 +45,9 @@ typedef struct kbd_s {
 int64_t kbd_now(kbd_t *k);
 int kbd_init(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version);
 int kbd_init_safe(kbd_t *k, const char *fbdir, const char *bl_dir, const char *version);
+/* Safe mode: start the status worker (gadget.env IP, /run/mk20/pair-code); panels redraw
+ * from its snapshot in kbd_service without filesystem I/O on the loop. */
+int kbd_safe_status_start(kbd_t *k);
 void kbd_free(kbd_t *k);
 /* Loop boundary: expire safety deadlines BEFORE any queued HID output. now_ms must be fresh. */
 void kbd_safety_tick(kbd_t *k, int64_t now_ms);
