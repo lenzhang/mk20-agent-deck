@@ -317,11 +317,11 @@ static void ux_open_settings(void)
     now+=1000; beat(&k); key(&k,5,1); key(&k,5,0); CHECK(onboard_current(&k)==ONBOARD_LS);
     now+=2000; beat(&k); ux_frames(p[0],frames,ids,64);
     key(&k,19,1); key(&k,19,0); n=ux_frames(p[0],frames,ids,64); CHECK(ux_count(frames,n,"openSettings")==1);
-    /* On a live host page fb19 is an ordinary host key, never openSettings. */
+    /* On a live host page fb19 is the Mac Escape HID key (2026-10-21): never openSettings, no host event. */
     kbd_free(&k); close(p[0]); close(p[1]);
     r2_online(&k,&c); CHECK(!pipe(p)); CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(p[1],F_SETFL,O_NONBLOCK)); k.host_fd=p[1];
     key(&k,19,1); key(&k,19,0); n=ux_frames(p[0],frames,ids,64);
-    CHECK(!ux_count(frames,n,"openSettings") && ux_count(frames,n,"keyStateChanged")==2);
+    CHECK(!ux_count(frames,n,"openSettings") && !ux_count(frames,n,"keyStateChanged"));
     close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
 }
 

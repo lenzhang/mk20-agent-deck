@@ -19,18 +19,19 @@ static void r2_host_backpressure(void)
         kbd_t k; ctl_t c; r2_online(&k,&c);
         int p[2]; CHECK(!pipe(p)); k.host_fd=p[1];
         CHECK(fcntl(p[0],F_SETFL,O_NONBLOCK)==0); CHECK(fcntl(p[1],F_SETFL,O_NONBLOCK)==0);
-        /* Cover the reviewer's fb17 case and all simultaneously owned keys. */
+        /* Cover the reviewer's fb17 case (now fb12: fb16-19 are Mac HID keys on live L1/L4 since
+         * 2026-10-21, never host events) and all simultaneously owned keys. */
         uint32_t owned=0; int count=0, downs,ups;
-        for(int fb=1;fb<20;fb++) if(fb!=16 && (!mode || fb==17)) {
+        for(int fb=1;fb<16;fb++) if(!mode || fb==12) {
             key(&k,fb,1); owned|=1u<<(fb-1); count++;
         }
         CHECK(host_events(p[0],&downs,&ups)==count && downs==count && !ups);
         r2_saturate(&k,p[1]);
         if(mode!=1) { knob(&k,103,1); now+=20; knob(&k,103,0); }
         for(int fb=1;fb<20;fb++) if(owned & (1u<<(fb-1))) key(&k,fb,0);
-        key(&k,17,1); key(&k,17,0); /* cannot overwrite a pending release */
+        key(&k,12,1); key(&k,12,0); /* cannot overwrite a pending release */
         /* Repeated boundaries/releases must neither lose nor duplicate ups. */
-        if(mode==0) { onboard_route(&k,ONBOARD_HOME); key(&k,17,0); }
+        if(mode==0) { onboard_route(&k,ONBOARD_HOME); key(&k,12,0); }
         if(mode==2) {
             ctl_set_allowed(&c,1);
             req(&c,"{\"op\":\"lease.acquire\",\"ttl_ms\":200}","token");
@@ -63,7 +64,7 @@ static void r2_host_backpressure(void)
         }
         CHECK(released==owned); CHECK(taps==(mode==1 ? 0 : 2)); CHECK(!k.host_out_len);
         /* A later physical release cannot produce a duplicate after recovery. */
-        key(&k,17,0); kbd_host_drain(&k); CHECK(!host_events(p[0],&downs,&ups));
+        key(&k,12,0); kbd_host_drain(&k); CHECK(!host_events(p[0],&downs,&ups));
         host_parser_free(&parser); close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
     }
 }
@@ -73,14 +74,14 @@ static void r2_host_disconnect(void)
         kbd_t k; ctl_t c; r2_online(&k,&c);
         int p[2]; CHECK(!pipe(p)); k.host_fd=p[1];
         CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK)); CHECK(!fcntl(p[1],F_SETFL,O_NONBLOCK));
-        if(held) key(&k,17,1);
+        if(held) key(&k,12,1);
         int downs,ups; host_events(p[0],&downs,&ups); r2_saturate(&k,p[1]);
         knob(&k,103,1); now+=20; knob(&k,103,0);
         /* Match the transport disconnect path, with immediate fd reuse before
          * another service tick. Neither pending releases nor taps may leak. */
         close(p[0]); close(p[1]); k.host_fd=-1; k.host_out_len=k.host_out_off=0; onboard_loss(&k);
         CHECK(!pipe(p)); k.host_fd=p[1]; CHECK(!fcntl(p[0],F_SETFL,O_NONBLOCK));
-        kbd_host_drain(&k); key(&k,17,0); CHECK(!host_events(p[0],&downs,&ups));
+        kbd_host_drain(&k); key(&k,12,0); CHECK(!host_events(p[0],&downs,&ups));
         close(p[0]); close(p[1]); k.host_fd=-1; kbd_free(&k);
     }
 }

@@ -320,6 +320,22 @@ def main():
         r1 = hid_reports()
         check(r1 == [b"\x01\x40" + bytes(7)], f"PTT down {r1}")
         par.feed(read_for(hm, 0.2))
+        # 2026-10-21 L1 layout: fb17/18/19 (fw col 1/2/3, row 3) = Backspace/Return/Escape on the live host page;
+        # with the PTT held: modifier + keys in one boot report, each release drops only its own usage
+        seq = [((1, 1), b"\x01\x40\x00\x2a" + bytes(5)), ((2, 1), b"\x01\x40\x00\x2a\x28" + bytes(4)),
+               ((3, 1), b"\x01\x40\x00\x2a\x28\x29" + bytes(3)), ((1, 0), b"\x01\x40\x00\x00\x28\x29" + bytes(3)),
+               ((2, 0), b"\x01\x40" + bytes(3) + b"\x29" + bytes(3)), ((3, 0), b"\x01\x40" + bytes(7))]
+        for (col, down), want in seq:
+            os.write(gm, gd32_frame([0x16, down, 3, col, 0, 0]))
+            got = hid_reports()
+            check(got == [want], f"L1 HID key col{col} down={down}: {got}")
+        os.write(gm, gd32_frame([0x16, 1, 3, 1, 0, 0])); held = read_for(hr, 1.5)   # hold: no synthetic repeats
+        check(held == b"\x01\x40\x00\x2a" + bytes(5), f"held DELETE: one down only {held.hex()}")
+        os.write(gm, gd32_frame([0x16, 0, 3, 1, 0, 0])); got = hid_reports()
+        check(got == [b"\x01\x40" + bytes(7)], f"held DELETE: one up {got}")
+        evs = [f.json() for f in par.feed(read_for(hm, 0.2)) if f.cmd == P.CMD_JSON and f.json().get("method") == "keyStateChanged"]
+        check(not evs, f"L1 HID keys are not forwarded as keyStateChanged {evs}")
+        print("e2e: L1 HID keys Backspace/Return/Escape (+RAlt) reports OK")
         # stop file: hidg0 closed within the 100 ms tick (+ all-up since RAlt is held)
         open(hidp + ".stop", "w").close()
         time.sleep(0.4)
@@ -380,6 +396,8 @@ def main():
                              "--lock", os.path.join(tmp, "kbd.lock")], capture_output=True, timeout=10)
         check(p2.returncode == 3, f"second instance refused rc={p2.returncode} {p2.stderr[-200:]}")
         os.write(gm, gd32_frame([0x16, 1, 3, 0, 0, 0])); hid_reports()
+        os.write(gm, gd32_frame([0x16, 1, 3, 3, 0, 0])); got = hid_reports()   # Escape held too at exit
+        check(got == [b"\x01\x40\x00\x29" + bytes(5)], f"Escape down before SIGTERM {got}")
         heartbeat_fd = None
         p.send_signal(signal.SIGTERM); p.wait(3)
         check(p.returncode == 0, "clean exit")

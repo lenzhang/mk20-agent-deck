@@ -4,6 +4,44 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
+## Unreleased (1.5.0)
+
+Not built as a release yet: `firmware/VERSION` stays **1.4.3** until the 1.5.0 bump. Branch feature/l1v2-hid
+(from release/1.4.0 @ 7d28d6a = 1.4.3-rc4); the Mac side of the same layout is mk20deck on feature/l1-layout-v2.
+
+### L1/L4 bottom row = Mac keyboard keys (`bin/mk20-kbd`)
+
+User decision 2026-10-21 (new L1 layout; replaces the PRD rule "non-PTT keys never produce HID" for exactly these
+keys): on a live L1/L4 page fb17 DELETE = USB HID Backspace (0x2A), fb18 SEND/OK = Return (0x28), fb19 NO =
+Escape (0x29). fb16 PTT (Right Option, `--ptt`) and fb20 MODE are unchanged; rows 1–3 become 15 session slots
+rendered by the Mac (no device change); L4 keeps the same bottom row. One table, `HOST_HID_KEYS` in
+`kbd/onboard.c`; key table and rules in kbd/UI.md.
+
+- Same gate as the Mac PTT: L1/L4, host ONLINE with a fresh frame (never in the grace window), not
+  PROBING/SUSPECT/offline, not in the post-e-stop pause, GD32 keycode 0; the press preempts an agent lease first
+  (`ctl_human_input`). Down on press, up on release, press-time ownership (`key_owner` 5); never forwarded as
+  `keyStateChanged`; HOME/LS/L5/agent pages and the offline placeholder keep fb17–19's on-board meaning.
+- `hid.c` unchanged (boot report via `hid_key`): RAlt + keys combine, releasing one keeps the others. Ups/all-up
+  on every e-stop (fb20/K2/socket), page boundary (K2, `ui.page`, K1 hold, ctl page, `ui.hello`), host
+  loss/SUSPECT, hidg0 replacement (all-up, then the still-held state), stop file/SIGUSR1 and exit.
+- Added safety: a hold of fb17–19 longer than 10 s is cut (GD32 reports are edge-triggered without state
+  resync, so a lost key-up would otherwise auto-repeat Backspace/Return on the Mac). The PTT is not cut.
+- Tests: new `kbd/tests/tests_onboard_r5.inc` (reports per key on L1 and L4, hold = one down/one up, repeated
+  down, 10 s cut, not forwarded, inert on HOME/LS/L5/agent and when PROBING/SUSPECT/offline/grace/e-stop pause,
+  release on 9 paths, real-FIFO hidg0 replacement/stop file/exit, PTT+keys combinations, `--ptt` elsewhere,
+  `--no-hid`, agent lease preempted); e2e on the real binary (RAlt + Backspace/Return/Escape reports, 1.5 s hold
+  = one report, no `keyStateChanged`, Escape+PTT held at SIGTERM -> all-up). Older tests that used fb17/fb19 as
+  ordinary host keys on a live L1 now use fb12 or expect no host event.
+
+Host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 877 passed / 1
+skipped, agent 398, onboard 11927 (was 11348), kbd 4173 ASan + 4173 TSan, safe mode 2 scenarios, e2e OK, ui
+41396, 330 goldens unchanged, sim 35, tools 64 passed / 1 skipped, shellcheck clean, release binaries match
+source. E-stop latencies unchanged (9 e2e runs, base 8: socket e-stop -> all-up 1.1–1.3 ms, base 1.2–1.4;
+stalled-host socket/reserved key/human/K2 triple 0.0–0.2 ms, base 0.1–0.7; K2 hold 1000.8–1005.0 ms, base
+1005.7–1013.2; blocked status worker socket 0.1–0.3 ms with one 5.5 ms outlier, base 0.1–1.6). `bin/mk20-kbd`
+sha256 `44997ce9f3355f7f37e456f678e47b86d82045bf921ae537d9549be7d03b317f` (595288 B, static ARM EABI5); the
+other binaries are byte-identical. **No device acceptance claimed.**
+
 ## 1.4.0-rc1 (UX revision + single settings entry)
 
 `firmware/VERSION` is **1.4.0**; build id **rc1**: `sh tools/mk20-release-build.sh firmware out rc1`.

@@ -19,6 +19,19 @@
 #define OPEN_SETTINGS_MS 3000
 #define RESTORE_FB20 1u
 #define RESTORE_FOOTER 2u
+/* Mac keyboard keys on the live L1/L4 bottom row: logical fb -> HID keyboard usage (page 0x07).
+ * User decision 2026-10-21 (new L1 layout; replaces the PRD rule "non-PTT keys never produce HID").
+ * Same gate as the Mac PTT (fb16, Right Option, --ptt COL,ROW; a --ptt position wins over this table)
+ * and never forwarded as keyStateChanged. Down on press, up on release: macOS auto-repeats while held.
+ * fb20 stays the Mac mode key / e-stop. Every other page keeps these keys' on-board meaning. */
+static const struct { int fb; uint8_t usage; } HOST_HID_KEYS[] = {
+    {17, 0x2A},   /* DELETE  -> Backspace */
+    {18, 0x28},   /* SEND/OK -> Return */
+    {19, 0x29},   /* NO      -> Escape (also interrupts Claude Code / codex) */
+};
+/* GD32 key reports are edge-triggered without a state resync: a lost key-up must not leave an
+ * auto-repeating Backspace/Return/Escape held. Longer holds are cut (press again to continue). */
+#define HID_KEY_HOLD_MS 10000
 struct onboard_s {
     ui_t ui;
     enum onboard_route route, back, host_page;
@@ -29,7 +42,10 @@ struct onboard_s {
     int64_t seen, first, last_beat, next_render, next_full, next_decode;
     uint32_t render;
     uint16_t *scratch;
+    /* Press-time owner: 0 none, 1 host key event, 2 Mac PTT (Right Option), 3 agent page,
+     * 4 L4 back, 5 Mac HID key (hid_usage, pressed at hid_at). */
     int key_owner[20], knob_down[2], knob_long[2];
+    uint8_t hid_usage[20]; int64_t hid_at[20];
     struct { int page, client; uint64_t generation; } agent_owner[20];
     uint32_t pressed;
     uint32_t pending_up;
@@ -103,12 +119,25 @@ int onboard_host_flush(kbd_t *k)
     }
     return 0;
 }
+static uint8_t host_hid_usage(int fb)
+{
+    for (size_t i = 0; i < sizeof HOST_HID_KEYS / sizeof *HOST_HID_KEYS; i++)
+        if (HOST_HID_KEYS[i].fb == fb) return HOST_HID_KEYS[i].usage;
+    return 0;
+}
+/* Up of a physical key that owns Mac HID since its press: only its own modifier/usage. */
+static void mac_up(kbd_t *k, int i, int owner)
+{
+    if (!k->hid) return;
+    if (owner == 2) hid_set_mod(k->hid, HID_MOD_RALT, 0);
+    else if (owner == 5) hid_key(k->hid, k->onboard->hid_usage[i], 0);
+}
 static void release_mac(kbd_t *k)
 {
     onboard_t *o = k->onboard;
-    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 2) {
-        if (k->hid) hid_set_mod(k->hid, HID_MOD_RALT, 0);
-        o->key_owner[i] = 0;
+    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 2 || o->key_owner[i] == 5) {
+        int owner = o->key_owner[i];
+        o->key_owner[i] = 0; mac_up(k,i,owner);
     }
 }
 static void release_key(kbd_t *k, int i)
@@ -120,7 +149,7 @@ static void release_key(kbd_t *k, int i)
         return;
     }
     o->key_owner[i] = 0; /* notify may disconnect a client */
-    if (owner == 2 && k->hid) hid_set_mod(k->hid,HID_MOD_RALT,0);
+    if (owner == 2 || owner == 5) mac_up(k,i,owner);
     else if (owner == 3 && k->ctl) {
         int ci=o->agent_owner[i].client;
         if (ci >= 0 && ci < CTL_MAX_CLIENTS &&
@@ -439,6 +468,10 @@ void onboard_tick(kbd_t *k, int64_t now)
         if (active && o->key_owner[19] == 1) { release_key(k,19); stop(k,"fb20_held",now); }
         o->agent_was = agent_active(k); o->render |= 1u << 19;
     }
+    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 5 && now - o->hid_at[i] >= HID_KEY_HOLD_MS) {
+        fprintf(stderr, "mk20-kbd: Mac key held %d s: released (lost key-up guard)\n", HID_KEY_HOLD_MS / 1000);
+        release_key(k,i);
+    }
     if (o->suspend) {
         /* Bounded: 5 s with no key/knob event at all resyncs the held state, so a GD32 key-up lost while
          * suspended (edge-triggered reports, no state resync) cannot leave L1/L4 dead. Safe: a key's up
@@ -536,6 +569,8 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
     /* fb20 is e-stop on every on-board page and whenever the keyboard agent is active.
      * On L1/L4 with the agent inactive it is the Mac host's mode key (PRD §6.2). */
     if (fb == 20 && !fb20_host(k)) { stop(k,"page_key",now); return 1; }
+    /* Repeated down of a held Mac HID key (its GD32 up was lost): still one down; the next up releases. */
+    if (o->key_owner[fb-1] == 5) return 1;
     /* Do not overwrite a still-owned host press with a new press while its up
      * is backpressured. Safety keys and deadlines have already been handled. */
     if (o->pending_up & (1u<<(fb-1))) {
@@ -552,6 +587,12 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
             o->key_owner[fb-1] = 2;
             if (k->hid) hid_set_mod(k->hid,HID_MOD_RALT,1);
             return 1; /* physical PTT is consumed; no second Mac action */
+        }
+        uint8_t usage = host_hid_usage(fb);
+        if (usage) {
+            o->key_owner[fb-1] = 5; o->hid_usage[fb-1] = usage; o->hid_at[fb-1] = now;
+            if (k->hid) hid_key(k->hid,usage,1);
+            return 1; /* a Mac keyboard key, consumed like the PTT: no host key event */
         }
         return 0;
     }
@@ -815,5 +856,6 @@ int onboard_timeout(kbd_t *k, int64_t now, int dflt)
     int64_t left = dflt;
     if (!producing && o->render && o->next_render-now < left) left = o->next_render-now;
     for (int i=0;i<2;i++) if (o->knob_down[i] && !o->knob_long[i] && o->knob_at[i]+1000-now < left) left=o->knob_at[i]+1000-now;
+    for (int i=0;i<20;i++) if (o->key_owner[i]==5 && o->hid_at[i]+HID_KEY_HOLD_MS-now < left) left=o->hid_at[i]+HID_KEY_HOLD_MS-now;
     return left < 0 ? 0 : (int)left;
 }

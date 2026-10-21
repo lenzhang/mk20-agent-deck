@@ -6,6 +6,41 @@ same numbering as GD32 key events, the host canvas and ctl. It is not the `/dev/
 are wired column-major from the top-right (logical fb1 is /dev/fb17, fb20 is /dev/fb4); `kbd/panels.c`
 holds the only map (1.4.3-rc4; before that every page was displayed permuted, see kbd/K2-RESULTS.md).
 
+## L1/L4 bottom row: Mac keyboard keys (user decision 2026-10-21; unreleased 1.5.0)
+
+New L1 layout: rows 1–3 (fb1–fb15) are 15 session slots rendered by the Mac (host canvas, no device
+change); L4 keeps the same bottom row. For exactly the keys below this replaces the PRD rule "the
+non-PTT keys never produce HID". The only fb -> usage map is `HOST_HID_KEYS` in `kbd/onboard.c`.
+
+| Key | GD32 col,row (0-based) | Label | Live L1/L4 (USB HID on /dev/hidg0) | Elsewhere (unchanged) |
+|---|---|---|---|---|
+| fb16 | 0,3 | PTT | Right Option (modifier 0x40) while held; `--ptt COL,ROW` moves it | L5/agent: board PTT; placeholder: inert |
+| fb17 | 1,3 | DELETE | Backspace (usage 0x2A) while held | HOME task state, LS/L5 read-only, agent-bindable; placeholder blank |
+| fb18 | 2,3 | SEND / OK | Return (0x28) while held | HOME ✓, LS 主页, L1/L4 placeholder 主页 |
+| fb19 | 3,3 | NO | Escape (0x29; also interrupts Claude Code / codex) while held | HOME/LS 网页设置 (`ui.openSettings`), placeholder URL |
+| fb20 | 4,3 | MODE | Mac mode key (forwarded) unless the keyboard agent is active, then e-stop | e-stop |
+
+- **Gate = the Mac PTT's:** host route L1/L4, host ONLINE with a fresh full frame (hence never in
+  the page-switch grace window), not PROBING/SUSPECT/offline, not during the post-e-stop pause,
+  GD32 keycode 0. The physical press first takes input back from an agent lease (`ctl_human_input`:
+  revoke + all-up), then the usage goes down; its release sends the up. These edges are consumed and
+  never forwarded as `keyStateChanged` (with `--no-hid` nothing is sent at all). A `--ptt` position
+  wins over the table (that key becomes the PTT; fb16 then is an ordinary host key).
+- **Hold:** the key stays down, macOS auto-repeats; mk20-kbd never sends synthetic repeats. A repeated
+  GD32 down of a held key is ignored. Press-time ownership (`key_owner` 5 + the recorded usage): the
+  up always releases exactly what that press put down. Reports are `hid.c`'s boot keyboard report
+  (`hid_key`: modifier byte + 6 key slots): physical keys contribute at most RAlt + these three, and
+  releasing one of them (or the PTT) keeps the others down.
+- **Releases (never a key stuck down on the Mac):** any page boundary (K2 toggle, host `ui.page`, K1
+  hold, ctl page change, `ui.hello`, host loss/EOF) sends each up; SUSPECT and every e-stop
+  (fb20/K2/socket: ctl all-up first, nothing re-pressed during the pause) release them; on a hidg0
+  node replacement the new node gets all-up then the still-held state (as for a held RAlt), a release
+  during the gap leaves only all-up; gadget teardown (stop file/SIGUSR1) and process exit send all-up.
+- **Lost key-up guard:** GD32 key reports are edge-triggered with no state resync, so a hold longer than
+  10 s (`HID_KEY_HOLD_MS`) is cut: the up is sent, the late physical up does nothing, press again to
+  continue. The PTT (long dictation) is not cut.
+- Safe mode and the legacy non-onboard loop keep PTT-only HID.
+
 ## On-device UX revision (2026-10-20, branch feature/fw-ux; supersedes U2 text below where they differ)
 
 Host-validated only (Docker, fake clock/files); **no device acceptance claimed**.
@@ -154,7 +189,7 @@ Every outstanding host press receives an up before navigation taps. Agent page-i
 changes are boundaries even within the AGENT route; releases go to the original
 page/connection, with disconnect generations preventing client-slot reuse leaks.
 HOME/LS pressed keys retain their labels and show a white top edge until release.
-Mac PTT edges are not also forwarded as host key events. Short host K1 (on L1; the
+Mac PTT edges (and, since 2026-10-21, the fb17–19 Mac HID key edges) are not also forwarded as host key events. Short host K1 (on L1; the
 Mac deck focuses the selected session) and short K2 toggle are forwarded as complete
 short taps only after the release decision. Knob rotation on L1/L4 is forwarded per
 detent (press edge only) while ONLINE and fresh; the Mac deck uses K1 rotation to move
