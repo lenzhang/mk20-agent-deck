@@ -56,7 +56,9 @@ def sample(deep: bool) -> dict:
         s["health"]["kbd"] = {x: k.get(x) for x in ("enabled", "mode", "running", "restarts", "recent_crashes")}
         s["keyboard_ok"] = acc.keyboard_check(h)[1]   # stock: kd=1; mk20-kbd release: kd=0 + mk20-kbd normal
         _, o = acc.sh("echo kd=$(pgrep -f '^/data/KeyboardDevice' | head -n 1); "
-                      "echo kbd=$(pgrep -f 'bin/mk20-kbd --run' | head -n 1); "
+                      # pidof (process name), not `pgrep -f "bin/mk20-kbd --run"`: that also matches this adb sh -c and,
+                      # after a pid wrap, reported the shell as a "restart" every sample (10-20/21 overnight soak).
+                      "echo kbd=$(for p in $(pidof mk20-kbd); do grep -q -- --run /proc/$p/cmdline && echo $p; done | head -n 1); "
                       "echo logkb=$(du -k /data/mk20/logs /mnt/SDCARD/mk20/logs 2>/dev/null | awk '{print $1}' | tr '\\n' ' '); "
                       "echo bridgelog=$(wc -c < /tmp/mk20/bridge.log 2>/dev/null)")
         f = dict(l.split("=", 1) for l in o.splitlines() if "=" in l)
@@ -123,7 +125,7 @@ def main() -> int:
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     end = time.time() + a.hours * 3600
     n = bad = reboots = kd_restarts = 0
-    last_up = last_kd = None
+    last_up = last_kd = last_kr = None
     rollbacks: list = []
     first_lr = None
     min_mem = min_fat = None
@@ -144,11 +146,17 @@ def main() -> int:
                 reboots += 1
                 s["event"] = "reboot"
             last_up = up if isinstance(up, int) else last_up
-            kd = s.get("kbd_pid") or s.get("kd_pid")   # the keyboard owner: mk20-kbd (K4) or stock KD
-            if kd and last_kd and kd != last_kd and s.get("event") != "reboot":
+            kr = (h.get("kbd") or {}).get("restarts")   # mk20d's own count of real mk20-kbd exits (authoritative)
+            kd = s.get("kbd_pid") or s.get("kd_pid")   # fallback for stock-era releases: the KD pid changed
+            if isinstance(kr, int) and isinstance(last_kr, int) and s.get("event") != "reboot":
+                if kr > last_kr:
+                    kd_restarts += kr - last_kr
+                    s["event"] = (s.get("event", "") + " kd-restart").strip()
+            elif not isinstance(kr, int) and kd and last_kd and kd != last_kd and s.get("event") != "reboot":
                 kd_restarts += 1
                 s["event"] = (s.get("event", "") + " kd-restart").strip()
             last_kd = kd or last_kd
+            last_kr = kr if isinstance(kr, int) else last_kr
             lr = (s.get("loader") or {}).get("last_rollback")
             if lr is not None and first_lr is None:
                 first_lr = lr                       # pre-existing record, not a soak event
