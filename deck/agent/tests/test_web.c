@@ -153,8 +153,12 @@ static void pairing(void)
     CHECK(!f.web.pairing && !*f.web.code && read_pair(&f,NULL)); pair_browser(&f);
     /* One-time code cannot establish another session. */
     snprintf(code,sizeof code,"{\"code\":\"%s\"}",f.fake.code); cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 401);
-    pair_browser(&f); cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(!read_pair(&f,NULL));
-    snprintf(code,sizeof code,"{\"code\":\"%s\"}",f.fake.code); cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 503);
+    /* Both session slots taken: no code is shown, the reason is explicit. */
+    pair_browser(&f); cJSON_Delete(request(&f,"POST","/pair/start","{}"));
+    CHECK(f.r.status == 503 && strstr(f.r.body,"\"error\":\"sessions_full\"") && strstr(f.r.body,"已有 2 个已配对的浏览器，请等待过期或在已配对页面退出"));
+    CHECK(!f.web.pairing && read_pair(&f,NULL));
+    snprintf(code,sizeof code,"{\"code\":\"%s\"}",f.fake.code); cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 401);
+    CHECK(!f.web.locked_until);   /* 9 failures in the window so far (with and without a challenge) */
     f.fake.now += WEB_IDLE_MS; web_tick(&f.web);
     CHECK(!*f.web.sessions[0].cookie && !*f.web.sessions[1].cookie);
     /* A symlinked display directory is refused (never written through). */
@@ -188,7 +192,57 @@ static void pair_limits(void)
     cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.r.status == 429 && strstr(f.r.body,"\"retry_after_s\":600"));
     cJSON_Delete(request(&f,"POST","/pair","{\"code\":\"123456\"}")); CHECK(f.r.status == 429);
     f.fake.now += WEB_RATE_WINDOW_MS; pair_browser(&f); CHECK(!f.web.locked_until);
+    /* Failures without any live challenge count too: blind probing is bounded the same way. */
+    f.fake.now += WEB_RATE_WINDOW_MS; CHECK(!f.web.pairing);
+    for (int i = 0; i < WEB_PAIR_FAILS; i++) { cJSON_Delete(request(&f,"POST","/pair","{\"code\":\"000000\"}")); CHECK(f.r.status == 401); }
+    CHECK(f.web.locked_until);
+    cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.r.status == 429 && read_pair(&f,NULL));
     cleanup(&f);
+}
+/* WEB_SESSIONS slots: explicit refusal for a third browser, logout frees a slot. */
+static void sessions_logout(void)
+{
+    fixture_t f; setup(&f); pair_browser(&f);
+    char a_cookie[256], a_csrf[128]; strcpy(a_cookie,f.q.cookie); strcpy(a_csrf,f.q.csrf);
+    cJSON_Delete(request(&f,"POST","/api/tasks","{\"goal\":\"owned by A\"}")); CHECK(f.r.status == 202 && f.mcp.task.live);
+    /* One slot left; another browser takes it after this code was shown: the code is void. */
+    cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.r.status == 200 && !read_pair(&f,NULL));
+    strcpy(f.web.sessions[1].cookie,"0123456789abcdef0123456789abcdef"); strcpy(f.web.sessions[1].csrf,"fedcba9876543210fedcba9876543210");
+    f.web.sessions[1].created = f.web.sessions[1].activity = f.fake.now;
+    char code[64]; snprintf(code,sizeof code,"{\"code\":\"%s\"}",f.fake.code);
+    cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 503 && strstr(f.r.body,"sessions_full") && !f.web.pairing && read_pair(&f,NULL));
+    snprintf(f.q.cookie,sizeof f.q.cookie,"mk20=%s",f.web.sessions[1].cookie); strcpy(f.q.csrf,f.web.sessions[1].csrf);
+    cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.r.status == 503 && strstr(f.r.body,"sessions_full"));
+    /* Logout: paired + CSRF; frees exactly this slot and expires the cookie. */
+    f.q.has_csrf = 0; cJSON_Delete(request(&f,"POST","/api/logout","{}")); CHECK(f.r.status == 403); f.q.has_csrf = 1;
+    cJSON_Delete(request(&f,"POST","/api/logout","{}")); CHECK(f.r.status == 200 && strstr(f.r.body,"logged_out") && strstr(f.r.cookie,"mk20=; Max-Age=0"));
+    CHECK(!*f.web.sessions[1].cookie && *f.web.sessions[0].cookie);
+    cJSON_Delete(request(&f,"GET","/api/session",NULL)); CHECK(f.r.status == 401);
+    cJSON_Delete(request(&f,"POST","/api/logout","{}")); CHECK(f.r.status == 401);
+    cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.r.status == 200 && !read_pair(&f,NULL));
+    /* A's session survives; logging A out also stops the task A owns. */
+    strcpy(f.q.cookie,a_cookie); strcpy(f.q.csrf,a_csrf);
+    cJSON_Delete(request(&f,"GET","/api/session",NULL)); CHECK(f.r.status == 200);
+    cJSON_Delete(request(&f,"POST","/api/logout","{}")); CHECK(f.r.status == 200 && !f.mcp.task.live && !*f.mcp.task.goal);
+    CHECK(!*f.web.sessions[0].cookie && !*f.web.sessions[1].cookie);
+    cleanup(&f);
+}
+/* The display file cannot be (re)published: 503 with a reason, never "started". */
+static void pair_publish_failure(void)
+{
+    fixture_t f; setup(&f);
+    cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.r.status == 200 && f.web.pairing && !read_pair(&f,NULL));
+    char run[4096]; snprintf(run,sizeof run,"%.4000s/run",f.root); CHECK(!chmod(run,0777));
+    cJSON_Delete(request(&f,"POST","/pair/start","{}"));
+    CHECK(f.r.status == 503 && strstr(f.r.body,"display_unavailable") && strstr(f.r.body,"无法在键盘上显示配对码") && !strstr(f.r.body,"started"));
+    CHECK(f.web.pairing && !f.web.attempts);   /* the live challenge (and its budget) is unchanged */
+    CHECK(!chmod(run,0700)); cJSON_Delete(request(&f,"POST","/pair/start","{}")); CHECK(f.r.status == 200 && strstr(f.r.body,"started"));
+    CHECK(!read_pair(&f,NULL));
+    char code[64]; snprintf(code,sizeof code,"{\"code\":\"%s\"}",f.fake.code); cJSON_Delete(request(&f,"POST","/pair",code)); CHECK(f.r.status == 200);
+    /* New challenge whose first publish fails: nothing is live afterwards. */
+    CHECK(!chmod(run,0777)); cJSON_Delete(request(&f,"POST","/pair/start","{}"));
+    CHECK(f.r.status == 503 && strstr(f.r.body,"display_unavailable") && !f.web.pairing && !*f.web.code);
+    CHECK(!chmod(run,0700)); cleanup(&f);
 }
 static void auth(void)
 {
@@ -555,7 +609,19 @@ static void maintenance(void)
     CHECK(strstr(f.r.body,"\"pass_count\":2") && strstr(f.r.body,"\"warn_count\":2") && strstr(f.r.body,"\"fail_count\":0"));
     CHECK(strstr(f.r.body,"\"WARN mk20-kbd safe mode (admin: http://172.30.250.2:8780)\"") && strstr(f.r.body,"\"WARN FAT free 900 KiB\""));
     CHECK(strstr(f.r.body,"\"last_rc\":139") && strstr(f.r.body,"\"reason\":\"crash-loop\"") && strstr(f.r.body,"\"debug_verbose\":true") && strstr(f.r.body,"\"pending\":[]"));
+    CHECK(strstr(f.r.body,"\"health_state\":\"ok\"") && strstr(f.r.body,"\"state_status\":\"ok\""));
     cJSON_Delete(j);
+    /* Forgeable snapshots (group/other-writable, foreign owner) are never parsed: 状态不可用. */
+    CHECK(!chmod(f.web.health_path,0666) && !chmod(state,0464) && !chmod(f.web.debug_path,0622));
+    j = request(&f,"GET","/api/status",NULL); CHECK(f.r.status == 200 && strstr(f.r.body,"\"health\":false") && strstr(f.r.body,"\"health_state\":\"unavailable\""));
+    CHECK(strstr(f.r.body,"\"state\":null") && strstr(f.r.body,"\"state_status\":\"unavailable\"") && strstr(f.r.body,"\"debug_verbose\":null") && !strstr(f.r.body,"1.4.0")); cJSON_Delete(j);
+    CHECK(!chmod(f.web.health_path,0600) && !chmod(state,0444) && !chmod(f.web.debug_path,0600));
+    if (!geteuid()) {
+        CHECK(!chown(f.web.health_path,4321,4321));
+        j = request(&f,"GET","/api/status",NULL); CHECK(strstr(f.r.body,"\"health_state\":\"unavailable\"") && !strstr(f.r.body,"\"slot\"")); cJSON_Delete(j);
+        CHECK(!chown(f.web.health_path,0,0));
+    }
+    j = request(&f,"GET","/api/status",NULL); CHECK(strstr(f.r.body,"\"health_state\":\"ok\"") && strstr(f.r.body,"\"slot\":\"B\"")); cJSON_Delete(j);
     /* Each action: CSRF + explicit self-naming confirmation; fixed names and bodies only. */
     const char *bad[][2] = {{"restart-kbd","{}"},{"restart-kbd","{\"confirm\":\"exit-safe-mode\"}"},{"restart-kbd","{\"confirm\":\"restart-kbd\",\"x\":1}"},
         {"debug","{\"confirm\":\"debug\"}"},{"debug","{\"confirm\":\"debug\",\"verbose\":\"1\"}"},{"debug","{\"confirm\":\"debug\",\"verbose\":true,\"keytrace\":true}"}};
@@ -614,4 +680,4 @@ static void settings_only(void)
     f.web.agent = 1; CHECK(!web_idle(&f.web));
     cleanup(&f);
 }
-int main(void) { slow_probe(); secret_nul(); pairing(); pair_limits(); auth(); secrets(); configs(); commit_marker(); catalogue(); maintenance(); settings_only(); glm_coding(); tasks(); events(); paused_budget(); queued_stop(); printf("A7 web: %u checks passed\n",checks); return 0; }
+int main(void) { slow_probe(); secret_nul(); pairing(); pair_limits(); sessions_logout(); pair_publish_failure(); auth(); secrets(); configs(); commit_marker(); catalogue(); maintenance(); settings_only(); glm_coding(); tasks(); events(); paused_budget(); queued_stop(); printf("A7 web: %u checks passed\n",checks); return 0; }

@@ -63,9 +63,16 @@ user guide [../SETTINGS.md](../SETTINGS.md)).
   `.pair-code.<random>.tmp` + rename, in a directory owned by the service and not
   group/other-writable (`--web-uptime-file`, default `/proc/uptime`, is a test seam).
   The file is removed on pairing, expiry, exhaustion, lockout, startup and exit. A code
-  allows 5 wrong attempts; at most 6 new codes per 10 min; 10 wrong codes in 10 min lock
-  pairing for 10 min (`429 rate_limited` with `retry_after_s`). A repeated start keeps
-  the live code and its attempt count. The code is never returned by HTTP or logged.
+  allows 5 wrong attempts; at most 6 new codes per 10 min; 10 failed `/pair` requests in
+  10 min, counted whether or not a challenge is live, lock `/pair` and `/pair/start` for
+  10 min (`429 rate_limited` with `retry_after_s`). A repeated start keeps the live code
+  and its attempt count. If the file cannot be (re)published the start answers `503
+  display_unavailable` (with a Chinese `message`), never `started`. The code is never
+  returned by HTTP or logged.
+- **Sessions.** `WEB_SESSIONS` = 2. With both slots taken `/pair/start` (and a late
+  `/pair`) answer `503 sessions_full` ("已有 2 个已配对的浏览器，请等待过期或在已配对页面退出");
+  `POST /api/logout` (paired, CSRF) frees the caller's slot, stops a task it owns and
+  expires the cookie.
 
 After pairing:
 
@@ -85,7 +92,9 @@ After pairing:
   fsync; while the marker exists readers fail closed (`409 apply_incomplete`).
   `POST /test` performs a device-side provider reachability check over that route.
 - `GET /api/status` and `POST /api/maint/{restart-kbd|exit-safe-mode|debug}`: the
-  maintenance page, see [../firmware/MAINT-HOOKS.md](../firmware/MAINT-HOOKS.md)
+  maintenance page, see [../firmware/MAINT-HOOKS.md](../firmware/MAINT-HOOKS.md); a
+  snapshot not owned by root/the service or writable by group/other is reported as
+  `unavailable` (状态不可用), never parsed
   (`--web-health-file`, `--web-maint-dir`, `--web-debug-file`).
 - Agent mode only: `POST /api/tasks {"goal":"…"}` queues while disabled as `waiting_allow`.
   `GET /api/tasks/{id}` returns state/steps/fixed summaries and retained shot numbers.

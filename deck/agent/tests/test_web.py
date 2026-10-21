@@ -293,7 +293,8 @@ def test_glm_coding_provider_and_secret_ipc(web_binary,kbd_build,tmp_path):
 
 def test_display_unavailable_ipc(web_binary,kbd_build,tmp_path):
     with keyboard(kbd_build,tmp_path) as (kbd,_,_,_), server(web_binary,tmp_path,kbd,display=False) as (cs,_,_,_,_,_,_):
-        assert cs[0].request("/pair/start","POST",{})[2] == dict(error="display_unavailable")
+        status, _, d = cs[0].request("/pair/start","POST",{})
+        assert status == 503 and d == dict(error="display_unavailable", message="无法在键盘上显示配对码（写入配对码文件失败），请稍后重试")
         assert cs[0].request("/pair","POST",dict(code="000000"))[0] == 401
         assert not (tmp_path.resolve() / "run/pair-code").exists()
 
@@ -581,3 +582,30 @@ def test_web_catalogue_generated_from_single_source(tmp_path):
     assert subprocess.run([os.sys.executable, str(tmp_path / "tools/gen-providers.py")]).returncode == 0
     assert '"new-model"' in (tmp_path / "agent/src/web_providers.inc").read_text()
     assert subprocess.run([os.sys.executable, str(tmp_path / "tools/gen-providers.py"), "--check"]).returncode == 0
+
+
+def test_session_limit_logout_ipc(web_binary,tmp_path):
+    # WEB_SESSIONS=2: a third browser gets an explicit refusal; logout frees a slot.
+    with server(web_binary,tmp_path,None,connections=3) as (cs,pair_file,_,_,_,_,_):
+        a, b, c = cs
+        a.pair(pair_file); b.pair(pair_file)
+        status, _, d = c.request("/pair/start","POST",{})
+        assert status == 503 and d["error"] == "sessions_full" and d["message"] == "已有 2 个已配对的浏览器，请等待过期或在已配对页面退出"
+        assert not pair_file.exists()
+        assert b.request("/api/logout","POST",{},headers={"X-CSRF-Token":None})[0] == 403
+        status, h, d = b.request("/api/logout","POST",{})
+        assert status == 200 and d == dict(logged_out=True) and h["Set-Cookie"].startswith("mk20=; Max-Age=0")
+        assert b.request("/api/session")[0] == 401 and a.request("/api/session")[0] == 200
+        c.pair(pair_file)
+        assert c.request("/api/session")[0] == 200
+
+
+def test_untrusted_health_snapshot_not_shown_ipc(web_binary,tmp_path):
+    root = tmp_path.resolve()
+    health = root / "health.json"; health.write_text(json.dumps(dict(version="6.6.6", release=dict(slot="A"))))
+    with server(web_binary,tmp_path,None,connections=1) as (cs,pair_file,_,_,_,_,_):
+        c = cs[0]; c.pair(pair_file)
+        assert c.request("/api/status")[2]["health_state"] == "ok"
+        health.chmod(0o666)
+        s = c.request("/api/status")[2]
+        assert s["health"] is False and s["health_state"] == "unavailable" and "6.6.6" not in json.dumps(s)

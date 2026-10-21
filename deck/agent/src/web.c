@@ -131,20 +131,37 @@ static void pair_started(web_t *w, http_response_t *r, int64_t t)
     char b[64]; int64_t left = WEB_PAIR_MS-(t-w->pair_at); if (left < 0) left = 0;
     snprintf(b,sizeof b,"{\"started\":true,\"expires_in_s\":%" PRId64 "}",left/1000); response(r,200,b);
 }
+/* The keyboard cannot show the code: never answer "started". */
+static void display_unavailable(http_response_t *r)
+{
+    response(r,503,"{\"error\":\"display_unavailable\",\"message\":\"无法在键盘上显示配对码（写入配对码文件失败），请稍后重试\"}");
+}
+static int session_free(web_t *w)
+{
+    for (int i = 0; i < WEB_SESSIONS; i++) if (!*w->sessions[i].cookie) return 1;
+    return 0;
+}
+static void sessions_full(http_response_t *r)
+{
+    char b[192]; snprintf(b,sizeof b,"{\"error\":\"sessions_full\",\"message\":\"已有 %d 个已配对的浏览器，请等待过期或在已配对页面退出\"}",WEB_SESSIONS);
+    response(r,503,b);
+}
 static void pair_start(web_t *w, http_response_t *r)
 {
     int64_t t = now(w), oldest; long long up;
     if (locked(w,t,r)) return;
+    /* No free session slot: showing a code could not lead to a session. */
+    if (!session_free(w)) { sessions_full(r); return; }
     /* A repeated start neither replaces a live challenge nor resets its attempt
      * count; it republishes the same code (e.g. after a keyboard restart). */
     if (w->pairing) {
-        if (!web_uptime(w,&up)) (void)web_pair_publish(w,w->code,up+(WEB_PAIR_MS-(t-w->pair_at))/1000);
+        if (web_uptime(w,&up) || web_pair_publish(w,w->code,up+(WEB_PAIR_MS-(t-w->pair_at))/1000)) { display_unavailable(r); return; }
         pair_started(w,r,t); return;
     }
     if (recent(w->starts,WEB_PAIR_STARTS,t,&oldest) >= WEB_PAIR_STARTS) { rate_limited(r,oldest+WEB_RATE_WINDOW_MS,t); return; }
     mem_wipe(w->code,sizeof w->code);
     if (pairing_code(w->code) || web_uptime(w,&up) || web_pair_publish(w,w->code,up+WEB_PAIR_MS/1000)) {
-        pair_end(w); response(r,503,"{\"error\":\"display_unavailable\"}"); return;
+        pair_end(w); display_unavailable(r); return;
     }
     remember(w->starts,WEB_PAIR_STARTS,t);
     w->pairing = 1; w->pair_at = t; w->attempts = 0;
@@ -157,17 +174,18 @@ static void pair(web_t *w, const cJSON *j, http_response_t *r)
     const cJSON *code = get(j,"code"); const char *s = cJSON_IsString(code) ? code->valuestring : NULL;
     int good = equal(s,w->code,6) && web_only(j,"code") && w->pairing;
     if (!good) {
-        if (w->pairing) {
-            remember(w->fails,WEB_PAIR_FAILS,t);
-            if (++w->attempts >= WEB_PAIR_ATTEMPTS) pair_end(w);
-            /* Global guess budget across challenges: lock out pairing for a window. */
-            if (recent(w->fails,WEB_PAIR_FAILS,t,&oldest) >= WEB_PAIR_FAILS) { w->locked_until = t+WEB_RATE_WINDOW_MS; pair_end(w); }
-        }
+        /* Every failed /pair counts in the global ring, including one sent while no
+         * challenge is live: probing cannot run unbounded. WEB_PAIR_FAILS failures in
+         * WEB_RATE_WINDOW_MS lock /pair and /pair/start for one window (429). */
+        remember(w->fails,WEB_PAIR_FAILS,t);
+        if (w->pairing && ++w->attempts >= WEB_PAIR_ATTEMPTS) pair_end(w);
+        if (recent(w->fails,WEB_PAIR_FAILS,t,&oldest) >= WEB_PAIR_FAILS) { w->locked_until = t+WEB_RATE_WINDOW_MS; pair_end(w); }
         response(r,401,"{\"error\":\"unauthorized\"}"); return;
     }
     web_session_t *slot = NULL;
     for (int i = 0; i < WEB_SESSIONS; i++) if (!*w->sessions[i].cookie) { slot = &w->sessions[i]; break; }
-    if (!slot) { response(r,503,"{\"error\":\"busy\"}"); return; }
+    /* Another browser took the last slot after this code was shown: the code is void. */
+    if (!slot) { pair_end(w); sessions_full(r); return; }
     char cookie[33], csrf[33];
     if (httpd_random_hex(cookie,16) || httpd_random_hex(csrf,16)) { response(r,500,"{}"); return; }
     strcpy(slot->cookie,cookie); strcpy(slot->csrf,csrf); slot->created = slot->activity = now(w);
@@ -438,6 +456,14 @@ static int events(web_t *w, const http_request_t *q, web_session_t *s, http_resp
     int size = snprintf(r->body,n+32,"event: task\ndata: %s\n\n",data); free(data);
     r->len = (size_t)size; r->status = 200; r->stream = 1; r->content_type = "text/event-stream"; e->sent = now(w); return 2;
 }
+/* Frees this browser's slot (WEB_SESSIONS in total); its own task stops as on expiry. */
+static void logout(web_t *w, web_session_t *s, http_response_t *r)
+{
+    if (w->mcp->task.live && !strcmp(w->mcp->task.owner,s->cookie)) (void)mcp_task_cancel(w->mcp,w->mcp->task.id);
+    mem_wipe(s,sizeof *s);
+    snprintf(r->cookie,sizeof r->cookie,"mk20=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/");
+    response(r,200,"{\"logged_out\":true}");
+}
 static void session_info(web_t *w, web_session_t *s, http_response_t *r)
 {
     /* Same-origin only (Host + SameSite cookie); lets a new tab recover its CSRF token. */
@@ -480,6 +506,7 @@ static int handle(void *v, const http_request_t *q, http_response_t *r)
     int rc = 0, task_api = !strncmp(path,"/api/tasks",10) && (!path[10] || path[10] == '/');
     if (pairing) pair(w,j,r);
     else if (!strcmp(path,"/api/session") && read) session_info(w,s,r);
+    else if (!strcmp(path,"/api/logout") && !strcmp(q->method,"POST")) logout(w,s,r);
     else if (!strcmp(path,"/api/catalogue") && read) json_response(r,200,web_catalogue(w));
     else if (!strcmp(path,"/api/status") && read) json_response(r,200,web_status(w));
     else if (!strncmp(path,"/api/maint/",11)) maint(w,path+11,q,j,r);
