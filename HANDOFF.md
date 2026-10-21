@@ -1,19 +1,23 @@
-# MK20 "Agent 增强固件" — handoff (2026-10-21 SGT)
+# MK20 "Agent 增强固件" — handoff (2026-10-21 18:30 SGT)
 
 Goal: production-grade replacement firmware for the Waveshare MK20 keyboard (Allwinner T113, Tina 5.4.61,
 BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page. Live status: PROGRESS.md (main).
 
-## Current state (2026-10-21 ~11:30)
-- **Device: fw 1.4.0-rc1, good (slot A)**, 1.3.1 kept as A/B fallback. Tarball sha256
-  `b3071a20001142c0f1dd0e04b361ea1b3cb5639897f7f466a67aacb2f71b1e04` (~/worktrees/rel-1.4.0-rc1/,
-  ~/mk20-backup/releases/). Tag `v1.4.0-rc1` on release/1.4.0. Acceptance: 12/12 + 1.4 checks PASS
-  (deck/reviews/1.4.0/install-1.4.0-rc1-*/RESULT.md + ADDENDUM.md).
+## Current state (2026-10-21 ~18:30)
+- **Device: fw 1.4.1-rc2, good (slot B)**, 1.4.0-rc1 in slot A as A/B fallback (1.3.1 still installed). Tarball sha256
+  `a996209adccf938e12a3ecf1f4ea9b5a34c9c54c052e74b2cc7ef7b236af7027` (~/worktrees/rel-1.4.1-rc2/, ~/mk20-backup/releases/),
+  tag `v1.4.1-rc2` on release/1.4.0. 1.4.1 = 1.4.0 + `/run/mk20` on tmpfs (found by the soak patrol: /run is on the TF
+  overlay, mk20-kbd wrote kbd.status 1/s to TF from its e-stop/HID loop). Acceptance PASS incl. auto-L1 with the Mac
+  display asleep (deck/reviews/1.4.0/install-1.4.1-rc2-*/RESULT.md).
+- **24 h soak on 1.4.1** started 2026-10-21 18:18 (`~/mk20-backup/soak/soak-20261021-181805.*`); verdict scheduled
+  10-22 18:37 (session cron). selftest watcher every 15 s → `selftest-watch.log` (absent = nothing abnormal).
+  1.4.0-rc1 soak (6.8 h, 82 samples): 1 transient `degraded` at 16:00 (selftest WARN, cause not captured — soak now
+  stores WARN lines), 0 reboots/restarts/composite losses.
 - **Mac: mk20deck runs as LaunchAgent** `com.leo.mk20-agent-deck` from `~/mk20-deploy` (detached checkout of
   release/1.4.0), venv `~/mk20-deploy/.venv`, config `~/.config/mk20-agent-deck/config.toml` (terminal_app=Ghostty,
   tmux new session = `ccai sg`), logs `~/.config/mk20-agent-deck/logs/deck.err.log`. Connects via
   tcp://172.30.250.2:17890 (usb0 bridge; the gadget has no ACM). Restart: `launchctl kickstart -k gui/$(id -u)/com.leo.mk20-agent-deck`.
-- **24 h soak on 1.4.0** started 2026-10-21 11:24 (`~/mk20-backup/soak/soak-20261021-112446.*`, annotations in
-  ANNOTATIONS.txt). 1.3.1 soak (155 samples): 0 real crashes, 0 composite losses, ping 0 loss, mk20-kbd RSS 2.3 MB flat.
+- Earlier soaks: 1.3.1 (155 samples): 0 real crashes, 0 composite losses, ping 0 loss. Annotations: ~/mk20-backup/soak/ANNOTATIONS.txt.
 - **Claude hooks** ("which agent needs me") installed in `~/.claude/settings-glm.json` (source of all ccai modes) and
   `settings.json`; backups `*.bak-mk20-20261021-095159`; script `~/.config/mk20-agent-deck/hooks/`; uninstall:
   `deck/tools/hooks/claude-hooks-uninstall.sh ~/.claude/settings-glm.json ~/.claude/settings.json`.
@@ -28,7 +32,7 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 `stat` (1.3.0 never confirmed), HOME host-loss livelock, test image lacked procps, soak/accept K4 rules.
 
 ## Branches (Gitea ssh://git@192.168.88.6:2222/leo/mk20-agent-deck.git)
-- `release/1.4.0` — integration (kd-replace-k4 + fw-ux + web-settings + deck-attention), tag v1.4.0-rc1.
+- `release/1.4.0` — integration (kd-replace-k4 + fw-ux + web-settings + deck-attention + fix/run-tmpfs), tags v1.4.0-rc1, v1.4.1-rc2.
 - `feature/kd-replace-k4` — K4 base (1.3.1 fix, soak/accept/crash-loop gate, build image).
 - `feature/fw-ux` (mk20-kbd UX), `feature/web-settings` (usb0 web), `feature/deck-ui-hello` → `feature/deck-attention` (mk20deck).
 - Older tracks unchanged: feature/agent (A8c, agent off by default, not merged), feature/hidfix (run 11 PASS), feature/uvc, uac-mic, onboard-ui, p2-computer-use, sim.
@@ -37,7 +41,7 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 - Image: `docker build -t mk20-build:trixie deck/tools/build-image` (pinned debian digest, uv 0.13.3, procps).
   BusyBox 1.27.2: `deck/tools/build-image/build-busybox127.sh` → `~/mk20-build-local/tools/bb127/busybox`.
 - Full tests: `cd deck && docker run --rm -v "$PWD":/work/wt/deck -v ~/mk20-build-local/tools/bb127:/bb127:ro -w /work/wt/deck -e MK20_TEST_BUSYBOX=/bb127/busybox mk20-build:trixie make test`
-  (1.4.0: tests 863, agent 398, onboard 11348, kbd 4018×2, ui 41396 — all pass). Tests expose only device commands
+  (1.4.1: tests 877, agent 398, onboard 11348, kbd 4019×2, ui 41396, sim 35, tools 64 — all pass). Tests expose only device commands
   (`tests/fixtures/device-commands.txt`). colima: `colima start default`; TSan may need `colima ssh -- sudo sysctl -w vm.mmap_rnd_bits=28`.
 - Release: `sh tools/mk20-release-build.sh firmware out <rc>` inside the image. Install + acceptance:
   `EXP=<sha> ~/worktrees/mk20-install-chain.sh <ver> <rc> <commit> <tar>` (+ install-eval.py). Gates:
@@ -58,7 +62,7 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 ## Open items
 1. Physical checks when the user is back: fb20 = mode key on L1 (cycles Desktop→herdr→tmux), fb19 opens the web on the
    Mac, PTT on L1, K1 rotate/press with real Claude hooks in tmux, HOME look & feel.
-2. 24 h soak on 1.4.0 → then promote rc1 to 1.4.0 final (or rc2 if anything shows up).
+2. 24 h soak on 1.4.1-rc2 (ends 10-22 18:18) → tag v1.4.1 as the production release, or next rc if anything shows up.
 3. PRD v1.4 §15 approval.
 4. codex hooks: reinstall the updated hook (`deck/tools/hooks/hooks-uninstall.sh && hooks-install.sh`) and re-trust in
    codex — needs the user's OK (changes ~/.codex).

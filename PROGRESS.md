@@ -1,22 +1,23 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-21 11:54 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-21 18:19 SGT
 
 ## 1. 当前状态
 
 | 工作线 | 分支 | 提交 | 状态 |
 |---|---|---|---|
 | hidfix（HID 模块修复） | feature/hidfix | 5452175（证据 4eb0bf4） | 第 11 次通过（20:50）：T4 50/50 + T7×3，解绑 57 次，0 Oops；codex 第 3 轮复审由用户豁免（Kimi GO + 离线 58/58） |
-| K4 / 1.4.0 | release/1.4.0 | v1.4.0-rc1 | **1.4.0-rc1 已装机 good**（10-21 11:15）：界面修订 + 键盘网页唯一设置入口 + mk20deck 心跳/「需要我」；24 h soak 进行中；剩实体按键目检 |
+| K4 / 1.4.x | release/1.4.0 | v1.4.1-rc2 | **1.4.1-rc2 已装机 good**（10-21 18:17）：1.4.0 + /run/mk20 tmpfs；24 h soak 进行中（至 10-22 18:18）；剩实体按键目检 |
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
 | UVC 采集卡 | feature/uvc | 02f1d41 | UHC07P = MS2130，USB 2.0 下仅 MJPEG；待上机 |
-| 设备 | — | — | fw 1.4.0-rc1（good，slot A）；1.3.1 为回退；soak 10-21 11:24 起；Mac 端 mk20deck 常驻（launchd，~/mk20-deploy） |
+| 设备 | — | — | fw 1.4.1-rc2（good，slot B）；1.4.0-rc1 为回退；soak 10-21 18:18 起；Mac 端 mk20deck 常驻（launchd） |
 
 rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191afadab6c26644d30a2e870a46b06dc92a9b5c73bad0a4e9019e4f4f`。
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-21 18:19** **1.4.1-rc2 已装机 good（18:17，slot B；1.4.0-rc1 在 slot A 作回退），验收全部 PASS**（含 Mac 屏幕睡眠时开机自动进 L1、/run/mk20 为 tmpfs、网页全套）。起因：16:47 巡检发现 1.4.0 soak 16:00 有 1 个 degraded 样本（自检 WARN，未能归因），排查时发现 /run 在 TF 卡 overlay 上、mk20-kbd 主循环每秒往 TF 写状态文件（磨损 + TF 卡顿会拖住急停/HID 主循环 + 重启后残留）→ rc2 开机挂 512 KiB tmpfs（Kimi K3 GO，MINOR 已修：检查监管锁防 TOCTOU）；soak 现在会记录 WARN 原文。另修一个 ASan 下偶发的 K3 定时测试。make test 全绿（tests 877 / agent 398 / onboard 11348 / kbd 4019×2 / ui 41396）。1.4.0 soak 收尾：82 样本（6.8 h），仅 16:00 一次 degraded，0 重启/崩溃/复合设备丢失。1.4.1 的 24 h soak 18:18 开始，10-22 18:37 自动判定；每 2 h 巡检。
 - **10-21 11:54** mk20deck Kimi K3 评审 GO（hooks 不影响 Claude 权限/不存内容、设备无法让 Mac 打开任意 URL、tmux 无注入）；唯一 MAJOR（心跳按 ack 计时导致设备侧间隔=周期+RTT）已改为按实际写出时间计时，另修 hooks 安装原子写/python3 检查（release/1.4.0 a0d6537，已重新部署）。真机：上一连接 1421 个心跳全部接受、0 拒绝、0 超时；Mac 屏幕睡眠时设备停在 L1 显示「Mac 已休眠」（jpg_ok 持续增长、jpg_bad 0）。四条线（rc3 / 界面 / 网页 / mk20deck）交叉评审全部 GO。剩余生产门槛：1.4.0 24 h soak（10-22 11:24 到期，已设到期自动判定）+ 用户亲手验证 fb20 模式键 / fb19 打开网页 / L1 PTT / K1 跳「需要我」。会话内每 2 h 自动巡检 soak 与 Mac 服务。
 - **10-21 11:27** **1.4.0-rc1 已装机并确认 good**（11:15，slot A，1.3.1 保留回退；tar sha256 b3071a20…1e04，tag v1.4.0-rc1）。验收 12/12 + 1.4 专项：网页默认运行、错误 Host 403、键盘配对码 0600 + 配对成功 + 配对后删除、无 CSRF/跨源写 403、维护操作走通、退出后 401；**开机自动进 L1 实机通过**（无任何按键，jpg_ok>0）。装机时发现并修复 mk20deck 两个问题：Mac 屏幕睡眠时设备重启后不重连、暂停时未重发「Mac 已休眠」画面（ebe8814 及后续，已重新部署）。Kimi K3：界面 r1/r2 NO-GO → 修复（急停后暂停转发 + 5 s 兜底重同步、fb20 租约竞态、状态探针移到工作线程、急停常驻提示、安全模式显示配对码）→ r3 GO；网页 GO（5 个 MINOR 已修）。make test 全绿（tests 863 / agent 398 / onboard 11348 / kbd 4018×2 / ui 41396）。1.4.0 上 24 h soak 11:24 开始。交接文档已重写（HANDOFF.md）。
 - **10-21 10:19** Mac 端 mk20deck 已部署为 launchd 常驻服务（~/mk20-deploy，固定在 feature/deck-attention 7babf2b；配置 ~/.config/mk20-agent-deck/config.toml：terminal_app=Ghostty、tmux 新会话=ccai sg）：经 usb0 桥连接，ui.hello + 心跳被 1.3.1 接受，已识别真实 Codex Desktop 线程。**在 1.3.1 上进主界面：HOME 按「会话 L1」**（1.4.0 起开机自动进）。Claude hooks（「哪个 agent 需要我」）已装入 ~/.claude/settings-glm.json（ccai 所有模式的源头）与 settings.json，备份 *.bak-mk20-20261021-095159；新会话生效。崩溃循环验收 PASS（3 次 SIGKILL → 安全模式 reason=crash-loop，自检只 WARN、HID 可用 → exit-safe-mode 钩子恢复；tools/mk20-crashloop-gate.sh，72d24a9）。1.3.1 soak 11.5 h：0 重启、0 真实崩溃（5 次为验收诱发）、0 复合设备丢失、ping 0 丢包、mk20-kbd RSS 2.3 MB 不涨；soak 报的 126 次 kd-restart 是 soak 工具 pgrep 自匹配 bug（716f5d4 已修）。Kimi K3：rc3 GO；网页单一入口 GO（5 个 MINOR 修复中）；界面修订 NO-GO（e-stop 后转发、租约竞态、devstat 在安全主循环做 I/O、急停指示）→ 修复中。release/1.4.0（网页 + mk20deck）make test 全绿（tests 861 / agent 396）。PRD v1.4 草案 §15（待批准）。
