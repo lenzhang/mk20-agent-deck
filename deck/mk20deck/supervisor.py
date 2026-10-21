@@ -43,6 +43,20 @@ class Supervisor:
     stats: SupervisorStats = field(default_factory=SupervisorStats)
     daemon: Daemon | None = None
     _last_port_msg: str = ""
+    calls: object | None = None  # webui.LoopCalls: arrange-page changes, run on this thread (also while unplugged)
+
+    def _wait(self, stop: threading.Event, secs: float) -> None:
+        """``stop.wait`` that keeps serving queued arrange-page calls while no device is connected."""
+        if self.calls is None:
+            stop.wait(secs)
+            return
+        end = time.monotonic() + secs
+        while not stop.is_set():
+            self.calls.drain(None)
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            self.calls.wait(min(left, 0.5))
 
     def _say_once(self, msg: str) -> None:
         if msg != self._last_port_msg:
@@ -76,19 +90,20 @@ class Supervisor:
             ports = [cfg.port] if cfg.port != "auto" else self.find_ports()
             if not ports:
                 self._say_once("未找到 MK20 CDC 端口，等待接入")
-                stop.wait(self.retry_s)
+                self._wait(stop, self.retry_s)
                 continue
             try:
                 tr = self.open_transport(ports[0])
             except Exception as e:  # noqa: BLE001 — busy (ScreenKey?): never kill/steal (PRD §8)
                 self._say_once(f"无法打开 {ports[0]}: {e} — 若 ScreenKey 在运行，请退出后重试")
-                stop.wait(self.retry_s * 1.5)
+                self._wait(stop, self.retry_s * 1.5)
                 continue
             renderer = self.make_renderer()
             d = Daemon(self.controller, renderer, None, cfg.poll_interval_s, cfg.heartbeat_s, cfg.knob_map,
                        keycode_map=getattr(cfg, "keycode_map", {}), power=self.power,
                        web_url=getattr(cfg, "web_url", DEFAULT_WEB_URL),
-                       bg_poll_s=getattr(cfg, "background_poll_s", 10.0), bg_adapters=self.bg_adapters)
+                       bg_poll_s=getattr(cfg, "background_poll_s", 10.0), bg_adapters=self.bg_adapters,
+                       calls=self.calls)
             link = DeviceLink(tr, on_key=d.on_device_key, ack_timeout=cfg.ack_timeout_s,
                               preamble_flush=cfg.preamble_flush, on_event=d.on_device_event)
             d.link = link
@@ -117,7 +132,7 @@ class Supervisor:
                 if stop.is_set() and link.connected:
                     d.offline_frame("守护进程已退出")
                 link.close()
-            stop.wait(max(settle, 0.5))
+            self._wait(stop, max(settle, 0.5))
         return self.stats
 
 

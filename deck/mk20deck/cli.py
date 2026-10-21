@@ -39,20 +39,77 @@ def build_controller(cfg: DeckConfig, adapters, sim: bool = False) -> Controller
                       on_state_change=lambda st: save_state(cfg.state_path, st))
 
 
+def build_arrange(cfg: DeckConfig, ctl: Controller, rules_path: str | None = None, idle_adapters=None):
+    """Slot rules + the loop hand-off of the 会话安排 page (rules apply even when the page is off)."""
+    from .rules import RulesStore
+    from .webui import ArrangeService, LoopCalls
+    calls = LoopCalls()
+    svc = ArrangeService(ctl, calls, RulesStore(rules_path), idle_adapters=idle_adapters,
+                         poll_interval=cfg.poll_interval_s, bg_poll_s=cfg.background_poll_s)
+    return calls, svc
+
+
 def cmd_run(args) -> int:
     from .hw.power import PowerMonitor
     from .supervisor import Supervisor, default_renderer_factory
     from .transport import find_ports, open_transport
+    from .webui import start_arrange_server
 
     cfg = load_config(args.config)
     if args.port:
         cfg.port = args.port
     ctl = build_controller(cfg, build_adapters(cfg))
+    calls, web = None, None
+    try:  # the page / rules never stop the deck: any failure here only logs and runs without them
+        from .webauth import default_sessions_path, default_socket_path
+        calls, svc = build_arrange(cfg, ctl, idle_adapters=build_adapters(cfg))
+        web = start_arrange_server(svc, cfg.arrange_port, sessions_path=default_sessions_path(),
+                                   socket_path=default_socket_path())  # None when off / port busy
+    except Exception:  # noqa: BLE001
+        log.exception("会话安排网页 / 固定规则未启动")
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    Supervisor(ctl, find_ports, open_transport, default_renderer_factory(cfg), cfg,
-               power=PowerMonitor.default(), bg_adapters=build_adapters(cfg)).run(stop)
+    try:
+        Supervisor(ctl, find_ports, open_transport, default_renderer_factory(cfg), cfg,
+                   power=PowerMonitor.default(), bg_adapters=build_adapters(cfg), calls=calls).run(stop)
+    finally:
+        if web is not None:
+            web.stop()
+    return 0
+
+
+def cmd_arrange(args, opener=None) -> int:
+    """Open the 会话安排 page of the running daemon: a one-time link (60 s, single use) obtained over the
+    daemon's 0600 unix socket, so only this user's processes with filesystem access can open the page."""
+    from .webauth import default_socket_path, request_url
+    from .webui import probe
+    cfg = load_config(args.config)
+    port = cfg.arrange_port
+    if not port:
+        print("会话安排网页已关闭：config.toml 里 [web] arrange_port = 0")
+        return 1
+    try:
+        url = request_url(getattr(args, "socket", None) or default_socket_path())
+    except (OSError, ValueError) as e:
+        st = probe(port)
+        why = ("端口被其他程序占用（改 [web] arrange_port）" if st == "other"
+               else "mk20deck 网页在运行，但授权通道不可用（见 mk20deck 日志）" if st == "ok"
+               else "mk20deck 守护进程没有运行（python -m mk20deck run / LaunchAgent）")
+        print(f"http://127.0.0.1:{port}/ 打不开：{why}")
+        log.debug("arrange: %s", e)
+        return 1
+    if args.print_only:
+        print(url)  # one-time link: valid for 60 s, works once
+        return 0
+    print(url.split("/auth?", 1)[0] + "/  （已用一次性链接在浏览器打开）")
+    if opener is None:
+        if sys.platform == "darwin":
+            from .daemon import open_url as opener
+        else:
+            import webbrowser
+            opener = webbrowser.open
+    opener(url)
     return 0
 
 
@@ -80,7 +137,25 @@ def cmd_serve(args) -> int:
         ctl = Controller(cfg, demo_adapters(), sim=True)
     d = Daemon(ctl, Renderer(DeviceLayout.default(), animations=cfg.animations), None,
                cfg.poll_interval_s, cfg.heartbeat_s, bg_poll_s=cfg.background_poll_s, bg_adapters=bg)
-    serve(d, args.host, args.http_port, args.source)
+    web = None
+    if args.arrange_port:  # the 会话安排 page against the simulated deck (demo data: a throw-away rules file)
+        import tempfile
+        from .webui import start_arrange_server
+        rules_path = None if args.source == "real" else os.path.join(tempfile.mkdtemp(prefix="mk20-sim-"),
+                                                                       "slot-rules.json")
+        from .webauth import default_sessions_path, default_socket_path
+        tmp = tempfile.mkdtemp(prefix="mk20-sim-")
+        sock = default_socket_path() if args.source == "real" else os.path.join(tmp, "arrange.sock")
+        d.calls, svc = build_arrange(cfg, ctl, rules_path)
+        web = start_arrange_server(svc, args.arrange_port, socket_path=sock,
+                                   sessions_path=default_sessions_path() if args.source == "real" else None)
+        if web is not None:
+            print(f"会话安排: python -m mk20deck arrange --socket {sock}   （或一次性链接 {web.mint_url()} ，60 秒内有效）", flush=True)
+    try:
+        serve(d, args.host, args.http_port, args.source)
+    finally:
+        if web is not None:
+            web.stop()
     return 0
 
 
@@ -294,7 +369,13 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--source", choices=("demo", "real"), default="demo")
     w.add_argument("--host", default="127.0.0.1")
     w.add_argument("--http-port", type=int, default=8765)
+    w.add_argument("--arrange-port", type=int, default=0, help="also serve the 会话安排 page (0 = off)")
     w.set_defaults(fn=cmd_serve)
+    ar = sub.add_parser("arrange", help="open the 会话安排 web page of the running daemon (127.0.0.1:8781)")
+    ar.add_argument("--print", dest="print_only", action="store_true",
+                    help="only print the one-time URL (60 s, single use)")
+    ar.add_argument("--socket", default=None, help="authorization socket (default $MK20DECK_HOME/run/arrange.sock)")
+    ar.set_defaults(fn=cmd_arrange)
     pr = sub.add_parser("probe-codex", help="read-only dump of Codex Desktop thread states")
     pr.add_argument("--json", action="store_true")
     pr.set_defaults(fn=cmd_probe)

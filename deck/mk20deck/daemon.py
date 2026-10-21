@@ -22,6 +22,10 @@ from .render.canvas import Renderer
 log = logging.getLogger(__name__)
 
 
+# One background poll at a time per process: a previous connection's poll thread (Supervisor makes a new
+# Daemon per connection, sharing the bg adapter instances) can never poll concurrently with the next one.
+_BG_POLL_LOCK = threading.Lock()
+
 OPEN_SETTINGS_EVENT = {"method": "ui.openSettings"}  # mk20-kbd 网页设置 key, exactly this (no payload)
 
 
@@ -105,6 +109,11 @@ class Daemon:
     _hid_at: float = 0.0
     _hid_retry_at: float = 0.0
     _hid_epoch: int = -1
+    bg_sessions: dict = field(default_factory=dict)  # mode -> (sessions | None, error, t0) of the last bg poll
+    # Cross-thread hand-off (webui.LoopCalls): the arrange web page queues its changes here; they run on this
+    # loop thread inside step() (never from the HTTP thread) and force a frame.
+    calls: object | None = None
+    bg_join_s: float = 6.0  # run() waits this long for its background poll thread to finish (adapter timeouts)
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -201,6 +210,10 @@ class Daemon:
     # -------------------------------------------------------------- background (other modes)
     def poll_background_once(self) -> int:
         """Poll every non-current mode once (worker thread or tests); results are queued, not applied."""
+        with _BG_POLL_LOCK:
+            return self._poll_background_locked()
+
+    def _poll_background_locked(self) -> int:
         ads = self.bg_adapters or self.controller.adapters
         current = self.controller.mode
         n = 0
@@ -223,7 +236,7 @@ class Daemon:
 
     def _bg_loop(self, stop: threading.Event, done: threading.Event) -> None:
         wait = self.bg_first_delay_s
-        while not (stop.wait(wait) or done.is_set()):
+        while not (done.wait(wait) or stop.is_set()):  # wakes at once when run() ends
             wait = self.bg_poll_s
             if not self.paused:
                 self.poll_background_once()
@@ -234,6 +247,7 @@ class Daemon:
                 m, sessions, err, t0 = self.bg_results.get_nowait()
             except queue.Empty:
                 return
+            self.bg_sessions[m] = (sessions, err, t0)
             self.controller.apply_background(m, sessions, err, t0)
 
     # -------------------------------------------------------------- option mode (ui.hidKeys)
@@ -285,6 +299,8 @@ class Daemon:
                 self._apply(self.events.get_nowait())
             except queue.Empty:
                 break
+        if self.calls is not None and self.calls.drain(self):
+            force = True  # an arrange-page change: show it on the keyboard now
         self._drain_background()
         self.controller.tick()
         if now >= self._next_poll:
@@ -370,11 +386,20 @@ class Daemon:
             self.paused = True
         done = threading.Event()
         if self.bg_poll_s > 0:
-            threading.Thread(target=self._bg_loop, args=(stop, done), name="mk20-bg-poll", daemon=True).start()
+            bg = threading.Thread(target=self._bg_loop, args=(stop, done), name="mk20-bg-poll", daemon=True)
+            bg.start()
+        else:
+            bg = None
+        if self.calls is not None:  # wake the loop at once when the web page queues a change
+            self.calls.attach(lambda: self.events.put(InputEvent("ui", 0, "wake", t=self.clock())))
         try:
             self._run(stop)
         finally:
             done.set()
+            if bg is not None:  # a reconnect never leaves the old poll thread running next to the new one
+                bg.join(self.bg_join_s)
+            if self.calls is not None:
+                self.calls.attach(None)
 
     def _run(self, stop: threading.Event) -> None:
         while not stop.is_set():
@@ -391,6 +416,8 @@ class Daemon:
                 stop.wait(self.power_interval)
                 while not self.events.empty():  # drop input while the Mac sleeps
                     self.events.get_nowait()
+                if self.calls is not None:
+                    self.calls.drain(self)  # arrange-page changes still apply (shown after wake)
                 continue
             self.step()
             try:

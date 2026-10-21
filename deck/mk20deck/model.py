@@ -102,6 +102,11 @@ class Session:
     options: tuple[str, ...] = ()
     prompt_kind: str = ""
     hooked: bool = False  # the state comes from a Claude/codex hook record (tmux): only such prompts enter option mode
+    window: str = ""  # tmux window name (slot rules "tmux 窗口名")
+    tmux_session: str = ""  # tmux session name (slot rules match it too)
+    # The title fell back to prompt text (Codex Desktop thread preview): fine on the keyboard, which shows the
+    # preview anyway, but it never leaves the Mac process (arrange web API shows the id prefix instead).
+    title_private: bool = False
 
 
 @dataclass

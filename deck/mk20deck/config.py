@@ -20,6 +20,8 @@ CONFIG_DIR = os.path.expanduser(os.environ.get("MK20DECK_HOME", "~/.config/mk20-
 # Device web settings, opened on the Mac when the keyboard sends {"method":"ui.openSettings"} (网页设置 key).
 # The URL comes only from this config, never from the device.
 DEFAULT_WEB_URL = "http://172.30.250.2:8780/"
+# Local "会话安排" page served by mk20deck itself (webui.py), bound to 127.0.0.1 only; 0 = off.
+DEFAULT_ARRANGE_PORT = 8781
 log = logging.getLogger(__name__)
 
 DEFAULT_SKILLS = (
@@ -72,6 +74,7 @@ class DeckConfig:
     keycode_map: dict[str, str] = field(default_factory=dict)
     state_path: str = os.path.join(CONFIG_DIR, "state.json")
     web_url: str = DEFAULT_WEB_URL  # see parse_web_url
+    arrange_port: int = DEFAULT_ARRANGE_PORT  # [web] arrange_port, see parse_port
 
 
 def parse_web_url(v: Any) -> str:
@@ -107,6 +110,14 @@ def parse_web_url(v: Any) -> str:
     return v
 
 
+def parse_port(v: Any, default: int = DEFAULT_ARRANGE_PORT) -> int:
+    """TCP port 1..65535, or 0 = off; anything else falls back to ``default`` with a warning."""
+    if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 65535:
+        return v
+    log.warning("config [web] arrange_port %r rejected (integer 0..65535, 0 = off): using %s", v, default)
+    return default
+
+
 def parse_backlight(v: Any) -> int | None:
     """``false``/``"off"``/``"none"``/negative -> None (don't touch); otherwise clamp to 0..100."""
     if v is None or v is False or (isinstance(v, str) and v.strip().lower() in ("off", "none", "false", "")):
@@ -134,6 +145,9 @@ def load_config(path: str | None = None) -> DeckConfig:
     cfg.backlight = parse_backlight(cfg.backlight)
     if "web_url" in deck:
         cfg.web_url = parse_web_url(deck["web_url"])
+    web = d.get("web", {})
+    if isinstance(web, dict) and "arrange_port" in web:
+        cfg.arrange_port = parse_port(web["arrange_port"])
     if cfg.fw_coord_base == "auto":
         cfg.fw_coord_base = None
     cfg.max_fps = min(float(cfg.max_fps), 8.0)  # PRD §7.4 hard ceiling
