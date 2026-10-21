@@ -595,7 +595,7 @@ def test_new_session_respects_ptt_and_caps():
     c.page = "L4"
     c.on_key(1, 4, True)
     tap(c, clk, 4, 1)
-    assert ads[Mode.DESKTOP].actions == [] and "PTT" in c.log[-1]
+    assert ads[Mode.DESKTOP].actions == [] and "按住说话" in c.log[-1] and "新建" in c.log[-1]
     c.on_key(1, 4, False)
     tap(c, clk, 4, 1)  # nothing selected: new session without a cwd
     assert ads[Mode.DESKTOP].actions == [("new", "")]
