@@ -117,6 +117,22 @@ falls back to its 1.5.1 behaviour when the hello carries no `page`. Tests: `kbd/
   held host key (owner 1) is the same press on every host page — not forwarded again (it used to send another
   `"pressed":true`, unbounded under a phantom storm); its next up releases. A genuine press is one down + one up,
   so the Mac's long-press gestures (600 ms pick-up) are unchanged.
+- **Residual, accepted for 1.6.0 (pre-existing; Kimi K3 rc4 review): a held host key with a lost GD32 up.** A host
+  key (owner 1: a session / mode key, the Mac mode key fb20, or the host half of a forwarded ⌫/⏎/Esc or digit)
+  whose GD32 up is lost, and that no same-page request kept (which would bound it at 10 s / 60 s), has no time
+  bound on the keyboard. What the Mac sees: the key stays pressed — its controller press stays open, so the
+  press's own long-press gesture fires once (a slot is picked up, "移动中", which the Mac drops after 8 s without
+  input; a held MODE goes to L4 once) and nothing more happens; no HID is involved, so nothing is typed or
+  auto-repeated on the Mac. What ends it: the key's next physical release (the press in between is swallowed as
+  the same press since rc4, its up sends the host up), any real page boundary (K2, `ui.page` to the other page,
+  K1 hold, ctl page, `ui.hello`), host loss (including SUSPECT turning into a loss after 5 s), an e-stop (its
+  5 s pause resync releases it, rc3), process exit. Why no cap in 1.6.0: the key carries no HID, the Mac's
+  gestures are bounded on its side, and how long a host key may legitimately be held is the Mac's decision (a
+  cut would end real holds the Mac interprets). Proposal for 1.6.1: a generous owner-1 cap (e.g. 60 s from the
+  press, ended with the host up and `cut_latch` like the other guards) once mk20deck confirms no gesture needs
+  longer holds. Log-only nit, same review: when a forwarded key (owner 6) or digit (owner 7) is turned into its
+  host half (owner 1) by an e-stop / SUSPECT, `press_at` keeps the original press, so a later same-page bound's
+  log line names the time since that press (not since the conversion).
   Why it is safe: (1) nothing new is pressed — the page is not live until the fresh frame and the grace window
   swallows new presses, so no input can act on stale labels; (2) every other release path still applies to the
   kept owners: the 10 s lost-up cut (owners ≥ 5, `hid_at` unchanged), the 120 s PTT cap, the 10 s `keep_until`
