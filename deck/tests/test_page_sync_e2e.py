@@ -63,6 +63,19 @@ class PtyTransport:
         pass
 
 
+class RecordingTransport(PtyTransport):
+    """Also keeps every ui.page frame the Mac writes (after the fact: was a request sent at all?)."""
+
+    def __init__(self, fd, pages):
+        super().__init__(fd)
+        self.pages = pages
+
+    def write(self, data):
+        if b'"ui.page"' in bytes(data):
+            self.pages.append(bytes(data))
+        super().write(data)
+
+
 def mkpty():
     m, s = pty.openpty()
     tty.setraw(m)
@@ -87,8 +100,13 @@ class Rig:
         self._echo = threading.Thread(target=self._echo_gd32, daemon=True)
         self._echo.start()
         self.raw: list[tuple[int, int, bool]] = []  # every key/knob event the Mac received (firmware coords)
-        self.link = DeviceLink(PtyTransport(self.hm), ack_timeout=1.0, preamble_flush=4096)
+        self.page_writes: list[bytes] = []  # every ui.page frame any of our links wrote
         self.c = Controller(DeckConfig(), demo_adapters(), sim=True)
+        self.connect()
+
+    def connect(self):
+        """A Mac daemon connection (Supervisor style: new DeviceLink + Daemon, the controller survives)."""
+        self.link = DeviceLink(RecordingTransport(self.hm, self.page_writes), ack_timeout=1.0, preamble_flush=4096)
         self.d = Daemon(self.c, Renderer(self.link.layout, animations=False), self.link, poll_interval=3600,
                         heartbeat=1.0, knob_map=dict(DEFAULT_KNOB_MAP), bg_poll_s=0)
         self.link.on_key = self._on_key
@@ -99,6 +117,19 @@ class Rig:
         self._run_stop = threading.Event()
         self.loop = threading.Thread(target=self._run, daemon=True)
         self.loop.start()
+
+    def disconnect(self):
+        """The Mac daemon goes away (restart / sleep): no heartbeats, nothing read until the next connect()."""
+        self._run_stop.set()
+        self.d._wake()
+        self.loop.join(5)
+        self.link.close()
+        self.link._reader.join(2)
+        assert not self.loop.is_alive() and not self.link._reader.is_alive()
+
+    def reconnect(self):
+        self.disconnect()
+        self.connect()
 
     def _on_key(self, ev):
         self.raw.append((ev.col, ev.row, ev.pressed))
@@ -212,6 +243,7 @@ class Rig:
 
     def close(self):
         self._run_stop.set()
+        self.d._wake()
         self.loop.join(5)
         self._stop.set()
         self.link.close()
@@ -299,3 +331,45 @@ def test_device_route_and_mac_page_agree_after_mode_long_press_k2_and_back_l1(ri
     time.sleep(0.5)
     assert not any(e[:2] == (K1, K1) for e in rig.raw[n:]) and rig.c.page == "L4"
     assert not rig.device_on_l1()
+
+
+# ------------------------------------------------------------------ fw 1.6.0: the hello names the page
+def test_fw160_reconnect_sends_no_same_page_request(rig):
+    """The Mac daemon reconnects while the keyboard stays on our page: its hello reply names that page, so no ui.page
+    goes out at all (older firmware got a same-page request, which released a held PTT / Mac HID key)."""
+    assert rig.boot(), "keyboard never reached L1 after the first ONLINE"
+    agree(rig, "L1")
+    for page in ("L1", "L4"):
+        if page == "L4":  # MODE long press: the Mac goes to L4 by itself (one real request)
+            n = len(rig.page_writes)
+            rig.key(FB20, True)
+            time.sleep(1.0)
+            rig.key(FB20, False)
+            agree(rig, "L4")
+            assert len(rig.page_writes) == n + 1
+        n = len(rig.page_writes)
+        rig.reconnect()
+        assert rig.link.ui_hello_page == page and rig.link.ui_hello_result.get("generation") == 0
+        agree(rig, page)  # live again: the full frame was forced at ONLINE
+        time.sleep(1.0)
+        assert len(rig.page_writes) == n, "a same-page ui.page was sent after the reconnect"
+        assert rig.link.pages_sent == 0 and rig.link.pages_rejected == 0
+
+
+def test_fw160_keyboard_page_changed_while_the_mac_was_away(rig):
+    """K2 on the keyboard while the Mac is away (no host ONLINE: no tap then).  The next hello first sends that K2 tap,
+    then names the new route: the Mac follows without any ui.page."""
+    assert rig.boot()
+    agree(rig, "L1")
+    rig.disconnect()
+    time.sleep(3.5)  # SUSPECT: the keyboard has no live host now
+    rig.tap_knob(K2)  # L1 -> L4 on the keyboard, nobody told
+    time.sleep(0.3)
+    n_raw, n = len(rig.raw), len(rig.page_writes)
+    rig.connect()
+    assert rig.link.ui_hello_page == "L4"
+    assert (K2, K2, True) in rig.raw[n_raw:] and (K2, K2, False) in rig.raw[n_raw:]  # the tap before the reply
+    agree(rig, "L4")
+    time.sleep(1.0)
+    assert len(rig.page_writes) == n and rig.c.page == "L4"
+

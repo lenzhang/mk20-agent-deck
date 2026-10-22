@@ -656,3 +656,182 @@ def test_generation_exhaustion_logs_once_and_stops_without_busy_retry(links, cap
     assert len(dev.page_requests) == 1 and not dev.hid_requests
     warn = [r for r in caplog.records if r.name == "mk20deck.link" and "exhausted" in r.getMessage()]
     assert len(warn) == 1
+
+
+# ------------------------------------------------------------------ fw 1.6.0: hello names the page, generations reset
+def v160():
+    return MockDevice(ui=True, hid_keys=True, fw160=True)
+
+
+def test_fw160_hello_page_seeds_the_belief_and_no_same_page_request(links):
+    """The hello reply names the keyboard's route: on our page nothing is sent at all after a (re)connect; at ONLINE
+    the step only forces the full frame the keyboard needs (it waits for one after every hello)."""
+    dev = v160()
+    d, c, clk, dev, link = rig(links, dev)
+    assert link.ui_hello_page == "L1" and d._page_dev == "L1"
+    assert dev.page_requests == [] and len(dev.frames) == 1  # the connect step: frame only
+    assert link.ui_hello() and d.next_wait() == pytest.approx(0.005)  # re-hello: wake for the frame
+    frames = len(dev.frames)
+    d.step()
+    assert dev.page_requests == [] and len(dev.frames) == frames + 1 and not d._page_hello
+    assert d._page_wait(clk()) is None  # nothing more to say, no spinning
+    long_press_mode(d, clk)  # a real change still goes out at once
+    assert c.page == "L4" == dev.route and pages(dev) == ["L4"]
+    assert link.ui_hello() and link.ui_hello_page == "L4"
+    d.step()
+    assert pages(dev) == ["L4"] and d._page_dev == "L4"
+
+
+def test_fw160_mac_page_differs_from_the_hello_page_sends_one_request(links):
+    dev = v160()
+    dev.route = dev.host_page = "L4"  # e.g. the daemon restarted with its persisted L1 while the keyboard shows L4
+    d, c, clk, dev, link = rig(links, dev)
+    assert link.ui_hello_page == "L4" and c.page == "L1"
+    assert pages(dev) == ["L1"] and dev.route == "L1" and d._page_dev == "L1"
+
+
+def test_fw160_route_changed_while_away_is_followed_without_a_request(links):
+    """K2 on the keyboard while the Mac was away: the hello first sends the K2 tap (the Mac follows, as with the old
+    ONLINE tap), then names the new route; the tap is contained in the hello: no double toggle, no ui.page."""
+    d, c, clk, dev, link = rig(links, v160())
+    assert dev.page_requests == []
+    dev.toggle_away()
+    assert dev.route == "L4" and dev.host_page == "L1"
+    assert link.ui_hello() and link.ui_hello_page == "L4" and dev.host_page == "L4"
+    device_events(d)  # the K2 tap that preceded the reply
+    assert c.page == "L4" == dev.route and d._page_dev == "L4"
+    for _ in range(3):
+        clk.advance(5)
+        d.step()
+    assert dev.page_requests == [] and c.page == dev.route == "L4"
+    dev.tap_k2()  # a later keyboard K2 (after the hello ack) still toggles both, nothing sent
+    device_events(d)
+    assert c.page == "L1" == dev.route == d._page_dev and dev.page_requests == []
+
+
+def test_fw160_tap_processed_before_the_seed_is_not_counted_twice(links):
+    """Loop order: the hello-time K2 tap may be applied in the step that first sees the new epoch (before the seed) or
+    in a later one (after it); either way the belief ends on the hello's page."""
+    d, c, clk, dev, link = rig(links, v160())
+    dev.toggle_away()
+    assert link.ui_hello()
+    assert wait_for(lambda: d.events.qsize() >= 2)
+    assert not d._sync_page(clk())  # the epoch seen before the queued tap was drained: deferred, nothing sent
+    assert d._page_epoch != link.ui_epoch and dev.page_requests == []
+    d.step()  # the tap first (the controller follows), then the seed from the hello
+    assert c.page == "L4" == d._page_dev == dev.route and dev.page_requests == []
+    # had the seed come first, the tap would not count twice: only taps after the hello's ack move the belief
+    assert d._page_dev_rx == link.ui_hello_rx >= 2
+    d._keyboard_k2_tap(link.ui_hello_rx)
+    assert d._page_dev == "L4"
+    d._keyboard_k2_tap(link.ui_hello_rx + 1)
+    assert d._page_dev == "L1"
+
+
+def test_fw160_hello_on_an_own_page_keeps_the_retry(links):
+    dev = v160()
+    dev.route = "HOME"
+    d, c, clk, dev, link = rig(links, dev)
+    assert dev.hellos and link.ui_hello_page is None and d._page_dev is None  # "none": unknown
+    assert len(dev.page_requests) == 1 and dev.pages_accepted == []  # refused: it is on its own page
+    dev.route = "L1"  # the user enters L1 (no tap: its host page was L1 already)
+    clk.advance(0.5)
+    d.step()
+    assert dev.pages_accepted == ["L1"] and d._page_dev == "L1"
+
+
+def test_hello_without_page_keeps_the_first_request(links):
+    d, c, clk, dev, link = rig(links)  # fw 1.5.1 MockDevice: no "page" in the hello
+    assert link.ui_hello_page is None and pages(dev) == ["L1"]
+
+
+def test_fw160_post_hello_frame_at_online_and_no_request(links):
+    dev = MockDevice(ui=True, hid_keys=True, fw160=True, heartbeat_ms=400)
+    times = []
+    orig = dev._handle
+
+    def handle(fr):
+        if fr.cmd == P.CMD_SHOW_JPG:
+            times.append(time.monotonic())
+        return orig(fr)
+    dev._handle = handle
+    d, c, link = real_rig(links, dev, beats=3)
+    stop, th = run_loop(d)
+    try:
+        assert wait_for(lambda: len([b for b in dev.heartbeats if b > dev.hellos[-1]]) >= 3, 5)
+        third = [b for b in dev.heartbeats if b > dev.hellos[-1]][2]
+        assert wait_for(lambda: any(t > third for t in times), 1.0)
+        assert min(t for t in times if t > third) - third < 0.3  # forced at ONLINE (heartbeat frames are 1e6 s apart)
+        assert dev.page_requests == []
+    finally:
+        stop.set()
+        d._wake()
+        th.join(3)
+
+
+def test_fw160_hello_resets_generations_and_recovers_exhaustion(links, caplog):
+    dev = MockDevice(ui=True, hid_keys=True)  # older firmware first: persistent counters, close to the end
+    dev.ui_generation = P.GENERATION_MAX - 1
+    link = linked(dev)
+    links.append(link)
+    assert link.ui_page("L4") == "ok" and dev.ui_generation == P.GENERATION_MAX
+    caplog.set_level(logging.INFO, logger="mk20deck.link")
+    assert link.ui_page("L1") == "unsupported" and link.ui_generation_exhausted and not link.supports("ui.page")
+    assert link.ui_hello() and link.ui_generation_exhausted  # that firmware re-reports the maximum: still used up
+    dev.fw160 = True  # the keyboard now runs 1.6.0 (mk20-kbd restarted / upgraded): its hello resets both
+    assert link.ui_hello() and link.ui_generation == 0 and not link.ui_generation_exhausted
+    assert link.ui_generation_recoveries == 1 and link.supports("ui.page") and link.supports("ui.hidKeys")
+    assert link.ui_page("L1") == "ok" and dev.page_requests[-1]["generation"] == 1
+    assert link.ui_hid_keys({}) == "ok" and dev.hid_requests[-1]["generation"] == 2
+    msgs = [r.getMessage() for r in caplog.records if r.name == "mk20deck.link"]
+    assert sum("exhausted" in m for m in msgs) == 1 and sum("usable again" in m for m in msgs) == 1
+
+
+def test_hello_values_are_authoritative_also_on_older_firmware(links):
+    """Refused requests use up our counter, not the keyboard's: a hello re-seeds to exactly the keyboard's values (all
+    generation-checked requests are serialized against the hello, so none can be in flight behind it)."""
+    dev = MockDevice(ui=True, hid_keys=True)
+    link = linked(dev)
+    links.append(link)
+    dev.page_live = False
+    for _ in range(5):
+        assert link.ui_page("L4") == "rejected"
+    assert link.ui_generation == 5 and dev.ui_generation == 0
+    assert link.ui_hello() and link.ui_generation == 0  # the keyboard's (fw 1.5.1: max of its two counters)
+    dev.page_live = True
+    assert link.ui_page("L4") == "ok" and dev.page_requests[-1]["generation"] == 1
+
+
+def test_hello_waits_for_a_generation_request_in_flight(links):
+    """A ui.page numbered from the old counter must never reach the keyboard behind a hello that reset it (it would be
+    accepted there and block our re-seeded counter): allocation + write + ack hold the same lock as the hello."""
+    dev = v160()
+    link = linked(dev)
+    links.append(link)
+    for _ in range(3):
+        assert link.ui_page("L1") == "ok"
+    allocated, go = threading.Event(), threading.Event()
+    orig = link._next_generation
+
+    def slow_next():
+        g = orig()
+        allocated.set()
+        go.wait(2)
+        return g
+    link._next_generation = slow_next
+    res = {}
+    t_page = threading.Thread(target=lambda: res.setdefault("page", link.ui_page("L4")))
+    t_page.start()
+    assert allocated.wait(2)
+    link._next_generation = orig
+    t_hello = threading.Thread(target=lambda: res.setdefault("hello", link.ui_hello()))
+    t_hello.start()
+    time.sleep(0.2)
+    assert "hello" not in res and len(dev.hellos) == 1  # blocked behind the request in flight
+    go.set()
+    t_page.join(3)
+    t_hello.join(3)
+    assert res == {"page": "ok", "hello": True}
+    methods = [r["method"] for r in dev.json_requests if r["method"] in ("ui.page", "ui.hello")]
+    assert methods[-2:] == ["ui.page", "ui.hello"] and dev.page_requests[-1]["generation"] == 4
+    assert link.ui_generation == 0 and link.ui_page("L1") == "ok" and dev.page_requests[-1]["generation"] == 1

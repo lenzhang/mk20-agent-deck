@@ -280,16 +280,20 @@ class Daemon:
     # -------------------------------------------------------------- page sync (ui.page)
     # The daemon keeps a belief of the keyboard's host page (``_page_dev``): set by an accepted ui.page, toggled by every
     # K2 tap the keyboard sends after that ack (it sends one exactly when its own host page flips: K2 short, L4 回 L1,
-    # HOME/LS -> L1/L4, ONLINE again), unknown after a hello, a non-acked request or a controller resync request.
-    # A request goes out only when the controller's page differs from that belief.  A same-page ui.page (the keyboard
-    # firmware runs a full page boundary for it: redraw AND release of held PTT / Mac HID keys) can therefore only
-    # happen while the belief is unknown:
-    #   * the first request after a hello (reconnect / re-hello), sent when the keyboard is ONLINE again (the link wakes
-    #     us at the page_online_beats-th heartbeat): the hello itself already ran a boundary, and a host page owns no
-    #     key before ONLINE + a fresh frame, which normally comes only after this request;
+    # HOME/LS -> L1/L4, ONLINE again), unknown after a non-acked request or a controller resync request.  After a hello
+    # it is the page the hello reply names (fw >= 1.6.0 "page": the keyboard's route; a route changed while we were
+    # away is announced by a K2 tap before that reply, so the reply is where the tap mirror starts), else unknown
+    # (older firmware, or "none": the keyboard is on one of its own pages).
+    # A request goes out only when the controller's page differs from that belief.  A same-page ui.page (fw < 1.6.0
+    # runs a full page boundary for it: redraw AND release of held PTT / Mac HID keys; fw >= 1.6.0 only redraws) can
+    # therefore only happen while the belief is unknown:
+    #   * the first request after a hello (reconnect / re-hello) on firmware whose hello names no page, sent when the
+    #     keyboard is ONLINE again (the link wakes us at the page_online_beats-th heartbeat): the hello itself already
+    #     ran a boundary, and a host page owns no key before ONLINE + a fresh frame;
     #   * the request after a refused / stale / unanswered one (we cannot know whether the keyboard moved);
     #   * a controller resync (K1 forwarded while we show L4: the keyboard is on L1, so normally a real change).
-    # Never in steady state: a keyboard K2 tap updates the belief and sends nothing.
+    # Never in steady state: a keyboard K2 tap updates the belief and sends nothing.  When the hello named our page,
+    # nothing is sent at all: at ONLINE the step only forces the full frame the keyboard needs.
     def _device_pages(self) -> bool:
         """The keyboard firmware has ui.page: it decides knob holds and K1 on its L4 itself."""
         link = self.link
@@ -326,17 +330,29 @@ class Daemon:
         if hasattr(c, "device_pages"):
             c.device_pages = self._device_pages()
         epoch = getattr(link, "ui_epoch", 0)
-        if epoch != self._page_epoch:  # reconnect / re-hello: the keyboard may show anything (reboot -> auto-L1)
-            self._page_epoch, self._page_dev, self._page_tried, self._page_retry_at = epoch, None, None, 0.0
+        if epoch != self._page_epoch and not self.events.empty():
+            # Input queued before this hello's reply first (the reader queues the keyboard's events before it hands
+            # over the ack): above all the hello-time K2 tap, which the controller must follow before we compare.
+            return False
+        if epoch != self._page_epoch:  # reconnect / re-hello: the keyboard may show anything (reboot -> auto-L1) ...
+            seed = getattr(link, "ui_hello_page", None)  # ... unless the hello said which page (fw >= 1.6.0)
+            self._page_epoch, self._page_tried, self._page_retry_at = epoch, None, 0.0
+            self._page_dev = seed if seed in P.PAGES else None
+            self._page_dev_rx = getattr(link, "ui_hello_rx", 0) if self._page_dev else 0
             self._page_hello = True
         sync = getattr(c, "page_sync", 0)
         if sync != self._page_sync:  # the controller saw the keyboard on another route: say it again
             self._page_sync, self._page_dev, self._page_tried, self._page_retry_at = sync, None, None, 0.0
         want = self._page_wanted()
-        if not self._pages_sendable() or want is None or want == self._page_dev:
+        if not self._pages_sendable() or want is None:
             return False
         if self._page_hello and self._probing():
             return False  # it refuses everything until ONLINE; the link wakes us at the right heartbeat
+        if want == self._page_dev:
+            if self._page_hello:  # ONLINE again on the page the hello named: no request, only the fresh full frame
+                self._page_hello = False
+                return True
+            return False
         if want != self._page_tried:  # a new target goes out at once, with a fresh back-off
             self._page_tried, self._page_retry_at, self._page_backoff = want, 0.0, self.page_retry_s
         elif now < self._page_retry_at:
@@ -374,8 +390,10 @@ class Daemon:
         if (getattr(self.link, "ui_epoch", 0), getattr(self.controller, "page_sync", 0)) != (self._page_epoch,
                                                                                             self._page_sync):
             return 0.0  # a hello / resync request since the last step: look at it now
-        if want == self._page_dev or (self._page_hello and self._probing()):
-            return None  # nothing to say / the link wakes us once the keyboard is ONLINE again
+        if self._page_hello and self._probing():
+            return None  # the link wakes us once the keyboard is ONLINE again
+        if want == self._page_dev:
+            return 0.0 if self._page_hello else None  # ONLINE on the hello's page: the frame now / nothing to say
         return max(0.0, self._page_retry_at - now)
 
     # -------------------------------------------------------------- option mode (ui.hidKeys)

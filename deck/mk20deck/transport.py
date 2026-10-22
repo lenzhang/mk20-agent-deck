@@ -241,12 +241,16 @@ class MockDevice:
     L1/L4 and with a generation above the last accepted one (shared with the hello's ``generation``); it sets the
     route and, like every firmware page boundary, drops the ui.hidKeys map (a non-empty map needs route L1).
     :meth:`tap_k2` / :meth:`back_l1` are the keyboard's own K2 short and L4 回 L1: route change + synthetic K2 tap.
+
+    ``fw160=True`` (with ``ui``) models fw 1.6.0: ``ui.hello`` names the route (``"page"``: L1/L4, else "none"), resets
+    both generations to 0, and first announces a route changed while no host was there (:meth:`toggle_away`: the
+    keyboard's ``host_page`` lags behind) with the usual K2 tap, before its reply.
     """
 
     UI_REJECT = "unavailable or invalid UI request"
 
     def __init__(self, layout: DeviceLayout | None = None, draw_delay: float = 0.0, ui: bool = False,
-                 heartbeat_ms: int = 1000, hid_keys: bool = False) -> None:
+                 heartbeat_ms: int = 1000, hid_keys: bool = False, fw160: bool = False) -> None:
         self.layout = layout or DeviceLayout.default()
         self.draw_delay = draw_delay
         self.ui = ui
@@ -267,6 +271,8 @@ class MockDevice:
         self.hid_map: dict[int, int] = {}
         self.hid_requests: list[dict] = []  # every ui.hidKeys request (accepted or not)
         self.route = "L1"  # keyboard route (kbd onboard): L1 / L4 host pages, or its own pages (HOME, LS, ...)
+        self.host_page = "L1"  # firmware host_page: the page the keyboard last told the host it shows (K2 taps / ui.page)
+        self.fw160 = fw160
         self.page_live = True  # False: like the firmware while PROBING / SUSPECT (ui.page refused)
         self.page_requests: list[dict] = []  # every ui.page request (accepted or not)
         self.pages_accepted: list[str] = []
@@ -364,6 +370,15 @@ class MockDevice:
             self.hellos.append(now)
             self.ui_negotiated, self.ui_lost, self.ui_online, self._beats = True, False, False, 0
             self.hid_map = {}
+            if self.fw160:
+                self.ui_generation = self.hid_generation = 0
+                if self.route in P.PAGES and self.host_page != self.route:
+                    self.host_page = self.route
+                    self._tap(103)  # emitted before the hello's own reply, like the firmware
+                return {"version": 1, "heartbeat_ms": self.heartbeat_ms,
+                        "capabilities": ["ui.page", "ui.heartbeat", "ui.hidKeys"],
+                        "page": self.route if self.route in P.PAGES else "none",
+                        "generation": self.ui_generation, "hid_generation": self.hid_generation}
             if self.hid_keys:
                 return {"version": 1, "heartbeat_ms": self.heartbeat_ms,
                         "capabilities": ["ui.page", "ui.heartbeat", "ui.hidKeys"],
@@ -408,7 +423,7 @@ class MockDevice:
         if (not self.ui_negotiated or self.ui_lost or not self.page_live or self.route not in P.PAGES
                 or type(g) is not int or not self.ui_generation < g <= 999_999_999 or page not in P.PAGES):
             return None
-        self.ui_generation, self.route, self.hid_map = g, page, {}
+        self.ui_generation, self.route, self.host_page, self.hid_map = g, page, page, {}
         self.pages_accepted.append(page)
         return {"page": page, "generation": g}
 
@@ -420,12 +435,20 @@ class MockDevice:
         """Keyboard K2 short on L1/L4: toggle the route, then tell the host with a K2 tap (103,103 down + up)."""
         if self.route in P.PAGES:
             self.route, self.hid_map = ("L4" if self.route == "L1" else "L1"), {}
+            self.host_page = self.route
             self._tap(103)
+
+    def toggle_away(self) -> None:
+        """Keyboard K2 short while no host is ONLINE (Mac asleep / daemon gone): the route flips, no tap is sent and
+        ``host_page`` keeps the old page (fw 1.6.0 announces it at the next hello)."""
+        if self.route in P.PAGES:
+            self.route, self.hid_map = ("L4" if self.route == "L1" else "L1"), {}
 
     def back_l1(self) -> None:
         """Keyboard L4 回 L1 (fb5, decided on the device): route L1, then a K2 tap; on L1 fb5 is a plain host key."""
         if self.route == "L4":
             self.route, self.hid_map = "L1", {}
+            self.host_page = self.route
             self._tap(103)
         else:
             self.press(4, 0, True)

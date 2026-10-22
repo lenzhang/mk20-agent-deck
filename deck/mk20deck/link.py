@@ -83,6 +83,10 @@ class DeviceLink:
         self.ui_negotiated = False
         self.ui_beat_s = 1.2
         self.ui_hello_result: dict = {}
+        # fw >= 1.6.0: the keyboard's route named by the last accepted ui.hello ("L1" / "L4"; None: one of its own
+        # pages, or older firmware that does not say) and rx_events at that ack (K2 taps up to it are contained in it)
+        self.ui_hello_page: str | None = None
+        self.ui_hello_rx = 0
         self.ui_beats = 0  # accepted heartbeats
         self.ui_beat_rejects = 0  # heartbeats answered success:false (lost / SUSPECT / not negotiated)
         self.ui_beat_timeouts = 0  # heartbeats without an answer within ack_timeout
@@ -100,6 +104,10 @@ class DeviceLink:
         # last ui.hidKeys / ui.page generation we used: one counter for both (each device counter only needs to see
         # strictly increasing values), starting above both of the device's, from the hello
         self.ui_generation = 0
+        # Serializes ui.hello against the generation-checked requests (allocate + write + ack): no ui.page / ui.hidKeys
+        # numbered from the old counter can be on the wire behind a hello, so the hello's values are authoritative.
+        self._gen_lock = threading.Lock()
+        self.ui_generation_recoveries = 0  # exhausted -> usable again after a hello re-seeded lower values (fw >= 1.6.0)
         self.hid_keys_sent = 0
         self.hid_keys_rejected = 0
         self.pages_sent = 0  # accepted ui.page requests
@@ -244,9 +252,20 @@ class DeviceLink:
 
     def ui_hello(self) -> bool:
         """Negotiate mk20-kbd host liveness. False on stock KD / fw < 1.3 ("Unknown method"): legacy mode,
-        where decoded frames on the host page are the liveness signal."""
+        where decoded frames on the host page are the liveness signal.
+
+        Generations: the hello reply names the keyboard's last accepted ui.page / ui.hidKeys generations and the next
+        request continues above both.  They are taken as they are (also lower than ours): the hello holds
+        ``_gen_lock`` like every generation-checked request, so nothing numbered from our old counter can reach the
+        keyboard after this hello, and the keyboard compares against exactly these values.  fw >= 1.6.0 resets both to
+        0 on every hello (a used-up 999999999 recovers here); older firmware reports its persistent counters."""
+        with self._gen_lock:
+            return self._ui_hello_locked()
+
+    def _ui_hello_locked(self) -> bool:
+        rx: list = []
         try:
-            ack = self.call(P.ui_hello())
+            ack = self.call(P.ui_hello(), ack_rx=rx)
         except ConnectionError:
             self.ui_negotiated = False
             return False
@@ -259,15 +278,27 @@ class DeviceLink:
         except (TypeError, ValueError):
             ms = 1000
         self.ui_beat_s = min(self.ui_beat_max_s, max(self.ui_beat_min_s, ms * self.ui_beat_factor / 1000))
-        self.ui_hello_result = dict(ack.result)
-        gens = [g for g in (ack.result.get("hid_generation"), ack.result.get("generation")) if type(g) is int]
-        with self._lock:
-            self.ui_generation = max([self.ui_generation, *gens])
-            self.ui_beats_hello = 0  # before the epoch: whoever sees the new epoch sees the reset count
+        gens = [g for g in (ack.result.get("hid_generation"), ack.result.get("generation"))
+                if type(g) is int and 0 <= g <= P.GENERATION_MAX]
+        page = ack.result.get("page")
+        with self._lock:  # before the epoch: whoever sees the new epoch sees this hello's result, page and counters
+            self.ui_hello_result = dict(ack.result)
+            self.ui_hello_page = page if page in P.PAGES else None
+            self.ui_hello_rx = rx[0] if rx else self.rx_events
+            if gens:  # authoritative (see the docstring); fw < 1.4 reports none: keep ours
+                self.ui_generation = max(gens)
+            self.ui_beats_hello = 0  # whoever sees the new epoch sees the reset count
             self.ui_epoch += 1
+            recovered = self.ui_generation_exhausted and self.ui_generation < P.GENERATION_MAX
+            if recovered:
+                self.ui_generation_exhausted = False
+                self.ui_generation_recoveries += 1
         self.ui_negotiated = True
-        log.info("ui.hello ok: heartbeat_ms=%s generation=%s capabilities=%s, heartbeat every %.2f s",
-                 ms, ack.result.get("generation"), ack.result.get("capabilities"), self.ui_beat_s)
+        log.info("ui.hello ok: heartbeat_ms=%s generation=%s hid_generation=%s page=%s capabilities=%s, heartbeat every "
+                 "%.2f s", ms, ack.result.get("generation"), ack.result.get("hid_generation"),
+                 str(page)[:8] if page is not None else "-", ack.result.get("capabilities"), self.ui_beat_s)
+        if recovered:
+            log.info("ui generation re-seeded from the hello (%d): ui.page / ui.hidKeys usable again", self.ui_generation)
         if self.ui_generation >= P.GENERATION_MAX:
             self._exhausted()
         self._ui_changed()
@@ -284,9 +315,9 @@ class DeviceLink:
     def _exhausted(self) -> None:
         if not self.ui_generation_exhausted:
             self.ui_generation_exhausted = True
-            log.warning("ui generation exhausted (%d): ui.page / ui.hidKeys disabled on this connection; a re-hello on "
-                        "the same connection does not recover it — only mk20-kbd restarting (its counters reset) and "
-                        "a new connection do (firmware follow-up)", P.GENERATION_MAX)
+            log.warning("ui generation exhausted (%d): ui.page / ui.hidKeys disabled until a ui.hello re-seeds lower "
+                        "values — fw >= 1.6.0 resets its counters on every hello (reconnect / re-hello); older firmware "
+                        "only when mk20-kbd restarts", P.GENERATION_MAX)
 
     def _next_generation(self) -> int | None:
         """Next ui.page / ui.hidKeys generation, or None once 999999999 is used up (never a busy retry)."""
@@ -353,6 +384,10 @@ class DeviceLink:
         (firmware without ui.hidKeys), "rejected" (e.g. page not live yet: retry) or "timeout"."""
         if not self.supports("ui.hidKeys"):
             return "unsupported"
+        with self._gen_lock:  # allocate + write + ack never interleave with a hello (see ui_hello)
+            return self._ui_hid_keys_locked(keys)
+
+    def _ui_hid_keys_locked(self, keys: dict[int, int]) -> str:
         gen = self._next_generation()
         if gen is None:
             return "unsupported"
@@ -380,12 +415,17 @@ class DeviceLink:
 
     def ui_page(self, page: str) -> str:
         """Ask the keyboard to show host page ``page`` ("L1" / "L4").  Returns "ok" (it switched, or re-entered the same
-        page: either way it now waits for a fresh full frame and has dropped any ui.hidKeys map), "unsupported" (no
+        page: either way it now waits for a fresh full frame and has dropped any ui.hidKeys map; on the same page
+        fw >= 1.6.0 keeps held keys, older firmware releases them), "unsupported" (no
         negotiated ``ui.page``: stock KD / legacy firmware), "rejected" (not ONLINE yet, keyboard on HOME/LS/L5/agent,
         a request made stale by a route change on the keyboard: retry later) or "timeout".  Never logs above debug:
         the daemon logs a failing streak once."""
         if not self.supports("ui.page"):
             return "unsupported"
+        with self._gen_lock:  # allocate + write + ack never interleave with a hello (see ui_hello)
+            return self._ui_page_locked(page)
+
+    def _ui_page_locked(self, page: str) -> str:
         gen = self._next_generation()
         if gen is None:
             return "unsupported"
