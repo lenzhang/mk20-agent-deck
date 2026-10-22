@@ -14,6 +14,7 @@ from mk20deck import protocol as P
 from mk20deck.config import DEFAULT_KNOB_MAP, DeckConfig
 from mk20deck.controller import PAGE_RESYNC, Controller
 from mk20deck.daemon import Daemon
+from mk20deck.daemon import InputEvent as D_InputEvent
 from mk20deck.link import DeviceLink
 from mk20deck.model import Mode, State
 from mk20deck.render.canvas import Renderer
@@ -835,3 +836,116 @@ def test_hello_waits_for_a_generation_request_in_flight(links):
     methods = [r["method"] for r in dev.json_requests if r["method"] in ("ui.page", "ui.hello")]
     assert methods[-2:] == ["ui.page", "ui.hello"] and dev.page_requests[-1]["generation"] == 4
     assert link.ui_generation == 0 and link.ui_page("L1") == "ok" and dev.page_requests[-1]["generation"] == 1
+
+
+# ------------------------------------------------------------------ Kimi K3 1.6.0 review: fencing + PROBING
+def test_request_decided_before_a_hello_is_dropped_not_renumbered(links):
+    """MINOR 2: a ui.page decided under the old epoch that only gets the lock after a hello (which reset the numbering)
+    must not go out with a fresh, acceptable number: dropped as "stale", nothing written."""
+    dev = v160()
+    link = linked(dev)
+    links.append(link)
+    epoch = link.ui_epoch
+    gate, entered = threading.Event(), threading.Event()
+    orig = dev._ui
+
+    def ui(method, obj):  # the hello holds the lock while the keyboard "thinks"
+        if method == "ui.hello":
+            entered.set()
+            gate.wait(2)
+        return orig(method, obj)
+    dev._ui = ui
+    t = threading.Thread(target=link.ui_hello)
+    t.start()
+    assert entered.wait(2)
+    res = {}
+    t2 = threading.Thread(target=lambda: res.setdefault("page", link.ui_page("L4", epoch=epoch)))
+    t2.start()
+    time.sleep(0.1)
+    assert "page" not in res  # blocked behind the hello
+    gate.set()
+    t.join(3)
+    t2.join(3)
+    assert res == {"page": "stale"} and link.ui_epoch == epoch + 1
+    assert dev.page_requests == [] and link.pages_sent == 0
+    assert link.ui_hid_keys({}, epoch=epoch) == "stale" and dev.hid_requests == []
+    assert link.ui_page("L4", epoch=link.ui_epoch) == "ok" and dev.page_requests[-1]["generation"] == 1
+
+
+def test_daemon_redecides_after_a_stale_request(links):
+    d, c, clk, dev, link = rig(links, v160())
+    long_press_mode(d, clk)
+    assert dev.route == "L4"
+    orig = link.ui_page
+    calls = []
+
+    def racing(page, epoch=None):  # a hello completes between our decision and the request
+        calls.append(page)
+        if len(calls) == 1:
+            dev.route = dev.host_page = "L1"  # e.g. the keyboard restarted into L1 meanwhile
+            assert link.ui_hello()
+        return orig(page, epoch=epoch)
+    link.ui_page = racing
+    tap(d, clk, *BACK_KEY)  # the Mac goes to L1 -> decides "ui.page L1" under the old epoch
+    assert calls == ["L1"] and dev.pages_accepted == ["L4"]  # stale: nothing sent
+    d.step()  # new epoch: the hello said L1 = our page -> no request at all, only the frame
+    assert calls == ["L1"] and c.page == "L1" == dev.route == d._page_dev and dev.pages_accepted == ["L4"]
+
+
+def test_fw160_keyboard_k2_while_probing_is_followed_without_pull_back(links):
+    """MINOR 3: the Mac shows L4, the keyboard L1 at the hello; the user presses K2 on the keyboard while it is PROBING
+    (no tap then, its host page lags); at ONLINE it taps.  The Mac must go to the keyboard's page (L4, which it
+    already shows) and send nothing — not toggle to L1 and pull the keyboard back."""
+    dev = MockDevice(ui=True, hid_keys=True, fw160=True, heartbeat_ms=400)
+    d, c, link = real_rig(links, dev, beats=3)
+    c.page = "L4"
+    assert link.ui_hello() and link.ui_hello_page == "L1"
+    dev.toggle_away()  # K2 on the keyboard during PROBING
+    stop, th = run_loop(d)
+    try:
+        assert wait_for(lambda: dev.ui_online and dev.host_page == "L4", 5)
+        time.sleep(0.5)
+        assert c.page == "L4" == dev.route == d._page_dev
+        assert dev.page_requests == []  # no pull-back
+    finally:
+        stop.set()
+        d._wake()
+        th.join(3)
+
+
+def test_fw160_keyboard_k2_while_probing_on_the_mac_page_is_followed(links):
+    dev = MockDevice(ui=True, hid_keys=True, fw160=True, heartbeat_ms=400)
+    d, c, link = real_rig(links, dev, beats=3)
+    assert c.page == "L1" and link.ui_hello() and link.ui_hello_page == "L1"
+    dev.toggle_away()
+    stop, th = run_loop(d)
+    try:
+        assert wait_for(lambda: dev.ui_online and c.page == "L4", 5)
+        time.sleep(0.5)
+        assert c.page == "L4" == dev.route == d._page_dev and dev.page_requests == []
+    finally:
+        stop.set()
+        d._wake()
+        th.join(3)
+
+
+def test_k2_target_only_for_taps_newer_than_a_known_belief(links):
+    d, c, clk, dev, link = rig(links, v160())
+    long_press_mode(d, clk)  # belief L4 (acked)
+    rx = d._page_dev_rx
+    mk = lambda r: D_InputEvent("knob", 2, "up", t=clk(), rx=r)  # noqa: E731
+    assert d._k2_target(mk(rx + 1)) == "L1"
+    assert d._k2_target(mk(rx)) is None  # contained in the ack: the old relative toggle
+    assert d._k2_target(D_InputEvent("knob", 2, "up", t=clk())) is None  # injected (no rx)
+    d._page_dev = None
+    assert d._k2_target(mk(rx + 1)) is None  # unknown belief
+    # the controller: a known target is absolute, the same page is no change
+    c.on_knob(2, "down")
+    c.on_knob(2, "up", target="L4")
+    assert c.page == "L4"
+    c.on_knob(2, "down")
+    c.on_knob(2, "up", target="L1")
+    assert c.page == "L1"
+    c.on_knob(2, "down")
+    c.on_knob(2, "up")
+    assert c.page == "L4"  # no target: toggle

@@ -275,7 +275,11 @@ class Daemon:
         elif ev.kind == "key":
             self.controller.on_key(ev.a, int(ev.b), ev.pressed)
         else:
-            self.controller.on_knob(ev.a, str(ev.b))
+            target = self._k2_target(ev)
+            if target is not None:
+                self.controller.on_knob(ev.a, str(ev.b), target=target)
+            else:
+                self.controller.on_knob(ev.a, str(ev.b))
             if ev.a == 2 and ev.b == "up" and ev.rx is not None:
                 self._keyboard_k2_tap(ev.rx)
         if tr:
@@ -361,6 +365,17 @@ class Daemon:
         page = self.controller.page
         return page if page in P.PAGES else None  # "LS" (legacy settings page) is never claimed
 
+    def _k2_target(self, ev: InputEvent) -> str | None:
+        """A K2 tap from the keyboard (ui.page firmware) newer than our known belief: the keyboard now shows the
+        other page than the belief, absolutely.  The controller goes there (Kimi K3 1.6.0 MINOR 3: a K2 on the
+        keyboard while it was PROBING is tapped at ONLINE; toggling relative to a Mac page that differed would make
+        the Mac pull the keyboard back, and the user's K2 would have no effect).  Unknown belief (refused /
+        stale request, older firmware) or a tap already contained in the last ack: the relative toggle as before."""
+        if (ev.a != 2 or ev.b != "up" or ev.rx is None or self._page_dev not in P.PAGES
+                or ev.rx <= self._page_dev_rx or not self._device_pages()):
+            return None
+        return "L4" if self._page_dev == "L1" else "L1"
+
     def _keyboard_k2_tap(self, rx: int) -> None:
         """A K2 tap from the keyboard: its host page flipped (and its boundary dropped any ui.hidKeys map).  Taps that
         arrived before the ack of our last accepted ui.page are already contained in that ack."""
@@ -410,7 +425,10 @@ class Daemon:
         elif now < self._page_retry_at:
             return False
         self._page_hello = False
-        res = link.ui_page(want)
+        res = link.ui_page(want, epoch=epoch)  # decided under this epoch: dropped if a hello completed since
+        if res == "stale":  # a hello completed since we decided: nothing sent, look again under the new epoch
+            self._page_hello, self._page_tried = True, None
+            return False
         if res == "ok":
             if self._page_failing:
                 log.info("ui.page %s accepted", want)
@@ -470,7 +488,9 @@ class Daemon:
             return
         if now < self._hid_retry_at:
             return
-        res = link.ui_hid_keys(want)
+        res = link.ui_hid_keys(want, epoch=epoch)
+        if res == "stale":  # a hello completed since we decided (it dropped the map): the next step re-sends
+            return
         if res == "ok":
             self._hid_map, self._hid_at, self._hid_retry_at = dict(want), now, 0.0
         elif res == "unsupported":

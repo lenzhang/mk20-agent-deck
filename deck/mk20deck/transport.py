@@ -244,7 +244,8 @@ class MockDevice:
 
     ``fw160=True`` (with ``ui``) models fw 1.6.0: ``ui.hello`` names the route (``"page"``: L1/L4, else "none"), resets
     both generations to 0, and first announces a route changed while no host was there (:meth:`toggle_away`: the
-    keyboard's ``host_page`` lags behind) with the usual K2 tap, before its reply.
+    keyboard's ``host_page`` lags behind) with the usual K2 tap, before its reply; a route changed while PROBING
+    (:meth:`toggle_away` after the hello) is tapped when the heartbeats make it ONLINE, before that heartbeat's ack.
     """
 
     UI_REJECT = "unavailable or invalid UI request"
@@ -471,6 +472,9 @@ class MockDevice:
             return
         self._last_beat = now
         if self._beats >= 3 and now - self._first >= 2 * period:
+            if self.fw160 and not self.ui_online and self.route in P.PAGES and self.host_page != self.route:
+                self.host_page = self.route  # ONLINE again: a route changed while PROBING is tapped now
+                self._tap(103)
             self.ui_online = True
 
     def lose(self) -> None:

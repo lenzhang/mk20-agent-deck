@@ -606,7 +606,10 @@ class Controller:
             self._on_up(p.role, p, t)  # the press-time role owns the release (page may have changed)
         self._touch()
 
-    def on_knob(self, knob: int, kind: str) -> None:
+    def on_knob(self, knob: int, kind: str, target: str | None = None) -> None:
+        """``target`` (daemon, ui.page firmware): for a K2 tap from the keyboard whose resulting page is known
+        ("L1"/"L4"), go there instead of toggling — the keyboard already shows it (no pull-back if our page moved
+        meanwhile, e.g. a K2 on the keyboard while it was PROBING)."""
         if self.page == "LS":
             if kind in ("cw", "ccw"):
                 self.settings.knob(knob, kind)
@@ -647,8 +650,9 @@ class Controller:
                     elif self._focus(s) and option_prompt(s) and self.page == "L1":
                         self._enter_option(s)
                 else:
-                    page = "L4" if self.page == "L1" else "L1"
-                    self._goto(page, f"切到 {page}")
+                    page = target if knob == 2 and target in P.PAGES else "L4" if self.page == "L1" else "L1"
+                    if page != self.page:
+                        self._goto(page, f"切到 {page}")
         elif kind in ("cw", "ccw"):
             if knob == 1 and self.option is not None:
                 pass  # the selection stays on the session being answered

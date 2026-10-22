@@ -379,12 +379,15 @@ class DeviceLink:
             return False
         return self.has_capability(capability)
 
-    def ui_hid_keys(self, keys: dict[int, int]) -> str:
+    def ui_hid_keys(self, keys: dict[int, int], epoch: int | None = None) -> str:
         """Option mode: logical fb -> digit map for the live L1 page ({} clears).  Returns "ok", "unsupported"
-        (firmware without ui.hidKeys), "rejected" (e.g. page not live yet: retry) or "timeout"."""
+        (firmware without ui.hidKeys), "rejected" (e.g. page not live yet: retry), "timeout" or "stale" (see
+        ``ui_page``: decided under another hello epoch, nothing sent)."""
         if not self.supports("ui.hidKeys"):
             return "unsupported"
         with self._gen_lock:  # allocate + write + ack never interleave with a hello (see ui_hello)
+            if epoch is not None and epoch != self.ui_epoch:
+                return "stale"
             return self._ui_hid_keys_locked(keys)
 
     def _ui_hid_keys_locked(self, keys: dict[int, int]) -> str:
@@ -413,16 +416,22 @@ class DeviceLink:
         log.info("ui.hidKeys %s not accepted (%s)", sorted(keys.items()), err[:80])
         return "rejected"
 
-    def ui_page(self, page: str) -> str:
+    def ui_page(self, page: str, epoch: int | None = None) -> str:
         """Ask the keyboard to show host page ``page`` ("L1" / "L4").  Returns "ok" (it switched, or re-entered the same
         page: either way it now waits for a fresh full frame and has dropped any ui.hidKeys map; on the same page
         fw >= 1.6.0 keeps held keys, older firmware releases them), "unsupported" (no
         negotiated ``ui.page``: stock KD / legacy firmware), "rejected" (not ONLINE yet, keyboard on HOME/LS/L5/agent,
         a request made stale by a route change on the keyboard: retry later) or "timeout".  Never logs above debug:
-        the daemon logs a failing streak once."""
+        the daemon logs a failing streak once.
+
+        ``epoch``: the ``ui_epoch`` the caller decided under.  If a hello completed since (inside the lock, so it is
+        exact), nothing is sent and the result is "stale": the decision was based on the keyboard's state before
+        that hello, and the hello reset the numbering, so a fresh number would make the old decision acceptable."""
         if not self.supports("ui.page"):
             return "unsupported"
         with self._gen_lock:  # allocate + write + ack never interleave with a hello (see ui_hello)
+            if epoch is not None and epoch != self.ui_epoch:
+                return "stale"
             return self._ui_page_locked(page)
 
     def _ui_page_locked(self, page: str) -> str:
