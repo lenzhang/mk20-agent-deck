@@ -1,0 +1,52 @@
+[   34.169727] VE: disable hw clock
+[   34.169834] disable_cedar_hw_clk,592
+[   34.572038] handle_ep0: ep0 setup end
+[   35.687905] usb0-vbus: disabling
+[   39.583729] handle_ep0: ep0 setup end
+[   41.160393] handle_ep0: ep0 setup end
+[   46.170631] handle_ep0: ep0 setup end
+[   47.771878] handle_ep0: ep0 setup end
+[   52.782147] handle_ep0: ep0 setup end
+[   54.395733] handle_ep0: ep0 setup end
+[   57.268935] regulator-dummy: Underflow of regulator enable count
+[   57.269704] android_work: sent uevent USB_STATE=DISCONNECTED
+[   57.621239] usb_f_ecm: loading out-of-tree module taints kernel.
+[   57.629105] using random self ethernet address
+[   57.629125] using random host ethernet address
+[   57.657336] file system registered
+[   57.710886] read descriptors
+[   57.710915] read strings
+[   57.713643] usb0: HOST MAC 02:11:22:33:44:56
+[   57.713975] usb0: MAC 02:11:22:33:44:55
+[   58.060324] sunxi_set_cur_vol_work()397 WARN: get power supply failed
+[   58.104699] android_work: sent uevent USB_STATE=CONNECTED
+[   58.111056] configfs-gadget gadget: high-speed config #1: c
+[   58.111285] android_work: sent uevent USB_STATE=CONFIGURED
+[   58.129627] ERR: Operation not supported
+[   58.130049] handle_ep0: ep0 setup end
+[   58.163174] handle_ep0: ep0 setup end
+[   58.190168] handle_ep0: ep0 setup end
+[   58.191098] handle_ep0: ep0 setup end
+[   58.191353] handle_ep0: ep0 setup end
+[   58.991879] handle_ep0: ep0 setup end
+[   58.992331] handle_ep0: ep0 setup end
+[   60.649215] handle_ep0: ep0 setup end
+[35213.678187] ERR: sunxi_udc_dma_release failed dma_hdl is NULL
+[71215.093221] ERR: sunxi_udc_dma_release failed dma_hdl is NULL
+[71272.769525] android_work: sent uevent USB_STATE=DISCONNECTED
+[71272.769875] regulator-dummy: Underflow of regulator enable count
+[71272.770333] read descriptors
+[71272.770356] read strings
+[71272.938312] sunxi_set_cur_vol_work()397 WARN: get power supply failed
+[71273.002804] android_work: sent uevent USB_STATE=CONNECTED
+[71273.009040] configfs-gadget gadget: high-speed config #1: c
+[71273.009259] android_work: sent uevent USB_STATE=CONFIGURED
+[71273.028976] ERR: Operation not supported
+[71273.029265] handle_ep0: ep0 setup end
+[71273.066697] IPv6: ADDRCONF(NETDEV_CHANGE): usb0: link becomes ready
+[71273.071397] handle_ep0: ep0 setup end
+[71273.101017] handle_ep0: ep0 setup end
+[71273.101641] handle_ep0: ep0 setup end
+[71273.102163] handle_ep0: ep0 setup end
+[71273.127654] handle_ep0: ep0 setup end
+[71274.775968] handle_ep0: ep0 setup end
