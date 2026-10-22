@@ -444,6 +444,10 @@ class MockDevice:
         if self.route in P.PAGES:
             self.route, self.hid_map = ("L4" if self.route == "L1" else "L1"), {}
 
+    def ui_event(self, method: str) -> None:
+        """A device-initiated UI event such as ``ui.openArrange`` (fixed payload, frame id 0xFFFFFFFF)."""
+        self.emit_json({"method": method}, self.EVENT_ID)
+
     def back_l1(self) -> None:
         """Keyboard L4 回 L1 (fb5, decided on the device): route L1, then a K2 tap; on L1 fb5 is a plain host key."""
         if self.route == "L4":

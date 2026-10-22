@@ -15,7 +15,8 @@ web_url = "http://172.30.250.2:8780/"  # opened on the Mac by the 网页设置 k
 
 [web]
 arrange_port = 8781              # 会话安排 page (http://127.0.0.1:8781/, 127.0.0.1 only); 0 = off. Open it with
-                                 # `mk20deck arrange` (one-time link via $MK20DECK_HOME/run/arrange.sock, 0600).
+                                 # `mk20deck arrange` (one-time link via $MK20DECK_HOME/run/arrange.sock, 0600)
+                                 # or the keyboard's LS 会话安排 key (fw >= 1.6.0; 0 = the key only shows a toast).
                                  # A busy port only logs one warning. Rules: $MK20DECK_HOME/slot-rules.json
 
 [codex_desktop]

@@ -232,6 +232,23 @@ def ui_page(page: str, generation: int) -> dict[str, Any]:
     return {**request("ui.page"), "generation": int(generation), "page": page}
 
 
+# Device-initiated UI events (cmd101, frame id 0xFFFFFFFF, kbd/UI.md): fixed payloads, no parameters — the Mac acts
+# on its own configuration only.  ui.openSettings (fw >= 1.4, 网页设置 key: [deck] web_url), ui.openArrange
+# (fw >= 1.6.0, LS 会话安排 key: the local 会话安排 page through a one-time link file).
+OPEN_SETTINGS_EVENT = {"method": "ui.openSettings"}
+OPEN_ARRANGE_EVENT = {"method": "ui.openArrange"}
+DEVICE_UI_EVENTS = (OPEN_SETTINGS_EVENT["method"], OPEN_ARRANGE_EVENT["method"])
+
+
+def device_ui_event(obj: Any) -> str | None:
+    """The whitelisted UI event ``obj`` is, exactly as the device sends it (``{"method": name}``, nothing else), or
+    None (unknown method, extra fields, non-string method)."""
+    if not isinstance(obj, dict) or len(obj) != 1:
+        return None
+    m = obj.get("method")
+    return m if isinstance(m, str) and m in DEVICE_UI_EVENTS else None
+
+
 def play_audio(file_path: str) -> dict[str, Any]:
     return request("playAudio", {"filePath": file_path})
 

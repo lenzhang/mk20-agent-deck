@@ -16,7 +16,7 @@ is **not** implemented (not approved).
 | `slots.py`, `controller.py` | slot manager (15 sticky slots, strict-higher replace, pins, per-mode memory, 8-slot state migration), gestures, roles L1/L4 (see Key layout) |
 | `rules.py`, `webui.py`, `webauth.py` | slot rules (固定规则, `slot-rules.json`), the local 会话安排 web page on 127.0.0.1:8781 and its one-time-link / session authorization (see 会话安排网页) |
 | `render/` | key & sub-screen renderer, ≤8 fps global cap, single attention animation |
-| `daemon.py`, `cli.py` | daemon loop, heartbeat, offline frame on exit, CLI; device event `ui.openSettings` (网页设置 key) opens `[deck] web_url` (Mac config only, IP/localhost, max once per 3 s) |
+| `daemon.py`, `cli.py` | daemon loop, heartbeat, offline frame on exit, CLI; device events (exact payloads only, `protocol.DEVICE_UI_EVENTS`): `ui.openSettings` (网页设置 key) opens `[deck] web_url` (Mac config only, IP/localhost, max once per 3 s); `ui.openArrange` (fw >= 1.6.0, keyboard LS 会话安排 key) opens the 会话安排 page through a one-time link file (max once per 3 s; page off → toast) |
 | `sim.py` | headless screenshots + interactive web sim |
 | `supervisor.py` | find port → open → handshake → run; reconnect on unplug / ACK loss / wake; busy-port hint (never kills) |
 | `hw/devtest.py` | on-device validation harness (`devtest`), markdown + JSON report |
@@ -109,8 +109,12 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
   0600 文件（macOS 上是 `open-*.webloc`，交给默认浏览器；其他系统是带 meta refresh 的 `open-*.html`），
   `mk20deck arrange` 只把文件路径交给 `open`；令牌兑换或过期（60 秒）后、网页停止时、以及启动时（上次遗留的）删除这些文件。
   `--print` 只把链接打印到当前终端；日志里链接只记到 `/auth?` 为止。
-  会话只以 id 的哈希保存在 `run/arrange-sessions.json`（0600），最多 8 个。键盘侧以后的 “会话安排” 链接也走
-  mk20deck（进程内 `ArrangeServer.mint_url()`），不会绕过这一步。
+  会话只以 id 的哈希保存在 `run/arrange-sessions.json`（0600），最多 8 个。
+- **从键盘打开**（固件 1.6.0）：L4 上短按 K1 进入键盘自己的设置页（LS），按 **会话安排** 键（左下第二个，fb17）。
+  键盘只发 `{"method":"ui.openArrange"}`（没有参数、没有链接；Mac 在线时才发，每 3 秒最多一次），mk20deck 在进程内用
+  `ArrangeServer.mint_file()` 生成同样的一次性链接文件，把**文件路径**交给 `open`（令牌只在那个 0600 文件里，不进参数、
+  不进日志、不走数据线），每 3 秒最多打开一次。网页关闭（`arrange_port = 0`）、没启动（端口被占用）或生成失败时
+  不打开，键盘上弹提示（约 5 秒，回到 L1/L4 也看得到）。
 - **安全**：只绑定 127.0.0.1；`Host` 必须正好是 `127.0.0.1:<端口>` 或 `localhost:<端口>`（防 DNS rebinding）；
   无任何 CORS 头，`OPTIONS`/`DELETE`/`PATCH`/`HEAD` 一律 405；改动只能 `POST`/`PUT` JSON（`Content-Type:
   application/json`，`Content-Length` ≤ 8 KiB，不接受分块），`Origin` 必须等于 `http://<Host>`，`Sec-Fetch-Site`
@@ -124,7 +128,6 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
   `PUT /api/rules/<id> {enabled?, kind?, value? | session?}`，`POST /api/rules/<id>/delete`。`slot` 是 0–14（S1–S15）。
 - 开发：`python -m mk20deck sim-serve --arrange-port 8782` 对着模拟数据开这个页面（规则写到临时文件；启动时打印
   `mk20deck arrange --socket <临时 socket>` 命令和一个一次性链接）。
-  键盘设备网页以后会加一个指向这里的链接（固件侧，不在本模块）。
 
 ## Dev
 ```bash

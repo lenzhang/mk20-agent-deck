@@ -33,6 +33,7 @@ KBD = Path(__file__).resolve().parents[1] / "kbd"
 K1, K2 = 100, 103  # GD32 knob press codes (row == col)
 FB20 = (3, 4)      # (row, col) firmware coordinates: MODE key (logical 20)
 FB5 = (0, 4)       # L4 回 L1 (logical 5) / S5 on L1
+FB17 = (3, 1)      # LS 会话安排 (fw 1.6.0) / DELETE on L1/L4
 
 
 def gd32_frame(pl):
@@ -373,3 +374,31 @@ def test_fw160_keyboard_page_changed_while_the_mac_was_away(rig):
     time.sleep(1.0)
     assert len(rig.page_writes) == n and rig.c.page == "L4"
 
+
+def test_fw160_ls_arrange_key_reaches_the_mac(rig):
+    """K1 short on the synced L4 opens the keyboard's own LS page; its 会话安排 key (fb17) sends ui.openArrange: the
+    Mac mints a one-time link file and opens it (here: stand-ins, no browser)."""
+    assert rig.boot()
+    agree(rig, "L1")
+    opened = []
+
+    class Arrange:
+        def mint_file(self):
+            opened.append("minted")
+            return "/nonexistent/run/open-e2e.webloc"
+    rig.d.arrange, rig.d.opener = Arrange(), opened.append
+    rig.key(FB20, True)
+    time.sleep(1.0)
+    rig.key(FB20, False)
+    agree(rig, "L4")
+    rig.tap_knob(K1)  # the keyboard's LS page (never forwarded to the Mac)
+    time.sleep(0.4)
+    assert not rig.device_on_l1() and rig.c.page == "L4"
+    rig.key(FB17, True)
+    time.sleep(0.08)
+    rig.key(FB17, False)
+    end = time.monotonic() + 3
+    while len(opened) < 2 and time.monotonic() < end:
+        time.sleep(0.02)
+    assert opened == ["minted", "/nonexistent/run/open-e2e.webloc"]
+    assert rig.d.arrange_opened == 1 and not any(e[:2] == FB17[::-1] for e in rig.raw)  # no key event for it

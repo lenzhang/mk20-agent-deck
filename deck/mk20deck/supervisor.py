@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import protocol as P
-from .config import DEFAULT_WEB_URL
+from .config import DEFAULT_ARRANGE_PORT, DEFAULT_WEB_URL
 from .controller import Controller
 from .daemon import Daemon, WakeReconnect
 from .layout import DeviceLayout
@@ -44,6 +44,7 @@ class Supervisor:
     daemon: Daemon | None = None
     _last_port_msg: str = ""
     calls: object | None = None  # webui.LoopCalls: arrange-page changes, run on this thread (also while unplugged)
+    arrange: object | None = None  # webui.ArrangeServer for the keyboard's 会话安排 key (ui.openArrange); None = off
 
     def _wait(self, stop: threading.Event, secs: float) -> None:
         """``stop.wait`` that keeps serving queued arrange-page calls while no device is connected."""
@@ -103,7 +104,8 @@ class Supervisor:
                        keycode_map=getattr(cfg, "keycode_map", {}), power=self.power,
                        web_url=getattr(cfg, "web_url", DEFAULT_WEB_URL),
                        bg_poll_s=getattr(cfg, "background_poll_s", 10.0), bg_adapters=self.bg_adapters,
-                       calls=self.calls)
+                       calls=self.calls, arrange=self.arrange,
+                       arrange_port=getattr(cfg, "arrange_port", DEFAULT_ARRANGE_PORT))
             link = DeviceLink(tr, on_key=d.on_device_key, ack_timeout=cfg.ack_timeout_s,
                               preamble_flush=cfg.preamble_flush, on_event=d.on_device_event)
             d.link = link

@@ -13,7 +13,7 @@ from typing import Callable
 from . import keytrace as _keytrace
 from . import protocol as P
 from .adapters.base import BackendUnavailable
-from .config import DEFAULT_WEB_URL
+from .config import DEFAULT_ARRANGE_PORT, DEFAULT_WEB_URL
 from .controller import LONG_PRESS, Controller
 from .link import UI_ONLINE_BEATS, DeviceLink, LatencyStats
 from .model import MODE_CYCLE
@@ -26,7 +26,11 @@ log = logging.getLogger(__name__)
 # Daemon per connection, sharing the bg adapter instances) can never poll concurrently with the next one.
 _BG_POLL_LOCK = threading.Lock()
 
-OPEN_SETTINGS_EVENT = {"method": "ui.openSettings"}  # mk20-kbd 网页设置 key, exactly this (no payload)
+OPEN_SETTINGS_EVENT = P.OPEN_SETTINGS_EVENT  # mk20-kbd 网页设置 key, exactly this (no payload)
+ARRANGE_OFF = "会话安排网页已关闭（config [web] arrange_port = 0）"
+ARRANGE_DOWN = "会话安排网页未启动（端口被占用？见 mk20deck 日志）"
+ARRANGE_FAILED = "会话安排：无法生成一次性链接（见 mk20deck 日志）"
+ARRANGE_TOAST_S = 5.0  # pressed on the keyboard's own LS page: still readable after 返回 to L1/L4
 
 
 def _shown(url: str) -> str:
@@ -99,6 +103,15 @@ class Daemon:
     settings_opened: int = 0
     settings_dropped: int = 0  # rate-limited or malformed ui.openSettings events
     _last_settings: float = -1e9
+    # 会话安排 key on the keyboard's LS page (fw >= 1.6.0, ui.openArrange): the in-process ArrangeServer mints a
+    # one-time link FILE (0600, in the 0700 run dir) and only its path goes to ``open`` — never the token / URL.
+    arrange: object | None = None  # webui.ArrangeServer (mint_file()), None: page off / not started
+    arrange_port: int = DEFAULT_ARRANGE_PORT  # config [web] arrange_port: 0 = off (explains a missing server)
+    open_arrange_min_s: float = 3.0
+    arrange_opened: int = 0
+    arrange_dropped: int = 0  # rate-limited ui.openArrange events
+    arrange_refused: int = 0  # page off / not started / link not minted: a toast instead
+    _last_arrange: float = -1e9
     # Cross-mode awareness: non-current modes are polled on a worker thread every bg_poll_s
     # (0 = off); results are applied on the loop thread in step().  bg_adapters should be
     # separate instances (cli.build_adapters) so a poll never races the foreground refresh.
@@ -176,16 +189,20 @@ class Daemon:
                                    ignored=getattr(ev, "ignored", None) or ""))
 
     def on_device_event(self, obj: dict) -> None:
-        """Non-key device JSON event, called from the link reader thread: only queue, never block or raise."""
+        """Non-key device JSON event, called from the link reader thread: only queue, never block or raise.  Only the
+        whitelisted fixed-payload events (protocol.DEVICE_UI_EVENTS) are acted on, and only exactly as sent."""
         method = obj.get("method")
-        if method != OPEN_SETTINGS_EVENT["method"]:
+        if method not in P.DEVICE_UI_EVENTS:
             log.info("ignored device event %r", str(method)[:64])
             return
-        if obj != OPEN_SETTINGS_EVENT:  # the device never sends a payload: refuse to act on one
-            self.settings_dropped += 1
-            log.warning("ui.openSettings with extra fields %s dropped", sorted(str(k)[:32] for k in obj)[:8])
+        if P.device_ui_event(obj) is None:  # the device never sends a payload: refuse to act on one
+            if method == "ui.openArrange":
+                self.arrange_dropped += 1
+            else:
+                self.settings_dropped += 1
+            log.warning("%s with extra fields %s dropped", method, sorted(str(k)[:32] for k in obj)[:8])
             return
-        self.events.put(InputEvent("ui", 0, "openSettings", t=self.clock()))
+        self.events.put(InputEvent("ui", 0, method.removeprefix("ui."), t=self.clock()))
 
     def _open_settings(self) -> None:
         now = self.clock()
@@ -199,6 +216,39 @@ class Daemon:
         # `open` can take a moment (LaunchServices): never stall the render loop for it.
         threading.Thread(target=self.opener, args=(self.web_url,), name="mk20-open-settings", daemon=True).start()
 
+    def _say(self, text: str) -> None:
+        say = getattr(self.controller, "_say", None)
+        if say is not None:
+            say(text, ARRANGE_TOAST_S)
+
+    def _open_arrange(self) -> None:
+        """ui.openArrange (keyboard LS fb17 会话安排): a one-time link file from the in-process ArrangeServer, opened
+        with ``open <file>`` (token only inside the 0600 file, never in argv / logs).  Page off or not running: a
+        toast on the keyboard instead.  At most once per open_arrange_min_s."""
+        now = self.clock()
+        if now - self._last_arrange < self.open_arrange_min_s:
+            self.arrange_dropped += 1
+            log.info("ui.openArrange rate-limited (%.1f s since the last one)", now - self._last_arrange)
+            return
+        self._last_arrange = now
+        srv = self.arrange
+        if srv is None:
+            self.arrange_refused += 1
+            self._say(ARRANGE_OFF if not self.arrange_port else ARRANGE_DOWN)
+            log.info("ui.openArrange: the 会话安排 page is %s", "off ([web] arrange_port = 0)" if not self.arrange_port
+                     else "not running")
+            return
+        try:
+            path = srv.mint_file()  # local 0600 file in the 0700 run dir: quick, safe on the loop thread
+        except Exception as e:  # noqa: BLE001 — never let it reach the frame loop; no details that could hold a token
+            self.arrange_refused += 1
+            self._say(ARRANGE_FAILED)
+            log.warning("ui.openArrange: one-time link not created (%s)", type(e).__name__)
+            return
+        self.arrange_opened += 1
+        log.info("ui.openArrange: opening the 会话安排 page (one-time link file)")
+        threading.Thread(target=self.opener, args=(path,), name="mk20-open-arrange", daemon=True).start()
+
     def inject_key(self, col: int, row: int, pressed: bool) -> None:
         """Document coordinates (simulator)."""
         self.events.put(InputEvent("key", col, row, pressed, t=self.clock()))
@@ -210,6 +260,8 @@ class Daemon:
         if ev.kind == "ui":  # device UI request, not controller input (no render/latency bookkeeping)
             if ev.b == "openSettings":
                 self._open_settings()
+            elif ev.b == "openArrange":
+                self._open_arrange()
             return
         log.info("input %s %s %s%s", ev.kind, ev.a, ev.b, "" if ev.kind != "key" else (" down" if ev.pressed else " up"))
         if hasattr(self.controller, "device_pages"):  # before the input: K1 on L4 and knob timing depend on it

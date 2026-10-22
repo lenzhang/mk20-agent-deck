@@ -72,7 +72,8 @@ def cmd_run(args) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     try:
         Supervisor(ctl, find_ports, open_transport, default_renderer_factory(cfg), cfg,
-                   power=PowerMonitor.default(), bg_adapters=build_adapters(cfg), calls=calls).run(stop)
+                   power=PowerMonitor.default(), bg_adapters=build_adapters(cfg), calls=calls,
+                   arrange=web).run(stop)  # web: the keyboard's 会话安排 key mints its one-time link here
     finally:
         if web is not None:
             web.stop()
@@ -157,6 +158,7 @@ def cmd_serve(args) -> int:
         d.calls, svc = build_arrange(cfg, ctl, rules_path)
         web = start_arrange_server(svc, args.arrange_port, socket_path=sock,
                                    sessions_path=default_sessions_path() if args.source == "real" else None)
+        d.arrange, d.arrange_port = web, args.arrange_port
         if web is not None:
             print(f"会话安排: python -m mk20deck arrange --socket {sock}   （或一次性链接 {web.mint_url()} ，60 秒内有效）", flush=True)
     try:
