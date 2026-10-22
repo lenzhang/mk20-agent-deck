@@ -71,7 +71,7 @@ def test_whole_card_restore_never_points_at_unsafe_images():
 
 def test_k4_release_contract_and_default():
     hooks = (FW / "MAINT-HOOKS.md").read_text()
-    assert (FW / "VERSION").read_text().strip() == "1.5.1"
+    assert (FW / "VERSION").read_text().strip() == "1.6.0"
     for name in ("restart-kbd", "exit-safe-mode", "debug", "state.json", "recent_crashes", "last_rc"):
         assert name in hooks
     for doc in DOCS.values():

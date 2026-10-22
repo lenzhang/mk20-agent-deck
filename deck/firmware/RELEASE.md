@@ -4,6 +4,81 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
+## 1.6.0-rc1: host protocol additions (same-page ui.page, hello page, generation reset, 会话安排 key)
+
+`firmware/VERSION` is **1.6.0** (MINOR: host-visible protocol additions); build id **rc1**:
+`sh tools/mk20-release-build.sh firmware out rc1`. feature/fw-1.6.0 = release/1.5.1 (5f2ed0d, incl. fix/page-sync)
++ fix/macos-test-gate (61cca87) + this work. Only `bin/mk20-kbd` changed in the release (rebuilt static armhf); the
+other binaries are byte-identical. Rules, compatibility and the safety arguments: kbd/UI.md "1.6.0 host protocol
+additions". Both directions stay compatible: an older mk20deck ignores the new hello field and the new event (and
+gets the K2 tap of a page changed while it was away ~2 s earlier, at the hello instead of at ONLINE); a newer
+mk20deck keeps its 1.5.1 behaviour when the hello carries no `page`.
+
+### `bin/mk20-kbd`
+
+- **Same-page `ui.page` releases nothing.** For the route the keyboard already shows it only clears the option map
+  and invalidates content (`invalidate()`: fresh full frame required, grace window, stale receive barrier, epoch,
+  staged tile, redraw); held PTT / ⌫ / ⏎ / Esc / option digit / host keys keep their press-time owners and end on
+  their physical release, the 10 s cut, SUSPECT, every e-stop or a real boundary. A repeated GD32 down of such a key
+  while the page waits for its frame is the same press. A route change keeps the full boundary.
+- **`ui.hello` names the route**: `"page":"L1"|"L4"|"none"` (none = HOME/LS/L5/agent) before the generations; a
+  route changed while no host was ONLINE is announced with the K2 tap before the reply (was: at ONLINE), so the
+  host's tap mirror starts at the reported page. `ui.page`'s reply already names the page.
+- **A fresh `ui.hello` resets `generation` and `hid_generation` to 0** (reported as before; strictly increasing
+  within a session). Safe: nothing written before a hello can be accepted after it (ordered stream; the hello's
+  loss boundary makes everything already received/queued behind it stale; `ui.page` / non-empty maps need ONLINE
+  = ≥ 3 heartbeats over ≥ 2 s after it), and mk20deck serializes hellos against its numbered requests.
+- **LS fb17 会话安排** (font: one new glyph 排, generator check reproduces the old file): sends exactly
+  `{"method":"ui.openArrange"}` (frame id 0xFFFFFFFF, ONLINE only, own 3 s limiter, like `ui.openSettings`), toast
+  "已请求 Mac 打开会话安排" / "Mac 端未运行：无法打开会话安排"; LS stays. Live L1/L4 fb17 is still Backspace.
+- Tests: new `kbd/tests/tests_onboard_r7.inc` (same-page L1 and L4 with PTT + ⌫ + Esc + host key + MODE held: no
+  HID report, no host up, page invalidated + grace, repeated downs, ordered releases; option digit + forwarded fb17
+  held: map cleared, ups on release; different page = full boundary in both cases; 10 s cut / socket e-stop / K2
+  hold / SUSPECT / hello still release; same-page during the e-stop pause; hello page on HOME/LS/L5/L1/L4, tap
+  before the reply for an offline change, none at ONLINE, PROBING change still tapped at ONLINE; generation reset
+  incl. exhaustion recovery and stale `ui.hidKeys` / `ui.page` queued behind a hello; openArrange gate, payload, id,
+  limiter vs openSettings, no other key, live L1 fb17 = Backspace, L4 → K1 → LS). Adjusted: r6 clear-path mode 4
+  (same-page ui.page now keeps held keys), r6 generations, r5 PROBING case (hello-time tap), ui_test LS fb17. e2e on
+  the real binary: hello `page`/`generation`, same-page `ui.page` with PTT + DELETE held = no report, released on
+  the physical up. Goldens: 330 → 374 (LS fb17 + canvas changed in the 5 LS scenes; new scenes ls-arrange-opened /
+  ls-arrange-offline).
+
+### mk20deck
+
+- **Page sync** (daemon): the hello's `page` seeds the page belief (rx of the hello ack: the hello-time K2 tap is
+  contained in it; input queued before the hello reply is applied first), so after a reconnect nothing is sent when
+  the Mac page matches; at ONLINE the step forces the full frame the keyboard needs. `"none"` / no field (older
+  firmware): unknown as before (first request at ONLINE, retries).
+- **Generations** (link): one lock (`_gen_lock`) across `ui.hello` and every `ui.page` / `ui.hidKeys`
+  (allocate + write + ack), and the hello's values are taken as they are (also lower than ours): exhaustion
+  recovers at the next hello on 1.6.0 firmware (one log line); older firmware re-reports its persistent counters
+  (unchanged behaviour, now exactly the keyboard's values).
+- **`ui.openArrange`**: whitelisted with `ui.openSettings` in `protocol.DEVICE_UI_EVENTS` (exact payload only);
+  the daemon mints a one-time link FILE through the in-process `ArrangeServer.mint_file()` (0600 in the 0700 run
+  dir) and runs `open <file>` in a thread — the token never appears in an argv, a log line or on the cable; at
+  most once per 3 s; page off (`arrange_port = 0`), not running or mint failure → keyboard toast (5 s). No new
+  capability is needed (the keyboard initiates).
+- `MockDevice(fw160=True)` models the 1.6.0 hello (page, reset, hello-time tap; `toggle_away()`, `ui_event()`).
+- Tests: `tests/test_page_sync.py` +11 (hello seeding, Mac page differs, change while away, seed/tap order, own
+  page, legacy hello, ONLINE frame without request, exhaustion recovery, authoritative re-seed on older firmware,
+  hello waits for a request in flight), `tests/test_page_sync_e2e.py` +3 on the real binary (reconnect on L1 and L4
+  sends no ui.page; keyboard K2 while the Mac was away followed without a request; LS 会话安排 reaches the Mac),
+  new `tests/test_ui_open_arrange.py` (whitelist, link file 0600/0700 + redeem, macOS argv = path only, no token in
+  logs, rate limit vs openSettings, payload dropped, off / not running / mint failure toasts, Supervisor wiring).
+
+Host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 1242 passed / 1 skipped
+(release/1.5.1 + gate: 1219 collected; +24), agent 398, onboard 13383 (was 12957; TSan build 13383), kbd 4191 ASan +
+4191 TSan, safe mode 2 scenarios, e2e OK (incl. hello page, same-page `ui.page` with PTT + DELETE held), ui 41405 (was
+41396), 374 goldens (was 330: 10 LS files changed, 44 new), sim 38, tools 64 passed / 1 skipped, shellcheck clean,
+release binaries match source. `make mac-test` (macOS, native): 785 passed / 457 skipped / 1 failed — only the known
+pre-existing `test_arrange_hardening.py::test_connection_cap_answers_503_beyond_the_limit`. E-stop latencies unchanged
+(socket e-stop -> all-up 1.3–1.6 ms; stalled host 0.0–1.0 ms; K2 hold 1001.2–1009.6 ms; blocked status worker
+0.1–0.6 / 1000.2–1013.2 ms). `bin/mk20-kbd` sha256 `43004be69951d0f0f7bb467fb715e8c14e8bebba2d9b10681724a88796c3d109`
+(595288 B, static ARM EABI5). `mk20-fw-1.6.0.tar` (rc1, 14 files, reproducible) sha256
+`314ee2635835cff14c2c92fae6ba96107b8e40b8d43b6e42876c3e291e7ea436`.
+**No device acceptance claimed** (same-page request with a held PTT on hardware, reconnect without a same-page
+request, 会话安排 from the keyboard).
+
 ## 1.5.1-rc1: L1 option mode (answer an agent's choice with 1–5)
 
 `firmware/VERSION` is **1.5.1**; build id **rc1** (release/1.5.1 = 1.5.0 slot-move 7c599a3 + feature/option-mode). User decision 2026-10-22:
@@ -300,6 +375,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
+| 1.6.0 | 2026-10-22 | **1.6.0-rc1**: host protocol additions — a same-page `ui.page` only redraws (held PTT / ⌫ / ⏎ / Esc / digit keep their owners and HID state; a route change keeps the full boundary); `ui.hello` names the route (`"page":"L1"\|"L4"\|"none"`), a route changed while no host was ONLINE is K2-tapped before that reply; a fresh `ui.hello` resets `generation` / `hid_generation` to 0; LS fb17 会话安排 sends `{"method":"ui.openArrange"}` (mk20deck opens the 会话安排 page through a one-time link file). Mac: hello page seeds the page belief (no same-page request after a reconnect), hello generations taken as authoritative under a lock (exhaustion recovers), ui.openArrange handler. Only `bin/mk20-kbd` changed. |
 | 1.5.1 | 2026-10-22 | **1.5.1-rc1**: option mode — tapping a hook-tracked session that waits for input/approval clears rows 1–3 and shows its options on the top row (labels from Claude AskUserQuestion / fixed permission labels / digits); host→device `ui.hidKeys` maps fb1..fb15 to momentary HID digits (allow-list 1–9, L1 only, cleared on page/host/e-stop, 30 s expiry); digits ignored while PTT is held. |
 | 1.5.0 | 2026-10-22 | **1.5.0-rc1**: user layout — L1 rows 1–3 = 15 sessions (tap = switch), bottom row 按住说话 / ⌫ 删除 (HID Backspace) / ⏎ 发送·可以 (Return) / ✗ 不行 (Escape) / 模式; L4 row1 DESK HERD TMUX ＋新会话 回L1 (local Back fb14 -> fb5); fb17–19 holds cut at 10 s. |
 | 1.4.3 | 2026-10-21 | **1.4.3-rc4**: physical key-LCD order. Logical key L (col c, row r) is `/dev/fb((4-c)*4+r+1)` (column-major from the top-right, photo of 1.4.2 L1), not /dev/fbL: every page was displayed permuted (display != function). `panel_t.dev` (one table in kbd/panels.c) is used only to open the node and to derive the SPI bus; input, UI, host protocol and getInfo stay logical. `--pattern` labels R/C + fbN. Only `bin/mk20-kbd` changed. |
