@@ -1,9 +1,9 @@
-# MK20 "Agent 增强固件" — handoff (2026-10-22 05:10 SGT)
+# MK20 "Agent 增强固件" — handoff (2026-10-22 09:00 SGT)
 
 Goal: production-grade replacement firmware for the Waveshare MK20 keyboard (Allwinner T113, Tina 5.4.61,
 BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page. Live status: PROGRESS.md (main).
 
-## Current state (2026-10-22 ~05:10)
+## Current state (2026-10-22 ~09:00)
 - **Device: fw 1.5.1-rc1, good**; previous good kept in the other A/B slot. Tar sha256
   `3d7c14700b1bc8c7a172fae3e4078dea3493d012b1ffec04660c1429ef35e41b` (~/worktrees/rel-1.5.1-rc1/), tag `v1.5.1-rc1` on
   **release/1.5.1** (= release/1.5.0 @7c599a3 slot-move + feature/option-mode). Acceptance PASS.
@@ -13,12 +13,23 @@ BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page
   **Option mode (1.5.1):** tapping a hook-tracked session that waits for input clears rows 1–3 and shows its options on
   row 1 (momentary HID digits via `ui.hidKeys`; ignored while PTT held). Only "needs me" states animate.
 - **Physical LCD order fixed in 1.4.3** (fb1..4 = rightmost column; K2's old "verified" claim was wrong) — user confirmed.
-- **Session arrangement web (127.0.0.1:8781)** is on feature/arrange-web and merged into release/1.5.0 (93c2cc7) but
-  **NOT deployed**: Kimi NO-GO (token handout, unbounded queues, preview leak, stale manager, rule save rollback,
-  OverflowError, bg thread join) — fix in progress; do NOT deploy the Mac daemon from release/1.5.0.
-- **24 h soak** on 1.5.1 started 2026-10-22 05:02 (latest `~/mk20-backup/soak/soak-*.jsonl`); patrol every 2 h.
+- **Session arrangement web (127.0.0.1:8781) is LIVE on the Mac** (07:10): open with `mk20deck arrange`
+  (wrapper ~/.local/bin/mk20deck → ~/mk20-deploy venv); one-time link written to a 0600 .webloc in the 0700
+  `~/.config/mk20-agent-deck/run/` (never in argv), cookie 30 days. Kimi r1/r2 NO-GO → r3 GO (deck/reviews/1.5.1/).
+  Open MINOR: a local process can hold all 8 keep-alive slots (page-only DoS) → add a per-connection lifetime cap.
+- **Page sync (08:56)**: the Mac now sends absolute `ui.page` on every page change (guess of the device page, unknown
+  after any non-acked request/hello; device K2 taps flip it; K1/K2 forwarded edges are always taps on ui.page
+  firmware). Fixed: MODE long press used to switch only the Mac to L4. Kimi r1 NO-GO → r2 GO; real-binary e2e
+  (tests/test_page_sync_e2e.py, Linux only). Firmware follow-ups for the next rc: same-page ui.page should not release
+  held keys; hello should report the current route; generation reset after exhaustion.
+- **devtest HID-leak gate** follows the 1.5.x rule (PTT + L1/L4 bottom row + granted digits), Kimi r2 GO.
+- **PRD v1.5 draft** on branch docs/prd-1.5 (027c443; main PRD + GRILL-DECISIONS) — awaiting the user's approval
+  (「批准 PRD v1.5」, covers v1.4 §15 too); integrator decisions needing explicit OK: momentary digits, digits ignored
+  while PTT held, option mode only for hook prompts, 10 s HID auto-release.
+- **24 h soak** on 1.5.1 started 2026-10-22 05:02 (latest `~/mk20-backup/soak/soak-*.jsonl`); patrol every 2 h; one-shot
+  verdict job 10-23 05:23 (session-only cron).
 - **Mac: mk20deck runs as LaunchAgent** `com.leo.mk20-agent-deck` from `~/mk20-deploy` (detached checkout of
-  release/1.4.0), venv `~/mk20-deploy/.venv`, config `~/.config/mk20-agent-deck/config.toml` (terminal_app=Ghostty,
+  release/1.5.1 5f2ed0d; state backups ~/mk20-backup/deck-state-*.tgz), venv `~/mk20-deploy/.venv`, config `~/.config/mk20-agent-deck/config.toml` (terminal_app=Ghostty,
   tmux new session = `ccai sg`), logs `~/.config/mk20-agent-deck/logs/deck.err.log`. Connects via
   tcp://172.30.250.2:17890 (usb0 bridge; the gadget has no ACM). Restart: `launchctl kickstart -k gui/$(id -u)/com.leo.mk20-agent-deck`.
 - Earlier soaks: 1.3.1 (155 samples): 0 real crashes, 0 composite losses, ping 0 loss. Annotations: ~/mk20-backup/soak/ANNOTATIONS.txt.
@@ -65,13 +76,14 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 
 ## Open items
 1. User device checks for 1.5.1: option mode with a NEW Claude session in tmux (AskUserQuestion / permission menu accept
-   digits?), codex approval UI with digits, slot move gesture, ⌫/⏎/Esc keys, K2 → L4 新会话/回L1.
-2. Session arrangement web: finish the Kimi NO-GO fixes → re-review → merge into release/1.5.1 → deploy → user test.
-3. 24 h soak on 1.5.1 → tag the production release (v1.5.1) or next rc.
-4. PRD v1.5 (deck/docs/PRD-1.5-L1-LAYOUT.md) to merge into the main PRD + approval; PRD v1.4 §15 approval.
+   digits?), codex approval UI with digits, slot move gesture, ⌫/⏎/Esc keys, K2 → L4 新会话/回L1, MODE long press → L4
+   and back (page sync), `mk20deck arrange` rules page.
+2. 24 h soak on 1.5.1 → tag the production release (v1.5.1; Mac side = release/1.5.1 HEAD) or next rc.
+3. Next firmware rc: page-sync follow-ups above + device settings-web link to the arrange page.
+4. PRD v1.5 draft (branch docs/prd-1.5) → user approval → merge into main / release.
 5. codex hooks: reinstall the updated hook (`deck/tools/hooks/hooks-uninstall.sh && hooks-install.sh`) and re-trust in
-   codex — needs the user's OK (changes ~/.codex). Device web link to the arrange page (next firmware).
-6. hw/devtest.py HID-leak check still assumes "no HID except PTT" (fb17–19 / option digits are HID now) — update.
+   codex — needs the user's OK (changes ~/.codex).
+6. Arrange web MINOR: per-connection lifetime cap for keep-alive slots (local page-only DoS).
 7. Measure e-stop visual-feedback latency on device (fb20 face now on bus 0 with the sub-screen; Kimi rc4 note).
 8. Not in this delivery: agent A8c merge, USB mic / UVC capture / charger-only / Mac reboot / TF restore rehearsal tests,
    mk20-router 23 s WiFi-dongle reset (router off by default since 1.3), HOME visual polish beyond status text.
