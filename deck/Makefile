@@ -5,6 +5,9 @@ test: sim-test kbd-test agent-test onboard-ui-test
 	(cd tools && uv run --with pytest python -m pytest -q test_tcp_transport.py test_mk20_host_net.py test_mk20_soak.py test_mk20_accept.py test_tf_gpt.py)
 	MK20_TEST_BUSYBOX=$${MK20_TEST_BUSYBOX:-$$( [ -x /workspace/tools/bb127/busybox ] && echo /workspace/tools/bb127/busybox )} uv run --with pytest python -m pytest -q tests
 
+mac-test:   # on the Mac itself: mk20deck runs on macOS, so its tests must pass natively too (device-side C/BusyBox tests skip)
+	UV_PROJECT_ENVIRONMENT=$${UV_PROJECT_ENVIRONMENT:-/tmp/mk20deck-venv-mac} uv run --with pytest python -m pytest -q -p no:cacheprovider tests
+
 bins:   # static armhf bridge + router from source into firmware/release/bin (needs arm-linux-gnueabihf-gcc)
 	sh tools/mk20-build-bins.sh
 
@@ -24,7 +27,7 @@ sim-test:
 sim:
 	uv run python -m mk20sim --port 8766
 
-.PHONY: test bins release sim-test sim kbd-test agent-test
+.PHONY: test mac-test bins release sim-test sim kbd-test agent-test
 
 onboard-ui-test:   # U1/U2: offline C buffers/files plus C-backed simulator cases
 	$(MAKE) -C kbd ui-test

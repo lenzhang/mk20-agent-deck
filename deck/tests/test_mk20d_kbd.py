@@ -981,6 +981,7 @@ def test_release_rollback_requests_ab_without_tearing_down_usb(tmp_path):
     assert result.returncode == 0 and (tmp_path / 'cmd-rollback').exists()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="mk20-kbd is a Linux binary")
 def test_safe_mode_executable_portable():
     # The host binary is built by make -C kbd test/safe-test; skip only when absent.
     binary = DECK / 'kbd/mk20-kbd'
