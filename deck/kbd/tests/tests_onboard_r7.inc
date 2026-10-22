@@ -507,9 +507,63 @@ static void v7_pause_resync_releases_owners(void)
     { int n=ux_frames(p[0],f,ids,64); CHECK(!ux_count(f,n,"\"col\":103,")); }
     l1_teardown(&k,&c,hp,p);
 }
+/* rc4 (Kimi K3 rc3 delta): (1) every place that ends an owner also ends its same-page bound — a leftover keep
+ * pair cut a later press of the same key early and latched it; (2) a repeated GD32 down of a held host key is
+ * the same press (not forwarded again: a phantom storm cannot flood the Mac), the next up releases, a genuine
+ * long press is one down + one up; (3) the keep-cut log line names the real held time. */
+static int v7_stderr_begin(FILE **t) { fflush(stderr); int saved=dup(2); *t=tmpfile(); CHECK(*t!=NULL); dup2(fileno(*t),2); return saved; }
+static void v7_stderr_end(int saved, FILE *t, char *out, size_t cap)
+{ fflush(stderr); dup2(saved,2); close(saved); rewind(t); size_t n=fread(out,1,cap-1,t); out[n]=0; fclose(t); }
+static void v7_keep_pair_cleared(void)
+{
+    char f[64][192]; uint32_t ids[64]; int ups;
+    kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p);
+    key(&k,12,1); l1_host_keys(p[0]);
+    CHECK(v7_page(&k,p[0],"L1",&ups)==1 && !ups); /* keep armed at T */
+    int saved=k.host_fd; k.host_fd=-1; onboard_host_flush(&k); k.host_fd=saved; /* host gone: owner 1 dropped */
+    CHECK(onboard_key_owner(&k,12)==0);
+    hk_fresh(&k); live(&k,2000); ux_frames(p[0],f,ids,64); /* its GD32 up lost meanwhile */
+    key(&k,12,1); { int n=ux_frames(p[0],f,ids,64); CHECK(ux_count(f,n,"\"pressed\":true")==1); } /* a new press */
+    live(&k,12000); CHECK(!v7_ups(p[0]) && onboard_key_owner(&k,12)==1); /* T+10 s passed: not cut, not latched */
+    key(&k,12,0); CHECK(v7_ups(p[0])==1);
+    key(&k,12,1); key(&k,12,0); CHECK(v7_ups(p[0])==1);
+    /* a pending up flushed by the transport also clears it: re-arming after a new press works */
+    key(&k,12,1); l1_host_keys(p[0]);
+    CHECK(v7_page(&k,p[0],"L1",&ups)==1); hk_fresh(&k); live(&k,9000); CHECK(v7_ups(p[0])==1); /* bound re-armed */
+    key(&k,12,0); CHECK(!v7_ups(p[0]));
+    l1_teardown(&k,&c,hp,p);
+}
+static void v7_host_key_repeated_down(void)
+{
+    char f[64][192]; uint32_t ids[64];
+    kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p);
+    key(&k,12,1);
+    for (int i=0;i<50;i++) { now+=100; if (!(i%10)) beat(&k); key(&k,12,1); } /* a phantom-down storm, live page */
+    { int n=ux_frames(p[0],f,ids,64); CHECK(ux_count(f,n,"keyStateChanged")==1 && ux_count(f,n,"\"pressed\":true")==1); }
+    CHECK(onboard_key_owner(&k,12)==1);
+    key(&k,12,0); CHECK(v7_ups(p[0])==1 && !onboard_key_owner(&k,12)); /* the next up releases */
+    /* a genuine long press (the Mac's 600 ms pick-up) is one down + one up, unchanged */
+    key(&k,3,1); now+=800; beat(&k); key(&k,3,0);
+    { int n=ux_frames(p[0],f,ids,64); CHECK(ux_count(f,n,"keyStateChanged")==2 && ux_count(f,n,"\"pressed\":true")==1); }
+    /* the PTT-ignored digit (owner 1) and the Mac mode key (owner 1) likewise */
+    CHECK(hk_map(&k,p[0],HK3)==1);
+    key(&k,16,1); key(&k,1,1); key(&k,1,1); key(&k,1,1); key(&k,20,1); key(&k,20,1);
+    { int n=ux_frames(p[0],f,ids,64); CHECK(ux_count(f,n,"\"ignored\":\"ptt\"")==1 && ux_count(f,n,"\"pressed\":true")==2); }
+    key(&k,1,0); key(&k,20,0); key(&k,16,0); CHECK(v7_ups(p[0])==2);
+    /* the keep-cut log line names the real held time (here ~60 s: phantom downs every 5 s) */
+    key(&k,12,1); l1_host_keys(p[0]);
+    CHECK(v7_page(&k,p[0],"L1",NULL)==1); hk_fresh(&k);
+    FILE *t; int saved=v7_stderr_begin(&t);
+    for (int sec=1;sec<=KEEP_MAX/1000+2;sec++) { now+=1000; beat(&k); if (!(sec%5)) key(&k,12,1); for (int i=0;i<8;i++) kbd_service(&k,now); }
+    char log[4096]; v7_stderr_end(saved,t,log,sizeof log);
+    CHECK(strstr(log,"key held 60 s across a same-page ui.page") || strstr(log,"key held 61 s across a same-page ui.page"));
+    CHECK(v7_ups(p[0])==1);
+    l1_teardown(&k,&c,hp,p);
+}
 static void round7_regressions(void)
 {
     v7_same_page_keeps_held(); v7_same_page_option_mode(); v7_same_page_release_paths(); v7_hello_page();
     v7_generation_reset(); v7_open_arrange(); v7_estop_pause_owners(); v7_same_page_lost_up(); v7_fuzz_release_invariant();
-    v7_phantom_down_storm(); v7_cut_latch(); v7_pause_resync_releases_owners();
+    v7_phantom_down_storm(); v7_cut_latch(); v7_pause_resync_releases_owners(); v7_keep_pair_cleared();
+    v7_host_key_repeated_down();
 }

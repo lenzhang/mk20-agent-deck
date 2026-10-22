@@ -112,6 +112,11 @@ falls back to its 1.5.1 behaviour when the hello carries no `page`. Tests: `kbd/
   request (`keep_until`: host up / the pending 回 L1 is cancelled, never run late); a new GD32 down of that key
   confirms it pressed and renews the 10 s, never past 60 s after the first request (`KEEP_MAX_MS`, rc3) — a
   request used to release them at once, and a lost GD32 up (or a phantom-down storm) must not keep them for ever.
+  Every path that ends an owner (release, boundary, e-stop, loss, a transport flush without a host) also ends
+  that bound (rc4); the cut latch is only ended by the key's up (a physical fact). rc4: a repeated GD32 down of a
+  held host key (owner 1) is the same press on every host page — not forwarded again (it used to send another
+  `"pressed":true`, unbounded under a phantom storm); its next up releases. A genuine press is one down + one up,
+  so the Mac's long-press gestures (600 ms pick-up) are unchanged.
   Why it is safe: (1) nothing new is pressed — the page is not live until the fresh frame and the grace window
   swallows new presses, so no input can act on stale labels; (2) every other release path still applies to the
   kept owners: the 10 s lost-up cut (owners ≥ 5, `hid_at` unchanged), the 120 s PTT cap, the 10 s `keep_until`

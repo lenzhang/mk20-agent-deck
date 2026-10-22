@@ -315,6 +315,11 @@ def main():
         s = json.load(open(st))
         check(s["knob_init"] == "ok" and s["knob_ok"] == 6 and s["panels_written"] == 21 and s["echo_frames"] == 1
               and s["key_events"] == 3 and s["knob_events"] == 1 and s["host"] == 1, f"status {s}")
+        # release fb1 (pressed above): since rc4 a repeated down of a held host key is the same press, so a key left
+        # held here would make its later option-mode press only the release of this one
+        os.write(gm, gd32_frame([0x16, 0, 0, 0, 0, 0]))
+        evs = [P.classify_json(f.json()) for f in par.feed(read_for(hm, 0.3)) if f.cmd == P.CMD_JSON and f.json().get("method") == "keyStateChanged"]
+        check(len(evs) == 1 and (evs[0].col, evs[0].row, evs[0].pressed) == (0, 0, False), f"fb1 released {evs}")
         # HID: startup all-up, PTT (doc 1,4 = fw col 0,row 3) holds RAlt
         def hid_reports():
             b = read_for(hr, 0.3)

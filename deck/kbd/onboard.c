@@ -69,7 +69,7 @@ struct onboard_s {
      * bound of its own (owners >= 5 have the 10 s cut, the PTT its caps): it is kept until keep_until (request
      * + HID_KEY_HOLD_MS; a new GD32 down of that key renews it, never past keep_max). 0 = none. */
     int64_t keep_until[20], keep_max[20]; /* keep_max: absolute (request + KEEP_MAX_MS) */
-    int64_t press_at[20]; /* original press of a held PTT (owner 2): HID_PTT_MAX_MS counts from it */
+    int64_t press_at[20]; /* original press of a held key (live page); a PTT's HID_PTT_MAX_MS counts from it */
     /* Keys ended by a lost key-up guard (10 s cut, PTT caps, same-page bound): inert until the GD32 reports
      * their up, so a GD32 that only emits (phantom) downs cannot press them again right after the cut (rc3). */
     uint32_t cut_latch;
@@ -129,7 +129,10 @@ int onboard_host_flush(kbd_t *k)
     onboard_t *o=k->onboard;
     if (!o) return 0;
     if (k->host_fd < 0) {
-        for (int i=0;i<20;i++) if (o->key_owner[i]==1) o->key_owner[i]=0;
+        /* Every place that ends an owner also ends its same-page bound (rc4): a leftover keep pair would refuse
+         * to re-arm and cut a later press of the same key early. The cut latch is not touched: it records
+         * that the GD32 has not reported this key's up since a guard cut, a physical fact only an up ends. */
+        for (int i=0;i<20;i++) if (o->key_owner[i]==1) { o->key_owner[i]=0; o->keep_until[i]=o->keep_max[i]=0; }
         o->pending_up=0; o->tap_head=o->tap_count=o->tap_up=0;
         return 0;
     }
@@ -138,7 +141,7 @@ int onboard_host_flush(kbd_t *k)
     for (int i=0;i<20;i++) if (o->pending_up & (1u<<i)) {
         char j[160]; int n=host_json_key_state(j,sizeof j,i%5,i/5,0);
         if (n<=0 || kbd_host_queue(k,KBD_EVENT_ID,HOST_CMD_JSON,j,(size_t)n)) return -1;
-        o->pending_up &= ~(1u<<i); o->key_owner[i]=0;
+        o->pending_up &= ~(1u<<i); o->key_owner[i]=0; o->keep_until[i]=o->keep_max[i]=0;
     }
     while (o->tap_count) {
         int slot=o->taps[o->tap_head];
@@ -571,7 +574,8 @@ void onboard_tick(kbd_t *k, int64_t now)
         if (o->key_owner[i] == 4) { o->key_owner[i] = 0; o->cut_latch |= 1u << i; } /* never navigates late */
         else if (o->key_owner[i] == 1) {
             o->cut_latch |= 1u << i;
-            fprintf(stderr, "mk20-kbd: key held %d s after a same-page ui.page: released (lost key-up guard)\n", HID_KEY_HOLD_MS / 1000);
+            fprintf(stderr, "mk20-kbd: key held %d s across a same-page ui.page: released (lost key-up guard)\n",
+                    (int)((now - o->press_at[i]) / 1000));
             release_key(k,i);
         }
     }
@@ -717,6 +721,9 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
         kbd_host_drain(k);
         if (o->pending_up & (1u<<(fb-1))) return 1;
     }
+    /* Repeated down of a held host key (owner 1, its up not sent yet): the same press, not forwarded again
+     * (rc4: a phantom-down storm must not flood the Mac with presses); the next up releases. */
+    if (host_route(o) && o->key_owner[fb-1] == 1) return 1;
     if (keycode) return 1; /* incompatible GD32 mapping: never synthesize a second action */
     /* Swallowed down; its up is swallowed too. A key still owned from before the stop (a repeated GD32
      * down: its up was lost or is still due) keeps that owner, so the host still gets its up (1.6.0). */
@@ -724,6 +731,7 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
     if (host_route(o) && o->health == HOST_SUSPECT) return 1;
     if (host_route(o) && o->health == HOST_ONLINE && o->fresh) {
         int prev = o->key_owner[fb-1];
+        if (!prev) { o->press_at[fb-1] = now; o->keep_until[fb-1] = o->keep_max[fb-1] = 0; } /* a new press */
         o->key_owner[fb-1] = 1;
         /* L4 "回 L1" is decided locally on release: fb5 (row1,col5) in the 2026-10-21 layout (was fb14). */
         if (o->route == ONBOARD_L4 && fb == L4_BACK_FB) { o->key_owner[fb-1]=4; return 1; }

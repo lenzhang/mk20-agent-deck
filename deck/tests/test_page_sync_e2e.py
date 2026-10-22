@@ -402,3 +402,34 @@ def test_fw160_ls_arrange_key_reaches_the_mac(rig):
         time.sleep(0.02)
     assert opened == ["minted", "/nonexistent/run/open-e2e.webloc"]
     assert rig.d.arrange_opened == 1 and not any(e[:2] == FB17[::-1] for e in rig.raw)  # no key event for it
+
+
+def test_rc4_repeated_downs_of_a_held_host_key_are_one_long_press(rig):
+    """rc4: a repeated GD32 down of a held host key is the same press (never forwarded again: a phantom storm
+    cannot flood the Mac); a genuine long press is still one down + one up and the Mac's 600 ms pick-up works."""
+    assert rig.boot()
+    agree(rig, "L1")
+    idx = next(i for i in range(15) if rig.c.mgr.session_at(i) is not None)
+    rc = (idx // 5, idx % 5)  # firmware (row, col) of slot S<idx+1>
+    n = len(rig.raw)
+    rig.key(rc, True)
+    for _ in range(5):  # phantom downs while it is held
+        time.sleep(0.15)
+        rig.key(rc, True)
+    time.sleep(0.1)
+    rig.key(rc, False)
+    end = time.monotonic() + 3
+    while (rc[1], rc[0], False) not in rig.raw[n:] and time.monotonic() < end:
+        time.sleep(0.01)
+    got = [e for e in rig.raw[n:] if e[:2] == (rc[1], rc[0])]
+    assert got == [(rc[1], rc[0], True), (rc[1], rc[0], False)], got
+    assert wait_for_moving(rig), "the 0.85 s press was not the Mac's long press (pick-up)"
+
+
+def wait_for_moving(rig, timeout=2.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if rig.c.moving is not None:
+            return True
+        time.sleep(0.01)
+    return False
