@@ -285,7 +285,8 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 ## Release checklist
 
-1. `make test` is green on the box.
+1. `make test` is green on the box, and `make mac-test` is green on the Mac (mk20deck runs on macOS; socket and
+   timing behaviour differ from Linux, e.g. macOS answers unread request bytes on close with RST).
 2. Code review of the milestone diff: check the mihomo AI route first (US-Exit-Hy2), then the reviews in
    `deck/reviews/`. Fix every BLOCKER and MAJOR before building.
 3. Build. Copy the `.tar` and `.tar.sha256` to the Mac (`~/mk20-backup/releases/`) and check them with

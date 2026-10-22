@@ -11,7 +11,10 @@ from mk20deck.keytrace import parse
 from mk20deck.protocol import CMD_JSON, encode_frame
 
 SRC = DECK / "router/mk20_router.c"
-pytestmark = pytest.mark.skipif(not shutil.which("gcc"), reason="needs gcc")
+import sys
+
+pytestmark = pytest.mark.skipif(not shutil.which("gcc") or sys.platform != "linux",
+                                reason="device-side router: needs gcc and Linux headers")
 
 
 @pytest.fixture(scope="module")

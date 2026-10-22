@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from conftest import BB, DECK, scope_gadget_fn
 
+pytestmark = pytest.mark.skipif(not BB, reason="BusyBox unavailable (device-side router stop)")
+
 G = (DECK / "firmware/release/share/gadget.sh").read_text()
 FN = G[G.index("router_pids() {"):G.index("# KD stop:")]
 

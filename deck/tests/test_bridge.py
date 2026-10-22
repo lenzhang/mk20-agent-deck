@@ -4,7 +4,10 @@ import pytest
 from conftest import DECK
 
 SRC = DECK / "m2-scripts/bridge/ttygs_tcp_bridge.c"
-pytestmark = pytest.mark.skipif(not shutil.which("gcc"), reason="needs gcc")
+import sys
+
+pytestmark = pytest.mark.skipif(not shutil.which("gcc") or sys.platform != "linux",
+                                reason="device-side bridge: needs gcc and Linux headers")
 
 
 @pytest.fixture(scope="module")
