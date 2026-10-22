@@ -12,9 +12,11 @@ the controller, the slot managers or the rules store: every read and write is a 
 iteration, plus a "网页：…" toast).  Reads return a snapshot built on the loop thread; if the loop is busy
 (e.g. mid-handshake) the last snapshot is returned marked ``stale``.
 
-Bounds (Kimi K3 review, blocker 2): at most ``MAX_CONNECTIONS`` connections (more → 503 at once); HTTP/1.1
-keep-alive so a few open tabs polling every 2 s reuse their connection instead of hitting the cap; a
-keep-alive connection idle for ``READ_TIMEOUT_S`` is closed; every request has a hard ``REQUEST_DEADLINE_S``
+Bounds (Kimi K3 review, blocker 2): at most ``MAX_CONNECTIONS`` connections; HTTP/1.1 keep-alive so a few
+open tabs polling every 2 s reuse their connection instead of hitting the cap; a keep-alive connection idle
+for ``READ_TIMEOUT_S`` is closed, and every connection is recycled ("Connection: close") after
+``MAX_CONN_AGE_S`` or ``MAX_CONN_REQUESTS``; at the cap a new client first closes the oldest idle connection
+(503 only if none is idle); every request has a hard ``REQUEST_DEADLINE_S``
 from its first byte (a slow trickle is cut off, not just an idle socket), ``LoopCalls`` holds at most ``MAX_PENDING`` jobs (full → 503), the loop wake-up is coalesced and one
 loop iteration runs at most ``DRAIN_MAX`` jobs, so the page can never starve the keyboard loop.
 
@@ -48,6 +50,7 @@ import json
 import logging
 import re
 import secrets
+import select
 import socket
 import threading
 import time
@@ -69,6 +72,28 @@ MAX_PATH = 512
 MAX_CONNECTIONS = 8
 REQUEST_DEADLINE_S = 5.0   # from a request's first byte to the end of its response, header/body read included
 READ_TIMEOUT_S = 4.0       # per socket read; also the idle limit of a keep-alive connection between requests
+MAX_CONN_AGE_S = 60.0      # a keep-alive connection answers with "Connection: close" once it is this old ...
+MAX_CONN_REQUESTS = 100    # ... or has served this many requests (the page's fetch just reconnects)
+EVICT_MIN_IDLE_S = 0.2     # at the connection cap a new client closes the oldest connection idle this long
+EVICT_WAIT_S = 1.0         # ... and waits at most this for its slot (else 503)
+LINGER_S = 0.5             # after our last response: drain what the client still sends for at most this ...
+LINGER_BYTES = 64 * 1024   # ... or this many bytes, then close (no TCP reset: macOS resets on unread data)
+MAX_LINGER = 64            # sockets lingering at once (beyond: closed at once — only under a flood)
+# Test seam (None in production): called by a handler after its socket became readable and *before* it marks
+# itself busy, i.e. inside the window in which the eviction must notice the arrived bytes and leave it alone.
+_READY_HOOK: Callable | None = None
+
+
+def _readable(fd: int, timeout: float) -> bool:
+    """Data (or EOF / error) waiting on ``fd`` within ``timeout`` seconds — nothing is consumed."""
+    if fd < 0:
+        return True
+    if hasattr(select, "poll"):
+        p = select.poll()
+        p.register(fd, select.POLLIN | select.POLLPRI | select.POLLERR | select.POLLHUP)
+        return bool(p.poll(max(0, int(timeout * 1000))))
+    r, _, _ = select.select([fd], [], [], timeout)
+    return bool(r)
 JOB_TIMEOUT_S = 3.0        # the loop must pick a job up within this (else cancelled, 503)
 JOB_RUN_S = 1.5            # ... and finish a started one within this
 STATE_TIMEOUT_S = 2.0
@@ -547,6 +572,122 @@ _BUSY_RESPONSE = (b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: applicatio
                   b"Connection: close\r\n\r\n" + _BUSY_BODY)
 
 
+class _Lingerer:
+    """Graceful close off the request/accept threads.  A socket we are done with is half-closed (our FIN
+    follows the response), then whatever the client still sends — the rest of a refused request, a pipelined
+    request we will not serve — is read and dropped (≤ LINGER_BYTES, ≤ LINGER_S) before ``close``.  Closing
+    with unread bytes makes the kernel (macOS in particular) send a TCP reset, and the client would never see
+    our 503 / 4xx.  One thread, one poll() over all lingering sockets; at most MAX_LINGER of them."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._socks: dict[int, list] = {}  # fd -> [socket, deadline, bytes left]
+        self._ev = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._stopped = False
+        self.drained = 0
+        self.dropped = 0
+
+    def add(self, sock: socket.socket) -> None:
+        try:
+            sock.setblocking(False)
+            fd = sock.fileno()
+        except OSError:
+            fd = -1
+        with self._lock:
+            ok = fd >= 0 and not self._stopped and len(self._socks) < MAX_LINGER
+            if ok:
+                self._socks[fd] = [sock, time.monotonic() + LINGER_S, LINGER_BYTES]
+                if self._thread is None:
+                    self._thread = threading.Thread(target=self._run, name="mk20-arrange-linger", daemon=True)
+                    self._thread.start()
+        if not ok:
+            self.dropped += 1
+            self._close(sock)
+            return
+        self._ev.set()
+
+    def pending(self) -> int:
+        with self._lock:
+            return len(self._socks)
+
+    @staticmethod
+    def _close(sock: socket.socket) -> None:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _run(self) -> None:
+        # Never dies silently (Kimi r3 MINOR): an unexpected error in one pass is logged and the loop goes on;
+        # if the thread still ends, ``_thread`` is cleared so the next ``add`` starts a fresh one.
+        try:
+            while True:
+                with self._lock:
+                    if self._stopped:
+                        return
+                    items = list(self._socks.items())
+                if not items:
+                    self._ev.wait(0.5)
+                    self._ev.clear()
+                    continue
+                try:
+                    self._pass(items)
+                except Exception:  # noqa: BLE001 — keep lingering (else every close becomes a reset on macOS)
+                    log.exception("arrange linger pass failed")
+                    time.sleep(0.05)
+        finally:
+            with self._lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+
+    def _pass(self, items: list) -> None:
+        try:
+            if hasattr(select, "poll"):
+                p = select.poll()
+                for fd, _ in items:
+                    p.register(fd, select.POLLIN | select.POLLERR | select.POLLHUP)
+                ready = {fd for fd, _ in p.poll(50)}
+            else:
+                ready = set(select.select([fd for fd, _ in items], [], [], 0.05)[0])
+        except (OSError, ValueError):
+            ready = {fd for fd, _ in items}
+        now = time.monotonic()
+        for fd, entry in items:
+            sock, deadline, left = entry
+            done = now >= deadline
+            if not done and fd in ready:
+                try:
+                    data = sock.recv(min(left, 16384))
+                except BlockingIOError:
+                    data = None
+                except Exception:  # noqa: BLE001 — OSError or anything odd: just close this one
+                    data = b""
+                if data == b"":
+                    done = True  # the client closed too: clean close, no reset
+                elif data:
+                    entry[2] = left - len(data)
+                    done = entry[2] <= 0
+            if done:
+                with self._lock:
+                    if self._socks.get(fd) is entry:
+                        self._socks.pop(fd, None)
+                self._close(sock)
+                self.drained += 1
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
+            socks = [e[0] for e in self._socks.values()]
+            self._socks.clear()
+            t, self._thread = self._thread, None
+        self._ev.set()
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=1.0)  # its poll snapshot ends within 50 ms; no stale fd numbers polled after stop
+        for sock in socks:
+            self._close(sock)
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -555,20 +696,73 @@ class _Server(ThreadingHTTPServer):
 
     def __init__(self, *a, max_connections: int = MAX_CONNECTIONS, **kw) -> None:
         self._slots = threading.BoundedSemaphore(max_connections)
+        self._conns: dict[int, "_Handler"] = {}
+        self._conns_lock = threading.Lock()
         self.rejected = 0
         self.accepted = 0
+        self.evicted = 0
+        self.lingerer = _Lingerer()
         super().__init__(*a, **kw)
 
+    def shutdown_request(self, request) -> None:
+        """Every connection we close (after a response, a refusal, an eviction): half-close now, drain and close
+        on the lingering thread — never a reset that swallows our response, never blocking this thread."""
+        try:
+            request.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        self.lingerer.add(request)
+
+    def server_close(self) -> None:
+        super().server_close()
+        self.lingerer.stop()
+
+    def register(self, h: "_Handler") -> None:
+        with self._conns_lock:
+            self._conns[id(h)] = h
+
+    def unregister(self, h: "_Handler") -> None:
+        with self._conns_lock:
+            self._conns.pop(id(h), None)
+
+    def _evict_oldest_idle(self) -> bool:
+        """Close the oldest keep-alive connection that is idle (between requests) for EVICT_MIN_IDLE_S, so
+        connections that merely keep a slot can never starve a new client.
+
+        Never touches a request that has started to arrive: a handler waits for its next request's first
+        byte with poll (nothing consumed) and marks itself busy under this lock before reading; here, under
+        the same lock, a candidate whose socket already has bytes (or EOF) waiting is skipped, and the chosen
+        one is shut down before the lock is released, so it cannot turn busy in between."""
+        now = time.monotonic()
+        with self._conns_lock:
+            idle = sorted((h for h in self._conns.values()
+                           if h._idle_since is not None and now - h._idle_since >= EVICT_MIN_IDLE_S),
+                          key=lambda h: h._born)
+            for victim in idle:
+                try:
+                    if _readable(victim.connection.fileno(), 0):
+                        continue  # a request (or its first bytes) arrived: not idle any more
+                    victim._evicted, victim._idle_since = True, None
+                    victim.close_connection = True
+                    victim.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    continue
+                self.evicted += 1
+                return True
+        return False
+
     def process_request(self, request, client_address):
-        """At most ``max_connections`` handler threads; beyond that: an immediate 503, no thread."""
-        if not self._slots.acquire(blocking=False):
+        """At most ``max_connections`` handler threads; at the cap the oldest idle keep-alive connection is
+        closed to make room, else an immediate 503 (no thread)."""
+        if not self._slots.acquire(blocking=False) and \
+                not (self._evict_oldest_idle() and self._slots.acquire(timeout=EVICT_WAIT_S)):
             self.rejected += 1
             try:
                 request.setblocking(False)
-                request.send(_BUSY_RESPONSE)
+                request.send(_BUSY_RESPONSE)  # fits the socket buffer: never blocks the accept thread
             except OSError:
                 pass
-            self.shutdown_request(request)
+            self.shutdown_request(request)  # FIN after the 503; the unread request is drained, not reset
             return
         self.accepted += 1
         try:
@@ -620,18 +814,50 @@ class _Handler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         self.timeout = READ_TIMEOUT_S
         self._deadline: threading.Timer | None = None
+        self._born = time.monotonic()
+        self._requests = 0
+        self._last = False  # this connection's current response is its last ("Connection: close")
+        self._idle_since: float | None = None  # set while waiting between requests (evictable)
+        self._evicted = False
         super().setup()
+        self.server.register(self)
+
+    def _set_idle(self, idle: bool) -> bool:
+        """Idle <-> busy under the server's lock; False once the server claimed this connection for eviction."""
+        with self.server._conns_lock:
+            if self._evicted:
+                return False
+            self._idle_since = time.monotonic() if idle else None
+            return True
 
     def handle_one_request(self) -> None:
         """Wait (idle, at most READ_TIMEOUT_S) for the next request's first byte, then give the whole request a
-        hard REQUEST_DEADLINE_S: a client that trickles bytes is cut off (reads fail, the thread ends)."""
-        try:
-            if not self.rfile.peek(1):
-                self.close_connection = True  # client closed its keep-alive connection
+        hard REQUEST_DEADLINE_S: a client that trickles bytes is cut off (reads fail, the thread ends).
+        A connection lives at most MAX_CONN_AGE_S / MAX_CONN_REQUESTS: then its response says
+        "Connection: close" and the client reconnects (no keep-alive connection holds a slot forever)."""
+        if not self._buffered():  # (a pipelined request already read into our buffer needs no wait)
+            if not self._set_idle(True):
+                self.close_connection = True
                 return
+            try:  # wait for the first byte without consuming anything: while idle we are evictable
+                ready = _readable(self.connection.fileno(), self.timeout)
+            except (OSError, ValueError):
+                ready = False
+            hook = _READY_HOOK
+            if ready and hook is not None:
+                hook(self)
+            if not self._set_idle(False) or not ready:  # busy now: the eviction can no longer pick us
+                self.close_connection = True  # evicted, or the idle keep-alive limit passed
+                return
+        try:
+            data = self.rfile.peek(1)
         except (OSError, ValueError):
-            self.close_connection = True  # idle keep-alive limit / reset
+            data = b""
+        if not data:
+            self.close_connection = True  # the client closed its keep-alive connection
             return
+        self._requests += 1
+        self._last = self._requests >= MAX_CONN_REQUESTS or time.monotonic() - self._born >= MAX_CONN_AGE_S
         self._deadline = threading.Timer(REQUEST_DEADLINE_S, self._expire)
         self._deadline.daemon = True
         self._deadline.start()
@@ -640,14 +866,28 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             self._deadline.cancel()
 
+    def _buffered(self) -> bool:
+        """Bytes already in our read buffer (pipelining)?  Non-blocking peek; only called while busy."""
+        try:
+            self.connection.setblocking(False)
+            try:
+                return bool(self.rfile.peek(1))
+            finally:
+                self.connection.settimeout(self.timeout)
+        except (OSError, ValueError):
+            return False
+
     def _expire(self) -> None:
+        """Request deadline: stop reading (a blocked read returns EOF, the trickling client is cut off) but keep
+        the write side, so a response that is being produced still goes out; the close then lingers."""
         self.close_connection = True
         try:
-            self.connection.shutdown(socket.SHUT_RDWR)
+            self.connection.shutdown(socket.SHUT_RD)
         except OSError:
             pass
 
     def finish(self) -> None:
+        self.server.unregister(self)
         if self._deadline is not None:
             self._deadline.cancel()
         try:
@@ -673,7 +913,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("X-MK20-Arrange", "1")
-        if self.close_connection:
+        if self.close_connection or self._last:  # (send_header sets close_connection for "close")
             self.send_header("Connection", "close")
         for k, v in (extra or {}).items():
             self.send_header(k, v)

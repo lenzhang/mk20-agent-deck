@@ -13,9 +13,18 @@ R1 one-time URL in `open` argv (ps)             -> 0600 link file in the 0700 ru
 R2 token in the open-failure log                -> logs drop everything after /auth?
 R3 several tabs vs the 8-connection cap         -> HTTP/1.1 keep-alive (+ quiet page back-off on "busy")
 R4 flaky foreign-uid refusal (EPIPE)            -> reply-then-half-close-and-drain, tolerant client
+
+r3 MINOR on d82cd58:
+R5 keep-alive hogs could hold all 8 slots        -> per-connection cap (age / requests -> Connection: close),
+                                                    at the cap the oldest idle connection is closed first
+R6 first byte vs eviction race (5e36c55 MAJOR)   -> poll for the first byte (nothing consumed), busy before
+                                                    reading, eviction re-checks "no bytes waiting" under the lock
+R7 503 / refusals reset on macOS (8454b90 MAJOR) -> every close half-closes and drains (bounded, off the
+                                                    accept/request threads) before close: no TCP reset
 """
 import json
 import os
+import re
 import socket
 import sqlite3
 import stat
@@ -801,3 +810,437 @@ def test_client_maps_an_abrupt_refusal_to_a_refusal():
             request_url(path)
     th.join(5)
     srv.close()
+
+
+# ====================================================================== R5: per-connection cap
+def _read_head(s):
+    """One response on a keep-alive socket: returns the header block (body consumed), b"" on EOF."""
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = s.recv(4096)
+        if not chunk:
+            return b""
+        buf += chunk
+    head, _, body = buf.partition(b"\r\n\r\n")
+    n = int(re.search(rb"Content-Length: (\d+)", head).group(1))
+    while len(body) < n:
+        body += s.recv(4096)
+    return head
+
+
+def _ka_get(s, port, path="/favicon.ico"):
+    s.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+    return _read_head(s)
+
+
+def test_keep_alive_connection_is_recycled_after_max_requests(deck, monkeypatch):
+    monkeypatch.setattr(webui, "MAX_CONN_REQUESTS", 5)
+    w = deck()
+    s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+    heads = [_ka_get(s, w.srv.port) for _ in range(5)]
+    assert all(h.startswith(b"HTTP/1.1 204") for h in heads)
+    assert [b"Connection: close" in h for h in heads] == [False] * 4 + [True]
+    assert s.recv(16) == b""  # the server closed it after the 5th response
+    s.close()
+
+
+def test_keep_alive_connection_is_recycled_after_max_age(deck, monkeypatch):
+    monkeypatch.setattr(webui, "MAX_CONN_AGE_S", 0.6)
+    w = deck()
+    s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+    assert b"Connection: close" not in _ka_get(s, w.srv.port)
+    time.sleep(0.7)
+    assert b"Connection: close" in _ka_get(s, w.srv.port)  # still answered, then closed
+    assert s.recv(16) == b""
+    s.close()
+
+
+def test_the_page_keeps_working_across_the_recycling(deck, monkeypatch):
+    import http.client
+    monkeypatch.setattr(webui, "MAX_CONN_REQUESTS", 3)
+    w = deck()
+    before = w.srv.httpd.accepted
+    c = http.client.HTTPConnection("127.0.0.1", w.srv.port, timeout=5)  # like the page's fetch: reconnects
+    statuses = []
+    for i in range(10):
+        if i == 4:
+            c.request("POST", "/api/clear", body=b'{"mode": "codex_desktop", "slot": 14}',
+                      headers=dict(w.cl.auth(), Host=w.cl.host))
+        else:
+            c.request("GET", "/api/state", headers=dict(w.cl.auth(Origin=None), Host=w.cl.host))
+        r = c.getresponse()
+        r.read()
+        statuses.append(r.status)
+    c.close()
+    assert statuses == [200] * 10
+    assert w.srv.httpd.accepted - before >= 4  # reconnected every 3 requests
+
+
+def _hog(port, stop, gap, out):
+    """A keep-alive client that never lets go of its connection (until the server closes it)."""
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        out.append(s)
+        while not stop.is_set():
+            head = _ka_get(s, port)
+            if not head or b"Connection: close" in head:
+                return
+            if gap:
+                time.sleep(gap)
+    except OSError:
+        return
+
+
+def test_eight_idle_hogs_cannot_starve_a_new_client(deck):
+    w = deck()
+    wait_slots_free(w.srv, webui.MAX_CONNECTIONS)
+    stop = threading.Event()
+    socks = []
+    ths = [threading.Thread(target=_hog, args=(w.srv.port, stop, 0.5, socks), daemon=True)
+           for _ in range(webui.MAX_CONNECTIONS)]
+    for t in ths:
+        t.start()
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    assert w.srv.httpd._slots._value == 0  # all 8 slots held by keep-alive hogs
+    time.sleep(0.3)
+    rejected = w.srv.httpd.rejected
+    t1 = time.monotonic()
+    snap = w.cl.state()  # a new client: the oldest idle hog is closed to make room
+    assert snap["ok"] and time.monotonic() - t1 < 1.5
+    assert w.srv.httpd.evicted >= 1 and w.srv.httpd.rejected == rejected
+    stop.set()
+    for t in ths:
+        t.join(5)
+    for s in socks:
+        s.close()
+
+
+def test_busy_hogs_hold_slots_only_until_the_connection_age_cap(deck, monkeypatch):
+    monkeypatch.setattr(webui, "MAX_CONN_AGE_S", 1.0)
+    w = deck()
+    wait_slots_free(w.srv, webui.MAX_CONNECTIONS)
+    stop = threading.Event()
+    socks = []
+    ths = [threading.Thread(target=_hog, args=(w.srv.port, stop, 0, socks), daemon=True)  # never idle
+           for _ in range(webui.MAX_CONNECTIONS)]
+    for t in ths:
+        t.start()
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    start = time.monotonic()
+    got = None
+    while time.monotonic() - start < 4:
+        c = Client(w.srv)
+        c.token, c.sid = w.cl.token, w.cl.sid
+        try:
+            st, _, _ = c.req("GET", "/api/state", headers=c.auth(Origin=None))
+        except OSError:
+            st = None
+        if st == 200:
+            got = time.monotonic() - start
+            break
+        time.sleep(0.05)
+    stop.set()
+    for t in ths:
+        t.join(5)
+    for s in socks:
+        s.close()
+    assert got is not None and got < webui.MAX_CONN_AGE_S + 1.0  # starved at most until the cap
+
+
+# ====================================================================== R6: first byte vs eviction
+def _read_head_keep(s):
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = s.recv(4096)
+        if not chunk:
+            return b"", b""
+        buf += chunk
+    head, _, body = buf.partition(b"\r\n\r\n")
+    n = int(re.search(rb"Content-Length: (\d+)", head).group(1))
+    while len(body) < n:
+        body += s.recv(4096)
+    return head, body
+
+
+def _post_bytes(w, path, body):
+    raw = json.dumps(body).encode()
+    h = dict(w.cl.auth(), Host=w.cl.host, **{"Content-Length": str(len(raw))})
+    return (f"POST {path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in h.items()) + "\r\n").encode() + raw
+
+
+def _race_setup(deck, monkeypatch):
+    """Two slots: A = idle keep-alive connection (one request served), B = holds the other slot mid-request.
+    The hook parks A in the window "bytes arrived, not yet busy" until ``gate`` is set."""
+    w = deck(max_connections=2)
+    wait_slots_free(w.srv, 2)
+    port = w.srv.port
+    a = socket.create_connection(("127.0.0.1", port), timeout=5)
+    assert _ka_get(a, port).startswith(b"HTTP/1.1 204")
+    b = socket.create_connection(("127.0.0.1", port), timeout=5)
+    b.sendall(b"GET /favicon.ico HTTP/1.1\r\n")  # busy: never an eviction candidate
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    assert w.srv.httpd._slots._value == 0
+    time.sleep(webui.EVICT_MIN_IDLE_S + 0.15)  # A is idle long enough to be a candidate
+    gate, entered = threading.Event(), threading.Event()
+
+    def hook(h):
+        if h._requests >= 1 and not entered.is_set():  # A's next request
+            entered.set()
+            gate.wait(5)
+
+    monkeypatch.setattr(webui, "_READY_HOOK", hook)
+    return w, a, b, gate, entered
+
+
+def _new_client_at_the_cap(w):
+    return raw_http(w.srv.port, f"GET /favicon.ico HTTP/1.0\r\nHost: 127.0.0.1:{w.srv.port}\r\n\r\n".encode())
+
+
+def test_an_arrived_post_is_executed_and_answered_not_evicted(deck, monkeypatch):
+    w, a, b, gate, entered = _race_setup(deck, monkeypatch)
+    before = w.ctl.mgr.slots[14].key
+    assert before is not None
+    a.sendall(_post_bytes(w, "/api/clear", {"mode": "codex_desktop", "slot": 14, "expect": before}))
+    assert entered.wait(3)  # A: readable, still marked idle (the window of the old race)
+    third = _new_client_at_the_cap(w)
+    assert third.startswith(b"HTTP/1.1 503")  # nothing evictable: A has bytes waiting, B is busy
+    assert w.srv.httpd.evicted == 0
+    gate.set()
+    head, body = _read_head_keep(a)
+    assert head.startswith(b"HTTP/1.1 200"), head
+    assert json.loads(body)["message"] == "已清空"  # the POST was executed
+    a.close()
+    b.close()
+
+
+def test_a_partial_request_is_not_evicted_either(deck, monkeypatch):
+    w, a, b, gate, entered = _race_setup(deck, monkeypatch)
+    full = f"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:{w.srv.port}\r\n\r\n".encode()
+    a.sendall(full[:9])  # "GET /favi"
+    assert entered.wait(3)
+    assert _new_client_at_the_cap(w).startswith(b"HTTP/1.1 503")
+    assert w.srv.httpd.evicted == 0
+    gate.set()
+    time.sleep(0.1)
+    a.sendall(full[9:])
+    head, _ = _read_head_keep(a)
+    assert head.startswith(b"HTTP/1.1 204"), head  # answered, not cut off
+    a.close()
+    b.close()
+
+
+def test_a_truly_idle_connection_is_still_evicted(deck, monkeypatch):
+    w, a, b, gate, entered = _race_setup(deck, monkeypatch)
+    gate.set()  # the hook must not hold the evicted handler (it wakes on the EOF of its shutdown)
+    third = _new_client_at_the_cap(w)  # A has nothing waiting: it is closed to make room
+    assert third.startswith(b"HTTP/1.1 204"), third[:40]
+    assert w.srv.httpd.evicted == 1
+    a.settimeout(2)
+    assert a.recv(16) == b""
+    gate.set()
+    a.close()
+    b.close()
+
+
+def test_pipelined_requests_are_answered_without_waiting(deck, monkeypatch):
+    """Requests already in the read buffer (pipelining) are served at once, not after the idle limit."""
+    monkeypatch.setattr(webui, "READ_TIMEOUT_S", 3.0)
+    w = deck()
+    s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+    one = f"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:{w.srv.port}\r\n\r\n".encode()
+    t0 = time.monotonic()
+    s.sendall(one * 3)
+    data = b""
+    while data.count(b"\r\n\r\n") < 3 and time.monotonic() - t0 < 2.5:  # 204s: header blocks only
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    assert data.count(b"HTTP/1.1 204") == 3, data[:200]
+    assert time.monotonic() - t0 < 1.0
+    s.close()
+
+
+# ====================================================================== R7: refusals are delivered, never reset
+def _read_all(s, limit=3.0):
+    """Everything until EOF; a TCP reset fails the test (that is the macOS bug this guards)."""
+    s.settimeout(limit)
+    out = b""
+    while True:
+        chunk = s.recv(65536)  # ConnectionResetError propagates
+        if not chunk:
+            return out
+        out += chunk
+
+
+def _refusal_cases(w):
+    p = w.srv.port
+    host = f"Host: 127.0.0.1:{p}\r\n"
+    o = f"Origin: http://127.0.0.1:{p}\r\n"
+    auth = (f"{host}{o}X-MK20-CSRF: {w.cl.token}\r\nCookie: {w.cl.cookie_name}={w.cl.sid}\r\n"
+            "Content-Type: application/json\r\n")
+    big = b"x" * 9000
+    return {
+        "405": (f"DELETE /api/rules/r1 HTTP/1.1\r\n{host}Content-Length: 5\r\n\r\nhello".encode(), b"405"),
+        "403-auth": (f"POST /api/clear HTTP/1.1\r\n{host}{o}Content-Type: application/json\r\n"
+                     f"Content-Length: 2\r\n\r\n{{}}".encode(), b"403"),
+        "403-host": (b"GET / HTTP/1.1\r\nHost: evil:1\r\n\r\n", b"403"),
+        "404": (f"GET /nope HTTP/1.1\r\n{host}\r\n".encode(), b"404"),
+        "413": (f"POST /api/clear HTTP/1.1\r\n{auth}Content-Length: {len(big)}\r\n\r\n".encode() + big, b"413"),
+        "400-json": (f"POST /api/clear HTTP/1.1\r\n{auth}Content-Length: 5\r\n\r\n{{nope".encode(), b"400"),
+        "414": (f"GET /{'a' * 600} HTTP/1.1\r\n{host}\r\n".encode(), b"414"),
+        "400-line": (b"GARBAGE\r\n\r\n", b"400"),
+    }
+
+
+@pytest.mark.parametrize("case", ["405", "403-auth", "403-host", "404", "413", "400-json", "414", "400-line"])
+def test_refusals_reach_the_client_even_with_unread_bytes(deck, case):
+    w = deck()
+    req, status = _refusal_cases(w)[case]
+    s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+    # 40 KiB the server never reads (more than its 8 KiB read buffer, less than the 64 KiB drain): a plain
+    # close with these unread bytes resets the connection on macOS and the client loses the response
+    s.sendall(req + b"T" * 40000)
+    out = _read_all(s)
+    s.close()
+    if case == "400-line":  # http.server answers an unparsable request line HTTP/0.9-style (body only)
+        assert b"Error code: 400" in out, out[:120]
+    else:
+        assert out.split(b"\r\n", 1)[0].split(b" ")[1] == status, out[:120]
+
+
+def test_503_at_the_cap_reaches_a_client_that_sent_a_whole_post(deck):
+    w = deck(max_connections=2)
+    wait_slots_free(w.srv, 2)
+    hogs = []
+    for _ in range(2):
+        h = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+        h.sendall(b"GET / HTTP/1.1\r\n")  # busy, not evictable
+        hogs.append(h)
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    for _ in range(5):
+        s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+        s.sendall(_post_bytes(w, "/api/clear", {"mode": "codex_desktop", "slot": 1, "pad": "y" * 6000}))
+        out = _read_all(s)
+        s.close()
+        assert out.startswith(b"HTTP/1.1 503") and b'"code": "busy"' in out, out[:120]
+    for h in hogs:
+        h.close()
+
+
+def test_lingering_is_bounded_and_never_blocks_the_accept_loop(deck):
+    w = deck(max_connections=2)
+    wait_slots_free(w.srv, 2)
+    hogs = []
+    for _ in range(2):
+        h = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+        h.sendall(b"GET / HTTP/1.1\r\n")
+        hogs.append(h)
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    stop = threading.Event()
+    keep = []
+
+    def chatty():  # a refused client that keeps sending and never closes
+        try:
+            s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+            keep.append(s)
+            while not stop.is_set():
+                s.sendall(b"z" * 4096)
+                time.sleep(0.01)
+        except OSError:
+            pass
+
+    talkers = [threading.Thread(target=chatty, daemon=True) for _ in range(4)]
+    for t in talkers:
+        t.start()
+    t1 = time.monotonic()
+    silent = [socket.create_connection(("127.0.0.1", w.srv.port), timeout=5) for _ in range(webui.MAX_LINGER + 20)]
+    accept_time = time.monotonic() - t1
+    time.sleep(0.2)
+    assert w.srv.httpd.lingerer.pending() <= webui.MAX_LINGER  # bounded (the rest is closed at once)
+    assert accept_time < 3.0  # the accept loop never waited on a lingering client
+    t2 = time.monotonic()
+    while w.srv.httpd.lingerer.pending() and time.monotonic() - t2 < 3:
+        time.sleep(0.05)
+    assert w.srv.httpd.lingerer.pending() == 0  # every lingering socket closed within LINGER_S (+ poll)
+    assert time.monotonic() - t2 < webui.LINGER_S + 1.0
+    stop.set()
+    for t in talkers:
+        t.join(3)
+    for s in silent + keep + hogs:
+        s.close()
+    time.sleep(0.3)
+    assert w.cl.state()["ok"]
+
+
+# ---------------------------------------------------------------- R8: lingerer robustness (Kimi r3 MINORs)
+def _linger_pair():
+    a, b = socket.socketpair()
+    a.shutdown(socket.SHUT_WR)  # as shutdown_request does before handing over
+    return a, b
+
+
+def _wait(pred, timeout=3.0):
+    t0 = time.monotonic()
+    while not pred() and time.monotonic() - t0 < timeout:
+        time.sleep(0.02)
+    return pred()
+
+
+def test_lingerer_survives_an_unexpected_error_in_a_pass(monkeypatch):
+    lg = webui._Lingerer()
+    real, calls = lg._pass, []
+
+    def flaky(items):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")  # e.g. something odd from poll/recv
+        return real(items)
+
+    monkeypatch.setattr(lg, "_pass", flaky)
+    a, b = _linger_pair()
+    lg.add(a)
+    b.close()  # the client closes: the lingering socket must still be closed after the failed pass
+    assert _wait(lambda: lg.pending() == 0)
+    assert len(calls) >= 2 and lg._thread is not None and lg._thread.is_alive()
+    lg.stop()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")  # the thread is killed on purpose
+def test_lingerer_thread_that_ends_is_restarted_by_the_next_add(monkeypatch):
+    lg = webui._Lingerer()
+    real = lg._pass
+    monkeypatch.setattr(lg, "_pass", lambda items: (_ for _ in ()).throw(SystemExit()))  # not an Exception
+    a, b = _linger_pair()
+    lg.add(a)
+    assert _wait(lambda: lg._thread is None)  # the dead thread cleared itself
+    monkeypatch.setattr(lg, "_pass", real)
+    c, d = _linger_pair()
+    lg.add(c)
+    assert lg._thread is not None and lg._thread.is_alive()  # a fresh thread
+    b.close(); d.close()
+    assert _wait(lambda: lg.pending() == 0)  # both sockets (the old one too) are drained and closed
+    lg.stop()
+
+
+def test_lingerer_stop_joins_the_thread_and_closes_everything():
+    lg = webui._Lingerer()
+    socks = [_linger_pair() for _ in range(3)]
+    for a, _ in socks:
+        lg.add(a)
+    t = lg._thread
+    lg.stop()
+    assert t is not None and not t.is_alive() and lg._thread is None
+    assert lg.pending() == 0 and all(a.fileno() == -1 for a, _ in socks)
+    for _, b in socks:
+        b.close()
