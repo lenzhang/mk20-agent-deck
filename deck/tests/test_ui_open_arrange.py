@@ -226,3 +226,40 @@ def test_supervisor_passes_the_arrange_server_to_each_daemon(server, monkeypatch
     finally:
         stop.set()
         th.join(3)
+
+
+# ------------------------------------------------------------------ Kimi K3 1.6.0 MINOR 4: access log redaction
+def test_redact_query_drops_every_query_value():
+    from mk20deck.webui import redact_query
+    assert redact_query('"GET /auth?t=abc_DEF-123 HTTP/1.1" 200 -') == '"GET /auth?… HTTP/1.1" 200 -'
+    assert redact_query("Bad request syntax ('GET /auth?t=xyz')") == "Bad request syntax ('GET /auth?…')"
+    assert redact_query('"GET /api/state HTTP/1.1" 200 -') == '"GET /api/state HTTP/1.1" 200 -'
+    assert redact_query("x ?a=1&t=2 y ?q") == "x ?… y ?…"
+
+
+def test_access_log_never_records_a_one_time_token(server, caplog):
+    """DEBUG access lines (BaseHTTPRequestHandler.log_request / log_error) are the request line: a still-valid
+    /auth?t=<token> must not reach any log level — neither redeemed, refused nor in a malformed request line."""
+    import socket
+    caplog.set_level(logging.DEBUG)
+    tokens = [server.mint_url().split("/auth?t=", 1)[1] for _ in range(3)]
+    c = Client(server)
+    st, h, _ = c.req("GET", f"/auth?t={tokens[0]}")  # redeemed
+    assert st == 200 and c.take_cookie(h)
+    st, _, _ = c.req("GET", f"/auth?t={tokens[0]}")  # refused (used)
+    assert st == 403
+    st, _, _ = c.req("GET", f"/nothing?t={tokens[1]}")
+    assert st in (403, 404)
+    with socket.create_connection(("127.0.0.1", server.port), timeout=5) as s:  # malformed request line
+        s.sendall(f"GET /auth?t={tokens[2]} HTTP/1.1 extra\r\nHost: 127.0.0.1:{server.port}\r\n\r\n".encode())
+        s.settimeout(5)
+        try:
+            while s.recv(4096):
+                pass
+        except OSError:
+            pass
+    assert wait_until(lambda: "arrange http:" in caplog.text)
+    time.sleep(0.2)
+    for t in tokens:
+        assert t not in caplog.text
+    assert "/auth?…" in caplog.text  # the lines are there, only the query is gone

@@ -781,6 +781,14 @@ class _Server(ThreadingHTTPServer):
         log.debug("arrange http: request from %s failed", client_address, exc_info=True)
 
 
+_QUERY = re.compile(r"\?[^\s\"']*")
+
+
+def redact_query(text: str) -> str:
+    """``/auth?t=…`` -> ``/auth?…``: no query value (one-time token) of any request ever reaches a log line."""
+    return _QUERY.sub("?…", str(text))
+
+
 class _Reject(Exception):
     def __init__(self, status: int, error: str, code: str = "") -> None:
         super().__init__(error)
@@ -808,7 +816,14 @@ class _Handler(BaseHTTPRequestHandler):
         return self.server_version
 
     def log_message(self, fmt, *args):  # quiet (stderr is the launchd log)
-        log.debug("arrange http: " + fmt, *args)
+        """Access/error lines of BaseHTTPRequestHandler (request line, status, size): debug only, and every query
+        string is cut off first — `/auth?t=<one-time token>` may still be valid when it is logged (Kimi K3 1.6.0
+        MINOR 4), and a bad request line is quoted whole by send_error."""
+        try:
+            msg = fmt % args
+        except (TypeError, ValueError):
+            msg = fmt
+        log.debug("arrange http: %s", redact_query(msg))
 
     # -------------------------------------------------------------- deadline
     def setup(self) -> None:
