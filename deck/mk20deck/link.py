@@ -284,8 +284,9 @@ class DeviceLink:
     def _exhausted(self) -> None:
         if not self.ui_generation_exhausted:
             self.ui_generation_exhausted = True
-            log.warning("ui generation exhausted (%d): ui.page / ui.hidKeys disabled on this connection until the "
-                        "keyboard process restarts and resets its counters (firmware follow-up)", P.GENERATION_MAX)
+            log.warning("ui generation exhausted (%d): ui.page / ui.hidKeys disabled on this connection; a re-hello on "
+                        "the same connection does not recover it — only mk20-kbd restarting (its counters reset) and "
+                        "a new connection do (firmware follow-up)", P.GENERATION_MAX)
 
     def _next_generation(self) -> int | None:
         """Next ui.page / ui.hidKeys generation, or None once 999999999 is used up (never a busy retry)."""

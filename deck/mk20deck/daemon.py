@@ -552,7 +552,10 @@ class Daemon:
                 if self.clock() - self._last_sleep_frame >= self.sleep_frame_s:
                     self.offline_frame("Mac 已休眠")
                 stop.wait(self.power_interval)
-                while not self.events.empty():  # drop input while the Mac sleeps
+                # Drop input while the Mac sleeps.  A keyboard K2 tap dropped here leaves the page guess stale
+                # only until wake: WakeReconnect starts a new epoch, the guess becomes unknown and the absolute
+                # page is sent again (Kimi r2 MINOR).
+                while not self.events.empty():
                     self.events.get_nowait()
                 if self.calls is not None:
                     self.calls.drain(self)  # arrange-page changes still apply (shown after wake)
