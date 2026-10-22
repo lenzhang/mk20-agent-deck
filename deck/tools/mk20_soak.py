@@ -15,6 +15,14 @@ A sample whose health status is not "ok" also keeps the WARN/FAIL lines of healt
 On exit (incl. SIGTERM) writes <out>/soak-<start>.summary.json: pass/fail counts, reboots (uptime drops), KD
 restarts, rollbacks newer than the one present at start, composite losses, min memory, min FAT free, and
 "selftest_warn": samples per distinct WARN/FAIL message (durations such as "12s" folded to "Ns").
+Kernel memory (slow kernel leaks hide under a flat MemAvailable; SLUB without SLUB_DEBUG: no /proc/slabinfo):
+every sample keeps "meminfo" = /proc/meminfo MemAvailable, MemFree, Slab, SReclaimable, SUnreclaim, Shmem,
+Cached in kB (read in the same adb shell call as the pids; a missing/unparsable field is null). The summary's
+"kernel_mem" has first/last/min/max of Slab and SUnreclaim over the run and least-squares slopes in kB/h of
+SUnreclaim and MemAvailable since the last reboot (null below 6 samples or 1 h). "kernel_mem_trend":
+"growing" = SUnreclaim slope > 50 kB/h (= 1.2 MB/day) over >= 6 h, in the whole span AND in each half of it
+(sustained: a one-off step raises only one half); "flat" = >= 6 h of samples without that; "insufficient" = fewer
+than 6 samples, under 6 h, or a half with < 3 samples.
 Stop early: kill the process (pid in <out>/soak.pid); the summary is still written.
 """
 from __future__ import annotations
@@ -38,6 +46,12 @@ STOP = False
 WARN_LINES, WARN_CHARS = 8, 160
 # mk20d joins its selftest lines with spaces (health JSON string): a line starts at each level keyword
 _LEVEL = re.compile(r"(?:^|(?<=\s))(?=(?:PASS|INFO|WARN|FAIL) )")
+MEMINFO_KEYS = ("MemAvailable", "MemFree", "Slab", "SReclaimable", "SUnreclaim", "Shmem", "Cached")
+# device side (BusyBox 1.27.2 awk): one line "meminfo=MemFree:41000 MemAvailable:52000 Cached:9000 ..." (kB)
+MEMINFO_SH = "echo meminfo=$(awk '/^(" + "|".join(MEMINFO_KEYS) + "):/{print $1 $2}' /proc/meminfo 2>/dev/null)"
+_MEMINFO = re.compile(r"(?<![\w(])([A-Za-z]\w*):\s*(\d+)(?!\w)")
+SLOPE_MIN_N, SLOPE_MIN_H = 6, 1.0        # a slope needs >= 6 samples spanning >= 1 h
+TREND_KB_H, TREND_MIN_H = 50.0, 6.0      # "growing": SUnreclaim > 50 kB/h sustained over >= 6 h
 
 
 def _stop(*_a):
@@ -64,6 +78,76 @@ def problem_key(line: str) -> str:
     return re.sub(r"\b\d+s\b", "Ns", line)
 
 
+def parse_meminfo(text) -> dict:
+    """MEMINFO_KEYS in kB from /proc/meminfo lines ("Slab:   11820 kB") or the one-line MEMINFO_SH form
+    ("Slab:11820 SUnreclaim:9000"). A missing or unparsable field is None; never raises."""
+    out: dict = dict.fromkeys(MEMINFO_KEYS)
+    if isinstance(text, str):
+        for m in _MEMINFO.finditer(text):
+            if m.group(1) in out and out[m.group(1)] is None:
+                out[m.group(1)] = int(m.group(2))
+    return out
+
+
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _ls_kb_h(pts) -> float | None:
+    """Least-squares slope in kB/h of [(epoch_s, kB), ...]; None for < 2 points or no time spread."""
+    if len(pts) < 2:
+        return None
+    xs = [(t - pts[0][0]) / 3600 for t, _ in pts]
+    mx, my = sum(xs) / len(xs), sum(v for _, v in pts) / len(pts)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx <= 0:
+        return None
+    return round(sum((x - mx) * (v - my) for x, (_, v) in zip(xs, pts)) / sxx, 1)
+
+
+def _clean(pts) -> list:
+    return [(t, v) for t, v in pts if _num(t) and _num(v)]
+
+
+def slope_kb_h(pts) -> float | None:
+    """Least-squares slope (kB/h) of [(epoch_s, kB), ...]; None below SLOPE_MIN_N points or SLOPE_MIN_H span."""
+    pts = _clean(pts)
+    if len(pts) < SLOPE_MIN_N or pts[-1][0] - pts[0][0] < SLOPE_MIN_H * 3600:
+        return None
+    return _ls_kb_h(pts)
+
+
+def half_slopes_kb_h(pts) -> list | None:
+    """[first half, second half] slopes (kB/h) of the time span; a half with < 3 points is None."""
+    pts = _clean(pts)
+    if len(pts) < 2:
+        return None
+    mid = (pts[0][0] + pts[-1][0]) / 2
+    halves = ([p for p in pts if p[0] <= mid], [p for p in pts if p[0] >= mid])
+    return [_ls_kb_h(h) if len(h) >= 3 else None for h in halves]
+
+
+def kernel_mem_trend(pts) -> str:
+    """SUnreclaim [(epoch_s, kB), ...] -> "growing" | "flat" | "insufficient" (thresholds: module docstring)."""
+    pts = _clean(pts)
+    if len(pts) < SLOPE_MIN_N or pts[-1][0] - pts[0][0] < TREND_MIN_H * 3600:
+        return "insufficient"
+    halves = half_slopes_kb_h(pts)
+    if None in halves:
+        return "insufficient"
+    full = slope_kb_h(pts)
+    return "growing" if full is not None and full > TREND_KB_H and min(halves) > TREND_KB_H else "flat"
+
+
+def kernel_mem_summary(stats: dict, pts: dict, since) -> dict:
+    """Summary block: Slab/SUnreclaim first/last/min/max over the run (stats), slopes since `since` (last reboot)."""
+    su, ma = pts.get("SUnreclaim") or [], pts.get("MemAvailable") or []
+    return {"Slab": stats.get("Slab"), "SUnreclaim": stats.get("SUnreclaim"), "slope_since": since,
+            "slope_samples": len(su), "slope_hours": round((su[-1][0] - su[0][0]) / 3600, 2) if su else 0,
+            "sunreclaim_kb_h": slope_kb_h(su), "sunreclaim_half_kb_h": half_slopes_kb_h(su),
+            "mem_avail_kb_h": slope_kb_h(ma)}
+
+
 def sample(deep: bool) -> dict:
     s: dict = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "deep": deep}
     rc, o = acc.sh("echo up", timeout=10)
@@ -87,8 +171,9 @@ def sample(deep: bool) -> dict:
                       # after a pid wrap, reported the shell as a "restart" every sample (10-20/21 overnight soak).
                       "echo kbd=$(for p in $(pidof mk20-kbd); do grep -q -- --run /proc/$p/cmdline && echo $p; done | head -n 1); "
                       "echo logkb=$(du -k /data/mk20/logs /mnt/SDCARD/mk20/logs 2>/dev/null | awk '{print $1}' | tr '\\n' ' '); "
-                      "echo bridgelog=$(wc -c < /tmp/mk20/bridge.log 2>/dev/null)")
+                      "echo bridgelog=$(wc -c < /tmp/mk20/bridge.log 2>/dev/null); " + MEMINFO_SH)
         f = dict(l.split("=", 1) for l in o.splitlines() if "=" in l)
+        s["meminfo"] = parse_meminfo(f.get("meminfo"))   # same adb call: adbd (debug) logs every command to tmpfs
         s["kd_pid"] = f.get("kd", "").strip()
         s["kbd_pid"] = f.get("kbd", "").strip()
         s["log_kb"] = f.get("logkb", "").strip()
@@ -159,6 +244,9 @@ def main() -> int:
     first_fail = None
     comp_losses, last_comp = 0, None
     warn_counts: dict = {}
+    km_stats: dict = {}                                  # Slab/SUnreclaim first/last/min/max over the run
+    km_pts: dict = {"SUnreclaim": [], "MemAvailable": []}   # (host epoch, kB) since the last reboot
+    km_since = None
     summary: dict = {"start": stamp, "samples": 0}
     try:
         while not STOP and time.time() < end:
@@ -173,6 +261,8 @@ def main() -> int:
             if isinstance(up, int) and last_up is not None and up < last_up:
                 reboots += 1
                 s["event"] = "reboot"
+                km_pts = {k: [] for k in km_pts}     # kernel memory starts over at boot: slopes per boot
+                km_since = None
             last_up = up if isinstance(up, int) else last_up
             kr = (h.get("kbd") or {}).get("restarts")   # mk20d's own count of real mk20-kbd exits (authoritative)
             kd = s.get("kbd_pid") or s.get("kd_pid")   # fallback for stock-era releases: the KD pid changed
@@ -203,6 +293,17 @@ def main() -> int:
                         min_mem = v if min_mem is None else min(min_mem, v)
                     else:
                         min_fat = v if min_fat is None else min(min_fat, v)
+            mi = s.get("meminfo") if isinstance(s.get("meminfo"), dict) else {}
+            for k in ("Slab", "SUnreclaim"):
+                v = mi.get(k)
+                if _num(v):
+                    st = km_stats.setdefault(k, {"first": v, "last": v, "min": v, "max": v})
+                    st.update(last=v, min=min(st["min"], v), max=max(st["max"], v))
+            ma = mi.get("MemAvailable") if _num(mi.get("MemAvailable")) else h.get("mem_avail_kb")
+            for k, v in (("SUnreclaim", mi.get("SUnreclaim")), ("MemAvailable", ma)):
+                if _num(v):
+                    km_pts[k].append((t, v))
+                    km_since = km_since or s.get("time")
             for key in {problem_key(x) for x in s.get("selftest_warn") or [] if isinstance(x, str)}:
                 warn_counts[key] = warn_counts.get(key, 0) + 1
             if not s.get("ok"):
@@ -213,7 +314,9 @@ def main() -> int:
             summary = {"start": stamp, "samples": n, "failed": bad, "first_fail": first_fail, "reboots": reboots,
                        "kd_restarts": kd_restarts, "rollbacks": rollbacks, "composite_losses": comp_losses, "min_mem_kb": min_mem,
                        "min_fat_free_kb": min_fat, "last": s.get("time"), "running": True, "pid": os.getpid(),
-                       "selftest_warn": dict(sorted(warn_counts.items(), key=lambda kv: (-kv[1], kv[0])))}
+                       "selftest_warn": dict(sorted(warn_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+                       "kernel_mem": kernel_mem_summary(km_stats, km_pts, km_since),
+                       "kernel_mem_trend": kernel_mem_trend(km_pts["SUnreclaim"])}
             _write_json(sm, summary)
             while not STOP and time.time() < min(end, t + a.interval):
                 time.sleep(1)

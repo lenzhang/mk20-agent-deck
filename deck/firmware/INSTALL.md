@@ -183,3 +183,8 @@ mkdir -p ~/mk20-backup/soak && caffeinate -i nohup python3 tools/mk20_soak.py --
 
 The soak writes `~/mk20-backup/soak/soak-<start>.jsonl` (one sample every 5 min) and a `.summary.json` that it
 keeps up to date. Stop it with `kill $(cat ~/mk20-backup/soak/soak.pid)`; the summary is still written.
+Kernel memory: each sample keeps `meminfo` (`/proc/meminfo` MemAvailable, MemFree, Slab, SReclaimable, SUnreclaim,
+Shmem, Cached in kB, null when unreadable; the kernel has no `/proc/slabinfo`). The summary's `kernel_mem` has
+first/last/min/max of Slab and SUnreclaim and least-squares slopes (kB/h) of SUnreclaim and MemAvailable since the
+last reboot (null below 6 samples / 1 h); `kernel_mem_trend` is `growing` when SUnreclaim rises > 50 kB/h over
+>= 6 h in the whole span and in each half of it, else `flat` (>= 6 h) or `insufficient`.
