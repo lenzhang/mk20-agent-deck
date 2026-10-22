@@ -19,6 +19,8 @@ R5 keep-alive hogs could hold all 8 slots        -> per-connection cap (age / re
                                                     at the cap the oldest idle connection is closed first
 R6 first byte vs eviction race (5e36c55 MAJOR)   -> poll for the first byte (nothing consumed), busy before
                                                     reading, eviction re-checks "no bytes waiting" under the lock
+R7 503 / refusals reset on macOS (8454b90 MAJOR) -> every close half-closes and drains (bounded, off the
+                                                    accept/request threads) before close: no TCP reset
 """
 import json
 import os
@@ -1063,3 +1065,119 @@ def test_pipelined_requests_are_answered_without_waiting(deck, monkeypatch):
     assert data.count(b"HTTP/1.1 204") == 3, data[:200]
     assert time.monotonic() - t0 < 1.0
     s.close()
+
+
+# ====================================================================== R7: refusals are delivered, never reset
+def _read_all(s, limit=3.0):
+    """Everything until EOF; a TCP reset fails the test (that is the macOS bug this guards)."""
+    s.settimeout(limit)
+    out = b""
+    while True:
+        chunk = s.recv(65536)  # ConnectionResetError propagates
+        if not chunk:
+            return out
+        out += chunk
+
+
+def _refusal_cases(w):
+    p = w.srv.port
+    host = f"Host: 127.0.0.1:{p}\r\n"
+    o = f"Origin: http://127.0.0.1:{p}\r\n"
+    auth = (f"{host}{o}X-MK20-CSRF: {w.cl.token}\r\nCookie: {w.cl.cookie_name}={w.cl.sid}\r\n"
+            "Content-Type: application/json\r\n")
+    big = b"x" * 9000
+    return {
+        "405": (f"DELETE /api/rules/r1 HTTP/1.1\r\n{host}Content-Length: 5\r\n\r\nhello".encode(), b"405"),
+        "403-auth": (f"POST /api/clear HTTP/1.1\r\n{host}{o}Content-Type: application/json\r\n"
+                     f"Content-Length: 2\r\n\r\n{{}}".encode(), b"403"),
+        "403-host": (b"GET / HTTP/1.1\r\nHost: evil:1\r\n\r\n", b"403"),
+        "404": (f"GET /nope HTTP/1.1\r\n{host}\r\n".encode(), b"404"),
+        "413": (f"POST /api/clear HTTP/1.1\r\n{auth}Content-Length: {len(big)}\r\n\r\n".encode() + big, b"413"),
+        "400-json": (f"POST /api/clear HTTP/1.1\r\n{auth}Content-Length: 5\r\n\r\n{{nope".encode(), b"400"),
+        "414": (f"GET /{'a' * 600} HTTP/1.1\r\n{host}\r\n".encode(), b"414"),
+        "400-line": (b"GARBAGE\r\n\r\n", b"400"),
+    }
+
+
+@pytest.mark.parametrize("case", ["405", "403-auth", "403-host", "404", "413", "400-json", "414", "400-line"])
+def test_refusals_reach_the_client_even_with_unread_bytes(deck, case):
+    w = deck()
+    req, status = _refusal_cases(w)[case]
+    s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+    # 40 KiB the server never reads (more than its 8 KiB read buffer, less than the 64 KiB drain): a plain
+    # close with these unread bytes resets the connection on macOS and the client loses the response
+    s.sendall(req + b"T" * 40000)
+    out = _read_all(s)
+    s.close()
+    if case == "400-line":  # http.server answers an unparsable request line HTTP/0.9-style (body only)
+        assert b"Error code: 400" in out, out[:120]
+    else:
+        assert out.split(b"\r\n", 1)[0].split(b" ")[1] == status, out[:120]
+
+
+def test_503_at_the_cap_reaches_a_client_that_sent_a_whole_post(deck):
+    w = deck(max_connections=2)
+    wait_slots_free(w.srv, 2)
+    hogs = []
+    for _ in range(2):
+        h = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+        h.sendall(b"GET / HTTP/1.1\r\n")  # busy, not evictable
+        hogs.append(h)
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    for _ in range(5):
+        s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+        s.sendall(_post_bytes(w, "/api/clear", {"mode": "codex_desktop", "slot": 1, "pad": "y" * 6000}))
+        out = _read_all(s)
+        s.close()
+        assert out.startswith(b"HTTP/1.1 503") and b'"code": "busy"' in out, out[:120]
+    for h in hogs:
+        h.close()
+
+
+def test_lingering_is_bounded_and_never_blocks_the_accept_loop(deck):
+    w = deck(max_connections=2)
+    wait_slots_free(w.srv, 2)
+    hogs = []
+    for _ in range(2):
+        h = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+        h.sendall(b"GET / HTTP/1.1\r\n")
+        hogs.append(h)
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    stop = threading.Event()
+    keep = []
+
+    def chatty():  # a refused client that keeps sending and never closes
+        try:
+            s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+            keep.append(s)
+            while not stop.is_set():
+                s.sendall(b"z" * 4096)
+                time.sleep(0.01)
+        except OSError:
+            pass
+
+    talkers = [threading.Thread(target=chatty, daemon=True) for _ in range(4)]
+    for t in talkers:
+        t.start()
+    t1 = time.monotonic()
+    silent = [socket.create_connection(("127.0.0.1", w.srv.port), timeout=5) for _ in range(webui.MAX_LINGER + 20)]
+    accept_time = time.monotonic() - t1
+    time.sleep(0.2)
+    assert w.srv.httpd.lingerer.pending() <= webui.MAX_LINGER  # bounded (the rest is closed at once)
+    assert accept_time < 3.0  # the accept loop never waited on a lingering client
+    t2 = time.monotonic()
+    while w.srv.httpd.lingerer.pending() and time.monotonic() - t2 < 3:
+        time.sleep(0.05)
+    assert w.srv.httpd.lingerer.pending() == 0  # every lingering socket closed within LINGER_S (+ poll)
+    assert time.monotonic() - t2 < webui.LINGER_S + 1.0
+    stop.set()
+    for t in talkers:
+        t.join(3)
+    for s in silent + keep + hogs:
+        s.close()
+    time.sleep(0.3)
+    assert w.cl.state()["ok"]

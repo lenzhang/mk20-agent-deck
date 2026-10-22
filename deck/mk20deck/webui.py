@@ -76,6 +76,9 @@ MAX_CONN_AGE_S = 60.0      # a keep-alive connection answers with "Connection: c
 MAX_CONN_REQUESTS = 100    # ... or has served this many requests (the page's fetch just reconnects)
 EVICT_MIN_IDLE_S = 0.2     # at the connection cap a new client closes the oldest connection idle this long
 EVICT_WAIT_S = 1.0         # ... and waits at most this for its slot (else 503)
+LINGER_S = 0.5             # after our last response: drain what the client still sends for at most this ...
+LINGER_BYTES = 64 * 1024   # ... or this many bytes, then close (no TCP reset: macOS resets on unread data)
+MAX_LINGER = 64            # sockets lingering at once (beyond: closed at once — only under a flood)
 # Test seam (None in production): called by a handler after its socket became readable and *before* it marks
 # itself busy, i.e. inside the window in which the eviction must notice the arrived bytes and leave it alone.
 _READY_HOOK: Callable | None = None
@@ -569,6 +572,104 @@ _BUSY_RESPONSE = (b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: applicatio
                   b"Connection: close\r\n\r\n" + _BUSY_BODY)
 
 
+class _Lingerer:
+    """Graceful close off the request/accept threads.  A socket we are done with is half-closed (our FIN
+    follows the response), then whatever the client still sends — the rest of a refused request, a pipelined
+    request we will not serve — is read and dropped (≤ LINGER_BYTES, ≤ LINGER_S) before ``close``.  Closing
+    with unread bytes makes the kernel (macOS in particular) send a TCP reset, and the client would never see
+    our 503 / 4xx.  One thread, one poll() over all lingering sockets; at most MAX_LINGER of them."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._socks: dict[int, list] = {}  # fd -> [socket, deadline, bytes left]
+        self._ev = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._stopped = False
+        self.drained = 0
+        self.dropped = 0
+
+    def add(self, sock: socket.socket) -> None:
+        try:
+            sock.setblocking(False)
+            fd = sock.fileno()
+        except OSError:
+            fd = -1
+        with self._lock:
+            ok = fd >= 0 and not self._stopped and len(self._socks) < MAX_LINGER
+            if ok:
+                self._socks[fd] = [sock, time.monotonic() + LINGER_S, LINGER_BYTES]
+                if self._thread is None:
+                    self._thread = threading.Thread(target=self._run, name="mk20-arrange-linger", daemon=True)
+                    self._thread.start()
+        if not ok:
+            self.dropped += 1
+            self._close(sock)
+            return
+        self._ev.set()
+
+    def pending(self) -> int:
+        with self._lock:
+            return len(self._socks)
+
+    @staticmethod
+    def _close(sock: socket.socket) -> None:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                if self._stopped:
+                    return
+                items = list(self._socks.items())
+            if not items:
+                self._ev.wait(0.5)
+                self._ev.clear()
+                continue
+            try:
+                if hasattr(select, "poll"):
+                    p = select.poll()
+                    for fd, _ in items:
+                        p.register(fd, select.POLLIN | select.POLLERR | select.POLLHUP)
+                    ready = {fd for fd, _ in p.poll(50)}
+                else:
+                    ready = set(select.select([fd for fd, _ in items], [], [], 0.05)[0])
+            except (OSError, ValueError):
+                ready = {fd for fd, _ in items}
+            now = time.monotonic()
+            for fd, entry in items:
+                sock, deadline, left = entry
+                done = now >= deadline
+                if not done and fd in ready:
+                    try:
+                        data = sock.recv(min(left, 16384))
+                    except BlockingIOError:
+                        data = None
+                    except OSError:
+                        data = b""
+                    if data == b"":
+                        done = True  # the client closed too: clean close, no reset
+                    elif data:
+                        entry[2] = left - len(data)
+                        done = entry[2] <= 0
+                if done:
+                    with self._lock:
+                        self._socks.pop(fd, None)
+                    self._close(sock)
+                    self.drained += 1
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
+            socks = [e[0] for e in self._socks.values()]
+            self._socks.clear()
+        self._ev.set()
+        for sock in socks:
+            self._close(sock)
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -582,7 +683,21 @@ class _Server(ThreadingHTTPServer):
         self.rejected = 0
         self.accepted = 0
         self.evicted = 0
+        self.lingerer = _Lingerer()
         super().__init__(*a, **kw)
+
+    def shutdown_request(self, request) -> None:
+        """Every connection we close (after a response, a refusal, an eviction): half-close now, drain and close
+        on the lingering thread — never a reset that swallows our response, never blocking this thread."""
+        try:
+            request.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        self.lingerer.add(request)
+
+    def server_close(self) -> None:
+        super().server_close()
+        self.lingerer.stop()
 
     def register(self, h: "_Handler") -> None:
         with self._conns_lock:
@@ -626,10 +741,10 @@ class _Server(ThreadingHTTPServer):
             self.rejected += 1
             try:
                 request.setblocking(False)
-                request.send(_BUSY_RESPONSE)
+                request.send(_BUSY_RESPONSE)  # fits the socket buffer: never blocks the accept thread
             except OSError:
                 pass
-            self.shutdown_request(request)
+            self.shutdown_request(request)  # FIN after the 503; the unread request is drained, not reset
             return
         self.accepted += 1
         try:
@@ -745,9 +860,11 @@ class _Handler(BaseHTTPRequestHandler):
             return False
 
     def _expire(self) -> None:
+        """Request deadline: stop reading (a blocked read returns EOF, the trickling client is cut off) but keep
+        the write side, so a response that is being produced still goes out; the close then lingers."""
         self.close_connection = True
         try:
-            self.connection.shutdown(socket.SHUT_RDWR)
+            self.connection.shutdown(socket.SHUT_RD)
         except OSError:
             pass
 
