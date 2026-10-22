@@ -4,15 +4,62 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
-## 1.6.0-rc1: host protocol additions (same-page ui.page, hello page, generation reset, 会话安排 key)
+## 1.6.0-rc2: host protocol additions (same-page ui.page, hello page, generation reset, 会话安排 key)
 
-`firmware/VERSION` is **1.6.0** (MINOR: host-visible protocol additions); build id **rc1**:
-`sh tools/mk20-release-build.sh firmware out rc1`. feature/fw-1.6.0 = release/1.5.1 (5f2ed0d, incl. fix/page-sync)
+`firmware/VERSION` is **1.6.0** (MINOR: host-visible protocol additions); build id **rc2** (rc1 below, superseded):
+`sh tools/mk20-release-build.sh firmware out rc2`. feature/fw-1.6.0 = release/1.5.1 (5f2ed0d, incl. fix/page-sync)
 + fix/macos-test-gate (61cca87) + this work. Only `bin/mk20-kbd` changed in the release (rebuilt static armhf); the
 other binaries are byte-identical. Rules, compatibility and the safety arguments: kbd/UI.md "1.6.0 host protocol
 additions". Both directions stay compatible: an older mk20deck ignores the new hello field and the new event (and
 gets the K2 tap of a page changed while it was away ~2 s earlier, at the hello instead of at ONLINE); a newer
 mk20deck keeps its 1.5.1 behaviour when the hello carries no `page`.
+
+### 1.6.0-rc2: Kimi K3 review fixes (rc1: NO-GO, never installed)
+
+Build id **rc2**: `sh tools/mk20-release-build.sh firmware out rc2`; `firmware/VERSION` stays **1.6.0** (rc1 was
+never installed). release/1.5.1 f8de052 (arrange keep-alive cap, graceful close) merged in. Only `bin/mk20-kbd`
+changed in the release.
+
+- **MAJOR 1 — PTT lost-up bound.** With same-page `ui.page` keeping a held PTT, a lost GD32 up left Right Option
+  down indefinitely while ONLINE. A 10 s cut is wrong for dictation and the GD32 cannot be asked for the key state
+  (its link has exactly one allowed outbound frame shape), so every PTT hold now ends after **120 s**
+  (`HID_PTT_HOLD_MS`, logged as a lost key-up guard; press again to continue); a repeated GD32 down of the held PTT
+  confirms it pressed and restarts the window. A host key / L4 回 L1 press kept across a same-page request (no
+  bound of its own) ends 10 s after the first such request unless a new GD32 down re-confirms it (host up; the
+  pending 回 L1 is cancelled, never run late). Owners ≥ 5 keep their 10 s cut.
+- **MAJOR 2 — post-e-stop pause.** A repeated GD32 down in the pause cleared the press-time owner of a key held
+  from before the stop, so its later up sent nothing (host key / forwarded ⌫⏎Esc stuck on the Mac). The pause now
+  only swallows the down and keeps the owner. **Pre-existing in 1.5.1** (reproduced on 5f2ed0d: 0 host ups); it
+  needs a repeated GD32 down (lost or duplicated edge) of a key held across an e-stop.
+- **MINOR 1 — L4 回 L1 in the pause.** Its up navigated to L1 and sent the K2 tap during the pause. Now the
+  e-stop cancels a pending 回 L1 and its release is inert while suspended. **Pre-existing in 1.5.1** (reproduced:
+  route L1 + K2 tap).
+- **MINOR 2 — generation fencing (mk20deck).** `ui_page` / `ui_hid_keys` take the `ui_epoch` the caller decided
+  under; a mismatch inside the generation lock drops the request ("stale", nothing written) instead of renumbering
+  it after the hello; the daemon re-decides under the new epoch.
+- **MINOR 3 — K2 during PROBING (mk20deck).** A keyboard K2 tap newer than a known page belief is applied
+  absolutely: the Mac goes to the keyboard's page (the other page than the belief) instead of toggling its own,
+  so a K2 on the keyboard while PROBING (tapped at ONLINE) is followed and never pulled back. Unknown belief / a
+  tap already contained in the last ack: the relative toggle as before.
+- **MINOR 4 — arrange access log (mk20deck, webui.py).** `log_message` cuts every query string (`/auth?t=…` ->
+  `/auth?…`) before the DEBUG line, also for malformed request lines quoted by `send_error`.
+- Tests: `tests_onboard_r7.inc` + pause owners (with / without a same-page request), L4 回 L1 in the pause,
+  lost-up bounds (host key 10 s after the request, PTT 120 s cap, re-confirmation, repeated requests, 回 L1
+  cancelled) and a randomized release invariant (120 runs x 45 steps over PTT / ⌫⏎Esc / host keys / MODE /
+  回 L1, same-page and real `ui.page`, K2, e-stops, option maps, frames, time: HID all-up and every key released
+  on the host at the end); `test_page_sync.py` +5 (fencing in the link and the daemon, K2 while PROBING with the
+  Mac on the other / the same page, target rules); `test_ui_open_arrange.py` +2 (redaction). Each new test was
+  checked to fail with its fix reverted.
+
+rc2 host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 1271 passed / 1 skipped
+(+22 from the release/1.5.1 merge, +7 new), agent 398, onboard 16275 (rc1 13383; TSan build 16275), kbd 4191 ASan +
+4191 TSan, safe mode 2 scenarios, e2e OK, ui 41405, 374 goldens unchanged, sim 38, tools 64 passed / 1 skipped,
+shellcheck clean, release binaries match source. `make mac-test` (macOS, native): 815 passed / 457 skipped, no
+failures. E-stop latencies unchanged (socket e-stop -> all-up 1.7 ms; stalled host 0.2–3.6 ms; K2 hold 1005.5 ms;
+blocked status worker 0.6 / 1009.8 ms). `bin/mk20-kbd` sha256
+`a18d7d81ef054eda27b2618dde140f56af9bdbb20fe1dd0534a0ca7f76a37d34` (595288 B, static ARM EABI5).
+`mk20-fw-1.6.0.tar` (rc2, 14 files, reproducible) sha256 `f9ce9152a2f5c740e47661e789db4d4b5f74eb7cd1abfaadf3f62ab7e396030a`.
+**No device acceptance claimed.**
 
 ### `bin/mk20-kbd`
 
@@ -66,7 +113,7 @@ mk20deck keeps its 1.5.1 behaviour when the hello carries no `page`.
   new `tests/test_ui_open_arrange.py` (whitelist, link file 0600/0700 + redeem, macOS argv = path only, no token in
   logs, rate limit vs openSettings, payload dropped, off / not running / mint failure toasts, Supervisor wiring).
 
-Host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 1242 passed / 1 skipped
+rc1 host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 1242 passed / 1 skipped
 (release/1.5.1 + gate: 1219 collected; +24), agent 398, onboard 13383 (was 12957; TSan build 13383), kbd 4191 ASan +
 4191 TSan, safe mode 2 scenarios, e2e OK (incl. hello page, same-page `ui.page` with PTT + DELETE held), ui 41405 (was
 41396), 374 goldens (was 330: 10 LS files changed, 44 new), sim 38, tools 64 passed / 1 skipped, shellcheck clean,
@@ -375,7 +422,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
-| 1.6.0 | 2026-10-22 | **1.6.0-rc1**: host protocol additions — a same-page `ui.page` only redraws (held PTT / ⌫ / ⏎ / Esc / digit keep their owners and HID state; a route change keeps the full boundary); `ui.hello` names the route (`"page":"L1"\|"L4"\|"none"`), a route changed while no host was ONLINE is K2-tapped before that reply; a fresh `ui.hello` resets `generation` / `hid_generation` to 0; LS fb17 会话安排 sends `{"method":"ui.openArrange"}` (mk20deck opens the 会话安排 page through a one-time link file). Mac: hello page seeds the page belief (no same-page request after a reconnect), hello generations taken as authoritative under a lock (exhaustion recovers), ui.openArrange handler. Only `bin/mk20-kbd` changed. |
+| 1.6.0 | 2026-10-22 | **1.6.0-rc1**: host protocol additions — a same-page `ui.page` only redraws (held PTT / ⌫ / ⏎ / Esc / digit keep their owners and HID state; a route change keeps the full boundary); `ui.hello` names the route (`"page":"L1"\|"L4"\|"none"`), a route changed while no host was ONLINE is K2-tapped before that reply; a fresh `ui.hello` resets `generation` / `hid_generation` to 0; LS fb17 会话安排 sends `{"method":"ui.openArrange"}` (mk20deck opens the 会话安排 page through a one-time link file). Mac: hello page seeds the page belief (no same-page request after a reconnect), hello generations taken as authoritative under a lock (exhaustion recovers), ui.openArrange handler. Only `bin/mk20-kbd` changed. **rc2** (Kimi K3 NO-GO fixes): PTT lost-up cap 120 s (kept host key / 回 L1 across a same-page request: 10 s after it); post-e-stop pause keeps owners through a repeated GD32 down and 回 L1 is inert there (both pre-existing in 1.5.1); mk20deck drops numbered requests decided before a hello, follows a keyboard K2 made while PROBING (no pull-back), arrange access log without query strings. |
 | 1.5.1 | 2026-10-22 | **1.5.1-rc1**: option mode — tapping a hook-tracked session that waits for input/approval clears rows 1–3 and shows its options on the top row (labels from Claude AskUserQuestion / fixed permission labels / digits); host→device `ui.hidKeys` maps fb1..fb15 to momentary HID digits (allow-list 1–9, L1 only, cleared on page/host/e-stop, 30 s expiry); digits ignored while PTT is held. |
 | 1.5.0 | 2026-10-22 | **1.5.0-rc1**: user layout — L1 rows 1–3 = 15 sessions (tap = switch), bottom row 按住说话 / ⌫ 删除 (HID Backspace) / ⏎ 发送·可以 (Return) / ✗ 不行 (Escape) / 模式; L4 row1 DESK HERD TMUX ＋新会话 回L1 (local Back fb14 -> fb5); fb17–19 holds cut at 10 s. |
 | 1.4.3 | 2026-10-21 | **1.4.3-rc4**: physical key-LCD order. Logical key L (col c, row r) is `/dev/fb((4-c)*4+r+1)` (column-major from the top-right, photo of 1.4.2 L1), not /dev/fbL: every page was displayed permuted (display != function). `panel_t.dev` (one table in kbd/panels.c) is used only to open the node and to derive the SPI bus; input, UI, host protocol and getInfo stay logical. `--pattern` labels R/C + fbN. Only `bin/mk20-kbd` changed. |
