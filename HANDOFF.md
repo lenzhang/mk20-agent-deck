@@ -69,6 +69,9 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 - Route check before every codex/kimi run (AI=US-Exit-Hy2, exit 203.0.113.10); this Claude session's shell has
   HTTPS_PROXY=127.0.0.1:7895 (SG, Claude's own) — strip it per command only, never globally.
 - ccai: settings-glm.json is the source; settings-clean.json is regenerated at every launch; settings.json is overwritten.
+- **adb shell payloads must stay < 512 bytes** (keep ≤ 400): the device's adbd fails a longer request with
+  `bulk_read ... errno=75 (EOVERFLOW)` and the whole USB gadget re-enumerates (HID + ECM drop, 2026-10-23 00:48,
+  caused by a 661-byte patrol command). Split long checks into several short `mkadb.sh shell` calls.
 - Never touch ESP32 /dev/cu.usbmodem1111101 or the watch adb device; adb via ~/mk20-backup/mkadb.sh. GD32: never 0x19 or
   02 AA E2 78, never flash; only 05 00 r r 00 00 (r=100..105). No plain `reboot`. No USB-changing steps under adb.
 - Secrets 0600 under /data/mk20/secrets; never print/log/commit. Device installs: authorized by the user (10-20 21:30).
