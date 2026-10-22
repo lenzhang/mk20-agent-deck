@@ -4,15 +4,45 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
-## 1.6.0-rc3: host protocol additions (same-page ui.page, hello page, generation reset, 会话安排 key)
+## 1.6.0-rc4: host protocol additions (same-page ui.page, hello page, generation reset, 会话安排 key)
 
-`firmware/VERSION` is **1.6.0** (MINOR: host-visible protocol additions); build id **rc3** (rc1/rc2 below,
-superseded): `sh tools/mk20-release-build.sh firmware out rc3`. feature/fw-1.6.0 = release/1.5.1 (5f2ed0d, incl. fix/page-sync)
+`firmware/VERSION` is **1.6.0** (MINOR: host-visible protocol additions); build id **rc4** (rc1–rc3 below,
+superseded): `sh tools/mk20-release-build.sh firmware out rc4`. feature/fw-1.6.0 = release/1.5.1 (5f2ed0d, incl. fix/page-sync)
 + fix/macos-test-gate (61cca87) + this work. Only `bin/mk20-kbd` changed in the release (rebuilt static armhf); the
 other binaries are byte-identical. Rules, compatibility and the safety arguments: kbd/UI.md "1.6.0 host protocol
 additions". Both directions stay compatible: an older mk20deck ignores the new hello field and the new event (and
 gets the K2 tap of a page changed while it was away ~2 s earlier, at the hello instead of at ONLINE); a newer
 mk20deck keeps its 1.5.1 behaviour when the hello carries no `page`.
+
+### 1.6.0-rc4: Kimi K3 rc3 delta (GO) MINORs
+
+Build id **rc4**: `sh tools/mk20-release-build.sh firmware out rc4`; VERSION stays 1.6.0 (rc1–rc3 never installed).
+Only `bin/mk20-kbd` changed in the release.
+
+- **Keep pair cleared wherever an owner ends.** `onboard_host_flush` without a host cleared owner 1 but left the
+  same-page bound; the leftover refused to re-arm and, after a reconnect, cut a new press of the same key early
+  (and latched it). The flush (no host and flushed ups) and every new press now clear it; release_key / boundary /
+  stop / loss already did. The cut latch deliberately survives these paths: it records that the GD32 has not
+  reported the key's up since a guard cut, which only that up ends.
+- **Repeated down of a held host key** (pre-existing): on live pages it re-forwarded `"pressed":true` each time,
+  without bound under a phantom-down storm. It is now the same press (swallowed like owners ≥ 5), the next up
+  releases; a genuine long press is unchanged (one down + one up; the Mac's 600 ms pick-up verified on the real
+  binary).
+- **Log**: the same-page bound line prints the real held time ("key held 60 s across a same-page ui.page").
+- Tests: `tests_onboard_r7.inc` + keep pair after a host flush (new press not cut at the old bound, re-arming
+  works), host-key phantom storm (one press, owner kept, up releases), long press = one down + one up, PTT-ignored
+  digit and Mac mode key, keep-cut log text; `test_page_sync_e2e.py` + real-binary long press with phantom downs
+  (one down, one up, Mac pick-up). Each new C test fails with its fix reverted. `kbd/tests/e2e_run.py` now
+  releases the fb1 it pressed early (left held, its later option-mode press was only that press's release).
+
+rc4 host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 1272 passed / 1 skipped
+(+1), agent 398, onboard 16545 (rc3 16497; TSan build 16545), kbd 4191 ASan + 4191 TSan, safe mode 2 scenarios, e2e OK,
+ui 41405, 374 goldens unchanged, sim 38, tools 64 passed / 1 skipped, shellcheck clean, release binaries match source.
+`make mac-test` (macOS, native): 815 passed / 458 skipped, no failures. E-stop latencies unchanged (socket e-stop ->
+all-up 1.3–3.4 ms; stalled host 0.1–3.3 ms; K2 hold 1005.7–1008.3 ms; blocked status worker 0.5–1.1 / 1008.6–1010.2
+ms). `bin/mk20-kbd` sha256 `041dc48eee6a0a49cb60c036ad01127af63ed68435a5b453b338fc8b4cd460d6` (595288 B, static ARM
+EABI5). `mk20-fw-1.6.0.tar` (rc4, 14 files, reproducible) sha256
+`a40b997d62724932c3edce219fb6a24cf679c3bd1f1c1fa5aabfa33d5869ecfe`. **No device acceptance claimed.**
 
 ### 1.6.0-rc3: Kimi K3 delta review MINORs (rc2: GO)
 
@@ -454,7 +484,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
-| 1.6.0 | 2026-10-22 | **1.6.0-rc1**: host protocol additions — a same-page `ui.page` only redraws (held PTT / ⌫ / ⏎ / Esc / digit keep their owners and HID state; a route change keeps the full boundary); `ui.hello` names the route (`"page":"L1"\|"L4"\|"none"`), a route changed while no host was ONLINE is K2-tapped before that reply; a fresh `ui.hello` resets `generation` / `hid_generation` to 0; LS fb17 会话安排 sends `{"method":"ui.openArrange"}` (mk20deck opens the 会话安排 page through a one-time link file). Mac: hello page seeds the page belief (no same-page request after a reconnect), hello generations taken as authoritative under a lock (exhaustion recovers), ui.openArrange handler. Only `bin/mk20-kbd` changed. **rc2** (Kimi K3 NO-GO fixes): PTT lost-up cap 120 s (kept host key / 回 L1 across a same-page request: 10 s after it); post-e-stop pause keeps owners through a repeated GD32 down and 回 L1 is inert there (both pre-existing in 1.5.1); mk20deck drops numbered requests decided before a hello, follows a keyboard K2 made while PROBING (no pull-back), arrange access log without query strings. **rc3** (Kimi K3 GO + 2 MINORs): absolute caps per press (PTT 10 min, kept key 60 s) that repeated GD32 downs cannot extend, cut keys inert until their up; the 5 s e-stop pause resync also releases held owners (pre-existing in 1.5.1). |
+| 1.6.0 | 2026-10-22 | **1.6.0-rc1**: host protocol additions — a same-page `ui.page` only redraws (held PTT / ⌫ / ⏎ / Esc / digit keep their owners and HID state; a route change keeps the full boundary); `ui.hello` names the route (`"page":"L1"\|"L4"\|"none"`), a route changed while no host was ONLINE is K2-tapped before that reply; a fresh `ui.hello` resets `generation` / `hid_generation` to 0; LS fb17 会话安排 sends `{"method":"ui.openArrange"}` (mk20deck opens the 会话安排 page through a one-time link file). Mac: hello page seeds the page belief (no same-page request after a reconnect), hello generations taken as authoritative under a lock (exhaustion recovers), ui.openArrange handler. Only `bin/mk20-kbd` changed. **rc2** (Kimi K3 NO-GO fixes): PTT lost-up cap 120 s (kept host key / 回 L1 across a same-page request: 10 s after it); post-e-stop pause keeps owners through a repeated GD32 down and 回 L1 is inert there (both pre-existing in 1.5.1); mk20deck drops numbered requests decided before a hello, follows a keyboard K2 made while PROBING (no pull-back), arrange access log without query strings. **rc3** (Kimi K3 GO + 2 MINORs): absolute caps per press (PTT 10 min, kept key 60 s) that repeated GD32 downs cannot extend, cut keys inert until their up; the 5 s e-stop pause resync also releases held owners (pre-existing in 1.5.1). **rc4** (Kimi K3 GO + 2 MINORs, 1 nit): same-page bound cleared on every owner-ending path; a repeated GD32 down of a held host key is not forwarded again; keep-cut log shows the real held time. |
 | 1.5.1 | 2026-10-22 | **1.5.1-rc1**: option mode — tapping a hook-tracked session that waits for input/approval clears rows 1–3 and shows its options on the top row (labels from Claude AskUserQuestion / fixed permission labels / digits); host→device `ui.hidKeys` maps fb1..fb15 to momentary HID digits (allow-list 1–9, L1 only, cleared on page/host/e-stop, 30 s expiry); digits ignored while PTT is held. |
 | 1.5.0 | 2026-10-22 | **1.5.0-rc1**: user layout — L1 rows 1–3 = 15 sessions (tap = switch), bottom row 按住说话 / ⌫ 删除 (HID Backspace) / ⏎ 发送·可以 (Return) / ✗ 不行 (Escape) / 模式; L4 row1 DESK HERD TMUX ＋新会话 回L1 (local Back fb14 -> fb5); fb17–19 holds cut at 10 s. |
 | 1.4.3 | 2026-10-21 | **1.4.3-rc4**: physical key-LCD order. Logical key L (col c, row r) is `/dev/fb((4-c)*4+r+1)` (column-major from the top-right, photo of 1.4.2 L1), not /dev/fbL: every page was displayed permuted (display != function). `panel_t.dev` (one table in kbd/panels.c) is used only to open the node and to derive the SPI bus; input, UI, host protocol and getInfo stay logical. `--pattern` labels R/C + fbN. Only `bin/mk20-kbd` changed. |
