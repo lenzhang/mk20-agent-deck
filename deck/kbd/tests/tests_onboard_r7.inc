@@ -402,8 +402,114 @@ static void v7_fuzz_release_invariant(void)
         l1_teardown(&k,&c,hp,p);
     }
 }
+/* rc3 (Kimi K3 delta review): a faulty GD32 emitting phantom downs renews the PTT's 120 s window and a kept key's
+ * 10 s window, but never past the absolute caps: PTT 10 min from the original press, a kept host key / L4 回 L1
+ * 60 s from the first same-page request. */
+#define PTT_MAX_MS 600000 /* onboard.c HID_PTT_MAX_MS */
+#define KEEP_MAX 60000    /* onboard.c KEEP_MAX_MS */
+static void v7_phantom_down_storm(void)
+{
+    char f[64][192]; uint32_t ids[64]; int ups;
+    for (int same=0;same<2;same++) { /* live page / a same-page request with the page waiting for its frame */
+        kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p);
+        key(&k,16,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0,0));
+        int64_t t0=now, cut=-1;
+        if (same) CHECK(v7_page(&k,p[0],"L1",&ups)==1 && !ups); /* (never fresh again: guard path) */
+        for (int sec=1;sec<=PTT_MAX_MS/1000+30 && cut<0;sec++) {
+            now+=1000; beat(&k); key(&k,16,1); /* a phantom down every second */
+            for (int i=0;i<8;i++) kbd_service(&k,now);
+            if (!(sec%30)) ux_frames(p[0],f,ids,64);
+            if (!h.mods) cut=now-t0;
+        }
+        CHECK(cut>=PTT_MAX_MS && cut<=PTT_MAX_MS+1000); /* not at 120 s (renewed), at 10 min: absolute */
+        { uint8_t r[16][9]; int n=l1_reports(hp[0],r,16); CHECK(n==1 && l1_is(r[0],0,0,0,0)); }
+        CHECK(onboard_key_owner(&k,16)==0);
+        for (int sec=0;sec<30;sec++) { now+=1000; beat(&k); key(&k,16,1); } /* the storm goes on: stays up */
+        CHECK(l1_none(hp[0]) && !h.mods && onboard_key_owner(&k,16)==0);
+        key(&k,16,0); CHECK(l1_none(hp[0]));                                 /* its up: an ordinary key again */
+        if (same) hk_fresh(&k);
+        key(&k,16,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0,0)); key(&k,16,0); CHECK(l1_one(hp[0],0,0,0,0));
+        l1_teardown(&k,&c,hp,p);
+    }
+    /* kept host key / L4 回 L1 across a same-page request, phantom downs every 5 s */
+    for (int back=0;back<2;back++) {
+        kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p);
+        int fb = back ? 5 : 12;
+        if (back) { knob(&k,103,1); now+=20; knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L4); hk_fresh(&k); }
+        ux_frames(p[0],f,ids,64);
+        key(&k,fb,1); ux_frames(p[0],f,ids,64);
+        CHECK(v7_page(&k,p[0],back ? "L4" : "L1",&ups)==1 && !ups); hk_fresh(&k);
+        int64_t t0=now, cut=-1;
+        for (int sec=1;sec<=KEEP_MAX/1000+20 && cut<0;sec++) {
+            now+=1000; beat(&k); if (!(sec%5)) key(&k,fb,1);
+            for (int i=0;i<8;i++) kbd_service(&k,now);
+            int n=ux_frames(p[0],f,ids,64);
+            if (!back && ux_count(f,n,"\"pressed\":false")) cut=now-t0;
+            if (back && !onboard_key_owner(&k,fb)) cut=now-t0;
+        }
+        CHECK(cut>=KEEP_MAX && cut<=KEEP_MAX+1000); /* renewed past 10 s, ended at 60 s */
+        for (int sec=0;sec<10;sec++) { now+=1000; beat(&k); key(&k,fb,1); } /* more phantom downs: inert */
+        CHECK(!onboard_key_owner(&k,fb) && !v7_ups(p[0]) && !l1_host_keys(p[0]));
+        key(&k,fb,0); CHECK(onboard_current(&k)==(back ? ONBOARD_L4 : ONBOARD_L1) && !v7_ups(p[0]));
+        key(&k,fb,1); key(&k,fb,0); /* after its up: works again */
+        if (back) CHECK(onboard_current(&k)==ONBOARD_L1); else CHECK(v7_ups(p[0])==1);
+        l1_teardown(&k,&c,hp,p);
+    }
+}
+/* rc3: after any lost key-up guard cut a key is inert until the GD32 reports its up: a Backspace phantom-down
+ * storm types one 10 s Backspace, not one every 10 s; a real user (up before the next press) sees no change. */
+static void v7_cut_latch(void)
+{
+    kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p);
+    key(&k,17,1); CHECK(l1_one(hp[0],0,0x2A,0,0));
+    for (int sec=1;sec<=30;sec++) { now+=1000; beat(&k); key(&k,17,1); for (int i=0;i<8;i++) kbd_service(&k,now); }
+    { uint8_t r[16][9]; int n=l1_reports(hp[0],r,16); CHECK(n==1 && l1_is(r[0],0,0,0,0)); } /* one cut, no re-press */
+    key(&k,17,0); CHECK(l1_none(hp[0]));
+    key(&k,17,1); CHECK(l1_one(hp[0],0,0x2A,0,0)); key(&k,17,0); CHECK(l1_one(hp[0],0,0,0,0));
+    /* fb20 as the e-stop is never latched away: a cut Mac mode key still e-stops once the agent is active */
+    key(&k,20,1); l1_host_keys(p[0]);
+    CHECK(v7_page(&k,p[0],"L1",NULL)==1); hk_fresh(&k); live(&k,9000); CHECK(v7_ups(p[0])==1); /* kept-key bound */
+    ctl_set_allowed(&c,1); live(&k,0);
+    key(&k,20,1); CHECK(c.estopped);
+    l1_teardown(&k,&c,hp,p);
+}
+/* rc3 (pre-existing in 1.5.1): the 5 s resync of the post-e-stop pause also releases the press-time owners left
+ * by the stop (owner 1: host keys and the host halves of forwarded keys / digits), whose GD32 ups were lost. */
+static void v7_pause_resync_releases_owners(void)
+{
+    char f[64][192]; uint32_t ids[64];
+    kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p);
+    CHECK(hk_map(&k,p[0],HK3)==1);
+    key(&k,17,1); key(&k,1,1); key(&k,16,1); key(&k,12,1); /* the digit before the PTT (held PTT: ignored) */
+    CHECK(onboard_key_owner(&k,16)==2 && onboard_key_owner(&k,17)==6 && onboard_key_owner(&k,1)==7 && onboard_key_owner(&k,12)==1);
+    { uint8_t r[16][9]; l1_reports(hp[0],r,16); } ux_frames(p[0],f,ids,64);
+    req(&c,"{\"op\":\"estop\"}","true"); kbd_safety_tick(&k,now); CHECK(c.estopped);
+    { uint8_t r[16][9]; int n=l1_reports(hp[0],r,16); CHECK(n>=1 && l1_is(r[n-1],0,0,0,0) && !h.mods && !h.keys[0]); }
+    /* after the stop: 2 and 5 released, 6/7 only their host halves (1) remain, nothing else */
+    CHECK(onboard_key_owner(&k,16)==0 && onboard_key_owner(&k,17)==1 && onboard_key_owner(&k,1)==1 && onboard_key_owner(&k,12)==1);
+    for (int fb=1;fb<=20;fb++) if (fb!=17 && fb!=1 && fb!=12) CHECK(onboard_key_owner(&k,fb)==0);
+    CHECK(!v7_ups(p[0]));
+    /* all three GD32 ups lost: 5 s without input -> their host ups, owners clear, the pause can end */
+    live(&k,3000); CHECK(!v7_ups(p[0]));
+    live(&k,1000); CHECK(v7_ups(p[0])==3);
+    for (int fb=1;fb<=20;fb++) CHECK(onboard_key_owner(&k,fb)==0);
+    CHECK(l1_none(hp[0]));
+    live(&k,1000); ux_frames(p[0],f,ids,64);
+    key(&k,17,1); key(&k,16,0); key(&k,1,0); key(&k,12,0); CHECK(!v7_ups(p[0])); /* late physical ups: nothing */
+    key(&k,17,0); CHECK(l1_reports(hp[0],(uint8_t (*)[9])f,16)==2); /* the pause is over: Backspace down + up */
+    l1_teardown(&k,&c,hp,p);
+    /* L4 回 L1: cancelled by the stop (owner 4 -> 0), the resync has nothing left */
+    l1_setup(&k,&c,&h,hp,p);
+    knob(&k,103,1); now+=20; knob(&k,103,0); hk_fresh(&k); ux_frames(p[0],f,ids,64);
+    key(&k,5,1); CHECK(onboard_key_owner(&k,5)==4);
+    req(&c,"{\"op\":\"estop\"}","true"); kbd_safety_tick(&k,now); CHECK(onboard_key_owner(&k,5)==0);
+    live(&k,6000); key(&k,5,0); CHECK(onboard_current(&k)==ONBOARD_L4);
+    { int n=ux_frames(p[0],f,ids,64); CHECK(!ux_count(f,n,"\"col\":103,")); }
+    l1_teardown(&k,&c,hp,p);
+}
 static void round7_regressions(void)
 {
     v7_same_page_keeps_held(); v7_same_page_option_mode(); v7_same_page_release_paths(); v7_hello_page();
     v7_generation_reset(); v7_open_arrange(); v7_estop_pause_owners(); v7_same_page_lost_up(); v7_fuzz_release_invariant();
+    v7_phantom_down_storm(); v7_cut_latch(); v7_pause_resync_releases_owners();
 }

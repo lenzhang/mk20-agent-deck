@@ -25,6 +25,7 @@ const ui_t *onboard_ui(const struct kbd_s *k);
 enum onboard_route onboard_current(const struct kbd_s *k);
 enum onboard_health onboard_health(const struct kbd_s *k);
 int onboard_hid_keys(const struct kbd_s *k); /* keys in the active ui.hidKeys map (0 = none) */
+int onboard_key_owner(const struct kbd_s *k, int fb); /* press-time owner of logical key fb (tests/diagnostics) */
 /* Status probe roots (tests/simulator); production uses devstat_init_env(). */
 void onboard_status_root(struct kbd_s *k, const char *root, const char *pair_path, const char *version, const char *rel);
 struct devstat_s;

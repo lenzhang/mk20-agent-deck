@@ -41,7 +41,12 @@ non-PTT keys never produce HID". The only fb -> usage map is `HOST_HID_KEYS` in 
   10 s (`HID_KEY_HOLD_MS`) is cut: the up is sent, the late physical up does nothing, press again to
   continue. The PTT (long dictation) is not cut at 10 s; since 1.6.0 it ends after 120 s (`HID_PTT_HOLD_MS`,
   same lost-up reasoning: the GD32 cannot be asked for the key state, it has one allowed outbound frame), press
-  again to continue; a repeated GD32 down of the held PTT confirms it pressed and restarts the 120 s.
+  again to continue; a repeated GD32 down of the held PTT confirms it pressed and restarts the 120 s, but never
+  past 10 min after its original press (`HID_PTT_MAX_MS`, rc3). After any of these lost key-up guard cuts the key
+  is inert until the GD32 reports its up (`cut_latch`, rc3): a GD32 emitting phantom downs cannot press it again
+  right after the cut. Residual: such a storm holds a key at most for one bound (PTT 10 min, ⌫/⏎/Esc/digit 10 s,
+  a kept key 60 s) and then nothing until an up arrives; a real user, who releases before pressing again, sees no
+  difference (after a lost GD32 up the next press is ignored once, its release re-arms the key).
 - Safe mode and the legacy non-onboard loop keep PTT-only HID.
 
 ## L1 option mode: host `ui.hidKeys` (user decision 2026-10-22; unreleased, for 1.5.1)
@@ -104,8 +109,9 @@ falls back to its 1.5.1 behaviour when the hello carries no `page`. Tests: `kbd/
   (owner 4) end on their physical release as before. A real route change keeps the full `boundary()`.
   Bounds (rc2, Kimi K3 review): owners ≥ 5 keep their 10 s cut from the press; the PTT keeps its 120 s cap (every
   PTT hold has it); a kept host key / L4 回 L1 press (no bound of its own) ends 10 s after the first same-page
-  request (`keep_until`: host up / the pending 回 L1 is cancelled, never run late) unless a new GD32 down of that
-  key confirms it pressed — a request used to release them at once, and a lost GD32 up must not keep them for ever.
+  request (`keep_until`: host up / the pending 回 L1 is cancelled, never run late); a new GD32 down of that key
+  confirms it pressed and renews the 10 s, never past 60 s after the first request (`KEEP_MAX_MS`, rc3) — a
+  request used to release them at once, and a lost GD32 up (or a phantom-down storm) must not keep them for ever.
   Why it is safe: (1) nothing new is pressed — the page is not live until the fresh frame and the grace window
   swallows new presses, so no input can act on stale labels; (2) every other release path still applies to the
   kept owners: the 10 s lost-up cut (owners ≥ 5, `hid_at` unchanged), the 120 s PTT cap, the 10 s `keep_until`
@@ -217,7 +223,11 @@ Host-validated only (Docker, fake clock/files); **no device acceptance claimed**
   press-time owner (the host still gets those ups), also through a repeated GD32 down in the
   pause (1.6.0 rc2: before, that down cleared the owner and the host up was lost — also in
   1.5.1). An L4 回 L1 press made before the stop is cancelled by it and its release is inert in
-  the pause (before rc2 it navigated and sent the K2 tap). fb20 is the e-stop meanwhile (face
+  the pause (before rc2 it navigated and sent the K2 tap). The 5 s resync (no input for 5 s) also
+  releases the press-time owners still held (rc3; pre-existing in 1.5.1): after the stop only
+  owner 1 is left (host keys, and the host halves of forwarded keys / digits — the stop released
+  the PTT and ⌫/⏎/Esc and cancelled 回 L1), so a host key whose GD32 up was lost gets its host up
+  instead of staying pressed on the Mac. fb20 is the e-stop meanwhile (face
   and action). K2 counts as held only once its release capability is known.
 - **fb20 held while the agent becomes active.** If `allowed`/a lease appears while fb20 is
   down and owned by the host, the host first gets fb20's up, then the keyboard e-stops
