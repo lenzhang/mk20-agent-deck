@@ -18,6 +18,15 @@ permission labels, or bare digits 1..5).  The daemon asks the keyboard (``ui.hid
 keys type the digit into the frontmost window (the session just brought forward; once per press, never
 while the Mac PTT is held); presses come back marked (``hid`` / ``ignored``) and only give feedback here.  Exit: the session leaves needs_*, ✗ Esc, a K1
 press, a blank key, a page/mode switch, 30 s without input, 3 s after a choice, or a reconnect.
+
+Page sync (2026-10-22): the keyboard owns K2 short (it toggles its L1/L4 route and sends a K2 tap), the L4 回 L1 key
+and K1 short on L4 (its own LS page); the deck changes ``page`` itself on a MODE long press, 回 L1 / mode keys and
+knob holds.  The controller stays I/O-free: the daemon compares ``page`` / ``page_sync`` with what the keyboard last
+confirmed and sends ``ui.page`` (firmware with that capability: ``device_pages``).  Without it (stock KD / legacy
+firmware) nothing is sent and K1 short on L4 still opens the deck's own settings page.  With it the keyboard also
+decides knob holds itself (1 s, on the device) and forwards K1/K2 only as synthetic taps (down + up): every forwarded
+knob down -> up is a short press however late we process the up, and knob holds never fire here (a loop stall
+> LONG_PRESS between the two edges must not flip the page).  Legacy firmware keeps the timing (hold = L4 / L1).
 """
 from __future__ import annotations
 
@@ -56,6 +65,8 @@ PERMISSION_LABELS = ("是", "是，且不再问", "否")  # Claude Code / codex 
 OPTION_LEGACY = "固件不支持数字键，请在 Mac 上按数字"
 OPTION_PENDING = "数字键暂未生效（键盘未确认），请在 Mac 上按数字"
 OPTION_PTT = "先松开按住说话"  # the keyboard ignores digits while the Mac PTT (Right Option) is held
+# K1 short reached the deck on L4 although the keyboard handles it there itself: its route is L1 -> re-send L4.
+PAGE_RESYNC = "键盘页面已重新同步到 L4 · 再按 K1 进入键盘设置"
 # K1 rotation order (PRD delta 2026-10-20): who needs me first, then the rest by slot order.
 K1_RANK = {State.NEEDS_APPROVAL: 0, State.NEEDS_INPUT: 1, State.ERROR: 2, State.DONE_UNREAD: 3}
 MODE_SHORT = {Mode.DESKTOP: "桌面", Mode.HERDR: "herdr", Mode.TMUX: "tmux"}
@@ -246,6 +257,8 @@ class Controller:
         except ValueError:
             self.mode = cfg.default_mode
         self.page = "L1"
+        self.device_pages = False  # daemon: the keyboard has ui.page (follows our L1/L4, owns K1 on L4)
+        self.page_sync = 0  # +1 when the keyboard is known to show another route: the daemon re-sends ui.page
         self.managers: dict[Mode, SlotManager] = {
             m: SlotManager.from_dict((state.get("modes") or {}).get(m.value, {})) for m in MODE_CYCLE}
         self.backend: dict[Mode, tuple[bool, str]] = {m: (True, "") for m in MODE_CYCLE}
@@ -316,6 +329,16 @@ class Controller:
         self._drop_option()
         if not self._cancel_move(toast):
             self._say(toast, 0.8)
+
+    def request_page_sync(self) -> None:
+        """The keyboard's route is known to differ from ``page``: the daemon sends ui.page again, even if acked."""
+        self.page_sync += 1
+        self._touch()
+
+    def long_press_pending(self) -> bool:
+        """A press that can still reach LONG_PRESS (the daemon wakes up for it); knob presses only on legacy firmware."""
+        return any(not (p.long_fired or p.cancelled) and (pk[0] != "knob" or not self.device_pages)
+                   for pk, p in self.presses.items())
 
     def drop_gestures(self) -> None:
         """Reconnect / wake: presses in flight, a picked-up slot and option mode are never replayed."""
@@ -606,9 +629,16 @@ class Controller:
                 self._exit_option("回到会话列表")
         elif kind == "up":
             p = self.presses.pop(pk, None)
-            if p and not p.long_fired and not p.cancelled and t - p.t0 < LONG_PRESS:
+            # ui.page firmware forwards knob taps only (it decides holds itself): never judged by our timing
+            if p and not p.long_fired and not p.cancelled and (self.device_pages or t - p.t0 < LONG_PRESS):
                 if knob == 1 and self.page == "L4":
-                    self.open_settings()  # SETTINGS.md: short K1 press on L4 opens settings
+                    if self.device_pages:
+                        # On its L4 route the keyboard handles K1 itself (its LS page; the web page is the settings
+                        # entry), so this K1 came from its L1 route while we show L4: make it follow us again.
+                        self.request_page_sync()
+                        self._say(PAGE_RESYNC)
+                    else:
+                        self.open_settings()  # legacy firmware only (SETTINGS.md): short K1 on L4 opens settings
                     return
                 if knob == 1:
                     s = self.mgr.selected_session()  # K1 press = focus the selection (same as a slot tap)
@@ -635,8 +665,8 @@ class Controller:
             self._cancel_move()  # 8 s without key/knob input: nothing changes
         self._option_tick(t)
         for pk, p in list(self.presses.items()):
-            if p.long_fired or p.cancelled or t - p.t0 < LONG_PRESS:
-                continue
+            if p.long_fired or p.cancelled or t - p.t0 < LONG_PRESS or (pk[0] == "knob" and self.device_pages):
+                continue  # knob holds: legacy firmware only (ui.page firmware sends taps; its up decides)
             p.long_fired = True
             if pk[0] == "knob":
                 if pk[1] == 1:
