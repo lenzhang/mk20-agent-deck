@@ -1,38 +1,35 @@
-# MK20 "Agent 增强固件" — handoff (2026-10-22 09:00 SGT)
+# MK20 "Agent 增强固件" — handoff (2026-10-23 05:40 SGT)
 
 Goal: production-grade replacement firmware for the Waveshare MK20 keyboard (Allwinner T113, Tina 5.4.61,
 BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page. Live status: PROGRESS.md (main).
 
-## Current state (2026-10-22 ~09:00)
-- **Device: fw 1.5.1-rc1, good**; previous good kept in the other A/B slot. Tar sha256
-  `3d7c14700b1bc8c7a172fae3e4078dea3493d012b1ffec04660c1429ef35e41b` (~/worktrees/rel-1.5.1-rc1/), tag `v1.5.1-rc1` on
-  **release/1.5.1** (= release/1.5.0 @7c599a3 slot-move + feature/option-mode). Acceptance PASS.
-- **User's L1 layout (1.5.0, decided 10-21):** rows 1–3 = 15 sessions (tap = switch + bring to front; long press = pick
-  up, tap target = move+pin/swap, tap self = toggle pin, K1/8 s cancel); bottom row 🎤 PTT (Right Option) / ⌫ Backspace /
-  ⏎ Return (send = OK) / ✗ Escape / MODE — the three middle keys are device USB-HID. L4 row1 = DESK HERD TMUX ＋新会话 回L1.
-  **Option mode (1.5.1):** tapping a hook-tracked session that waits for input clears rows 1–3 and shows its options on
-  row 1 (momentary HID digits via `ui.hidKeys`; ignored while PTT held). Only "needs me" states animate.
-- **Physical LCD order fixed in 1.4.3** (fb1..4 = rightmost column; K2's old "verified" claim was wrong) — user confirmed.
-- **Session arrangement web (127.0.0.1:8781) is LIVE on the Mac** (07:10): open with `mk20deck arrange`
-  (wrapper ~/.local/bin/mk20deck → ~/mk20-deploy venv); one-time link written to a 0600 .webloc in the 0700
-  `~/.config/mk20-agent-deck/run/` (never in argv), cookie 30 days. Kimi r1/r2 NO-GO → r3 GO (deck/reviews/1.5.1/).
-  Open MINOR: a local process can hold all 8 keep-alive slots (page-only DoS) → add a per-connection lifetime cap.
-- **Page sync (08:56)**: the Mac now sends absolute `ui.page` on every page change (guess of the device page, unknown
-  after any non-acked request/hello; device K2 taps flip it; K1/K2 forwarded edges are always taps on ui.page
-  firmware). Fixed: MODE long press used to switch only the Mac to L4. Kimi r1 NO-GO → r2 GO; real-binary e2e
-  (tests/test_page_sync_e2e.py, Linux only). Firmware follow-ups for the next rc: same-page ui.page should not release
-  held keys; hello should report the current route; generation reset after exhaustion.
-- **devtest HID-leak gate** follows the 1.5.x rule (PTT + L1/L4 bottom row + granted digits), Kimi r2 GO.
-- **PRD v1.5 draft** on branch docs/prd-1.5 (027c443; main PRD + GRILL-DECISIONS) — awaiting the user's approval
-  (「批准 PRD v1.5」, covers v1.4 §15 too); integrator decisions needing explicit OK: momentary digits, digits ignored
-  while PTT held, option mode only for hook prompts, 10 s HID auto-release.
-- **24 h soak** on 1.5.1 started 2026-10-22 05:02 (latest `~/mk20-backup/soak/soak-*.jsonl`); patrol every 2 h; one-shot
-  verdict job 10-23 05:23 (session-only cron).
-- **Mac: mk20deck runs as LaunchAgent** `com.leo.mk20-agent-deck` from `~/mk20-deploy` (detached checkout of
-  release/1.5.1 5f2ed0d; state backups ~/mk20-backup/deck-state-*.tgz), venv `~/mk20-deploy/.venv`, config `~/.config/mk20-agent-deck/config.toml` (terminal_app=Ghostty,
-  tmux new session = `ccai sg`), logs `~/.config/mk20-agent-deck/logs/deck.err.log`. Connects via
-  tcp://172.30.250.2:17890 (usb0 bridge; the gadget has no ACM). Restart: `launchctl kickstart -k gui/$(id -u)/com.leo.mk20-agent-deck`.
-- Earlier soaks: 1.3.1 (155 samples): 0 real crashes, 0 composite losses, ping 0 loss. Annotations: ~/mk20-backup/soak/ANNOTATIONS.txt.
+## Current state (2026-10-23 ~05:40) — user away for several days since 10-22 10:30 (autonomous mode)
+- **Production: tag `v1.5.1`** on release/1.5.1 f8de052 = fw 1.5.1 build rc1 (tar sha256
+  `3d7c14700b1bc8c7a172fae3e4078dea3493d012b1ffec04660c1429ef35e41b`, reproducible from the tag) + Mac mk20deck f8de052.
+  24 h soak PASS (10-22 05:02 → 10-23 05:02, 288 samples, all zero; memory flat).
+- **Device now: fw 1.6.0-rc4, good** (installed 10-23 05:26, slot A; 1.5.1 kept in slot B), tag `v1.6.0-rc4` (a8dd423)
+  on **release/1.6.0**; tar ~/worktrees/rel-1.6.0-rc4/mk20-fw-1.6.0.tar sha256
+  `a40b997d62724932c3edce219fb6a24cf679c3bd1f1c1fa5aabfa33d5869ecfe` (reproduced). Acceptance PASS (evidence
+  deck/reviews/1.6.0/install-1.6.0-rc4-20261023-052415). 1.6.0 = same-page `ui.page` keeps held keys (lost-up guards:
+  PTT 120 s window / 10 min absolute, kept keys 10 s / 60 s, cut latch until the GD32 up), `ui.hello` reports
+  `page` and resets generations, LS page key **会话安排** (`ui.openArrange` → Mac opens the arrange page), e-stop pause
+  keeps key owners (also fixes two 1.5.1 edge bugs), Mac epoch fencing. Kimi K3: rc1 NO-GO → rc2/rc3/rc4 GO.
+- **24 h soak on 1.6.0-rc4** started 10-23 05:28 (`~/mk20-backup/soak/soak-20261023-052849.*`, run from
+  ~/worktrees/mk20-rel-160/deck with `MK20_ADB=~/mk20-backup/mkadb.sh`), selftest watcher, 30-min slab logger
+  (`soak/slab-log.txt`); patrol every 2 h (`~/worktrees/mk20-patrol.sh`); verdict job 10-24 05:47 (session-only cron).
+- **Mac: mk20deck** LaunchAgent `com.leo.mk20-agent-deck` from `~/mk20-deploy` (detached at release/1.6.0 a8dd423; state
+  backups ~/mk20-backup/deck-state-*.tgz), venv `~/mk20-deploy/.venv`, config `~/.config/mk20-agent-deck/config.toml`
+  (terminal_app=Ghostty, new session = `ccai sg`), logs `~/.config/mk20-agent-deck/logs/deck.err.log`, bridge
+  tcp://172.30.250.2:17890. Restart: `launchctl kickstart -k gui/$(id -u)/com.leo.mk20-agent-deck`.
+  **会话安排 page** 127.0.0.1:8781: `mk20deck arrange` (wrapper ~/.local/bin/mk20deck) or the keyboard's LS 会话安排 key;
+  one-time link in a 0600 .webloc (never argv/logs), keep-alive with per-connection cap, graceful close (no RST on macOS).
+  **Page sync** via absolute `ui.page` (hello page seeds the guess on 1.6.0).
+- **User's L1 layout (1.5.0):** rows 1–3 = 15 sessions (tap = switch + front; long press = pick up → tap target = move+pin /
+  swap, tap self = toggle pin, K1/8 s cancel); bottom row 🎤 PTT (Right Option) / ⌫ / ⏎ (send = OK) / ✗ Esc / MODE — the
+  middle three are device USB-HID. L4 row1 = DESK HERD TMUX ＋新会话 回L1. **Option mode (1.5.1)**: tap a session that
+  waits for input → options on row 1, digits as momentary HID. Only "needs me" states animate.
+- **Tests:** Docker `make test` (Linux box) AND `make mac-test` (native macOS; mk20deck runs there) must both be green.
+- **PRD v1.5 draft** on branch docs/prd-1.5 (027c443) — awaiting the user's approval.
 - **Claude hooks** ("which agent needs me") installed in `~/.claude/settings-glm.json` (source of all ccai modes) and
   `settings.json`; backups `*.bak-mk20-20261021-095159`; script `~/.config/mk20-agent-deck/hooks/`; uninstall:
   `deck/tools/hooks/claude-hooks-uninstall.sh ~/.claude/settings-glm.json ~/.claude/settings.json`.
@@ -47,7 +44,10 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 `stat` (1.3.0 never confirmed), HOME host-loss livelock, test image lacked procps, soak/accept K4 rules.
 
 ## Branches (Gitea ssh://git@192.168.88.6:2222/leo/mk20-agent-deck.git)
-- `release/1.4.0` — integration (kd-replace-k4 + fw-ux + web-settings + deck-attention + fix/run-tmpfs), tags v1.4.0-rc1, v1.4.1-rc2, v1.4.2-rc3.
+- **`release/1.6.0`** — current (feature/fw-1.6.0 + install evidence), tag v1.6.0-rc4. **`release/1.5.1`** — production
+  tag **v1.5.1** (+ v1.5.1-rc1); merged there: feature/arrange-web, fix/page-sync, fix/devtest-hid-leak,
+  fix/arrange-keepalive-cap, fix/arrange-linger-minors, fix/macos-test-gate. `release/1.5.0` (v1.5.0-rc1, **do not deploy
+  the Mac from it**: pre-fix arrange code), `release/1.4.0` (v1.4.0-rc1 … v1.4.3-rc4). Open: fix/soak-slab, docs/prd-1.5.
 - `feature/kd-replace-k4` — K4 base (1.3.1 fix, soak/accept/crash-loop gate, build image).
 - `feature/fw-ux` (mk20-kbd UX), `feature/web-settings` (usb0 web), `feature/deck-ui-hello` → `feature/deck-attention` (mk20deck).
 - Older tracks unchanged: feature/agent (A8c, agent off by default, not merged), feature/hidfix (run 11 PASS), feature/uvc, uac-mic, onboard-ui, p2-computer-use, sim.
@@ -78,15 +78,18 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 - Each parallel task its own worktree; never stop other agents' containers.
 
 ## Open items
-1. User device checks for 1.5.1: option mode with a NEW Claude session in tmux (AskUserQuestion / permission menu accept
-   digits?), codex approval UI with digits, slot move gesture, ⌫/⏎/Esc keys, K2 → L4 新会话/回L1, MODE long press → L4
-   and back (page sync), `mk20deck arrange` rules page.
-2. 24 h soak on 1.5.1 → tag the production release (v1.5.1; Mac side = release/1.5.1 HEAD) or next rc.
-3. Next firmware rc: page-sync follow-ups above + device settings-web link to the arrange page.
-4. PRD v1.5 draft (branch docs/prd-1.5) → user approval → merge into main / release.
-5. codex hooks: reinstall the updated hook (`deck/tools/hooks/hooks-uninstall.sh && hooks-install.sh`) and re-trust in
-   codex — needs the user's OK (changes ~/.codex).
-6. Arrange web MINOR: per-connection lifetime cap for keep-alive slots (local page-only DoS).
-7. Measure e-stop visual-feedback latency on device (fb20 face now on bus 0 with the sub-screen; Kimi rc4 note).
-8. Not in this delivery: agent A8c merge, USB mic / UVC capture / charger-only / Mac reboot / TF restore rehearsal tests,
+**Waiting for the user (collected while away):**
+1. Approve PRD v1.5 (「批准 PRD v1.5」, covers v1.4 §15). Integrator decisions needing an explicit OK: momentary option
+   digits, digits ignored while PTT held, option mode only for hook prompts, ⌫/⏎/Esc 10 s auto-release, **PTT 120 s cap
+   (10 min absolute)**, "after a lost-up cut the key ignores downs until its up".
+2. Hands-on checks: option-mode digits in a NEW Claude/codex session, long-press pick-up/place, ⌫/⏎/Esc, MODE long press →
+   L4 and back (pages stay in sync), `mk20deck arrange` + the LS 会话安排 key (1.6.0), PTT hold across a reconnect.
+3. codex hooks reinstall (changes ~/.codex). 4. Decide: production build with adb OFF by default (adb = unauthenticated root
+   over USB; maintenance toggle instead).
+**Autonomous:**
+5. 1.6.0-rc4 24 h soak → tag v1.6.0 (verdict job 10-24 05:47).
+6. fix/soak-slab (soak records /proc/meminfo + 480-byte adb guard in soak/accept tools) → review → merge.
+7. 1.6.1 candidates: 60 s cap for an owner-1 host key with a lost up (UI.md residual), device settings-web link to 会话安排.
+8. Measure e-stop visual-feedback latency on device (needs a physical press).
+9. Not in this delivery: agent A8c merge, USB mic / UVC capture / charger-only / Mac reboot / TF restore rehearsal tests,
    mk20-router 23 s WiFi-dongle reset (router off by default since 1.3), HOME visual polish beyond status text.

@@ -1,22 +1,23 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-22 09:00 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-23 05:40 SGT
 
 ## 1. 当前状态
 
 | 工作线 | 分支 | 提交 | 状态 |
 |---|---|---|---|
 | hidfix（HID 模块修复） | feature/hidfix | 5452175（证据 4eb0bf4） | 第 11 次通过（20:50）：T4 50/50 + T7×3，解绑 57 次，0 Oops；codex 第 3 轮复审由用户豁免（Kimi GO + 离线 58/58） |
-| K4 / 1.5.x | release/1.5.1 | 5f2ed0d（固件 v1.5.1-rc1） | **1.5.1-rc1 已装机 good**（10-22 05:01）：用户新布局 + 选项模式；Mac 端已上线会话安排网页 + 页面同步（09:00）；soak 进行中（10-23 05:23 判定） |
+| K4 / 1.6.x | release/1.6.0 | v1.6.0-rc4（a8dd423） | **v1.5.1 生产版**（10-23 05:23，24 h soak PASS）；**1.6.0-rc4 已装机 good**（05:26）+ Mac 已部署；1.6.0 soak 进行中（10-24 05:47 判定） |
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
 | UVC 采集卡 | feature/uvc | 02f1d41 | UHC07P = MS2130，USB 2.0 下仅 MJPEG；待上机 |
-| 设备 | — | — | fw 1.5.1-rc1（good）；上一 good 在另一槽回退；soak 10-22 05:02 起；Mac 端 mk20deck 常驻（release/1.5.1 5f2ed0d） |
+| 设备 | — | — | fw 1.6.0-rc4（good，A 槽）；1.5.1 在 B 槽作回退；soak 10-23 05:28 起；Mac 端 mk20deck 常驻（release/1.6.0 a8dd423） |
 
 rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191afadab6c26644d30a2e870a46b06dc92a9b5c73bad0a4e9019e4f4f`。
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-23 05:40** **v1.5.1 生产版**：1.5.1 24 h soak PASS（288 样本，失败/重启/kbd 重启/复合丢失/回滚全为 0，ping 0 丢包，内存与内核不可回收内存持平；00:48 一次 USB 重新枚举是巡检的 661 字节 adb 请求触发 adbd EOVERFLOW 所致、设备与 Mac 自行恢复，之后定规则 adb 请求 <512 字节）。tag v1.5.1 = release/1.5.1 f8de052（固件 tar 3d7c1470…e41b 可从 tag 复现）。**1.6.0-rc4 已装机 good**（05:26，验收全 PASS；旧 Mac 端与新固件兼容已实测），Mac 端随后部署 release/1.6.0（hello 带 page=L1）。1.6.0：同页 ui.page 不松按住的键（PTT 120 s/10 min、保持键 10 s/60 s、丢 up 后锁存）、hello 报告当前页并重置序号、LS 页「会话安排」键、急停暂停保留按键归属（顺带修 1.5.1 两个边角 bug）、Mac 侧 epoch 围栏；Kimi K3 rc1 NO-GO → rc2/rc3/rc4 GO；make test 1272 / mac-test 815 全绿。10-22 白天：会话安排网页连接上限与 macOS 优雅关闭（Kimi 三轮）、macOS 原生测试门槛 make mac-test。用户离开数天（10-22 10:30 起），待用户事项见 HANDOFF Open items。
 - **10-22 09:00** Mac 端两次更新（固件不变，仍 1.5.1-rc1）：① 07:10 **会话安排网页上线**（http://127.0.0.1:8781，终端运行 `mk20deck arrange` 打开，授权 30 天；Kimi K3 r2 NO-GO（一次性链接经 `open` 参数可被 ps 看到）→ 链接改写进 0700 目录里的 0600 .webloc、HTTP/1.1 keep-alive、拒绝测试去竞态 → r3 GO；集成 make test 1160 通过）。② 08:56 **键盘与 Mac 页面同步**：代码审查发现长按模式键只切了 Mac 页面，键盘仍在 L1，之后 K2 反向、键 5 被当成回 L1、K1 打开旧 Mac 设置页；改为 Mac 每次换页都发绝对 `ui.page`（固件早已支持），未确认即重发，K1/K2 转发一律当单击；Kimi r1 NO-GO（在途请求被 K2 判过期后永久错页，已用真实固件复现）→ 修复 → r2 GO；真实固件端到端测试覆盖交错。③ devtest HID 泄漏判定按 1.5.x 规则（PTT + 底排 ⌫/⏎/Esc + 授予的数字键）重写，Kimi r1 NO-GO → r2 GO。集成 make test 1218 通过（tests 1218 / onboard 12957 / kbd 4191×2 / agent 398 / ui 41396）。PRD v1.5 草案在 docs/prd-1.5（待用户批准）。soak 3.7 h 全部合格。固件后续（下一 rc）：同页 ui.page 不释放按住的键、hello 回报当前页、generation 用尽可重置。
 - **10-22 05:04** **1.5.1-rc1 已装机 good（05:01）**：选项模式（点等待输入的会话→上三排清空、首排显示选项，按数字直接选；固件经 ui.hidKeys 发瞬时数字键，按住说话时忽略），Kimi K3 GO（2 个 MINOR 已修），make test 全绿（tests 1000 / onboard 12957 / kbd 4191×2）；Claude hook 脚本已更新（只记选项短标签）。此前：10-21 23:00 用户照片证明物理屏顺序错（fb1–4 是最右一列）→ 1.4.3 修复，用户确认；10-21 23:20 用户定新布局（15 会话 + 底排 说话/删除/发送=可以/Esc/模式）→ 1.5.0（01:31）；空闲会话不再闪；长按拿起-放下移动钉扎已部署。会话安排网页（127.0.0.1:8781）已做完但 Kimi NO-GO，修复中，未部署。1.5.1 soak 05:02 开始。
 - **10-21 21:31** **1.4.2-rc3 已装机 good（21:29，slot A；1.4.1 在 slot B 作回退），验收全部 PASS**。起因：20:47 巡检见 1.4.1 上 MemAvailable 约 -0.75 MB/h，查到 /tmp/adbd.log（tmpfs=内存）2.5 h 涨到 2.4 MB——调试版 adbd 每条 adb 命令都记日志且以 `>` 打开、从不截断（主要由测试的 adb 轮询触发）；Slab 与我们进程 RSS 平稳，非泄漏。修复：adbd 改追加写 + mk20d maint 与其他 /tmp 日志一样截断（Kimi K3 GO）。另修 K3 测试的两处时序竞态（固定 150 ms 窗口、写线程占用面板期间 d=0 的快照），24×ASan 负载 + TSan 全过。make test 全绿。1.4.1 soak 3.2 h 全部合格（无 WARN）。1.4.2 的 24 h soak 21:30 开始，10-22 21:47 自动判定。
