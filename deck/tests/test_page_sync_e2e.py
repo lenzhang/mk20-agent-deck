@@ -10,6 +10,7 @@ Linux only (ptys + the host build of mk20-kbd; part of the Docker ``make test``)
 import os
 import pty
 import select
+import signal
 import subprocess
 import sys
 import threading
@@ -166,6 +167,43 @@ class Rig:
             time.sleep(0.3)
         return False
 
+    def _stopped(self, timeout=2.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            with open(f"/proc/{self.proc.pid}/stat") as f:
+                if f.read().rsplit(")", 1)[1].split()[0] == "T":
+                    return True
+            time.sleep(0.001)
+        return False
+
+    def cross_next_page(self, stale):
+        """The next ui.page the Mac writes meets a physical K2 on the keyboard.  stale=True: the request sits in the
+        host tty while the keyboard handles the K2 (SIGSTOP / SIGCONT makes both readable at once and mk20-kbd serves
+        the GD32 before host bytes), so the route boundary refuses it as "stale UI request" while the K2 tap is
+        already on its way to the Mac.  stale=False: the K2 is handled (its tap seen by the Mac's reader) before the
+        request is written: accepted, same page, the tap processed after the ack."""
+        t = self.link.t
+        orig = t.write
+
+        def write(data):
+            if b'"ui.page"' not in data:
+                return orig(data)
+            t.write = orig
+            if stale:
+                os.kill(self.proc.pid, signal.SIGSTOP)
+                assert self._stopped()
+                orig(data)
+                self.gd32([0x16, 1, K2, K2, 0, 0], [0x16, 0, K2, K2, 0, 0])
+                os.kill(self.proc.pid, signal.SIGCONT)
+                return None
+            n = len(self.raw)
+            self.gd32([0x16, 1, K2, K2, 0, 0], [0x16, 0, K2, K2, 0, 0])
+            end = time.monotonic() + 2
+            while (K2, K2, False) not in self.raw[n:] and time.monotonic() < end:
+                time.sleep(0.002)
+            return orig(data)
+        t.write = write
+
     def wait_page(self, page, timeout=3.0):
         end = time.monotonic() + timeout
         while time.monotonic() < end and self.c.page != page:
@@ -234,6 +272,23 @@ def test_device_route_and_mac_page_agree_after_mode_long_press_k2_and_back_l1(ri
     agree(rig, "L4")
     rig.tap_knob(K2)
     agree(rig, "L1")
+    # Kimi K3 interleaving (a): MODE long -> ui.page L4 in flight; the user taps K2 on the keyboard (L1 -> L4) while
+    # the request is still queued: refused as stale; the Mac then gets the tap (L4 -> L1): both must end on L1.
+    rejected = rig.link.pages_rejected
+    rig.cross_next_page(stale=True)
+    rig.key(FB20, True)
+    time.sleep(1.0)
+    rig.key(FB20, False)
+    agree(rig, "L1")
+    assert rig.link.pages_rejected == rejected + 1 and rig.link.ui_page_error == "stale UI request"
+    # (c): the keyboard toggled (tap on the wire) before our ui.page L4 arrived: accepted on the same page, the tap
+    # reaches the controller after the ack and must not count twice.
+    rig.cross_next_page(stale=False)
+    rig.key(FB20, True)
+    time.sleep(1.0)
+    rig.key(FB20, False)
+    agree(rig, "L1")
+    assert rig.link.pages_rejected == rejected + 1
     # Synced L4: K1 short opens the keyboard's own LS page; the Mac never gets K1 nor opens its SettingsPage
     rig.key(FB20, True)
     time.sleep(1.0)

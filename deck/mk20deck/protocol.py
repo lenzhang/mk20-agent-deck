@@ -200,12 +200,13 @@ def ui_heartbeat() -> dict[str, Any]:
 HID_DIGIT = {d: 0x1D + d for d in range(1, 10)}  # 1 -> 0x1E ... 9 -> 0x26
 HID_RETURN, HID_ESCAPE, HID_BACKSPACE = 0x28, 0x29, 0x2A
 HID_KEYS_MAX = 9  # firmware limit: at most nine of fb1..fb15
+GENERATION_MAX = 999_999_999  # ui.hidKeys / ui.page generations: 1..999999999, strictly increasing on the keyboard
 
 
 def ui_hid_keys(keys: dict[int, int], generation: int) -> dict[str, Any]:
     """mk20-kbd L1 option mode (kbd/UI.md): ``keys`` maps logical fb 1..15 -> digit 1..9 (``{}`` clears).
     Validated like the firmware so a bad map never leaves the host: <= 9 entries, no digit twice."""
-    if not 1 <= int(generation) <= 999_999_999:
+    if not 1 <= int(generation) <= GENERATION_MAX:
         raise ValueError("generation out of range")
     if len(keys) > HID_KEYS_MAX or len(set(keys.values())) != len(keys):
         raise ValueError("at most nine keys, each digit once")
@@ -226,7 +227,7 @@ def ui_page(page: str, generation: int) -> dict[str, Any]:
     generation 1..999999999 (strictly increasing on the device side)."""
     if page not in PAGES:
         raise ValueError(f"bad page {page!r}")
-    if isinstance(generation, bool) or not 1 <= int(generation) <= 999_999_999:
+    if isinstance(generation, bool) or not 1 <= int(generation) <= GENERATION_MAX:
         raise ValueError("generation out of range")
     return {**request("ui.page"), "generation": int(generation), "page": page}
 

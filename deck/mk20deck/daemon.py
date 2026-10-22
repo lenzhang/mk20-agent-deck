@@ -15,7 +15,7 @@ from . import protocol as P
 from .adapters.base import BackendUnavailable
 from .config import DEFAULT_WEB_URL
 from .controller import LONG_PRESS, Controller
-from .link import DeviceLink, LatencyStats
+from .link import UI_ONLINE_BEATS, DeviceLink, LatencyStats
 from .model import MODE_CYCLE
 from .render.canvas import Renderer
 
@@ -60,6 +60,7 @@ class InputEvent:
     code: str = ""  # raw code for the key trace
     hid: int | None = None  # option mode: the keyboard typed this press itself (HID usage)
     ignored: str = ""  # option mode: "ptt" = the keyboard ignored this digit press (Mac PTT held)
+    rx: int | None = None  # link.rx_events when the link delivered it (None: injected, not from the keyboard)
 
 
 class WakeReconnect(ConnectionError):
@@ -116,10 +117,13 @@ class Daemon:
     _hid_retry_at: float = 0.0
     _hid_epoch: int = -1
     # Page sync (2026-10-22): keep the keyboard's L1/L4 route equal to the controller's page with ui.page.
-    page_retry_s: float = 0.5  # first retry of a refused / unanswered ui.page (PROBING after a hello, HOME, LS ...)
+    page_retry_s: float = 0.5  # first retry of a refused / unanswered ui.page (keyboard on HOME/LS, stale, SUSPECT)
     page_retry_max_s: float = 2.0  # back-off cap: bounded traffic while the keyboard sits on its own pages
-    _page_acked: str | None = None  # what the keyboard last confirmed on this link epoch (None: tell it again)
+    page_online_beats: int = UI_ONLINE_BEATS  # after a hello: accepted heartbeats until the keyboard is ONLINE
+    _page_dev: str | None = None  # belief: the keyboard's host page (its L1/L4 route); None = unknown, tell it
+    _page_dev_rx: int = 0  # link.rx_events at the ack that set _page_dev (K2 taps up to it are already in it)
     _page_epoch: int = -1
+    _page_hello: bool = False  # the first request after a hello is still due (waits for page_online_beats)
     _page_sync: int = 0  # controller.page_sync seen
     _page_tried: str | None = None  # page of the current failing streak
     _page_retry_at: float = 0.0
@@ -156,7 +160,9 @@ class Daemon:
             knob = 1 if tag.startswith("K1") else 2
             action = tag.split(":", 1)[1] if ":" in tag else "press"
             if action == "press":
-                self.events.put(InputEvent("knob", knob, "down" if ev.pressed else "up", ev.pressed, t=now, code=code))
+                rx = getattr(self.link, "rx_events", None)  # called on the link's reader thread: this event's count
+                self.events.put(InputEvent("knob", knob, "down" if ev.pressed else "up", ev.pressed, t=now, code=code,
+                                           rx=rx))
             elif ev.pressed:
                 self.events.put(InputEvent("knob", knob, action, True, t=now, code=code))
             return
@@ -206,8 +212,8 @@ class Daemon:
                 self._open_settings()
             return
         log.info("input %s %s %s%s", ev.kind, ev.a, ev.b, "" if ev.kind != "key" else (" down" if ev.pressed else " up"))
-        if hasattr(self.controller, "device_pages"):  # before the input: K1 on L4 depends on it
-            self.controller.device_pages = self._pages_supported()
+        if hasattr(self.controller, "device_pages"):  # before the input: K1 on L4 and knob timing depend on it
+            self.controller.device_pages = self._device_pages()
         tr = self.trace
         if tr:
             c = self.controller
@@ -218,6 +224,8 @@ class Daemon:
             self.controller.on_key(ev.a, int(ev.b), ev.pressed)
         else:
             self.controller.on_knob(ev.a, str(ev.b))
+            if ev.a == 2 and ev.b == "up" and ev.rx is not None:
+                self._keyboard_k2_tap(ev.rx)
         if tr:
             code = ev.code or f"inj:{ev.a},{ev.b}"
             tr.ev("routed", code, ev.pressed)
@@ -270,7 +278,25 @@ class Daemon:
             self.controller.apply_background(m, sessions, err, t0)
 
     # -------------------------------------------------------------- page sync (ui.page)
-    def _pages_supported(self) -> bool:
+    # The daemon keeps a belief of the keyboard's host page (``_page_dev``): set by an accepted ui.page, toggled by every
+    # K2 tap the keyboard sends after that ack (it sends one exactly when its own host page flips: K2 short, L4 回 L1,
+    # HOME/LS -> L1/L4, ONLINE again), unknown after a hello, a non-acked request or a controller resync request.
+    # A request goes out only when the controller's page differs from that belief.  A same-page ui.page (the keyboard
+    # firmware runs a full page boundary for it: redraw AND release of held PTT / Mac HID keys) can therefore only
+    # happen while the belief is unknown:
+    #   * the first request after a hello (reconnect / re-hello), sent when the keyboard is ONLINE again (the link wakes
+    #     us at the page_online_beats-th heartbeat): the hello itself already ran a boundary, and a host page owns no
+    #     key before ONLINE + a fresh frame, which normally comes only after this request;
+    #   * the request after a refused / stale / unanswered one (we cannot know whether the keyboard moved);
+    #   * a controller resync (K1 forwarded while we show L4: the keyboard is on L1, so normally a real change).
+    # Never in steady state: a keyboard K2 tap updates the belief and sends nothing.
+    def _device_pages(self) -> bool:
+        """The keyboard firmware has ui.page: it decides knob holds and K1 on its L4 itself."""
+        link = self.link
+        has = getattr(link, "has_capability", None) if link is not None else None
+        return bool(has and getattr(link, "ui_negotiated", False) and has("ui.page"))
+
+    def _pages_sendable(self) -> bool:
         link = self.link
         return (link is not None and getattr(link, "ui_negotiated", False) and link.supports("ui.page")
                 and self._page_off_epoch != getattr(link, "ui_epoch", 0))
@@ -279,37 +305,52 @@ class Daemon:
         page = self.controller.page
         return page if page in P.PAGES else None  # "LS" (legacy settings page) is never claimed
 
+    def _keyboard_k2_tap(self, rx: int) -> None:
+        """A K2 tap from the keyboard: its host page flipped (and its boundary dropped any ui.hidKeys map).  Taps that
+        arrived before the ack of our last accepted ui.page are already contained in that ack."""
+        if self._page_dev is not None and rx > self._page_dev_rx:
+            self._page_dev = "L4" if self._page_dev == "L1" else "L1"
+        if self._device_pages():
+            self._hid_map, self._hid_retry_at = {}, 0.0
+
+    def _wake(self) -> None:
+        """Link hook (reader / heartbeat thread): a hello or ONLINE again -> run a step now, never after the old wait."""
+        self.events.put(InputEvent("ui", 0, "wake", t=self.clock()))
+
     def _sync_page(self, now: float) -> bool:
-        """Send the controller's absolute page whenever it differs from what the keyboard last confirmed (any cause:
-        MODE long press, 回 L1, mode keys, knob holds, a K2 tap from the keyboard), after every hello, and again when
-        the controller saw the keyboard disagree.  True when the keyboard accepted: it then needs a fresh full frame and
-        has dropped its ui.hidKeys map (every page boundary does), so both are re-sent right after."""
+        """Send the controller's absolute page when it differs from the belief (see above).  True when the keyboard
+        accepted: it then needs a fresh full frame and has dropped its ui.hidKeys map, so both follow right after."""
         c, link = self.controller, self.link
         if link is None:
             return False
-        supported = self._pages_supported()
         if hasattr(c, "device_pages"):
-            c.device_pages = supported
+            c.device_pages = self._device_pages()
         epoch = getattr(link, "ui_epoch", 0)
         if epoch != self._page_epoch:  # reconnect / re-hello: the keyboard may show anything (reboot -> auto-L1)
-            self._page_epoch, self._page_acked, self._page_tried, self._page_retry_at = epoch, None, None, 0.0
+            self._page_epoch, self._page_dev, self._page_tried, self._page_retry_at = epoch, None, None, 0.0
+            self._page_hello = True
         sync = getattr(c, "page_sync", 0)
         if sync != self._page_sync:  # the controller saw the keyboard on another route: say it again
-            self._page_sync, self._page_acked, self._page_tried, self._page_retry_at = sync, None, None, 0.0
+            self._page_sync, self._page_dev, self._page_tried, self._page_retry_at = sync, None, None, 0.0
         want = self._page_wanted()
-        if not supported or want is None or want == self._page_acked:
+        if not self._pages_sendable() or want is None or want == self._page_dev:
             return False
+        if self._page_hello and self._probing():
+            return False  # it refuses everything until ONLINE; the link wakes us at the right heartbeat
         if want != self._page_tried:  # a new target goes out at once, with a fresh back-off
             self._page_tried, self._page_retry_at, self._page_backoff = want, 0.0, self.page_retry_s
         elif now < self._page_retry_at:
             return False
+        self._page_hello = False
         res = link.ui_page(want)
         if res == "ok":
             if self._page_failing:
                 log.info("ui.page %s accepted", want)
-            self._page_acked, self._page_tried, self._page_failing = want, None, False
+            self._page_dev, self._page_dev_rx = want, getattr(link, "ui_page_rx", 0)
+            self._page_tried, self._page_failing = None, False
             self._hid_map, self._hid_retry_at = {}, 0.0  # the keyboard cleared its option-mode map at the boundary
             return True
+        self._page_dev = None  # refused / stale / unanswered: the keyboard may have moved meanwhile
         if res == "unsupported":
             self._page_off_epoch = epoch
             log.info("ui.page refused as unsupported: not sent again until the next hello")
@@ -323,14 +364,19 @@ class Daemon:
                      self.page_retry_max_s)
         return False
 
+    def _probing(self) -> bool:
+        return getattr(self.link, "ui_beats_hello", self.page_online_beats) < self.page_online_beats
+
     def _page_wait(self, now: float) -> float | None:
         want = self._page_wanted()
-        if want is None or not self._pages_supported():
+        if want is None or not self._pages_sendable():
             return None  # legacy firmware: never spin on a request it cannot take
         if (getattr(self.link, "ui_epoch", 0), getattr(self.controller, "page_sync", 0)) != (self._page_epoch,
                                                                                             self._page_sync):
-            return 0.0  # a hello / resync request since the last step: tell the keyboard now
-        return None if want == self._page_acked else max(0.0, self._page_retry_at - now)
+            return 0.0  # a hello / resync request since the last step: look at it now
+        if want == self._page_dev or (self._page_hello and self._probing()):
+            return None  # nothing to say / the link wakes us once the keyboard is ONLINE again
+        return max(0.0, self._page_retry_at - now)
 
     # -------------------------------------------------------------- option mode (ui.hidKeys)
     def _sync_hid_keys(self, now: float) -> None:
@@ -480,6 +526,8 @@ class Daemon:
             bg = None
         if self.calls is not None:  # wake the loop at once when the web page queues a change
             self.calls.attach(lambda: self.events.put(InputEvent("ui", 0, "wake", t=self.clock())))
+        if self.link is not None and hasattr(self.link, "on_ui"):  # hello / ONLINE again: page, map, frame at once
+            self.link.on_ui = self._wake
         try:
             self._run(stop)
         finally:
@@ -488,6 +536,8 @@ class Daemon:
                 bg.join(self.bg_join_s)
             if self.calls is not None:
                 self.calls.attach(None)
+            if self.link is not None and getattr(self.link, "on_ui", None) == self._wake:
+                self.link.on_ui = None
 
     def _run(self, stop: threading.Event) -> None:
         while not stop.is_set():

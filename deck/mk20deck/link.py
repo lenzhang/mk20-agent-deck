@@ -15,6 +15,10 @@ from .transport import Transport
 
 log = logging.getLogger(__name__)
 
+# kbd/UI.md: after a ui.hello the keyboard is PROBING; three consecutive ui.heartbeat samples spanning >= 2 s make it
+# ONLINE again (the earliest moment it accepts ui.page / a non-empty ui.hidKeys map).
+UI_ONLINE_BEATS = 3
+
 
 @dataclass
 class LatencyStats:
@@ -84,6 +88,15 @@ class DeviceLink:
         self.ui_beat_timeouts = 0  # heartbeats without an answer within ack_timeout
         self.ui_rehellos = 0  # hellos after a rejected heartbeat (device had declared us lost)
         self.ui_epoch = 0  # +1 per accepted ui.hello: the device dropped any ui.hidKeys map then
+        self.ui_beats_hello = 0  # heartbeats accepted since the last accepted ui.hello (UI_ONLINE_BEATS: ONLINE)
+        # Called (reader / heartbeat thread, must not block) after an accepted ui.hello and when the keyboard should be
+        # ONLINE again (UI_ONLINE_BEATS heartbeats later): the daemon wakes its loop to re-send page / map / frame.
+        self.on_ui: Callable[[], None] | None = None
+        # Device events dispatched so far (reader thread).  Every ack carries the count at its arrival, so the daemon
+        # can tell a keyboard K2 tap sent before our ui.page was processed from one sent after it.
+        self.rx_events = 0
+        self.ui_page_rx = 0  # rx_events when the last accepted ui.page was acknowledged
+        self.ui_generation_exhausted = False
         # last ui.hidKeys / ui.page generation we used: one counter for both (each device counter only needs to see
         # strictly increasing values), starting above both of the device's, from the hello
         self.ui_generation = 0
@@ -134,7 +147,7 @@ class DeviceLink:
             pending, self._pending = self._pending, {}
         for q in pending.values():  # wake waiters immediately instead of after ack_timeout
             try:
-                q.put_nowait(P.Frame(0, -1, b""))
+                q.put_nowait((P.Frame(0, -1, b""), self.rx_events))
             except queue.Full:
                 pass
 
@@ -148,10 +161,12 @@ class DeviceLink:
                     log.exception("on_json hook failed")
             item = P.classify_json(obj)
             if isinstance(item, P.KeyEvent):
+                self.rx_events += 1
                 if self.on_key:
                     self.on_key(item)
                 return  # device events never resolve a waiter (even if their id matched one of ours)
             if not isinstance(item, P.Ack) and "method" in obj and "errorString" not in obj:
+                self.rx_events += 1
                 self._event(obj)
                 return
             if fr.frame_id == 0xFFFFFFFF or (not isinstance(item, P.Ack) and "errorString" in obj):
@@ -160,7 +175,7 @@ class DeviceLink:
         with self._lock:
             waiter = self._pending.pop(fr.frame_id, None)
         if waiter is not None:
-            waiter.put(fr)
+            waiter.put((fr, self.rx_events))  # same thread as the events: everything before it is counted
 
     def _event(self, obj: dict) -> None:
         """Device-initiated non-key event: hand to ``on_event``; unknown ones are dropped. Runs on the reader thread,
@@ -173,8 +188,9 @@ class DeviceLink:
         except Exception:  # noqa: BLE001
             log.exception("device event hook failed for %r", str(obj.get("method"))[:64])
 
-    def _send(self, cmd: int, data: bytes, wait: bool, sent_at: list | None = None) -> P.Frame | None:
-        q: "queue.Queue[P.Frame]" = queue.Queue(maxsize=1)
+    def _send(self, cmd: int, data: bytes, wait: bool, sent_at: list | None = None,
+              ack_rx: list | None = None) -> P.Frame | None:
+        q: "queue.Queue[tuple[P.Frame, int]]" = queue.Queue(maxsize=1)
         with self._lock:  # ids are allocated from two threads (pushes + heartbeat): a duplicate would misroute acks
             fid = self.ids.next()
             if wait:
@@ -193,11 +209,14 @@ class DeviceLink:
             return None
         try:
             # close() wakes registered waiters; one registered after that wake-up must not sit out ack_timeout
-            return q.get(timeout=0 if self._stop.is_set() else self.ack_timeout)
+            fr, rx = q.get(timeout=0 if self._stop.is_set() else self.ack_timeout)
         except queue.Empty:
             with self._lock:
                 self._pending.pop(fid, None)
             return None
+        if ack_rx is not None:
+            ack_rx.append(rx)
+        return fr
 
     # ------------------------------------------------------------------
     def handshake(self, fw_base: int | None = None) -> DeviceLayout:
@@ -244,11 +263,38 @@ class DeviceLink:
         gens = [g for g in (ack.result.get("hid_generation"), ack.result.get("generation")) if type(g) is int]
         with self._lock:
             self.ui_generation = max([self.ui_generation, *gens])
+            self.ui_beats_hello = 0  # before the epoch: whoever sees the new epoch sees the reset count
             self.ui_epoch += 1
         self.ui_negotiated = True
         log.info("ui.hello ok: heartbeat_ms=%s generation=%s capabilities=%s, heartbeat every %.2f s",
                  ms, ack.result.get("generation"), ack.result.get("capabilities"), self.ui_beat_s)
+        if self.ui_generation >= P.GENERATION_MAX:
+            self._exhausted()
+        self._ui_changed()
         return True
+
+    def _ui_changed(self) -> None:
+        hook = self.on_ui
+        if hook is not None:
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 — a waker bug never stops the reader / heartbeat thread
+                log.exception("on_ui hook failed")
+
+    def _exhausted(self) -> None:
+        if not self.ui_generation_exhausted:
+            self.ui_generation_exhausted = True
+            log.warning("ui generation exhausted (%d): ui.page / ui.hidKeys disabled on this connection until the "
+                        "keyboard process restarts and resets its counters (firmware follow-up)", P.GENERATION_MAX)
+
+    def _next_generation(self) -> int | None:
+        """Next ui.page / ui.hidKeys generation, or None once 999999999 is used up (never a busy retry)."""
+        with self._lock:
+            if self.ui_generation < P.GENERATION_MAX:
+                self.ui_generation += 1
+                return self.ui_generation
+        self._exhausted()
+        return None
 
     def _beat_loop(self) -> None:
         nxt = time.monotonic() + self.ui_beat_s
@@ -273,8 +319,11 @@ class DeviceLink:
                 continue
             if ack.success:
                 self.ui_beats += 1
+                self.ui_beats_hello += 1
                 if self.ui_beats == 1:
                     log.info("ui.heartbeat accepted (first)")
+                if self.ui_beats_hello == UI_ONLINE_BEATS:
+                    self._ui_changed()  # the keyboard should be ONLINE again now
                 continue
             self.ui_beat_rejects += 1
             now = time.monotonic()
@@ -287,18 +336,25 @@ class DeviceLink:
                 if self.ui_hello():
                     nxt = time.monotonic() + self.ui_beat_s
 
-    def supports(self, capability: str) -> bool:
+    def has_capability(self, capability: str) -> bool:
         """Advertised in the last accepted ui.hello (mk20-kbd); False for stock KD / legacy firmware."""
         caps = self.ui_hello_result.get("capabilities") if self.ui_negotiated else None
         return isinstance(caps, list) and capability in caps
+
+    def supports(self, capability: str) -> bool:
+        """Advertised and usable: the generation-checked requests stop once the generation is used up."""
+        if capability in ("ui.page", "ui.hidKeys") and self.ui_generation_exhausted:
+            return False
+        return self.has_capability(capability)
 
     def ui_hid_keys(self, keys: dict[int, int]) -> str:
         """Option mode: logical fb -> digit map for the live L1 page ({} clears).  Returns "ok", "unsupported"
         (firmware without ui.hidKeys), "rejected" (e.g. page not live yet: retry) or "timeout"."""
         if not self.supports("ui.hidKeys"):
             return "unsupported"
-        with self._lock:
-            self.ui_generation = gen = self.ui_generation + 1
+        gen = self._next_generation()
+        if gen is None:
+            return "unsupported"
         try:
             req = P.ui_hid_keys(keys, gen)
         except ValueError as e:   # generation exhausted / bad map: never let it escape into the frame loop
@@ -329,22 +385,25 @@ class DeviceLink:
         the daemon logs a failing streak once."""
         if not self.supports("ui.page"):
             return "unsupported"
-        with self._lock:
-            self.ui_generation = gen = self.ui_generation + 1
+        gen = self._next_generation()
+        if gen is None:
+            return "unsupported"
         try:
             req = P.ui_page(page, gen)
         except ValueError as e:   # generation exhausted / bad page: never let it escape into the frame loop
             self.pages_rejected += 1
             self.ui_page_error = str(e)[:80]
             return "rejected"
+        rx: list = []
         try:
-            ack = self.call(req)
+            ack = self.call(req, ack_rx=rx)
         except ConnectionError:
             return "timeout"
         if ack is None:
             return "timeout"
         if ack.success and ack.result.get("page") == page and ack.result.get("generation") == gen:
             self.pages_sent += 1
+            self.ui_page_rx = rx[0] if rx else self.rx_events
             return "ok"
         self.pages_rejected += 1
         err = str(ack.error or "")
@@ -354,8 +413,9 @@ class DeviceLink:
             return "unsupported"
         return "rejected"
 
-    def call(self, req: dict, sent_at: list | None = None) -> P.Ack | None:
-        fr = self._send(P.CMD_JSON, P.json_bytes(req), wait=True, sent_at=sent_at)
+    def call(self, req: dict, sent_at: list | None = None, ack_rx: list | None = None) -> P.Ack | None:
+        """``ack_rx``: receives ``rx_events`` at the ack's arrival (device events dispatched before it)."""
+        fr = self._send(P.CMD_JSON, P.json_bytes(req), wait=True, sent_at=sent_at, ack_rx=ack_rx)
         if fr is None:
             return None
         item = P.classify_json(fr.json() or {})
