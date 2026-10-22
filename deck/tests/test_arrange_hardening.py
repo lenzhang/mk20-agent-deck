@@ -1181,3 +1181,66 @@ def test_lingering_is_bounded_and_never_blocks_the_accept_loop(deck):
         s.close()
     time.sleep(0.3)
     assert w.cl.state()["ok"]
+
+
+# ---------------------------------------------------------------- R8: lingerer robustness (Kimi r3 MINORs)
+def _linger_pair():
+    a, b = socket.socketpair()
+    a.shutdown(socket.SHUT_WR)  # as shutdown_request does before handing over
+    return a, b
+
+
+def _wait(pred, timeout=3.0):
+    t0 = time.monotonic()
+    while not pred() and time.monotonic() - t0 < timeout:
+        time.sleep(0.02)
+    return pred()
+
+
+def test_lingerer_survives_an_unexpected_error_in_a_pass(monkeypatch):
+    lg = webui._Lingerer()
+    real, calls = lg._pass, []
+
+    def flaky(items):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")  # e.g. something odd from poll/recv
+        return real(items)
+
+    monkeypatch.setattr(lg, "_pass", flaky)
+    a, b = _linger_pair()
+    lg.add(a)
+    b.close()  # the client closes: the lingering socket must still be closed after the failed pass
+    assert _wait(lambda: lg.pending() == 0)
+    assert len(calls) >= 2 and lg._thread is not None and lg._thread.is_alive()
+    lg.stop()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")  # the thread is killed on purpose
+def test_lingerer_thread_that_ends_is_restarted_by_the_next_add(monkeypatch):
+    lg = webui._Lingerer()
+    real = lg._pass
+    monkeypatch.setattr(lg, "_pass", lambda items: (_ for _ in ()).throw(SystemExit()))  # not an Exception
+    a, b = _linger_pair()
+    lg.add(a)
+    assert _wait(lambda: lg._thread is None)  # the dead thread cleared itself
+    monkeypatch.setattr(lg, "_pass", real)
+    c, d = _linger_pair()
+    lg.add(c)
+    assert lg._thread is not None and lg._thread.is_alive()  # a fresh thread
+    b.close(); d.close()
+    assert _wait(lambda: lg.pending() == 0)  # both sockets (the old one too) are drained and closed
+    lg.stop()
+
+
+def test_lingerer_stop_joins_the_thread_and_closes_everything():
+    lg = webui._Lingerer()
+    socks = [_linger_pair() for _ in range(3)]
+    for a, _ in socks:
+        lg.add(a)
+    t = lg._thread
+    lg.stop()
+    assert t is not None and not t.is_alive() and lg._thread is None
+    assert lg.pending() == 0 and all(a.fileno() == -1 for a, _ in socks)
+    for _, b in socks:
+        b.close()

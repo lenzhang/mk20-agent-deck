@@ -619,53 +619,71 @@ class _Lingerer:
             pass
 
     def _run(self) -> None:
-        while True:
+        # Never dies silently (Kimi r3 MINOR): an unexpected error in one pass is logged and the loop goes on;
+        # if the thread still ends, ``_thread`` is cleared so the next ``add`` starts a fresh one.
+        try:
+            while True:
+                with self._lock:
+                    if self._stopped:
+                        return
+                    items = list(self._socks.items())
+                if not items:
+                    self._ev.wait(0.5)
+                    self._ev.clear()
+                    continue
+                try:
+                    self._pass(items)
+                except Exception:  # noqa: BLE001 — keep lingering (else every close becomes a reset on macOS)
+                    log.exception("arrange linger pass failed")
+                    time.sleep(0.05)
+        finally:
             with self._lock:
-                if self._stopped:
-                    return
-                items = list(self._socks.items())
-            if not items:
-                self._ev.wait(0.5)
-                self._ev.clear()
-                continue
-            try:
-                if hasattr(select, "poll"):
-                    p = select.poll()
-                    for fd, _ in items:
-                        p.register(fd, select.POLLIN | select.POLLERR | select.POLLHUP)
-                    ready = {fd for fd, _ in p.poll(50)}
-                else:
-                    ready = set(select.select([fd for fd, _ in items], [], [], 0.05)[0])
-            except (OSError, ValueError):
-                ready = {fd for fd, _ in items}
-            now = time.monotonic()
-            for fd, entry in items:
-                sock, deadline, left = entry
-                done = now >= deadline
-                if not done and fd in ready:
-                    try:
-                        data = sock.recv(min(left, 16384))
-                    except BlockingIOError:
-                        data = None
-                    except OSError:
-                        data = b""
-                    if data == b"":
-                        done = True  # the client closed too: clean close, no reset
-                    elif data:
-                        entry[2] = left - len(data)
-                        done = entry[2] <= 0
-                if done:
-                    with self._lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+
+    def _pass(self, items: list) -> None:
+        try:
+            if hasattr(select, "poll"):
+                p = select.poll()
+                for fd, _ in items:
+                    p.register(fd, select.POLLIN | select.POLLERR | select.POLLHUP)
+                ready = {fd for fd, _ in p.poll(50)}
+            else:
+                ready = set(select.select([fd for fd, _ in items], [], [], 0.05)[0])
+        except (OSError, ValueError):
+            ready = {fd for fd, _ in items}
+        now = time.monotonic()
+        for fd, entry in items:
+            sock, deadline, left = entry
+            done = now >= deadline
+            if not done and fd in ready:
+                try:
+                    data = sock.recv(min(left, 16384))
+                except BlockingIOError:
+                    data = None
+                except Exception:  # noqa: BLE001 — OSError or anything odd: just close this one
+                    data = b""
+                if data == b"":
+                    done = True  # the client closed too: clean close, no reset
+                elif data:
+                    entry[2] = left - len(data)
+                    done = entry[2] <= 0
+            if done:
+                with self._lock:
+                    if self._socks.get(fd) is entry:
                         self._socks.pop(fd, None)
-                    self._close(sock)
-                    self.drained += 1
+                self._close(sock)
+                self.drained += 1
 
     def stop(self) -> None:
         with self._lock:
             self._stopped = True
             socks = [e[0] for e in self._socks.values()]
             self._socks.clear()
+            t, self._thread = self._thread, None
         self._ev.set()
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=1.0)  # its poll snapshot ends within 50 ms; no stale fd numbers polled after stop
         for sock in socks:
             self._close(sock)
 
