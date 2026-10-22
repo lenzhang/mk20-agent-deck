@@ -50,6 +50,7 @@ import json
 import logging
 import re
 import secrets
+import select
 import socket
 import threading
 import time
@@ -75,6 +76,21 @@ MAX_CONN_AGE_S = 60.0      # a keep-alive connection answers with "Connection: c
 MAX_CONN_REQUESTS = 100    # ... or has served this many requests (the page's fetch just reconnects)
 EVICT_MIN_IDLE_S = 0.2     # at the connection cap a new client closes the oldest connection idle this long
 EVICT_WAIT_S = 1.0         # ... and waits at most this for its slot (else 503)
+# Test seam (None in production): called by a handler after its socket became readable and *before* it marks
+# itself busy, i.e. inside the window in which the eviction must notice the arrived bytes and leave it alone.
+_READY_HOOK: Callable | None = None
+
+
+def _readable(fd: int, timeout: float) -> bool:
+    """Data (or EOF / error) waiting on ``fd`` within ``timeout`` seconds — nothing is consumed."""
+    if fd < 0:
+        return True
+    if hasattr(select, "poll"):
+        p = select.poll()
+        p.register(fd, select.POLLIN | select.POLLPRI | select.POLLERR | select.POLLHUP)
+        return bool(p.poll(max(0, int(timeout * 1000))))
+    r, _, _ = select.select([fd], [], [], timeout)
+    return bool(r)
 JOB_TIMEOUT_S = 3.0        # the loop must pick a job up within this (else cancelled, 503)
 JOB_RUN_S = 1.5            # ... and finish a started one within this
 STATE_TIMEOUT_S = 2.0
@@ -578,19 +594,29 @@ class _Server(ThreadingHTTPServer):
 
     def _evict_oldest_idle(self) -> bool:
         """Close the oldest keep-alive connection that is idle (between requests) for EVICT_MIN_IDLE_S, so
-        connections that merely keep a slot can never starve a new client.  Never touches a request in
-        progress (the handler claims "busy" under the same lock before reading a request)."""
+        connections that merely keep a slot can never starve a new client.
+
+        Never touches a request that has started to arrive: a handler waits for its next request's first
+        byte with poll (nothing consumed) and marks itself busy under this lock before reading; here, under
+        the same lock, a candidate whose socket already has bytes (or EOF) waiting is skipped, and the chosen
+        one is shut down before the lock is released, so it cannot turn busy in between."""
         now = time.monotonic()
         with self._conns_lock:
-            idle = [h for h in self._conns.values()
-                    if h._idle_since is not None and now - h._idle_since >= EVICT_MIN_IDLE_S]
-            if not idle:
-                return False
-            victim = min(idle, key=lambda h: h._born)
-            victim._evicted, victim._idle_since = True, None
-        victim._expire()
-        self.evicted += 1
-        return True
+            idle = sorted((h for h in self._conns.values()
+                           if h._idle_since is not None and now - h._idle_since >= EVICT_MIN_IDLE_S),
+                          key=lambda h: h._born)
+            for victim in idle:
+                try:
+                    if _readable(victim.connection.fileno(), 0):
+                        continue  # a request (or its first bytes) arrived: not idle any more
+                    victim._evicted, victim._idle_since = True, None
+                    victim.close_connection = True
+                    victim.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    continue
+                self.evicted += 1
+                return True
+        return False
 
     def process_request(self, request, client_address):
         """At most ``max_connections`` handler threads; at the cap the oldest idle keep-alive connection is
@@ -676,15 +702,26 @@ class _Handler(BaseHTTPRequestHandler):
         hard REQUEST_DEADLINE_S: a client that trickles bytes is cut off (reads fail, the thread ends).
         A connection lives at most MAX_CONN_AGE_S / MAX_CONN_REQUESTS: then its response says
         "Connection: close" and the client reconnects (no keep-alive connection holds a slot forever)."""
-        if not self._set_idle(True):
-            self.close_connection = True
-            return
+        if not self._buffered():  # (a pipelined request already read into our buffer needs no wait)
+            if not self._set_idle(True):
+                self.close_connection = True
+                return
+            try:  # wait for the first byte without consuming anything: while idle we are evictable
+                ready = _readable(self.connection.fileno(), self.timeout)
+            except (OSError, ValueError):
+                ready = False
+            hook = _READY_HOOK
+            if ready and hook is not None:
+                hook(self)
+            if not self._set_idle(False) or not ready:  # busy now: the eviction can no longer pick us
+                self.close_connection = True  # evicted, or the idle keep-alive limit passed
+                return
         try:
             data = self.rfile.peek(1)
         except (OSError, ValueError):
-            data = b""  # idle keep-alive limit / reset / evicted
-        if not self._set_idle(False) or not data:
-            self.close_connection = True  # evicted, or the client closed its keep-alive connection
+            data = b""
+        if not data:
+            self.close_connection = True  # the client closed its keep-alive connection
             return
         self._requests += 1
         self._last = self._requests >= MAX_CONN_REQUESTS or time.monotonic() - self._born >= MAX_CONN_AGE_S
@@ -695,6 +732,17 @@ class _Handler(BaseHTTPRequestHandler):
             super().handle_one_request()
         finally:
             self._deadline.cancel()
+
+    def _buffered(self) -> bool:
+        """Bytes already in our read buffer (pipelining)?  Non-blocking peek; only called while busy."""
+        try:
+            self.connection.setblocking(False)
+            try:
+                return bool(self.rfile.peek(1))
+            finally:
+                self.connection.settimeout(self.timeout)
+        except (OSError, ValueError):
+            return False
 
     def _expire(self) -> None:
         self.close_connection = True

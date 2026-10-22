@@ -17,6 +17,8 @@ R4 flaky foreign-uid refusal (EPIPE)            -> reply-then-half-close-and-dra
 r3 MINOR on d82cd58:
 R5 keep-alive hogs could hold all 8 slots        -> per-connection cap (age / requests -> Connection: close),
                                                     at the cap the oldest idle connection is closed first
+R6 first byte vs eviction race (5e36c55 MAJOR)   -> poll for the first byte (nothing consumed), busy before
+                                                    reading, eviction re-checks "no bytes waiting" under the lock
 """
 import json
 import os
@@ -945,3 +947,119 @@ def test_busy_hogs_hold_slots_only_until_the_connection_age_cap(deck, monkeypatc
     for s in socks:
         s.close()
     assert got is not None and got < webui.MAX_CONN_AGE_S + 1.0  # starved at most until the cap
+
+
+# ====================================================================== R6: first byte vs eviction
+def _read_head_keep(s):
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = s.recv(4096)
+        if not chunk:
+            return b"", b""
+        buf += chunk
+    head, _, body = buf.partition(b"\r\n\r\n")
+    n = int(re.search(rb"Content-Length: (\d+)", head).group(1))
+    while len(body) < n:
+        body += s.recv(4096)
+    return head, body
+
+
+def _post_bytes(w, path, body):
+    raw = json.dumps(body).encode()
+    h = dict(w.cl.auth(), Host=w.cl.host, **{"Content-Length": str(len(raw))})
+    return (f"POST {path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in h.items()) + "\r\n").encode() + raw
+
+
+def _race_setup(deck, monkeypatch):
+    """Two slots: A = idle keep-alive connection (one request served), B = holds the other slot mid-request.
+    The hook parks A in the window "bytes arrived, not yet busy" until ``gate`` is set."""
+    w = deck(max_connections=2)
+    wait_slots_free(w.srv, 2)
+    port = w.srv.port
+    a = socket.create_connection(("127.0.0.1", port), timeout=5)
+    assert _ka_get(a, port).startswith(b"HTTP/1.1 204")
+    b = socket.create_connection(("127.0.0.1", port), timeout=5)
+    b.sendall(b"GET /favicon.ico HTTP/1.1\r\n")  # busy: never an eviction candidate
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    assert w.srv.httpd._slots._value == 0
+    time.sleep(webui.EVICT_MIN_IDLE_S + 0.15)  # A is idle long enough to be a candidate
+    gate, entered = threading.Event(), threading.Event()
+
+    def hook(h):
+        if h._requests >= 1 and not entered.is_set():  # A's next request
+            entered.set()
+            gate.wait(5)
+
+    monkeypatch.setattr(webui, "_READY_HOOK", hook)
+    return w, a, b, gate, entered
+
+
+def _new_client_at_the_cap(w):
+    return raw_http(w.srv.port, f"GET /favicon.ico HTTP/1.0\r\nHost: 127.0.0.1:{w.srv.port}\r\n\r\n".encode())
+
+
+def test_an_arrived_post_is_executed_and_answered_not_evicted(deck, monkeypatch):
+    w, a, b, gate, entered = _race_setup(deck, monkeypatch)
+    before = w.ctl.mgr.slots[14].key
+    assert before is not None
+    a.sendall(_post_bytes(w, "/api/clear", {"mode": "codex_desktop", "slot": 14, "expect": before}))
+    assert entered.wait(3)  # A: readable, still marked idle (the window of the old race)
+    third = _new_client_at_the_cap(w)
+    assert third.startswith(b"HTTP/1.1 503")  # nothing evictable: A has bytes waiting, B is busy
+    assert w.srv.httpd.evicted == 0
+    gate.set()
+    head, body = _read_head_keep(a)
+    assert head.startswith(b"HTTP/1.1 200"), head
+    assert json.loads(body)["message"] == "已清空"  # the POST was executed
+    a.close()
+    b.close()
+
+
+def test_a_partial_request_is_not_evicted_either(deck, monkeypatch):
+    w, a, b, gate, entered = _race_setup(deck, monkeypatch)
+    full = f"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:{w.srv.port}\r\n\r\n".encode()
+    a.sendall(full[:9])  # "GET /favi"
+    assert entered.wait(3)
+    assert _new_client_at_the_cap(w).startswith(b"HTTP/1.1 503")
+    assert w.srv.httpd.evicted == 0
+    gate.set()
+    time.sleep(0.1)
+    a.sendall(full[9:])
+    head, _ = _read_head_keep(a)
+    assert head.startswith(b"HTTP/1.1 204"), head  # answered, not cut off
+    a.close()
+    b.close()
+
+
+def test_a_truly_idle_connection_is_still_evicted(deck, monkeypatch):
+    w, a, b, gate, entered = _race_setup(deck, monkeypatch)
+    gate.set()  # the hook must not hold the evicted handler (it wakes on the EOF of its shutdown)
+    third = _new_client_at_the_cap(w)  # A has nothing waiting: it is closed to make room
+    assert third.startswith(b"HTTP/1.1 204"), third[:40]
+    assert w.srv.httpd.evicted == 1
+    a.settimeout(2)
+    assert a.recv(16) == b""
+    gate.set()
+    a.close()
+    b.close()
+
+
+def test_pipelined_requests_are_answered_without_waiting(deck, monkeypatch):
+    """Requests already in the read buffer (pipelining) are served at once, not after the idle limit."""
+    monkeypatch.setattr(webui, "READ_TIMEOUT_S", 3.0)
+    w = deck()
+    s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+    one = f"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:{w.srv.port}\r\n\r\n".encode()
+    t0 = time.monotonic()
+    s.sendall(one * 3)
+    data = b""
+    while data.count(b"\r\n\r\n") < 3 and time.monotonic() - t0 < 2.5:  # 204s: header blocks only
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    assert data.count(b"HTTP/1.1 204") == 3, data[:200]
+    assert time.monotonic() - t0 < 1.0
+    s.close()
