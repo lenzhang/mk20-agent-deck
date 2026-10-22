@@ -33,6 +33,11 @@ static const struct { int fb; uint8_t usage; } HOST_HID_KEYS[] = {
 /* GD32 key reports are edge-triggered without a state resync: a lost key-up must not leave an
  * auto-repeating Backspace/Return/Escape held. Longer holds are cut (press again to continue). */
 #define HID_KEY_HOLD_MS 10000
+/* The Mac PTT (Right Option) is held for dictation, so it is not cut at 10 s; but a lost GD32 key-up must not
+ * leave RAlt down for ever either (1.6.0, Kimi K3: same-page ui.page no longer releases it, and the GD32 cannot
+ * be asked for the key state: one outbound frame shape only). A PTT hold ends after HID_PTT_HOLD_MS (press
+ * again to continue); a repeated GD32 down of the held PTT confirms it pressed and restarts the window. */
+#define HID_PTT_HOLD_MS 120000
 /* L1 option mode (host ui.hidKeys, user decision 2026-10-22): the Mac maps up to 9 of fb1..fb15 to the
  * digits 1..9 while an agent asks a numbered choice. The map lives only on the live L1 page and only
  * HID_MAP_MS after the last accepted request (the Mac refreshes it every ~10 s while it is shown). */
@@ -55,6 +60,10 @@ struct onboard_s {
      * at hid_at): its release sends no HID, just the host up. */
     int key_owner[20], knob_down[2], knob_long[2];
     uint8_t hid_usage[20]; int64_t hid_at[20];
+    /* 1.6.0: a host key or L4 回 L1 press (owner 1/4) still held across a same-page ui.page has no lost-up
+     * bound of its own (owners >= 5 have the 10 s cut, the PTT its 120 s cap): it is kept at most until
+     * keep_until (request + HID_KEY_HOLD_MS) unless a new GD32 down of that key confirms it pressed. 0 = none. */
+    int64_t keep_until[20];
     uint8_t hid_map[20]; int hid_mapped; long hid_generation; int64_t hid_map_at; /* ui.hidKeys (fb1..fb15) */
     struct { int page, client; uint64_t generation; } agent_owner[20];
     uint32_t pressed;
@@ -156,6 +165,7 @@ static void release_mac(kbd_t *k)
 static void release_key(kbd_t *k, int i)
 {
     onboard_t *o = k->onboard; int owner = o->key_owner[i];
+    o->keep_until[i] = 0;
     if (owner == 6) { mac_up(k,i,6); o->key_owner[i] = owner = 1; } /* HID up first, then the host up */
     if (owner == 7) o->key_owner[i] = owner = 1; /* the digit went up at its press: only the host up is due */
     if (owner == 1) {
@@ -379,7 +389,14 @@ int onboard_json(kbd_t *k, const char *m, const char *s, size_t n, char *r, size
          * their press-time owners and HID state (a held PTT / Backspace / Return / Escape / digit is not
          * released under the finger; each still ends on its physical release, the 10 s cut, SUSPECT,
          * e-stop or a real boundary). A real route change keeps the full boundary. */
-        if (route == o->route) { hid_map_clear(o); invalidate(k,1); } else onboard_route(k,route);
+        if (route == o->route) {
+            hid_map_clear(o); invalidate(k,1);
+            /* ... bounded: a kept host key / L4 回 L1 press ends HID_KEY_HOLD_MS after the first such request
+             * unless the GD32 reports that key down again (onboard_tick); the PTT keeps its own 120 s cap. */
+            int64_t until = kbd_now(k) + HID_KEY_HOLD_MS;
+            for (int i = 0; i < 20; i++)
+                if (!o->keep_until[i] && (o->key_owner[i] == 1 || o->key_owner[i] == 4)) o->keep_until[i] = until;
+        } else onboard_route(k,route);
         snprintf(r,cap,"{\"page\":\"%s\",\"generation\":%ld}",p,v); return 1;
     }
     return 0;
@@ -446,6 +463,7 @@ static void stop(kbd_t *k, const char *reason, int64_t now)
         /* Stay on the Mac page: ctl_estop() already revoked the lease and sent all-up;
          * release a held Mac PTT too and show a bounded stop banner in the footer. */
         release_mac(k); hid_map_clear(o); /* every e-stop also ends option mode */
+        for (int i = 0; i < 20; i++) if (o->key_owner[i] == 4) { o->key_owner[i] = 0; o->keep_until[i] = 0; } /* no late 回 L1 */
         if (k->ctl) { k->ctl->screen.current = page_id(o->route); o->last_page = k->ctl->screen.current; }
         o->stop_banner = 1; o->stop_at = now; o->render |= RESERVED;
         o->suspend = 1; o->input_at = now; /* panic presses right after the stop never reach the Mac */
@@ -536,8 +554,20 @@ void onboard_tick(kbd_t *k, int64_t now)
         o->agent_was = agent_active(k); o->render |= 1u << 19;
     }
     if (o->hid_mapped && now - o->hid_map_at >= HID_MAP_MS) hid_map_clear(o); /* the Mac stopped refreshing it */
+    for (int i = 0; i < 20; i++) if (o->keep_until[i] && now >= o->keep_until[i]) {
+        o->keep_until[i] = 0;
+        if (o->key_owner[i] == 4) o->key_owner[i] = 0; /* a pending 回 L1 never navigates late */
+        else if (o->key_owner[i] == 1) {
+            fprintf(stderr, "mk20-kbd: key held %d s after a same-page ui.page: released (lost key-up guard)\n", HID_KEY_HOLD_MS / 1000);
+            release_key(k,i);
+        }
+    }
     for (int i = 0; i < 20; i++) if (o->key_owner[i] >= 5 && now - o->hid_at[i] >= HID_KEY_HOLD_MS) {
         fprintf(stderr, "mk20-kbd: Mac key held %d s: released (lost key-up guard)\n", HID_KEY_HOLD_MS / 1000);
+        release_key(k,i);
+    }
+    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 2 && now - o->hid_at[i] >= HID_PTT_HOLD_MS) {
+        fprintf(stderr, "mk20-kbd: Mac PTT held %d s: released (lost key-up guard)\n", HID_PTT_HOLD_MS / 1000);
         release_key(k,i);
     }
     if (o->suspend) {
@@ -639,10 +669,12 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
     int fb = row*5+col+1;
     if (fb < 1 || fb > 20) return 1;
     if (down) o->pressed |= 1u << (fb-1); else o->pressed &= ~(1u << (fb-1));
+    if (down) o->keep_until[fb-1] = 0; /* the GD32 reports it pressed: its state is confirmed again */
     if (!down) {
         int owner = o->key_owner[fb-1];
         release_key(k,fb-1);
-        if (owner == 4 && o->route == ONBOARD_L4) onboard_route(k,ONBOARD_L1);
+        /* L4 回 L1 navigates on release, never during the post-e-stop pause (the stop also cancels it) */
+        if (owner == 4 && o->route == ONBOARD_L4 && !suspended(o)) onboard_route(k,ONBOARD_L1);
         if (!host_route(o)) o->render |= 1u << (fb-1);
         return 1; /* release_key delivers to the press-time owner */
     }
@@ -658,14 +690,16 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
         if (o->pending_up & (1u<<(fb-1))) return 1;
     }
     if (keycode) return 1; /* incompatible GD32 mapping: never synthesize a second action */
-    if (suspended(o)) { o->key_owner[fb-1] = 0; return 1; } /* swallowed down; its up is swallowed too */
+    /* Swallowed down; its up is swallowed too. A key still owned from before the stop (a repeated GD32
+     * down: its up was lost or is still due) keeps that owner, so the host still gets its up (1.6.0). */
+    if (suspended(o)) return 1;
     if (host_route(o) && o->health == HOST_SUSPECT) return 1;
     if (host_route(o) && o->health == HOST_ONLINE && o->fresh) {
         o->key_owner[fb-1] = 1;
         /* L4 "回 L1" is decided locally on release: fb5 (row1,col5) in the 2026-10-21 layout (was fb14). */
         if (o->route == ONBOARD_L4 && fb == L4_BACK_FB) { o->key_owner[fb-1]=4; return 1; }
         if (col == k->ptt_col && row == k->ptt_row) {
-            o->key_owner[fb-1] = 2;
+            o->key_owner[fb-1] = 2; o->hid_at[fb-1] = now; /* also a repeated down: restarts the 120 s cap */
             if (k->hid) hid_set_mod(k->hid,HID_MOD_RALT,1);
             return 1; /* physical PTT is consumed; no second Mac action */
         }
@@ -698,7 +732,10 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
     /* Still held from before a same-page ui.page (1.6.0: owners survive its redraw; the page waits for a
      * fresh frame): a repeated GD32 down of that key is the same press. Its up goes to the press-time
      * owner (resetting it here would leak a held RAlt or lose the host's up). */
-    if (host_route(o) && o->key_owner[fb-1]) return 1;
+    if (host_route(o) && o->key_owner[fb-1]) {
+        if (o->key_owner[fb-1] == 2) o->hid_at[fb-1] = now; /* the GD32 reports the PTT pressed: restart its cap */
+        return 1;
+    }
     o->key_owner[fb-1] = 0;
     if (fb == 20) return 1; /* host mode key while the Mac page is not live: inert */
     /* Page-switch grace: the old page's labels may still be under the user's finger.
@@ -962,6 +999,8 @@ int onboard_timeout(kbd_t *k, int64_t now, int dflt)
     if (!producing && o->render && o->next_render-now < left) left = o->next_render-now;
     for (int i=0;i<2;i++) if (o->knob_down[i] && !o->knob_long[i] && o->knob_at[i]+1000-now < left) left=o->knob_at[i]+1000-now;
     for (int i=0;i<20;i++) if (o->key_owner[i]>=5 && o->hid_at[i]+HID_KEY_HOLD_MS-now < left) left=o->hid_at[i]+HID_KEY_HOLD_MS-now;
+    for (int i=0;i<20;i++) if (o->key_owner[i]==2 && o->hid_at[i]+HID_PTT_HOLD_MS-now < left) left=o->hid_at[i]+HID_PTT_HOLD_MS-now;
+    for (int i=0;i<20;i++) if (o->keep_until[i] && o->keep_until[i]-now < left) left=o->keep_until[i]-now;
     if (o->hid_mapped && o->hid_map_at+HID_MAP_MS-now < left) left=o->hid_map_at+HID_MAP_MS-now;
     return left < 0 ? 0 : (int)left;
 }

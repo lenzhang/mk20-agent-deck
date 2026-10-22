@@ -99,8 +99,7 @@ static void v7_same_page_release_paths(void)
         CHECK(v7_page(&k,p[0],"L1",&ups)==1 && !ups && l1_none(hp[0]));
         switch (mode) {
         case 0: live(&k,8000); CHECK(l1_none(hp[0])); live(&k,0); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0,0)); /* 10 s cut (Return) */
-                key(&k,18,0); key(&k,16,0);
-                CHECK(l1_one(hp[0],0,0,0,0)); break;
+                key(&k,18,0); key(&k,16,0); CHECK(l1_one(hp[0],0,0,0,0)); break;                          /* the PTT is not cut */
         case 1: req(&c,"{\"op\":\"estop\"}","true"); kbd_safety_tick(&k,now); CHECK(c.estopped); break; /* socket e-stop */
         case 2: knob(&k,103,1); now+=1000; kbd_service(&k,now); CHECK(c.estopped); knob(&k,103,0); break; /* K2 hold */
         case 3: now+=3000; kbd_safety_tick(&k,now); CHECK(onboard_health(&k)==HOST_SUSPECT); break;        /* SUSPECT */
@@ -262,8 +261,149 @@ static void v7_open_arrange(void)
     key(&k,17,1); key(&k,17,0); n=ux_frames(p[0],f,ids,64); CHECK(n==1 && !strcmp(f[0],want) && l1_none(hp[0]));
     l1_teardown(&k,&c,hp,p);
 }
+/* Kimi K3 r1 (1.6.0): (1) a key still owned from before an e-stop keeps that owner through a repeated GD32
+ * down in the post-e-stop pause (its host up is due); (2) L4 回 L1 is inert while suspended; (3) a key held
+ * across a same-page ui.page whose GD32 up is lost ends (host key / L4 back: 10 s after the request; PTT: its
+ * 120 s cap, which every PTT hold now has). */
+static void v7_estop_pause_owners(void)
+{
+    char f[64][192]; uint32_t ids[64]; int ups;
+    for (int same=0;same<2;same++) {
+        kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p);
+        CHECK(hk_map(&k,p[0],HK3)==1);
+        key(&k,17,1); CHECK(l1_one(hp[0],0,0x2A,0,0));      /* forwarded Backspace (owner 6) */
+        key(&k,12,1);                                       /* plain host key (owner 1) */
+        { int n=ux_frames(p[0],f,ids,64); CHECK(ux_count(f,n,"\"pressed\":true")==2); }
+        if (same) CHECK(v7_page(&k,p[0],"L1",&ups)==1 && !ups);
+        req(&c,"{\"op\":\"estop\"}","true"); kbd_safety_tick(&k,now); CHECK(c.estopped);
+        CHECK(l1_one(hp[0],0,0,0,0) && !h.keys[0]);          /* the stop released the HID half */
+        CHECK(!v7_ups(p[0]));                                /* host halves still due */
+        key(&k,17,1); key(&k,12,1);                          /* repeated GD32 downs in the pause */
+        CHECK(l1_none(hp[0]) && !l1_host_keys(p[0]));
+        key(&k,17,0); key(&k,12,0);
+        CHECK(l1_none(hp[0]) && v7_ups(p[0])==2);            /* both host ups delivered */
+        live(&k,1000); if (same) hk_fresh(&k);
+        key(&k,18,1); CHECK(l1_one(hp[0],0,0x28,0,0)); key(&k,18,0); CHECK(l1_one(hp[0],0,0,0,0));
+        l1_teardown(&k,&c,hp,p);
+    }
+    /* (2) L4 回 L1 held when the e-stop comes: its release never navigates nor taps the host. */
+    for (int same=0;same<2;same++) {
+        kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p);
+        knob(&k,103,1); now+=20; knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L4); hk_fresh(&k); ux_frames(p[0],f,ids,64);
+        key(&k,5,1);
+        if (same) CHECK(v7_page(&k,p[0],"L4",&ups)==1 && !ups);
+        req(&c,"{\"op\":\"estop\"}","true"); kbd_safety_tick(&k,now); CHECK(c.estopped);
+        ux_frames(p[0],f,ids,64);
+        key(&k,5,0);
+        { int n=ux_frames(p[0],f,ids,64); CHECK(!ux_count(f,n,"\"col\":103,") && !ux_count(f,n,"keyStateChanged")); }
+        CHECK(onboard_current(&k)==ONBOARD_L4);
+        live(&k,1000); if (same) hk_fresh(&k); ux_frames(p[0],f,ids,64);
+        key(&k,5,1); key(&k,5,0); CHECK(onboard_current(&k)==ONBOARD_L1); /* after the pause: works again */
+        { int n=ux_frames(p[0],f,ids,64); CHECK(ux_count(f,n,"\"col\":103,")==2); }
+        l1_teardown(&k,&c,hp,p);
+    }
+}
+#define PTT_CAP_MS 120000 /* onboard.c HID_PTT_HOLD_MS */
+static void v7_same_page_lost_up(void)
+{
+    kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p); int ups;
+    char f[64][192]; uint32_t ids[64];
+    /* PTT + a host key held, same-page request, both GD32 ups lost. The host key (no bound of its own) ends
+     * 10 s after the request; the PTT (dictation: never the 10 s cut) ends at its 120 s cap from the press. */
+    key(&k,16,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0,0)); key(&k,12,1); l1_host_keys(p[0]);
+    CHECK(v7_page(&k,p[0],"L1",&ups)==1 && !ups);
+    hk_fresh(&k);
+    pump(&k); int t=onboard_timeout(&k,now,600000); CHECK(t>0 && t<=L1_HOLD_MS); /* the loop wakes for the bound */
+    live(&k,8000); CHECK(l1_none(hp[0]) && h.mods==HID_MOD_RALT && !v7_ups(p[0]));
+    live(&k,0); CHECK(l1_none(hp[0]) && h.mods==HID_MOD_RALT && v7_ups(p[0])==1);   /* 10 s: host up, PTT kept */
+    pump(&k); t=onboard_timeout(&k,now,600000); CHECK(t>0 && t<=PTT_CAP_MS);
+    live(&k,PTT_CAP_MS-14000); CHECK(l1_none(hp[0]) && h.mods==HID_MOD_RALT);       /* ~118 s */
+    live(&k,2000); CHECK(l1_one(hp[0],0,0,0,0) && !h.mods);                          /* 120 s: RAlt up */
+    key(&k,16,0); key(&k,12,0); CHECK(l1_none(hp[0]) && !v7_ups(p[0]));             /* the late ups: nothing */
+    /* The cap applies to every PTT hold (not only across same-page requests); a repeated GD32 down of the
+     * held PTT confirms it pressed and restarts the window (also while the page waits for its frame). */
+    key(&k,16,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0,0));
+    live(&k,100000); key(&k,16,1); CHECK(l1_none(hp[0]));                           /* re-confirmed at ~101 s */
+    ux_frames(p[0],f,ids,64); /* (100 heartbeat acks) */
+    CHECK(v7_page(&k,p[0],"L1",&ups)==1 && !ups);
+    live(&k,60000); key(&k,16,1); CHECK(l1_none(hp[0]));                            /* not live yet: still kept */
+    hk_fresh(&k); live(&k,100000); CHECK(l1_none(hp[0]) && h.mods==HID_MOD_RALT);  /* 4 min of dictation */
+    key(&k,16,0); CHECK(l1_one(hp[0],0,0,0,0));
+    key(&k,16,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0,0)); live(&k,PTT_CAP_MS); CHECK(l1_one(hp[0],0,0,0,0)); /* no same-page */
+    key(&k,16,0); CHECK(l1_none(hp[0]));
+    key(&k,16,1); CHECK(l1_one(hp[0],HID_MOD_RALT,0,0,0)); key(&k,16,0); CHECK(l1_one(hp[0],0,0,0,0)); /* press again: works */
+    /* Repeated same-page requests never extend a host key's bound; a GD32 down re-confirms it. */
+    ux_frames(p[0],f,ids,64); key(&k,12,1); l1_host_keys(p[0]);
+    CHECK(v7_page(&k,p[0],"L1",&ups)==1); hk_fresh(&k); live(&k,5000);
+    CHECK(v7_page(&k,p[0],"L1",&ups)==1); hk_fresh(&k); live(&k,3000); CHECK(v7_ups(p[0])==1);
+    key(&k,12,0); CHECK(!v7_ups(p[0]));
+    /* A pending L4 回 L1 kept across a same-page request is cancelled by the bound, never run late. */
+    knob(&k,103,1); now+=20; knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L4); hk_fresh(&k); ux_frames(p[0],f,ids,64);
+    key(&k,5,1); CHECK(v7_page(&k,p[0],"L4",&ups)==1); hk_fresh(&k);
+    live(&k,10000); key(&k,5,0); CHECK(onboard_current(&k)==ONBOARD_L4);
+    { int n=ux_frames(p[0],f,ids,64); CHECK(!ux_count(f,n,"\"col\":103,")); }
+    key(&k,5,1); key(&k,5,0); CHECK(onboard_current(&k)==ONBOARD_L1); /* a fresh press works */
+    l1_teardown(&k,&c,hp,p);
+}
+/* Host key events since the last read, per logical key. keyStateChanged is a state: downs[] = 1 while the host
+ * sees the key pressed (a repeated down of a held host key is forwarded again: still pressed), an up while the
+ * host already sees it released counts as bad; ups[] counts the ups. */
+static void v7_count(int fd, int downs[20], int ups[20], int *bad)
+{
+    char f[64][192]; uint32_t ids[64]; int n=ux_frames(fd,f,ids,64);
+    for (int i=0;i<n;i++) {
+        const char *q=strstr(f[i],"\"col\":"), *r=strstr(f[i],"\"row\":");
+        if (!strstr(f[i],"keyStateChanged") || !q || !r) continue;
+        int col=atoi(q+6), row=atoi(r+6);
+        if (col<0 || col>4 || row<0 || row>3) continue; /* knob taps */
+        int fb=row*5+col;
+        if (strstr(f[i],"\"pressed\":true")) downs[fb]=1;
+        else { ups[fb]++; if (!downs[fb]) (*bad)++; downs[fb]=0; }
+    }
+}
+/* Randomized: PTT / Mac HID keys / host keys / MODE / L4 back pressed, repeated and released in any order
+ * across same-page and real ui.page, K2, socket e-stops, option maps, fresh frames and time. Every physical
+ * key is released at the end (no lost ups here): HID must end all-up, the host must see every key released
+ * and never an up for a key it sees released. */
+static void v7_fuzz_release_invariant(void)
+{
+    static const int keys[] = {1,2,5,12,16,17,18,19,20};
+    unsigned seed = 0x16f0u;
+    for (int run=0;run<120;run++) {
+        kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p);
+        int phys[21]={0}, downs[20]={0}, upsk[20]={0}, bad=0;
+#define RND(n) ((seed = seed*1103515245u + 12345u) >> 16) % (n)
+        for (int step=0;step<45;step++) {
+            int op=(int)RND(100), fb=keys[RND(sizeof keys/sizeof *keys)];
+            enum onboard_route r=onboard_current(&k);
+            if (op<30) { if (!phys[fb] || RND(4)==0) { phys[fb]=1; key(&k,fb,1); } }
+            else if (op<55) { if (phys[fb]) { phys[fb]=0; key(&k,fb,0); } }
+            else if (op<67) { /* same page (mostly) or the other one; json() directly: every frame is counted */
+                char q[160]; int same=op<63; const char *pg=(r==ONBOARD_L1)==same ? "L1" : "L4";
+                snprintf(q,sizeof q,"{\"method\":\"ui.page\",\"page\":\"%s\",\"generation\":%ld}",pg,++v7_gen); json(&k,q); }
+            else if (op<71) { knob(&k,103,1); now+=20; knob(&k,103,0); }
+            else if (op<74) { req(&c,"{\"op\":\"estop\"}","true"); kbd_safety_tick(&k,now); }
+            else if (op<79 && r==ONBOARD_L1) {
+                char q[160]; snprintf(q,sizeof q,"{\"method\":\"ui.hidKeys\",\"generation\":%ld,\"keys\":{%s}}",++hk_gen,HK3); json(&k,q); }
+            else if (op<87) { beat(&k); if (r==ONBOARD_L1 || r==ONBOARD_L4) l1_fresh(&k); beat(&k); }
+            else live(&k,(int)RND(4)*1000);
+            if (onboard_current(&k)!=ONBOARD_L1 && onboard_current(&k)!=ONBOARD_L4) onboard_route(&k,ONBOARD_L1);
+            v7_count(p[0],downs,upsk,&bad);
+        }
+        for (int i=0;i<(int)(sizeof keys/sizeof *keys);i++) if (phys[keys[i]]) { phys[keys[i]]=0; key(&k,keys[i],0); }
+        live(&k,12000); v7_count(p[0],downs,upsk,&bad);
+        { uint8_t r[16][9]; l1_reports(hp[0],r,16); }
+        int ok = !bad && !h.mods && !h.keys[0] && !h.keys[1] && !h.keys[2] && !h.keys[3];
+        for (int i=0;i<20;i++) ok &= !downs[i]; /* the host sees every key released */
+        CHECK(ok);
+        if (!ok) { fprintf(stderr,"v7_fuzz: run %d mods=%d keys=%d,%d,%d bad=%d\n",run,h.mods,h.keys[0],h.keys[1],h.keys[2],bad);
+                   for (int i=0;i<20;i++) if (downs[i]) fprintf(stderr,"  fb%d still pressed on the host (%d ups)\n",i+1,upsk[i]); }
+#undef RND
+        l1_teardown(&k,&c,hp,p);
+    }
+}
 static void round7_regressions(void)
 {
     v7_same_page_keeps_held(); v7_same_page_option_mode(); v7_same_page_release_paths(); v7_hello_page();
-    v7_generation_reset(); v7_open_arrange();
+    v7_generation_reset(); v7_open_arrange(); v7_estop_pause_owners(); v7_same_page_lost_up(); v7_fuzz_release_invariant();
 }

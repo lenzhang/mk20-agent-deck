@@ -39,7 +39,9 @@ non-PTT keys never produce HID". The only fb -> usage map is `HOST_HID_KEYS` in 
   during the gap leaves only all-up; gadget teardown (stop file/SIGUSR1) and process exit send all-up.
 - **Lost key-up guard:** GD32 key reports are edge-triggered with no state resync, so a hold longer than
   10 s (`HID_KEY_HOLD_MS`) is cut: the up is sent, the late physical up does nothing, press again to
-  continue. The PTT (long dictation) is not cut.
+  continue. The PTT (long dictation) is not cut at 10 s; since 1.6.0 it ends after 120 s (`HID_PTT_HOLD_MS`,
+  same lost-up reasoning: the GD32 cannot be asked for the key state, it has one allowed outbound frame), press
+  again to continue; a repeated GD32 down of the held PTT confirms it pressed and restarts the 120 s.
 - Safe mode and the legacy non-onboard loop keep PTT-only HID.
 
 ## L1 option mode: host `ui.hidKeys` (user decision 2026-10-22; unreleased, for 1.5.1)
@@ -100,9 +102,14 @@ falls back to its 1.5.1 behaviour when the hello carries no `page`. Tests: `kbd/
   it does **not** release key owners: a held PTT (RAlt), ⌫ / ⏎ / Esc, an option digit (owner 7: already typed, only
   its host up is due), a forwarded fb17–19 (owner 6), a host key or the Mac mode key (owner 1) and L4 回 L1
   (owner 4) end on their physical release as before. A real route change keeps the full `boundary()`.
+  Bounds (rc2, Kimi K3 review): owners ≥ 5 keep their 10 s cut from the press; the PTT keeps its 120 s cap (every
+  PTT hold has it); a kept host key / L4 回 L1 press (no bound of its own) ends 10 s after the first same-page
+  request (`keep_until`: host up / the pending 回 L1 is cancelled, never run late) unless a new GD32 down of that
+  key confirms it pressed — a request used to release them at once, and a lost GD32 up must not keep them for ever.
   Why it is safe: (1) nothing new is pressed — the page is not live until the fresh frame and the grace window
   swallows new presses, so no input can act on stale labels; (2) every other release path still applies to the
-  kept owners: the 10 s lost-up cut (owners ≥ 5, `hid_at` unchanged), SUSPECT (`release_mac`), every e-stop
+  kept owners: the 10 s lost-up cut (owners ≥ 5, `hid_at` unchanged), the 120 s PTT cap, the 10 s `keep_until`
+  bound of a kept host key / L4 回 L1, SUSPECT (`release_mac`), every e-stop
   (`release_mac`, then the post-e-stop pause, which a same-page request neither starts nor ends), host loss /
   `ui.hello` / any real boundary, hidg0 replacement and exit; (3) a repeated GD32 down of a key still owned while
   the page waits for its frame is the same press (`onboard_input`: owner kept, nothing sent) — without this a
@@ -117,6 +124,8 @@ falls back to its 1.5.1 behaviour when the hello carries no `page`. Tests: `kbd/
   changed while no host was ONLINE (`host_page` != route, e.g. K2 while the Mac slept) is announced with the usual
   K2 tap **before** the hello reply (was: at ONLINE), and `host_page` = route. Route changes after the hello (while
   PROBING) are still tapped at ONLINE. An older host just sees that tap about 2 s earlier, with the same effect.
+  mk20deck (rc2) applies a K2 tap newer than its known page belief absolutely — its page becomes the keyboard's
+  (the other page than the belief) — so a K2 on the keyboard while PROBING is followed, never pulled back.
 - **A fresh `ui.hello` resets both generations.** `generation` (ui.page) and `hid_generation` (ui.hidKeys) are 0
   after every hello and reported as before, so a used-up 999999999 recovers with the next hello. Within a host
   session (hello to hello) both still strictly increase; a host loss alone does not reset them (it requires a new
@@ -128,7 +137,8 @@ falls back to its 1.5.1 behaviour when the hello carries no `page`. Tests: `kbd/
   hello. What the reset newly admits is only a request written after the hello with a number ≤ the old counter —
   i.e. the same host continuing from the values the hello reported. mk20deck holds one lock across hello and every
   generation-checked request (allocate, write, ack), so none of its requests numbered from the old counter can
-  follow a hello, and it takes the hello's values as they are.
+  follow a hello, drops (inside that lock) a request decided under an older hello epoch instead of renumbering it
+  (rc2), and takes the hello's values as they are.
 - **LS fb17 会话安排 → `{"method":"ui.openArrange"}`.** Modelled on `ui.openSettings`: exactly this payload,
   frame id 0xFFFFFFFF, sent only while ONLINE, at most once per 3 s (own limiter, counted per attempt), toast
   "已请求 Mac 打开会话安排" or, not ONLINE, "Mac 端未运行：无法打开会话安排"; LS stays (no navigation). No token or
@@ -204,8 +214,11 @@ Host-validated only (Docker, fake clock/files); **no device acceptance claimed**
   key or knob event reaches the host, and nothing navigates (K1/K2 short and K1 hold
   included), until every key/knob is up **and** 1 s passed without input. Presses in that
   time are swallowed with their matching ups; presses made before the stop keep their
-  press-time owner (the host still gets those ups). fb20 is the e-stop meanwhile (face and
-  action). K2 counts as held only once its release capability is known.
+  press-time owner (the host still gets those ups), also through a repeated GD32 down in the
+  pause (1.6.0 rc2: before, that down cleared the owner and the host up was lost — also in
+  1.5.1). An L4 回 L1 press made before the stop is cancelled by it and its release is inert in
+  the pause (before rc2 it navigated and sent the K2 tap). fb20 is the e-stop meanwhile (face
+  and action). K2 counts as held only once its release capability is known.
 - **fb20 held while the agent becomes active.** If `allowed`/a lease appears while fb20 is
   down and owned by the host, the host first gets fb20's up, then the keyboard e-stops
   (reason `fb20_held`, fail safe) and fb20 is redrawn as the e-stop face.
