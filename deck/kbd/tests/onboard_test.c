@@ -255,10 +255,11 @@ static void in_flight_replacement(void) {
 #include "tests_onboard_r4.inc"
 #include "tests_onboard_r5.inc"
 #include "tests_onboard_r6.inc"
+#include "tests_onboard_r7.inc"
 int main(void) {
     setenv("MK20_ROOT","/nonexistent-u2-status",1); unsetenv("MK20_KBD_PAIR_CODE"); unsetenv("MK20_VERSION"); unsetenv("MK20_REL");
     FILE *f=fopen("tests/data/canvas.jpg","rb"); if(!f) return 2;
     fseek(f,0,SEEK_END); jpg_size=(size_t)ftell(f); rewind(f); jpg=malloc(jpg_size); CHECK(fread(jpg,1,jpg_size,f)==jpg_size); fclose(f);
-    offline_and_ownership(); health_and_stale(); safety(); acknowledgements(); reservations(); legacy_and_ptt(); initialization_deadline(); pixels_and_regions(); unread_receive_work(); in_flight_replacement(); round1_regressions(); round2_regressions(); round3_regressions(); round4_regressions(); round5_regressions(); round6_regressions(); free(jpg);
+    offline_and_ownership(); health_and_stale(); safety(); acknowledgements(); reservations(); legacy_and_ptt(); initialization_deadline(); pixels_and_regions(); unread_receive_work(); in_flight_replacement(); round1_regressions(); round2_regressions(); round3_regressions(); round4_regressions(); round5_regressions(); round6_regressions(); round7_regressions(); free(jpg);
     printf("U2 onboard: %d checks, %d failures\n",checks,fails); return !!fails;
 }

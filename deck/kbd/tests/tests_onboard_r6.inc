@@ -257,7 +257,8 @@ static void hk_clear_paths(void)
         case 1: knob(&k,103,1); now+=1000; kbd_service(&k,now); CHECK(c.estopped); knob(&k,103,0); break; /* K2 hold */
         case 2: req(&c,"{\"op\":\"estop\"}","true"); kbd_safety_tick(&k,now); CHECK(c.estopped); break;   /* socket */
         case 3: knob(&k,103,1); now+=20; knob(&k,103,0); CHECK(onboard_current(&k)==ONBOARD_L4); break;   /* K2 short */
-        case 4: json(&k,"{\"method\":\"ui.page\",\"page\":\"L1\",\"generation\":9}"); CHECK(onboard_current(&k)==ONBOARD_L1); break;
+        case 4: json(&k,"{\"method\":\"ui.page\",\"page\":\"L1\",\"generation\":9}"); CHECK(onboard_current(&k)==ONBOARD_L1);
+                boundary_up=0; break; /* 1.6.0: same page = redraw only, held keys keep their owners */
         case 5: knob(&k,100,1); now+=1000; kbd_service(&k,now); knob(&k,100,0); CHECK(onboard_current(&k)==ONBOARD_HOME); break;
         case 6: onboard_loss(&k); CHECK(onboard_health(&k)==HOST_OFFLINE); break;
         case 7: now+=3000; kbd_safety_tick(&k,now); CHECK(onboard_health(&k)==HOST_SUSPECT); break;
@@ -306,7 +307,8 @@ static void hk_expiry(void)
     CHECK(hk_map(&k,p[0],"\"9\":\"4\"")==1 && hk_digit_ok(&k,hp[0],p[0],9,0x21));
     l1_teardown(&k,&c,hp,p);
 }
-/* Generations: strictly increasing across hello/loss until process restart, independent of ui.page. */
+/* Generations: strictly increasing within one host session, independent of ui.page; since 1.6.0 a fresh
+ * ui.hello starts both at 0 again (a host loss alone does not). See tests_onboard_r7.inc v7_generation_reset. */
 static void hk_generation(void)
 {
     kbd_t k; ctl_t c; hid_t h; int hp[2], p[2]; l1_setup(&k,&c,&h,hp,p); char f[64][192]; uint32_t ids[64];
@@ -314,15 +316,21 @@ static void hk_generation(void)
     json(&k,"{\"method\":\"ui.page\",\"page\":\"L1\",\"generation\":3}"); hk_fresh(&k); /* page counter is separate */
     { int n=ux_frames(p[0],f,ids,64); CHECK(ux_count(f,n,"\"result\":{\"page\":\"L1\",\"generation\":3}")==1); }
     CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":51,\"keys\":{\"1\":\"1\"}}",NULL,0)==1);
+    CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":51,\"keys\":{\"1\":\"1\"}}",NULL,0)==0);
+    CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":4,\"keys\":{\"1\":\"1\"}}",NULL,0)==0);
     json(&k,"{\"method\":\"ui.hello\",\"version\":1}");
-    { int n=ux_frames(p[0],f,ids,64); CHECK(ux_count(f,n,"\"generation\":3,\"hid_generation\":51}")==1); }
+    { int n=ux_frames(p[0],f,ids,64); CHECK(ux_count(f,n,"\"generation\":0,\"hid_generation\":0}")==1); }
     beat(&k); now+=1000; beat(&k); now+=1000; beat(&k); hk_fresh(&k); ux_frames(p[0],f,ids,64);
     CHECK(hk_plain(&k,hp[0],p[0],1)); /* hello cleared the map */
-    CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":51,\"keys\":{\"1\":\"1\"}}",NULL,0)==0);
-    onboard_loss(&k); hello(&k); beat(&k); now+=1000; beat(&k); now+=1000; beat(&k); hk_fresh(&k); ux_frames(p[0],f,ids,64);
-    CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":40,\"keys\":{\"1\":\"1\"}}",NULL,0)==0);
+    CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":4,\"keys\":{\"1\":\"1\"}}",NULL,0)==1); /* new session */
+    onboard_loss(&k); json(&k,"{\"method\":\"getInfo\"}"); ux_frames(p[0],f,ids,64); /* host loss, legacy re-handshake ... */
+    hello(&k); beat(&k); now+=1000; beat(&k); now+=1000; beat(&k); hk_fresh(&k); ux_frames(p[0],f,ids,64);
+    CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":1,\"keys\":{\"1\":\"1\"}}",NULL,0)==1); /* ... hello: from 0 */
     CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":999999999,\"keys\":{\"1\":\"1\"}}",NULL,0)==1);
     CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":999999999,\"keys\":{}}",NULL,0)==0); /* exhausted */
+    CHECK(hk_digit_ok(&k,hp[0],p[0],1,0x1E));
+    hello(&k); beat(&k); now+=1000; beat(&k); now+=1000; beat(&k); hk_fresh(&k); ux_frames(p[0],f,ids,64);
+    CHECK(hk_raw(&k,p[0],"{\"method\":\"ui.hidKeys\",\"generation\":1,\"keys\":{\"1\":\"1\"}}",NULL,0)==1); /* recovered */
     CHECK(hk_digit_ok(&k,hp[0],p[0],1,0x1E));
     l1_teardown(&k,&c,hp,p);
 }

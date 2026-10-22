@@ -15,7 +15,7 @@ non-PTT keys never produce HID". The only fb -> usage map is `HOST_HID_KEYS` in 
 | Key | GD32 col,row (0-based) | Label | Live L1/L4 (USB HID on /dev/hidg0) | Elsewhere (unchanged) |
 |---|---|---|---|---|
 | fb16 | 0,3 | PTT | Right Option (modifier 0x40) while held; `--ptt COL,ROW` moves it | L5/agent: board PTT; placeholder: inert |
-| fb17 | 1,3 | DELETE | Backspace (usage 0x2A) while held | HOME task state, LS/L5 read-only, agent-bindable; placeholder blank |
+| fb17 | 1,3 | DELETE | Backspace (usage 0x2A) while held | HOME task state, LS 会话安排 (`ui.openArrange`, 1.6.0), L5 read-only, agent-bindable; placeholder blank |
 | fb18 | 2,3 | SEND / OK | Return (0x28) while held | HOME ✓, LS 主页, L1/L4 placeholder 主页 |
 | fb19 | 3,3 | NO | Escape (0x29; also interrupts Claude Code / codex) while held | HOME/LS 网页设置 (`ui.openSettings`), placeholder URL |
 | fb20 | 4,3 | MODE | Mac mode key (forwarded) unless the keyboard agent is active, then e-stop | e-stop |
@@ -31,8 +31,9 @@ non-PTT keys never produce HID". The only fb -> usage map is `HOST_HID_KEYS` in 
   up always releases exactly what that press put down. Reports are `hid.c`'s boot keyboard report
   (`hid_key`: modifier byte + 6 key slots): physical keys contribute at most RAlt + these three, and
   releasing one of them (or the PTT) keeps the others down.
-- **Releases (never a key stuck down on the Mac):** any page boundary (K2 toggle, host `ui.page`, K1
-  hold, ctl page change, `ui.hello`, host loss/EOF) sends each up; SUSPECT and every e-stop
+- **Releases (never a key stuck down on the Mac):** any page boundary (K2 toggle, host `ui.page` to the other
+  page, K1 hold, ctl page change, `ui.hello`, host loss/EOF) sends each up (1.6.0: a same-page `ui.page` only
+  redraws and keeps held keys, see "1.6.0 host protocol additions"); SUSPECT and every e-stop
   (fb20/K2/socket: ctl all-up first, nothing re-pressed during the pause) release them; on a hidg0
   node replacement the new node gets all-up then the still-held state (as for a held RAlt), a release
   during the gap leaves only all-up; gadget teardown (stop file/SIGUSR1) and process exit send all-up.
@@ -53,7 +54,8 @@ their option menus.
   values, <= 24 keys, <= 1023 bytes, nothing nested deeper). Keys are logical fb `"1"`..`"15"` (exact decimal),
   values exactly one of `"1"`..`"9"` (HID usages 0x1E..0x26), at most 9 entries, no digit twice; `{}` clears.
   G is 1..999999999 and strictly greater than the last accepted ui.hidKeys generation (own counter, independent
-  of `ui.page`, kept across hello/loss until process restart); a refused request consumes nothing.
+  of `ui.page`; since 1.6.0 every `ui.hello` starts it at 0 again, before: kept until process restart); a refused
+  request consumes nothing.
 - **Accepted** (non-empty) only while negotiated (`ui.hello`), ONLINE, on L1 and not in the post-e-stop pause;
   `{}` whenever negotiated and no handshake is pending. A request still queued in the tty at a route boundary is
   refused as stale, like `ui.page`. Reply `{"ack_method":"ui.hidKeys","success":true,"result":{"generation":G,
@@ -61,7 +63,8 @@ their option menus.
   without the method answers "unsupported"). `ui.hello` now returns `"capabilities":["ui.page","ui.heartbeat",
   "ui.hidKeys"]`, `"generation"` (ui.page) and `"hid_generation"` (last accepted ui.hidKeys); the host continues
   above both.
-- **Cleared** on every page boundary (leaving L1: K2, HOME, K1 hold, ctl page; `ui.page` even to L1; `ui.hello`;
+- **Cleared** on every page boundary (leaving L1: K2, HOME, K1 hold, ctl page; `ui.page` even to L1 (1.6.0: that
+  one keeps held keys); `ui.hello`;
   host loss/EOF), on SUSPECT, on every e-stop (fb20/K2/socket), and 30 s (`HID_MAP_MS`) after the last accepted
   request (mk20deck refreshes it every 10 s while the choice is shown). `onboard_hid_keys()` reports the count.
 - **Mapped digit** (only on the live L1 page: ONLINE + fresh frame, never grace/PROBING/SUSPECT/offline/e-stop
@@ -83,6 +86,54 @@ their option menus.
   marked press to an option role only (toast "已选 k", leave option mode on Escape, "先松开按住说话") and never to a
   slot select/focus/pick-up or any other Mac action, even when its option mode ended a moment earlier. The HID
   path never waits for or depends on the host.
+
+## 1.6.0 host protocol additions (integrator brief 2026-10-22; MINOR bump)
+
+Both directions stay compatible: an older mk20deck ignores the new hello field and the new event; a newer mk20deck
+falls back to its 1.5.1 behaviour when the hello carries no `page`. Tests: `kbd/tests/tests_onboard_r7.inc`,
+`kbd/tests/e2e_run.py`, `tests/test_page_sync.py` / `test_page_sync_e2e.py` (real binary), `tests/test_ui_open_arrange.py`.
+
+- **Same-page `ui.page` = redraw only.** A `ui.page` naming the route the keyboard already shows clears the
+  option-mode map and invalidates content exactly like a boundary (`invalidate()` in `onboard.c`: staged tile,
+  restore, queued decode, `epoch++`, `fresh`/`publishing` = 0 so a fresh full frame is required, the receive
+  barrier that makes queued frames / `ui.page` / `ui.hidKeys` stale, grace window, full redraw, `host_page`), but
+  it does **not** release key owners: a held PTT (RAlt), ⌫ / ⏎ / Esc, an option digit (owner 7: already typed, only
+  its host up is due), a forwarded fb17–19 (owner 6), a host key or the Mac mode key (owner 1) and L4 回 L1
+  (owner 4) end on their physical release as before. A real route change keeps the full `boundary()`.
+  Why it is safe: (1) nothing new is pressed — the page is not live until the fresh frame and the grace window
+  swallows new presses, so no input can act on stale labels; (2) every other release path still applies to the
+  kept owners: the 10 s lost-up cut (owners ≥ 5, `hid_at` unchanged), SUSPECT (`release_mac`), every e-stop
+  (`release_mac`, then the post-e-stop pause, which a same-page request neither starts nor ends), host loss /
+  `ui.hello` / any real boundary, hidg0 replacement and exit; (3) a repeated GD32 down of a key still owned while
+  the page waits for its frame is the same press (`onboard_input`: owner kept, nothing sent) — without this a
+  re-sent down would reset the owner and leak RAlt or lose the host's up; (4) the map is cleared, so no digit
+  mapping outlives the request (the Mac re-sends it after the accepted page); (5) `tile_generation` also changes
+  with the accepted generation, so a tile staged before the request is dropped.
+- **`ui.hello` names the page.** The reply gains `"page"`: `"L1"` / `"L4"` when the keyboard's route is a host
+  page, `"none"` on HOME / LS / L5 / agent pages (`ui.page` is refused there). Existing fields are unchanged
+  (`version`, `heartbeat_ms`, `capabilities`, `generation`, `hid_generation`; `page` comes before the
+  generations). The `ui.page` reply already names the accepted page. The K2 tap that tells the host "my host page
+  flipped" stays the only relative signal, so the reported page must be where the host's tap mirror starts: a route
+  changed while no host was ONLINE (`host_page` != route, e.g. K2 while the Mac slept) is announced with the usual
+  K2 tap **before** the hello reply (was: at ONLINE), and `host_page` = route. Route changes after the hello (while
+  PROBING) are still tapped at ONLINE. An older host just sees that tap about 2 s earlier, with the same effect.
+- **A fresh `ui.hello` resets both generations.** `generation` (ui.page) and `hid_generation` (ui.hidKeys) are 0
+  after every hello and reported as before, so a used-up 999999999 recovers with the next hello. Within a host
+  session (hello to hello) both still strictly increase; a host loss alone does not reset them (it requires a new
+  hello anyway). Why it is safe: generations only order requests within one session; nothing sent before a hello
+  can be accepted after it, independent of its number — earlier bytes on the ordered stream are handled before
+  the hello, bytes already received or queued behind it are stale (the hello's loss boundary sets the parser
+  barrier and `host_rx_barrier` = FIONREAD, and stale `ui.page` / `ui.hidKeys` are refused, see
+  `v7_generation_reset`), and `ui.page` / a non-empty map need ONLINE, i.e. ≥ 3 heartbeats spanning ≥ 2 s after the
+  hello. What the reset newly admits is only a request written after the hello with a number ≤ the old counter —
+  i.e. the same host continuing from the values the hello reported. mk20deck holds one lock across hello and every
+  generation-checked request (allocate, write, ack), so none of its requests numbered from the old counter can
+  follow a hello, and it takes the hello's values as they are.
+- **LS fb17 会话安排 → `{"method":"ui.openArrange"}`.** Modelled on `ui.openSettings`: exactly this payload,
+  frame id 0xFFFFFFFF, sent only while ONLINE, at most once per 3 s (own limiter, counted per attempt), toast
+  "已请求 Mac 打开会话安排" or, not ONLINE, "Mac 端未运行：无法打开会话安排"; LS stays (no navigation). No token or
+  URL crosses the cable: mk20deck mints a one-time link file through its in-process `ArrangeServer` and opens
+  that path. On a live L1/L4 fb17 stays the Mac's Backspace; HOME fb17 is unchanged (task state).
 
 ## On-device UX revision (2026-10-20, branch feature/fw-ux; supersedes U2 text below where they differ)
 
@@ -245,8 +296,8 @@ a second navigation tap.
 Optional cmd101 **flat JSON** methods (<=1023 JSON bytes, strict duplicate/type checks):
 
 - `{"method":"ui.hello","version":1}` returns version1, heartbeat_ms1000,
-  capabilities `ui.page`/`ui.heartbeat` (since 1.5.1 also `ui.hidKeys`), and the last accepted generation
-  (since 1.5.1 also `hid_generation`).
+  capabilities `ui.page`/`ui.heartbeat` (since 1.5.1 also `ui.hidKeys`), since 1.6.0 `page` (`L1`/`L4`/`none`),
+  and the last accepted generation (since 1.5.1 also `hid_generation`; since 1.6.0 both 0: every hello resets them).
 - `{"method":"ui.hidKeys","generation":G,"keys":{...}}` (1.5.1): L1 option-mode digit keys, see
   "L1 option mode" above.
 - `{"method":"ui.heartbeat"}` at 1 Hz: three consecutive samples spanning >=2 s
@@ -257,14 +308,18 @@ Optional cmd101 **flat JSON** methods (<=1023 JSON bytes, strict duplicate/type 
   (except the one-time boot auto-L1 on the first ONLINE).
 - `{"method":"ui.page","page":"L4","generation":7}` is accepted only while
   ONLINE and already in an explicitly entered L1/L4 route. Page is L1 or L4;
-  generation is 1..999999999 and strictly increases across hello/loss until process
-  restart. The reply echoes the accepted page/generation; even same-page acceptance
-  invalidates prior content and requires a fresh full frame. Home/LS/L5/agent routes
+  generation is 1..999999999 and strictly increases within a host session (until
+  1.5.1 across hello/loss until process restart; since 1.6.0 a hello resets it to 0).
+  The reply echoes the accepted page/generation; even same-page acceptance
+  invalidates prior content and requires a fresh full frame (since 1.6.0 without
+  releasing held keys). Home/LS/L5/agent routes
   cannot be claimed. cmd201 remains reserved/unimplemented; no widget generation
   transport is claimed yet.
 - Device -> host event `{"method":"ui.openSettings"}` (2026-10-20): exactly this payload,
   frame id 0xFFFFFFFF, sent only while ONLINE when fb19 网页设置 is pressed on HOME/LS, at
   most once per 3 s. The host opens its own settings URL; the device never sends a URL.
+- Device -> host event `{"method":"ui.openArrange"}` (1.6.0): the same rules for LS fb17
+  会话安排 (own 3 s limiter); the host opens its 会话安排 page with a one-time link file.
 
 Replies retain the KD `ack_method`/`success`/`result` envelope and frame id. `getInfo`
 and backlight work on all routes and grant no ownership. Legacy hosts need no new

@@ -280,6 +280,8 @@ def main():
         ha = [f.json() for f in hs if f.cmd == P.CMD_JSON and (f.json() or {}).get("ack_method") == "ui.hello"]
         check(ha and "ui.hidKeys" in ha[0]["result"]["capabilities"] and ha[0]["result"].get("hid_generation") == 0,
               f"ui.hello advertises ui.hidKeys {ha}")
+        check(ha and ha[0]["result"].get("page") == "L1" and ha[0]["result"].get("generation") == 0,
+              f"ui.hello names the route (1.6.0) {ha}")
         heartbeat_fd, heartbeat_at = hm, time.monotonic()
         boot = io.BytesIO(); Image.new("RGB", (640, 656)).save(boot, "JPEG")
         os.write(hm, P.encode_frame(P.CMD_SHOW_JPG, boot.getvalue(), 8))
@@ -384,6 +386,18 @@ def main():
         check(hid_reports() == [], "cleared: fb1 no HID")
         evs = host_keys(); check(len(evs) == 2 and all(e.hid is None for e in evs), f"cleared: fb1 plain host key {evs}")
         print("e2e: L1 option mode ui.hidKeys: momentary digits, held = one digit, PTT ignore, forwarding, stale generation, clear OK")
+        # 1.6.0: a same-page ui.page only redraws: the held PTT (RAlt) and a held DELETE (Backspace) stay down on the
+        # Mac (no report at all), the page waits for a fresh full frame, each key still ends on its physical release.
+        os.write(gm, gd32_frame([0x16, 1, 3, 1, 0, 0])); got = hid_reports()
+        check(got == [b"\x01\x40\x00\x2a" + bytes(5)], f"DELETE down with the PTT before a same-page ui.page {got}")
+        os.write(hm, P.encode_frame(P.CMD_JSON, json.dumps({"method": "ui.page", "page": "L1", "generation": 30}).encode(), 23))
+        a = [f.json() for f in par.feed(read_for(hm, 0.3)) if f.cmd == P.CMD_JSON and (f.json() or {}).get("ack_method") == "ui.page"]
+        check(a and a[0]["success"] and a[0]["result"] == {"page": "L1", "generation": 30}, f"same-page ui.page accepted {a}")
+        got = hid_reports(); check(got == [], f"same-page ui.page releases nothing {got}")
+        os.write(hm, P.encode_frame(P.CMD_SHOW_JPG, boot.getvalue(), 24)); par.feed(read_for(hm, 0.6))
+        os.write(gm, gd32_frame([0x16, 0, 3, 1, 0, 0])); got = hid_reports()
+        check(got == [b"\x01\x40" + bytes(7)], f"DELETE released on its physical up, PTT still held {got}")
+        print("e2e: same-page ui.page keeps held PTT + DELETE (no HID report), released on the physical up OK")
         # stop file: hidg0 closed within the 100 ms tick (+ all-up since RAlt is held)
         open(hidp + ".stop", "w").close()
         time.sleep(0.4)

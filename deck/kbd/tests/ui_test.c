@@ -25,7 +25,9 @@ static void state_tests(void)
     CHECK(u.focus==ui_item_count(UI_NET)-1);
     ui_knob(&u,1,UI_CW,0); CHECK(u.tab==UI_MODELS && u.focus==0);
     ui_knob(&u,1,UI_CCW,0); ui_knob(&u,1,UI_CCW,0); CHECK(u.tab==UI_DEVICE);
-    ui_key(&u,17); CHECK(u.route==UI_LS && u.toast==UI_NONE); /* former Apply is inert */
+    ui_key(&u,17); CHECK(u.route==UI_LS && u.toast==UI_SUB_ARRANGE_OFFLINE); /* 1.6.0 会话安排 (was the inert Apply) */
+    u.host_online=1; ui_key(&u,17); CHECK(u.route==UI_LS && u.toast==UI_SUB_ARRANGE_OPENED); u.host_online=0;
+    ui_key(&u,1); CHECK(u.toast==UI_NONE && u.tab==UI_NET); ui_knob(&u,1,UI_CCW,0); CHECK(u.tab==UI_DEVICE);
     ui_key(&u,16); CHECK(u.route==UI_HOME && !u.back_home);
     ui_key(&u,15); CHECK(u.route==UI_LS && u.tab==UI_DEVICE);
     ui_key(&u,18); CHECK(u.route==UI_HOME && u.back_home);

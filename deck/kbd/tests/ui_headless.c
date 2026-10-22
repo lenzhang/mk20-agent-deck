@@ -40,11 +40,13 @@ static void scene(ui_t *u,int i)
     case 12: online(u); ui_key(u,15); return;
     case 13: u->st.agent=UI_AGENT_STOPPED; ui_key(u,20); return;
     case 14: u->st.cfg=UI_CONF_INVALID; u->st.profile=-2; u->st.provider=-2; u->st.model=-2; u->st.key=UI_KEYST_UNKNOWN; return;
+    case 15: online(u); ui_key(u,5); ui_key(u,17); return; /* 1.6.0 LS fb17 会话安排: ui.openArrange sent */
+    case 16: u->st.link=UI_LINK_NOAPP; ui_key(u,5); ui_key(u,17); return; /* ... Mac not ONLINE: nothing sent */
     }
 }
 int main(int argc,char **argv)
 {
-    static const char *names[]={"home-offline","home-online","home-configured","home-usb-down","home-confirm","home-web-offline","home-web-opened","home-pair","ls-network","ls-model","ls-key","ls-test","ls-info","stopped","home-invalid"};
+    static const char *names[]={"home-offline","home-online","home-configured","home-usb-down","home-confirm","home-web-offline","home-web-opened","home-pair","ls-network","ls-model","ls-key","ls-test","ls-info","stopped","home-invalid","ls-arrange-opened","ls-arrange-offline"};
     if (argc!=2) return 2;
     uint16_t *p=malloc(428*142*2),*canvas=malloc(CANVAS_W*CANVAS_H*2); if (!p||!canvas) return 1;
     for (size_t s=0;s<sizeof names/sizeof names[0];s++) {

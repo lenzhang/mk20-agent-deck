@@ -54,6 +54,9 @@ static void enter(ui_t *u, enum ui_tab tab)
 { u->route = UI_LS; u->tab = tab; u->focus = 0; u->back_home = 0; u->toast = UI_NONE; }
 /* The compositor sends ui.openSettings only when the host is ONLINE; the toast says which. */
 static void web(ui_t *u) { u->toast = u->host_online ? UI_SUB_WEB_OPENED : UI_SUB_WEB_OFFLINE; }
+/* LS fb17 会话安排 (1.6.0): the compositor sends ui.openArrange under the same rule. */
+static void arrange(ui_t *u) { u->toast = u->host_online ? UI_SUB_ARRANGE_OPENED : UI_SUB_ARRANGE_OFFLINE; }
+static int arrange_toast(enum ui_label t) { return t == UI_SUB_ARRANGE_OPENED || t == UI_SUB_ARRANGE_OFFLINE; }
 void ui_key(ui_t *u, int fb)
 {
     if (fb < 1 || fb > 20) return;
@@ -70,6 +73,7 @@ void ui_key(ui_t *u, int fb)
     if (fb <= 5) { u->tab = (enum ui_tab)(fb-1); u->focus = 0; }
     else if (fb <= 15) { if (fb-6 < ui_item_count(u->tab)) u->focus = fb-6; }
     else if (fb == 16 || fb == 18) { u->route = UI_HOME; u->back_home = fb == 18; }
+    else if (fb == 17) arrange(u);
     else if (fb == 19) web(u);
 }
 static void rotate(ui_t *u, int knob, int sign)
@@ -314,7 +318,7 @@ static void sub_screen(const ui_t *u, uint16_t *p, int w, int h)
         enum ui_label msg = u->toast != UI_NONE ? u->toast : s->confirm ? UI_SUB_CONFIRM : UI_SUB_EDIT_WEB;
         text(p,w,h,8,49,L(msg),msg == UI_SUB_CONFIRM ? AMBER : FG,w-16);
         if (msg == UI_SUB_SUMMARY) { status_line(u,line,sizeof line); text(p,w,h,8,76,line,FG,w-16); }
-        else ui_font_draw_scaled(p,w,h,8,72,url,BLUE,w-16,2);
+        else if (!arrange_toast(msg)) ui_font_draw_scaled(p,w,h,8,72,url,BLUE,w-16,2); /* not the settings URL */
     }
     ui_render_footer(u,p,w,h);
 }
@@ -393,6 +397,8 @@ int ui_render_panel(const ui_t *u, int fb, uint16_t *p, size_t count)
         }
     } else if (fb == 16 || fb == 18) {
         face(p,w,h,EDGE); text(p,w,h,13,24,L(fb == 16 ? UI_BACK : UI_HOME_TITLE),FG,w-26);
+    } else if (fb == 17) {
+        nav_tile(p,w,h,L(UI_ARRANGE),EDGE); /* opens the Mac's 会话安排 page (ui.openArrange) */
     } else if (fb == 19) {
         item_text(u,IT_WEB,v,sizeof v,sub,sizeof sub);
         status_tile(p,w,h,L(UI_WEB),v,sub,FG,EDGE,FG);

@@ -68,9 +68,9 @@ struct onboard_s {
     int64_t knob_at[2];
     int last_page, last_stop, confirm_pending, incompatible; long confirm_id; unsigned estops_seen;
     /* 2026-10-20 UX: boot auto-L1, host-owned fb20/footer, grace window, status probes */
-    int auto_l1, grace_shown, stop_banner, opened, face20, footer_host, agent_was, footer_sig;
+    int auto_l1, grace_shown, stop_banner, opened, arranged, face20, footer_host, agent_was, footer_sig;
     uint32_t restore;
-    int64_t switch_at, stop_at, open_at;
+    int64_t switch_at, stop_at, open_at, arrange_at;
     devstat_t *ds; ds_result_t dsr; int ds_kick, ds_stale;
     int suspend, stop_ack; int64_t input_at; /* host forwarding paused after an e-stop on L1/L4 */
     pthread_t decoder;
@@ -175,11 +175,12 @@ static void release_key(kbd_t *k, int i)
         }
     }
 }
-static void boundary(kbd_t *k, int redraw)
+/* Everything a page boundary invalidates except the press-time owners: staged tile, restore, queued
+ * decode, epoch (stale decode results), fresh/publishing (a new full frame is required), the receive
+ * barrier (frames/ui.page/ui.hidKeys already queued are stale), grace window and redraw. */
+static void invalidate(kbd_t *k, int redraw)
 {
     onboard_t *o = k->onboard;
-    hid_map_clear(o); /* every page boundary (route, ui.page, K1 hold, ctl page, hello, loss) ends option mode */
-    for (int i=0;i<20;i++) release_key(k,i);
     if (k->ctl) { k->ctl->confirm.shown=0; k->ctl->confirm.shown_ms=0; }
     o->tile_fb=0; o->restore=0;
     free(o->next_jpg); o->next_jpg=NULL;
@@ -196,6 +197,12 @@ static void boundary(kbd_t *k, int redraw)
         screen_discard(&k->scr); o->render = ALL_PANELS; o->next_render = 0;
     } else if (o->route == ONBOARD_HOME) o->render |= 1u | (1u << 20);
     o->next_full = o->next_decode = 0;
+}
+static void boundary(kbd_t *k, int redraw)
+{
+    hid_map_clear(k->onboard); /* every page boundary (route, ui.page, K1 hold, ctl page, hello, loss) ends option mode */
+    for (int i=0;i<20;i++) release_key(k,i);
+    invalidate(k,redraw);
 }
 void onboard_route(kbd_t *k, enum onboard_route r)
 {
@@ -331,8 +338,20 @@ int onboard_json(kbd_t *k, const char *m, const char *s, size_t n, char *r, size
         if (ctl_json_int(s,n,"version",&v) || v != 1) return -1;
         onboard_loss(k); o->negotiated = 1; o->handshake_required = 0;
         o->health = HOST_PROBING; o->seen = kbd_now(k);
+        /* 1.6.0: a fresh host session starts both counters at 0 again (no exhaustion). Safe because nothing
+         * written before this hello can be accepted after it: earlier stream bytes were handled before it,
+         * bytes already queued behind it are stale (the loss boundary's receive barrier refuses ui.page /
+         * ui.hidKeys among them), and ui.page / a non-empty map also need ONLINE, i.e. >= 3 heartbeats over
+         * >= 2 s after this hello. The generation only orders requests within one session (UI.md). */
+        o->generation = o->hid_generation = 0;
+        /* 1.6.0: the reply names the route ("page"), so the host does not have to guess after a reconnect.
+         * A host page that changed while no host was ONLINE is announced now with the usual K2 tap (before
+         * this reply) instead of at ONLINE: the reported page is also where the host's K2-tap mirror starts.
+         * Route changes while PROBING are still announced at ONLINE (sample()). */
+        if (host_route(o) && o->host_page != o->route) { o->host_page = o->route; host_tap(k,103); }
         snprintf(r,cap,"{\"version\":1,\"heartbeat_ms\":1000,\"capabilities\":[\"ui.page\",\"ui.heartbeat\",\"ui.hidKeys\"],"
-                 "\"generation\":%ld,\"hid_generation\":%ld}",o->generation,o->hid_generation);
+                 "\"page\":\"%s\",\"generation\":%ld,\"hid_generation\":%ld}",
+                 o->route == ONBOARD_L1 ? "L1" : o->route == ONBOARD_L4 ? "L4" : "none",o->generation,o->hid_generation);
         return 1;
     }
     if (!strcmp(m, "ui.hidKeys")) {
@@ -355,7 +374,12 @@ int onboard_json(kbd_t *k, const char *m, const char *s, size_t n, char *r, size
         o->generation = v;
         enum onboard_route route = !strcmp(p,"L1") ? ONBOARD_L1 : ONBOARD_L4;
         o->host_page=route; /* host explicitly requested this content; no synthetic toggle */
-        if (route == o->route) boundary(k,1); else onboard_route(k,route);
+        /* 1.6.0: the page the keyboard already shows is only redrawn: option map cleared, content
+         * invalidated (fresh full frame needed, grace window, stale receive barrier), but held keys keep
+         * their press-time owners and HID state (a held PTT / Backspace / Return / Escape / digit is not
+         * released under the finger; each still ends on its physical release, the 10 s cut, SUSPECT,
+         * e-stop or a real boundary). A real route change keeps the full boundary. */
+        if (route == o->route) { hid_map_clear(o); invalidate(k,1); } else onboard_route(k,route);
         snprintf(r,cap,"{\"page\":\"%s\",\"generation\":%ld}",p,v); return 1;
     }
     return 0;
@@ -550,15 +574,27 @@ static void host_tap(kbd_t *k, int slot)
     o->taps[(o->tap_head+o->tap_count)%HOST_TAPS]=slot; o->tap_count++;
     kbd_host_drain(k);
 }
-/* One device-initiated cmd101 event, exactly {"method":"ui.openSettings"}: the Mac builds
- * the URL from its own configuration. Only while ONLINE, at most once per 3 s. */
+/* One device-initiated cmd101 event with a fixed payload and no parameters: the Mac acts on its
+ * own configuration (URL, one-time link). Only while ONLINE, at most once per 3 s per event. */
+static void open_event(kbd_t *k, int64_t now, const char *j, size_t n, int *opened, int64_t *at)
+{
+    onboard_t *o = k->onboard;
+    if (o->health != HOST_ONLINE || k->host_fd < 0 || (*opened && now - *at < OPEN_SETTINGS_MS)) return;
+    *opened = 1; *at = now; /* rate limit counts attempts, not successful sends */
+    kbd_host_send(k,KBD_EVENT_ID,HOST_CMD_JSON,j,n);
+}
+/* fb19 网页设置 (HOME/LS): exactly {"method":"ui.openSettings"}; the Mac builds the URL itself. */
 static void open_settings(kbd_t *k, int64_t now)
 {
     static const char j[] = "{\"method\":\"ui.openSettings\"}";
-    onboard_t *o = k->onboard;
-    if (o->health != HOST_ONLINE || k->host_fd < 0 || (o->opened && now - o->open_at < OPEN_SETTINGS_MS)) return;
-    o->opened = 1; o->open_at = now; /* rate limit counts attempts, not successful sends */
-    kbd_host_send(k,KBD_EVENT_ID,HOST_CMD_JSON,j,sizeof j - 1);
+    open_event(k,now,j,sizeof j - 1,&k->onboard->opened,&k->onboard->open_at);
+}
+/* fb17 会话安排 (LS, 1.6.0): exactly {"method":"ui.openArrange"}; the Mac opens its own 会话安排 page
+ * through a one-time link file (no token or URL ever crosses the cable). Own 3 s limiter. */
+static void open_arrange(kbd_t *k, int64_t now)
+{
+    static const char j[] = "{\"method\":\"ui.openArrange\"}";
+    open_event(k,now,j,sizeof j - 1,&k->onboard->arranged,&k->onboard->arrange_at);
 }
 static void short_knob(kbd_t *k, int knob, int64_t now)
 {
@@ -659,6 +695,10 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
         }
         return 0;
     }
+    /* Still held from before a same-page ui.page (1.6.0: owners survive its redraw; the page waits for a
+     * fresh frame): a repeated GD32 down of that key is the same press. Its up goes to the press-time
+     * owner (resetting it here would leak a held RAlt or lose the host's up). */
+    if (host_route(o) && o->key_owner[fb-1]) return 1;
     o->key_owner[fb-1] = 0;
     if (fb == 20) return 1; /* host mode key while the Mac page is not live: inert */
     /* Page-switch grace: the old page's labels may still be under the user's finger.
@@ -675,6 +715,7 @@ int onboard_input(kbd_t *k, int row, int col, int knob, int down, int keycode, i
     } else if (o->route == ONBOARD_LS) {
         ui_key(&o->ui,fb);
         if (fb == 19) open_settings(k,now);
+        else if (fb == 17) open_arrange(k,now);
         if (o->ui.route == UI_HOME) onboard_route(k,o->ui.back_home ? ONBOARD_HOME : o->back);
     } else if (o->route == ONBOARD_L5) {
         if (fb == 1 && k->ctl) ctl_set_allowed(k->ctl,!k->ctl->allowed);

@@ -130,6 +130,7 @@ static void l1_inert_states(void)
     key(&k,18,1); key(&k,18,0); CHECK(onboard_current(&k)==ONBOARD_HOME && l1_none(hp[0]));
     /* PROBING (handshake, not yet ONLINE). */
     onboard_route(&k,ONBOARD_L1); hello(&k); beat(&k); CHECK(onboard_health(&k)==HOST_PROBING);
+    CHECK(l1_host_keys(p[0])==2); /* 1.6.0: the hello announces L4 -> L1 (changed while offline) with the K2 tap */
     key(&k,17,1); key(&k,17,0); key(&k,19,1); key(&k,19,0); CHECK(l1_none(hp[0]) && !l1_host_keys(p[0]));
     l1_teardown(&k,&c,hp,p);
     /* Post-e-stop suspension: swallowed until everything is up and 1 s is quiet. */
