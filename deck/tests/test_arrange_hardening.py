@@ -13,9 +13,14 @@ R1 one-time URL in `open` argv (ps)             -> 0600 link file in the 0700 ru
 R2 token in the open-failure log                -> logs drop everything after /auth?
 R3 several tabs vs the 8-connection cap         -> HTTP/1.1 keep-alive (+ quiet page back-off on "busy")
 R4 flaky foreign-uid refusal (EPIPE)            -> reply-then-half-close-and-drain, tolerant client
+
+r3 MINOR on d82cd58:
+R5 keep-alive hogs could hold all 8 slots        -> per-connection cap (age / requests -> Connection: close),
+                                                    at the cap the oldest idle connection is closed first
 """
 import json
 import os
+import re
 import socket
 import sqlite3
 import stat
@@ -801,3 +806,142 @@ def test_client_maps_an_abrupt_refusal_to_a_refusal():
             request_url(path)
     th.join(5)
     srv.close()
+
+
+# ====================================================================== R5: per-connection cap
+def _read_head(s):
+    """One response on a keep-alive socket: returns the header block (body consumed), b"" on EOF."""
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = s.recv(4096)
+        if not chunk:
+            return b""
+        buf += chunk
+    head, _, body = buf.partition(b"\r\n\r\n")
+    n = int(re.search(rb"Content-Length: (\d+)", head).group(1))
+    while len(body) < n:
+        body += s.recv(4096)
+    return head
+
+
+def _ka_get(s, port, path="/favicon.ico"):
+    s.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+    return _read_head(s)
+
+
+def test_keep_alive_connection_is_recycled_after_max_requests(deck, monkeypatch):
+    monkeypatch.setattr(webui, "MAX_CONN_REQUESTS", 5)
+    w = deck()
+    s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+    heads = [_ka_get(s, w.srv.port) for _ in range(5)]
+    assert all(h.startswith(b"HTTP/1.1 204") for h in heads)
+    assert [b"Connection: close" in h for h in heads] == [False] * 4 + [True]
+    assert s.recv(16) == b""  # the server closed it after the 5th response
+    s.close()
+
+
+def test_keep_alive_connection_is_recycled_after_max_age(deck, monkeypatch):
+    monkeypatch.setattr(webui, "MAX_CONN_AGE_S", 0.6)
+    w = deck()
+    s = socket.create_connection(("127.0.0.1", w.srv.port), timeout=5)
+    assert b"Connection: close" not in _ka_get(s, w.srv.port)
+    time.sleep(0.7)
+    assert b"Connection: close" in _ka_get(s, w.srv.port)  # still answered, then closed
+    assert s.recv(16) == b""
+    s.close()
+
+
+def test_the_page_keeps_working_across_the_recycling(deck, monkeypatch):
+    import http.client
+    monkeypatch.setattr(webui, "MAX_CONN_REQUESTS", 3)
+    w = deck()
+    before = w.srv.httpd.accepted
+    c = http.client.HTTPConnection("127.0.0.1", w.srv.port, timeout=5)  # like the page's fetch: reconnects
+    statuses = []
+    for i in range(10):
+        if i == 4:
+            c.request("POST", "/api/clear", body=b'{"mode": "codex_desktop", "slot": 14}',
+                      headers=dict(w.cl.auth(), Host=w.cl.host))
+        else:
+            c.request("GET", "/api/state", headers=dict(w.cl.auth(Origin=None), Host=w.cl.host))
+        r = c.getresponse()
+        r.read()
+        statuses.append(r.status)
+    c.close()
+    assert statuses == [200] * 10
+    assert w.srv.httpd.accepted - before >= 4  # reconnected every 3 requests
+
+
+def _hog(port, stop, gap, out):
+    """A keep-alive client that never lets go of its connection (until the server closes it)."""
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        out.append(s)
+        while not stop.is_set():
+            head = _ka_get(s, port)
+            if not head or b"Connection: close" in head:
+                return
+            if gap:
+                time.sleep(gap)
+    except OSError:
+        return
+
+
+def test_eight_idle_hogs_cannot_starve_a_new_client(deck):
+    w = deck()
+    wait_slots_free(w.srv, webui.MAX_CONNECTIONS)
+    stop = threading.Event()
+    socks = []
+    ths = [threading.Thread(target=_hog, args=(w.srv.port, stop, 0.5, socks), daemon=True)
+           for _ in range(webui.MAX_CONNECTIONS)]
+    for t in ths:
+        t.start()
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    assert w.srv.httpd._slots._value == 0  # all 8 slots held by keep-alive hogs
+    time.sleep(0.3)
+    rejected = w.srv.httpd.rejected
+    t1 = time.monotonic()
+    snap = w.cl.state()  # a new client: the oldest idle hog is closed to make room
+    assert snap["ok"] and time.monotonic() - t1 < 1.5
+    assert w.srv.httpd.evicted >= 1 and w.srv.httpd.rejected == rejected
+    stop.set()
+    for t in ths:
+        t.join(5)
+    for s in socks:
+        s.close()
+
+
+def test_busy_hogs_hold_slots_only_until_the_connection_age_cap(deck, monkeypatch):
+    monkeypatch.setattr(webui, "MAX_CONN_AGE_S", 1.0)
+    w = deck()
+    wait_slots_free(w.srv, webui.MAX_CONNECTIONS)
+    stop = threading.Event()
+    socks = []
+    ths = [threading.Thread(target=_hog, args=(w.srv.port, stop, 0, socks), daemon=True)  # never idle
+           for _ in range(webui.MAX_CONNECTIONS)]
+    for t in ths:
+        t.start()
+    t0 = time.monotonic()
+    while w.srv.httpd._slots._value > 0 and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    start = time.monotonic()
+    got = None
+    while time.monotonic() - start < 4:
+        c = Client(w.srv)
+        c.token, c.sid = w.cl.token, w.cl.sid
+        try:
+            st, _, _ = c.req("GET", "/api/state", headers=c.auth(Origin=None))
+        except OSError:
+            st = None
+        if st == 200:
+            got = time.monotonic() - start
+            break
+        time.sleep(0.05)
+    stop.set()
+    for t in ths:
+        t.join(5)
+    for s in socks:
+        s.close()
+    assert got is not None and got < webui.MAX_CONN_AGE_S + 1.0  # starved at most until the cap

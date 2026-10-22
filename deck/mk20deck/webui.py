@@ -12,9 +12,11 @@ the controller, the slot managers or the rules store: every read and write is a 
 iteration, plus a "网页：…" toast).  Reads return a snapshot built on the loop thread; if the loop is busy
 (e.g. mid-handshake) the last snapshot is returned marked ``stale``.
 
-Bounds (Kimi K3 review, blocker 2): at most ``MAX_CONNECTIONS`` connections (more → 503 at once); HTTP/1.1
-keep-alive so a few open tabs polling every 2 s reuse their connection instead of hitting the cap; a
-keep-alive connection idle for ``READ_TIMEOUT_S`` is closed; every request has a hard ``REQUEST_DEADLINE_S``
+Bounds (Kimi K3 review, blocker 2): at most ``MAX_CONNECTIONS`` connections; HTTP/1.1 keep-alive so a few
+open tabs polling every 2 s reuse their connection instead of hitting the cap; a keep-alive connection idle
+for ``READ_TIMEOUT_S`` is closed, and every connection is recycled ("Connection: close") after
+``MAX_CONN_AGE_S`` or ``MAX_CONN_REQUESTS``; at the cap a new client first closes the oldest idle connection
+(503 only if none is idle); every request has a hard ``REQUEST_DEADLINE_S``
 from its first byte (a slow trickle is cut off, not just an idle socket), ``LoopCalls`` holds at most ``MAX_PENDING`` jobs (full → 503), the loop wake-up is coalesced and one
 loop iteration runs at most ``DRAIN_MAX`` jobs, so the page can never starve the keyboard loop.
 
@@ -69,6 +71,10 @@ MAX_PATH = 512
 MAX_CONNECTIONS = 8
 REQUEST_DEADLINE_S = 5.0   # from a request's first byte to the end of its response, header/body read included
 READ_TIMEOUT_S = 4.0       # per socket read; also the idle limit of a keep-alive connection between requests
+MAX_CONN_AGE_S = 60.0      # a keep-alive connection answers with "Connection: close" once it is this old ...
+MAX_CONN_REQUESTS = 100    # ... or has served this many requests (the page's fetch just reconnects)
+EVICT_MIN_IDLE_S = 0.2     # at the connection cap a new client closes the oldest connection idle this long
+EVICT_WAIT_S = 1.0         # ... and waits at most this for its slot (else 503)
 JOB_TIMEOUT_S = 3.0        # the loop must pick a job up within this (else cancelled, 503)
 JOB_RUN_S = 1.5            # ... and finish a started one within this
 STATE_TIMEOUT_S = 2.0
@@ -555,13 +561,42 @@ class _Server(ThreadingHTTPServer):
 
     def __init__(self, *a, max_connections: int = MAX_CONNECTIONS, **kw) -> None:
         self._slots = threading.BoundedSemaphore(max_connections)
+        self._conns: dict[int, "_Handler"] = {}
+        self._conns_lock = threading.Lock()
         self.rejected = 0
         self.accepted = 0
+        self.evicted = 0
         super().__init__(*a, **kw)
 
+    def register(self, h: "_Handler") -> None:
+        with self._conns_lock:
+            self._conns[id(h)] = h
+
+    def unregister(self, h: "_Handler") -> None:
+        with self._conns_lock:
+            self._conns.pop(id(h), None)
+
+    def _evict_oldest_idle(self) -> bool:
+        """Close the oldest keep-alive connection that is idle (between requests) for EVICT_MIN_IDLE_S, so
+        connections that merely keep a slot can never starve a new client.  Never touches a request in
+        progress (the handler claims "busy" under the same lock before reading a request)."""
+        now = time.monotonic()
+        with self._conns_lock:
+            idle = [h for h in self._conns.values()
+                    if h._idle_since is not None and now - h._idle_since >= EVICT_MIN_IDLE_S]
+            if not idle:
+                return False
+            victim = min(idle, key=lambda h: h._born)
+            victim._evicted, victim._idle_since = True, None
+        victim._expire()
+        self.evicted += 1
+        return True
+
     def process_request(self, request, client_address):
-        """At most ``max_connections`` handler threads; beyond that: an immediate 503, no thread."""
-        if not self._slots.acquire(blocking=False):
+        """At most ``max_connections`` handler threads; at the cap the oldest idle keep-alive connection is
+        closed to make room, else an immediate 503 (no thread)."""
+        if not self._slots.acquire(blocking=False) and \
+                not (self._evict_oldest_idle() and self._slots.acquire(timeout=EVICT_WAIT_S)):
             self.rejected += 1
             try:
                 request.setblocking(False)
@@ -620,18 +655,39 @@ class _Handler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         self.timeout = READ_TIMEOUT_S
         self._deadline: threading.Timer | None = None
+        self._born = time.monotonic()
+        self._requests = 0
+        self._last = False  # this connection's current response is its last ("Connection: close")
+        self._idle_since: float | None = None  # set while waiting between requests (evictable)
+        self._evicted = False
         super().setup()
+        self.server.register(self)
+
+    def _set_idle(self, idle: bool) -> bool:
+        """Idle <-> busy under the server's lock; False once the server claimed this connection for eviction."""
+        with self.server._conns_lock:
+            if self._evicted:
+                return False
+            self._idle_since = time.monotonic() if idle else None
+            return True
 
     def handle_one_request(self) -> None:
         """Wait (idle, at most READ_TIMEOUT_S) for the next request's first byte, then give the whole request a
-        hard REQUEST_DEADLINE_S: a client that trickles bytes is cut off (reads fail, the thread ends)."""
-        try:
-            if not self.rfile.peek(1):
-                self.close_connection = True  # client closed its keep-alive connection
-                return
-        except (OSError, ValueError):
-            self.close_connection = True  # idle keep-alive limit / reset
+        hard REQUEST_DEADLINE_S: a client that trickles bytes is cut off (reads fail, the thread ends).
+        A connection lives at most MAX_CONN_AGE_S / MAX_CONN_REQUESTS: then its response says
+        "Connection: close" and the client reconnects (no keep-alive connection holds a slot forever)."""
+        if not self._set_idle(True):
+            self.close_connection = True
             return
+        try:
+            data = self.rfile.peek(1)
+        except (OSError, ValueError):
+            data = b""  # idle keep-alive limit / reset / evicted
+        if not self._set_idle(False) or not data:
+            self.close_connection = True  # evicted, or the client closed its keep-alive connection
+            return
+        self._requests += 1
+        self._last = self._requests >= MAX_CONN_REQUESTS or time.monotonic() - self._born >= MAX_CONN_AGE_S
         self._deadline = threading.Timer(REQUEST_DEADLINE_S, self._expire)
         self._deadline.daemon = True
         self._deadline.start()
@@ -648,6 +704,7 @@ class _Handler(BaseHTTPRequestHandler):
             pass
 
     def finish(self) -> None:
+        self.server.unregister(self)
         if self._deadline is not None:
             self._deadline.cancel()
         try:
@@ -673,7 +730,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("X-MK20-Arrange", "1")
-        if self.close_connection:
+        if self.close_connection or self._last:  # (send_header sets close_connection for "close")
             self.send_header("Connection", "close")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
