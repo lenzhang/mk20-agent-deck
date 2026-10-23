@@ -118,13 +118,23 @@ def slope_kb_h(pts) -> float | None:
 
 
 def half_slopes_kb_h(pts) -> list | None:
-    """[first half, second half] slopes (kB/h) of the time span; a half with < 3 points is None."""
+    """[first half, second half] slopes (kB/h) of the time span; a half with < 3 points or spanning < 0.5 h is None
+    (a few minutes of samples give a noisy slope)."""
     pts = _clean(pts)
     if len(pts) < 2:
         return None
     mid = (pts[0][0] + pts[-1][0]) / 2
     halves = ([p for p in pts if p[0] <= mid], [p for p in pts if p[0] >= mid])
-    return [_ls_kb_h(h) if len(h) >= 3 else None for h in halves]
+    return [_ls_kb_h(h) if len(h) >= 3 and h[-1][0] - h[0][0] >= 1800 else None for h in halves]
+
+
+def recent_slope_kb_h(pts, hours: float = TREND_MIN_H) -> float | None:
+    """Slope (kB/h) over the last `hours` only — shows a leak that starts late, which the whole-span trend (both
+    halves must grow) reports as "flat" for a long time. None until the samples span `hours`."""
+    pts = _clean(pts)
+    if not pts or pts[-1][0] - pts[0][0] < hours * 3600:
+        return None
+    return slope_kb_h([p for p in pts if p[0] >= pts[-1][0] - hours * 3600])
 
 
 def kernel_mem_trend(pts) -> str:
@@ -145,6 +155,7 @@ def kernel_mem_summary(stats: dict, pts: dict, since) -> dict:
     return {"Slab": stats.get("Slab"), "SUnreclaim": stats.get("SUnreclaim"), "slope_since": since,
             "slope_samples": len(su), "slope_hours": round((su[-1][0] - su[0][0]) / 3600, 2) if su else 0,
             "sunreclaim_kb_h": slope_kb_h(su), "sunreclaim_half_kb_h": half_slopes_kb_h(su),
+            "sunreclaim_last6h_kb_h": recent_slope_kb_h(su),
             "mem_avail_kb_h": slope_kb_h(ma)}
 
 
@@ -250,7 +261,7 @@ def main() -> int:
     km_stats: dict = {}                                  # Slab/SUnreclaim first/last/min/max over the run
     km_pts: dict = {"SUnreclaim": [], "MemAvailable": []}   # (host epoch, kB) since the last reboot
     km_since = None
-    summary: dict = {"start": stamp, "samples": 0}
+    summary: dict = {"start": stamp, "samples": 0, "kernel_mem": None, "kernel_mem_trend": "insufficient"}
     try:
         while not STOP and time.time() < end:
             t = time.time()

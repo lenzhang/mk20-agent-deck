@@ -173,19 +173,21 @@ def _busybox():
 
 def test_meminfo_shell_command_on_device_awk(tmp_path):
     """The real device-side snippet (BusyBox 1.27.2 awk when MK20_TEST_BUSYBOX is set, e.g. in Docker)."""
-    devcmds = (pathlib.Path(soak.HERE).parent / "tests/fixtures/device-commands.txt").read_text().split("\n")
+    fx = pathlib.Path(soak.HERE).parent / "tests/fixtures/device-commands.txt"
+    if not fx.exists():
+        pytest.skip("device command fixture not in this tree")
+    bb = _busybox()
+    if not bb:
+        pytest.skip("BusyBox unavailable: the device-side awk must be tested with BusyBox (MK20_TEST_BUSYBOX)")
+    devcmds = fx.read_text().split("\n")
     assert "awk" in devcmds and "echo" in soak.MEMINFO_SH.split()[0]
     (tmp_path / "meminfo").write_text(MEMINFO)
     cmd = soak.MEMINFO_SH.replace("/proc/meminfo", str(tmp_path / "meminfo"))
     assert cmd != soak.MEMINFO_SH
-    bb = _busybox()
-    if bb:
-        d = tmp_path / "bin"
-        d.mkdir()
-        (d / "awk").symlink_to(bb)
-        out = subprocess.run([bb, "sh", "-c", cmd], capture_output=True, text=True, env={"PATH": str(d)}, timeout=10)
-    else:
-        out = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True, timeout=10)
+    d = tmp_path / "bin"
+    d.mkdir()
+    (d / "awk").symlink_to(bb)
+    out = subprocess.run([bb, "sh", "-c", cmd], capture_output=True, text=True, env={"PATH": str(d)}, timeout=10)
     assert out.returncode == 0 and out.stdout.count("\n") == 1 and out.stdout.startswith("meminfo=")
     assert soak.parse_meminfo(out.stdout.split("=", 1)[1]) == MEMINFO_WANT
     gone = soak.MEMINFO_SH.replace("/proc/meminfo", str(tmp_path / "nope"))   # unreadable: empty, not an error
@@ -321,3 +323,13 @@ def test_accept_sh_refuses_an_oversized_adb_request(monkeypatch):
         soak.acc.sh(ok + "y")
     assert len(sent) == 1   # never sent
     assert soak.acc.adb_payload_len("ü") == len("shell:") + 2 + 1   # bytes, not characters
+
+
+def test_recent_slope_shows_a_late_leak_and_half_slopes_need_half_an_hour():
+    late = _line(0, 4) + _line(80, 4, start=11820, t0=1_000_000 + 4 * 3600)[1:]
+    assert soak.kernel_mem_trend(late) == "flat" and soak.recent_slope_kb_h(late) > 50   # visible in the last 6 h
+    assert soak.recent_slope_kb_h(_line(80, 5)) is None                                   # not 6 h of data yet
+    assert soak.recent_slope_kb_h(_line(0, 7)) == 0
+    short = [(1_000_000 + i * 60, 11800 + i * 10) for i in range(8)]                     # 7 minutes of samples
+    assert soak.half_slopes_kb_h(short) == [None, None]
+    assert soak.kernel_mem_summary({}, {"SUnreclaim": late, "MemAvailable": []}, "t")["sunreclaim_last6h_kb_h"] > 50
