@@ -38,6 +38,7 @@ def test_events_and_summary(tmp_path, monkeypatch):
     assert sm["rollbacks"] == [{"time": "t", "record": "1.1.2->1.1.1"}]
     assert sm["min_mem_kb"] == 50000 and sm["min_fat_free_kb"] == 1200
     assert sm["kernel_mem_trend"] == "insufficient" and sm["kernel_mem"]["SUnreclaim"] is None   # no meminfo: no crash
+    assert sm["host_link_stalls"] == 0 and sm["first_host_link_stall"] is None             # no bridge data: no stall
 
 
 def test_keyboard_owner_restart_counts_mk20_kbd(tmp_path, monkeypatch):
@@ -333,3 +334,80 @@ def test_recent_slope_shows_a_late_leak_and_half_slopes_need_half_an_hour():
     short = [(1_000_000 + i * 60, 11800 + i * 10) for i in range(8)]                     # 7 minutes of samples
     assert soak.half_slopes_kb_h(short) == [None, None]
     assert soak.kernel_mem_summary({}, {"SUnreclaim": late, "MemAvailable": []}, "t")["sunreclaim_last6h_kb_h"] > 50
+
+
+
+# ---- 1.6.1: host link liveness (incident 2026-10-23: 51 min stalled bridge, every sample ok) ----
+# kbd.status of the incident (before.txt): json_in/jpg_ok frozen while bridge_clients stayed 2
+INCIDENT_KST = ('{"version":"mk20-kbd-0.3","mode":"normal","estopped":0,"gd32_rw":1,"knob_init":"ok","knob_ok":6,'
+                '"knob_timeouts":0,"knob_tx_errors":0,"panels_written":21,"panels_dirty":0,"write_errors":0,"key_events":0,'
+                '"knob_events":0,"echo_frames":0,"other_frames":0,"jpg_ok":26153,"jpg_bad":0,"jpg_size":0,"json_in":43440,'
+                '"host":1,"host_tx_errors":0,"host_tx_timeouts":0,"backlight":80,"hid_open":1,"hid_reopens":0,"hid_replaced":0}\n')
+
+
+def test_kbd_link_from_the_embedded_status_string():
+    assert soak.kbd_link(INCIDENT_KST) == {"json_in": 43440, "jpg_ok": 26153, "host": 1, "host_flushes": None}  # 1.6.0
+    v161 = INCIDENT_KST.replace('"host_tx_timeouts":0,', '"host_tx_timeouts":0,"host_flushes":3,')
+    assert soak.kbd_link(v161)["host_flushes"] == 3
+    assert soak.kbd_link(json.loads(v161)) == {"json_in": 43440, "jpg_ok": 26153, "host": 1, "host_flushes": 3}
+    none = dict.fromkeys(soak.KBD_LINK_KEYS)
+    for bad in (None, "", 7, "garbage", '{"json_in":"x"}', '{"json_in":-3}', '{"json_in":1.5}', {"json_in": True}):
+        assert soak.kbd_link(bad)["json_in"] is None
+    assert soak.kbd_link(None) == none
+    assert soak.kbd_link(INCIDENT_KST[:300])["json_in"] is None and soak.kbd_link(INCIDENT_KST[:300])["jpg_ok"] == 26153  # cut
+
+
+def test_host_link_state_rules():
+    def smp(clients, json_in, **kw):
+        return dict({"bridge_clients": clients, "kbd_link": {"json_in": json_in}, "kbd_pid": "7"}, **kw)
+    st = soak.host_link_state
+    assert st(smp(1, 100), smp(1, 101)) == "ok"
+    assert st(smp(2, 43440), smp(2, 43440)) == "stalled"                 # the incident
+    assert st(smp(1, 500), smp(1, 400)) == "stalled"                     # went back without a restart: not alive
+    assert st(smp(0, 100), smp(1, 100)) == "idle" and st(smp(1, 100), smp(0, 100)) == "idle"
+    assert st(None, smp(1, 100)) == "unknown"                            # first sample
+    assert st(smp(None, 100), smp(1, 100)) == "unknown"                  # netstat failed
+    assert st(smp(1, None), smp(1, 100)) == "unknown"                    # old release / no kbd status
+    assert st(smp(1, 900), smp(1, 3, event="reboot")) == "unknown"
+    assert st(smp(1, 900), smp(1, 3, event="kd-restart")) == "unknown"
+    assert st(smp(1, 900), smp(1, 3, kbd_pid="8")) == "unknown"         # mk20-kbd pid changed
+    assert st({"ok": False, "error": "x"}, smp(1, 3)) == "unknown"        # previous sample failed outright
+
+
+def test_sample_records_kbd_link_without_extra_adb_calls(monkeypatch):
+    h = {"status": "ok", "uptime_s": 3600, "kd": 0, "selftest": {"pass": True}, "usb": {"composite": True},
+         "kbd": {"enabled": True, "mode": "normal", "running": True, "restarts": 0, "status": INCIDENT_KST}}
+    calls = _device(monkeypatch, h)
+    s = soak.sample(deep=False)
+    assert s["kbd_link"] == {"json_in": 43440, "jpg_ok": 26153, "host": 1, "host_flushes": None}
+    assert s["ok"] is True and s["bridge_clients"] == 1 and "host_link" not in s   # decided against the previous one
+    assert len(calls) == 3 and max(soak.acc.adb_payload_len(c) for c in calls) <= 400
+
+
+def test_summary_marks_stalled_host_link_samples_not_ok(tmp_path, monkeypatch):
+    monkeypatch.setenv("MK20_ADB", "true")
+
+    def smp(up, clients, json_in, pid="7", restarts=0):
+        return {"health": {"uptime_s": up, "kbd": {"restarts": restarts}}, "bridge_clients": clients, "kbd_pid": pid,
+                "kbd_link": {"json_in": json_in, "jpg_ok": 1, "host": 1, "host_flushes": 0}}
+    seq = [smp(100, 1, 100),        # t0 unknown (first)
+           smp(400, 1, 350),        # t1 ok
+           smp(700, 2, 350),        # t2 stalled (incident: stale sockets, json_in frozen)
+           smp(1000, 2, 350),       # t3 stalled
+           smp(1300, 0, 350),       # t4 idle (Mac gone)
+           smp(1600, 1, 360),       # t5 idle (previous had no client)
+           smp(1900, 1, 600),       # t6 ok
+           smp(50, 1, 3),           # t7 reboot: unknown
+           smp(350, 1, 2, pid="9", restarts=1),   # t8 mk20-kbd restart: unknown
+           smp(650, 1, 2, pid="9", restarts=1)]   # t9 stalled again
+    _timed(monkeypatch, seq)
+    monkeypatch.setattr("sys.argv", ["x", "--hours", "100", "--interval", "0", "--out", str(tmp_path)])
+    assert soak.main() == 0
+    lines = [json.loads(l) for l in next(p for p in tmp_path.iterdir() if p.name.endswith(".jsonl")).read_text().splitlines()]
+    assert [x["host_link"] for x in lines] == ["unknown", "ok", "stalled", "stalled", "idle", "idle", "ok", "unknown",
+                                              "unknown", "stalled"]
+    assert [x["ok"] for x in lines] == [x["host_link"] != "stalled" for x in lines]
+    assert lines[7].get("event") == "reboot" and "kd-restart" in lines[8].get("event", "")
+    sm = _summary(tmp_path)
+    assert sm["host_link_stalls"] == 3 and sm["first_host_link_stall"] == "t2"
+    assert sm["failed"] == 3 and sm["first_fail"] == "t2"

@@ -23,6 +23,13 @@ SUnreclaim and MemAvailable since the last reboot (null below 6 samples or 1 h).
 "growing" = SUnreclaim slope > 50 kB/h (= 1.2 MB/day) over >= 6 h, in the whole span AND in each half of it
 (sustained: a one-off step raises only one half); "flat" = >= 6 h of samples without that; "insufficient" = fewer
 than 6 samples, under 6 h, or a half with < 3 samples.
+Host link liveness (1.6.1, incident 2026-10-23: the bridge hung 51 min on a stalled pty while every sample stayed ok):
+every sample keeps "kbd_link" = json_in / jpg_ok / host / host_flushes from the mk20-kbd status string the health
+JSON already embeds (no extra adb call; a missing field is null). The Mac sends a heartbeat every 1.2 s, so while a
+client is connected json_in must grow: bridge_clients >= 1 in this and the previous sample with json_in not
+increased -> "host_link": "stalled" and the sample is NOT ok ("ok": json_in grew; "idle": no client in one of the
+two samples; "unknown": no previous sample / missing data / reboot / mk20-kbd restart between them). The summary
+counts "host_link_stalls" and keeps "first_host_link_stall".
 Stop early: kill the process (pid in <out>/soak.pid); the summary is still written.
 """
 from __future__ import annotations
@@ -159,6 +166,41 @@ def kernel_mem_summary(stats: dict, pts: dict, since) -> dict:
             "mem_avail_kb_h": slope_kb_h(ma)}
 
 
+KBD_LINK_KEYS = ("json_in", "jpg_ok", "host", "host_flushes")
+
+
+def kbd_link(status) -> dict:
+    """json_in / jpg_ok / host / host_flushes of the mk20-kbd status (health "kbd"."status": the kbd.status JSON as a
+    string, cut at 700 bytes by mk20d, so parsed field by field). Missing/unparsable -> None; never raises."""
+    out: dict = dict.fromkeys(KBD_LINK_KEYS)
+    if isinstance(status, dict):
+        return {k: status.get(k) if _num(status.get(k)) else None for k in KBD_LINK_KEYS}
+    if isinstance(status, str):
+        for k in KBD_LINK_KEYS:
+            m = re.search(r'"%s"\s*:\s*(\d+)(?![\d.])' % k, status)
+            out[k] = int(m.group(1)) if m else None
+    return out
+
+
+def host_link_state(prev, cur) -> str:
+    """"stalled" | "ok" | "idle" | "unknown" for sample `cur` against the previous sample `prev` (module docstring)."""
+    if not isinstance(prev, dict) or not isinstance(cur, dict):
+        return "unknown"
+    pc, cc = prev.get("bridge_clients"), cur.get("bridge_clients")
+    if not (_num(pc) and _num(cc)):
+        return "unknown"
+    if pc < 1 or cc < 1:
+        return "idle"
+    pj, cj = (prev.get("kbd_link") or {}).get("json_in"), (cur.get("kbd_link") or {}).get("json_in")
+    ev = cur.get("event") or ""
+    if not (_num(pj) and _num(cj)) or "reboot" in ev or "kd-restart" in ev:
+        return "unknown"
+    pk, ck = prev.get("kbd_pid"), cur.get("kbd_pid")
+    if pk and ck and pk != ck:
+        return "unknown"   # mk20-kbd restarted (its counters start over)
+    return "ok" if cj > pj else "stalled"
+
+
 def sample(deep: bool) -> dict:
     s: dict = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "deep": deep}
     rc, o = acc.sh("echo up", timeout=10)
@@ -174,6 +216,7 @@ def sample(deep: bool) -> dict:
         s["health"]["selftest"] = (h.get("selftest") or {}).get("pass")
         k = h.get("kbd") or {}   # mk20-kbd releases (K4, >= 1.3): mode/restarts from mk20d health
         s["health"]["kbd"] = {x: k.get(x) for x in ("enabled", "mode", "running", "restarts", "recent_crashes")}
+        s["kbd_link"] = kbd_link(k.get("status"))   # host link liveness: json_in must grow while a client is connected
         if h and h.get("status") != "ok":   # degraded/fail: keep what selftest complained about
             s["selftest_warn"] = selftest_problems((h.get("selftest") or {}).get("detail"))
         s["keyboard_ok"] = acc.keyboard_check(h)[1]   # stock: kd=1; mk20-kbd release: kd=0 + mk20-kbd normal
@@ -261,7 +304,10 @@ def main() -> int:
     km_stats: dict = {}                                  # Slab/SUnreclaim first/last/min/max over the run
     km_pts: dict = {"SUnreclaim": [], "MemAvailable": []}   # (host epoch, kB) since the last reboot
     km_since = None
-    summary: dict = {"start": stamp, "samples": 0, "kernel_mem": None, "kernel_mem_trend": "insufficient"}
+    summary: dict = {"start": stamp, "samples": 0, "kernel_mem": None, "kernel_mem_trend": "insufficient",
+                     "host_link_stalls": 0, "first_host_link_stall": None}
+    prev = None                                          # previous sample (host link liveness)
+    hl_stalls, first_hl = 0, None
     try:
         while not STOP and time.time() < end:
             t = time.time()
@@ -318,6 +364,12 @@ def main() -> int:
                 if _num(v):
                     km_pts[k].append((t, v))
                     km_since = km_since or s.get("time")
+            s["host_link"] = host_link_state(prev, s)
+            if s["host_link"] == "stalled":              # connected but nothing reaches mk20-kbd: not ok
+                s["ok"] = False
+                hl_stalls += 1
+                first_hl = first_hl or s.get("time")
+            prev = s
             for key in {problem_key(x) for x in s.get("selftest_warn") or [] if isinstance(x, str)}:
                 warn_counts[key] = warn_counts.get(key, 0) + 1
             if not s.get("ok"):
@@ -330,7 +382,8 @@ def main() -> int:
                        "min_fat_free_kb": min_fat, "last": s.get("time"), "running": True, "pid": os.getpid(),
                        "selftest_warn": dict(sorted(warn_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
                        "kernel_mem": kernel_mem_summary(km_stats, km_pts, km_since),
-                       "kernel_mem_trend": kernel_mem_trend(km_pts["SUnreclaim"])}
+                       "kernel_mem_trend": kernel_mem_trend(km_pts["SUnreclaim"]),
+                       "host_link_stalls": hl_stalls, "first_host_link_stall": first_hl}
             _write_json(sm, summary)
             while not STOP and time.time() < min(end, t + a.interval):
                 time.sleep(1)

@@ -188,3 +188,8 @@ Shmem, Cached in kB, null when unreadable; the kernel has no `/proc/slabinfo`). 
 first/last/min/max of Slab and SUnreclaim and least-squares slopes (kB/h) of SUnreclaim and MemAvailable since the
 last reboot (null below 6 samples / 1 h); `kernel_mem_trend` is `growing` when SUnreclaim rises > 50 kB/h over
 >= 6 h in the whole span and in each half of it, else `flat` (>= 6 h) or `insufficient`.
+Host link (1.6.1): each sample keeps `kbd_link` (`json_in`, `jpg_ok`, `host`, `host_flushes` from the mk20-kbd
+status inside the health JSON, no extra adb call). The Mac sends a heartbeat every 1.2 s, so with `bridge_clients`
+>= 1 in two consecutive samples `json_in` must grow; if it does not, the sample is `"host_link": "stalled"` and not
+ok (`ok` / `idle` = no client / `unknown` = first sample, missing data, reboot or mk20-kbd restart). The summary
+counts `host_link_stalls` (`first_host_link_stall`).
