@@ -1,0 +1,211 @@
+2026-10-21 10:02:21,854 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 10:02:26,147 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 10:02:26,147 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 10:02:26,149 INFO mk20deck.supervisor: 背光 80
+2026-10-21 10:02:27,353 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 10:03:41,545 INFO mk20deck.daemon: power event: display_sleep
+2026-10-21 11:14:30,094 WARNING mk20deck.link: transport read failed: [Errno 49] Can't assign requested address
+2026-10-21 11:20:30,452 INFO mk20deck.link: ui liveness: 3559 heartbeats accepted, 0 rejected, 15 timeouts, 0 re-hellos
+2026-10-21 11:20:30,934 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 11:20:30,935 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 11:20:30,938 INFO mk20deck.supervisor: 背光 80
+2026-10-21 11:20:30,963 INFO mk20deck.daemon: power event: display_sleep
+2026-10-21 11:20:32,146 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 11:23:13,208 INFO mk20deck.link: ui liveness: 134 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-21 11:23:13,557 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 11:23:13,558 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 11:23:13,560 INFO mk20deck.supervisor: 背光 80
+2026-10-21 11:23:13,575 INFO mk20deck.daemon: power event: display_sleep
+2026-10-21 11:23:14,770 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 11:51:53,227 INFO mk20deck.link: ui liveness: 1421 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-21 11:51:53,663 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 11:51:53,663 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 11:51:53,667 INFO mk20deck.supervisor: 背光 80
+2026-10-21 11:51:53,687 INFO mk20deck.daemon: power event: display_sleep
+2026-10-21 11:51:54,875 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 18:15:41,699 WARNING mk20deck.link: transport read failed: [Errno 49] Can't assign requested address
+2026-10-21 18:15:42,323 INFO mk20deck.supervisor: 连接中断：读取失败（拔线？）: [Errno 49] Can't assign requested address
+2026-10-21 18:15:42,323 INFO mk20deck.link: ui liveness: 19043 heartbeats accepted, 0 rejected, 15 timeouts, 0 re-hellos
+2026-10-21 18:15:43,892 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 18:16:07,408 INFO mk20deck.supervisor: 握手失败：Write timeout
+2026-10-21 18:16:24,612 INFO mk20deck.supervisor: 握手失败：write failed: [Errno 6] Device not configured
+2026-10-21 18:16:25,682 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 18:16:29,981 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 18:16:29,982 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 18:16:29,984 INFO mk20deck.supervisor: 背光 80
+2026-10-21 18:16:31,190 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 21:28:22,946 WARNING mk20deck.link: transport read failed: [Errno 49] Can't assign requested address
+2026-10-21 21:28:23,813 INFO mk20deck.supervisor: 连接中断：读取失败（拔线？）: [Errno 49] Can't assign requested address
+2026-10-21 21:28:23,814 INFO mk20deck.link: ui liveness: 9513 heartbeats accepted, 0 rejected, 15 timeouts, 0 re-hellos
+2026-10-21 21:28:25,386 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 21:28:48,898 INFO mk20deck.supervisor: 握手失败：Write timeout
+2026-10-21 21:29:07,029 INFO mk20deck.supervisor: 握手失败：write failed: [Errno 6] Device not configured
+2026-10-21 21:29:08,090 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 21:29:12,394 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 21:29:12,396 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 21:29:12,398 INFO mk20deck.supervisor: 背光 80
+2026-10-21 21:29:13,606 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 22:54:05,288 INFO mk20deck.daemon: power event: display_wake
+2026-10-21 22:54:05,289 INFO mk20deck.supervisor: 唤醒（display_wake），重新握手
+2026-10-21 22:54:05,290 INFO mk20deck.link: ui liveness: 4214 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-21 22:54:07,600 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 22:54:07,600 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 22:54:07,604 INFO mk20deck.supervisor: 背光 80
+2026-10-21 22:54:08,806 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-21 23:42:25,194 INFO mk20deck.supervisor: 连接中断：写入失败（拔线？）: timed out
+2026-10-21 23:42:27,199 INFO mk20deck.link: ui liveness: 2398 heartbeats accepted, 0 rejected, 2 timeouts, 0 re-hellos
+2026-10-21 23:42:28,782 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 23:43:04,584 INFO mk20deck.supervisor: 握手失败：Write timeout
+2026-10-21 23:43:21,367 INFO mk20deck.supervisor: 握手失败：write failed: [Errno 6] Device not configured
+2026-10-21 23:43:22,453 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-21 23:43:26,727 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-21 23:43:26,728 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-21 23:43:26,729 INFO mk20deck.supervisor: 背光 80
+2026-10-21 23:43:27,935 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 01:29:05,970 INFO mk20deck.link: ui liveness: 5256 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-22 01:29:06,335 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-22 01:29:06,335 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 01:29:06,339 INFO mk20deck.supervisor: 背光 80
+2026-10-22 01:29:07,540 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 01:29:58,119 INFO mk20deck.supervisor: 连接中断：写入失败（拔线？）: timed out
+2026-10-22 01:30:00,125 INFO mk20deck.link: ui liveness: 37 heartbeats accepted, 0 rejected, 1 timeouts, 0 re-hellos
+2026-10-22 01:30:01,732 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-22 01:30:37,472 INFO mk20deck.supervisor: 握手失败：Write timeout
+2026-10-22 01:30:56,091 WARNING mk20deck.link: transport read failed: [Errno 6] Device not configured
+2026-10-22 01:30:56,096 INFO mk20deck.supervisor: 握手失败：write failed: [Errno 6] Device not configured
+2026-10-22 01:30:57,176 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-22 01:31:01,472 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-22 01:31:01,473 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 01:31:01,475 INFO mk20deck.supervisor: 背光 80
+2026-10-22 01:31:02,680 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 01:54:04,949 INFO mk20deck.daemon: input key 1 1 down
+2026-10-22 01:54:05,067 INFO mk20deck.daemon: input key 1 1 up
+2026-10-22 01:54:05,219 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:07,661 INFO mk20deck.daemon: input key 2 1 down
+2026-10-22 01:54:07,786 INFO mk20deck.daemon: input key 2 1 up
+2026-10-22 01:54:07,868 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:09,619 INFO mk20deck.daemon: input key 1 1 down
+2026-10-22 01:54:09,726 INFO mk20deck.daemon: input key 1 1 up
+2026-10-22 01:54:09,825 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:10,821 INFO mk20deck.daemon: input key 1 2 down
+2026-10-22 01:54:10,912 INFO mk20deck.daemon: input key 1 2 up
+2026-10-22 01:54:10,995 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:13,064 INFO mk20deck.daemon: input key 3 1 down
+2026-10-22 01:54:13,170 INFO mk20deck.daemon: input key 3 1 up
+2026-10-22 01:54:13,284 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:14,457 INFO mk20deck.daemon: input key 4 1 down
+2026-10-22 01:54:14,602 INFO mk20deck.daemon: input key 4 1 up
+2026-10-22 01:54:14,679 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:15,528 INFO mk20deck.daemon: input key 5 1 down
+2026-10-22 01:54:15,713 INFO mk20deck.daemon: input key 5 1 up
+2026-10-22 01:54:15,800 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:17,980 INFO mk20deck.daemon: input key 1 3 down
+2026-10-22 01:54:18,079 INFO mk20deck.daemon: input key 1 3 up
+2026-10-22 01:54:18,168 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:19,360 INFO mk20deck.daemon: input key 2 3 down
+2026-10-22 01:54:19,519 INFO mk20deck.daemon: input key 2 3 up
+2026-10-22 01:54:19,633 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:20,498 INFO mk20deck.daemon: input key 3 3 down
+2026-10-22 01:54:20,683 INFO mk20deck.daemon: input key 3 3 up
+2026-10-22 01:54:20,793 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:21,693 INFO mk20deck.daemon: input key 4 2 down
+2026-10-22 01:54:21,777 INFO mk20deck.daemon: input key 4 2 up
+2026-10-22 01:54:21,836 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:23,137 INFO mk20deck.daemon: input key 1 1 down
+2026-10-22 01:54:23,252 INFO mk20deck.daemon: input key 1 1 up
+2026-10-22 01:54:23,351 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:34,243 INFO mk20deck.daemon: input key 1 1 down
+2026-10-22 01:54:34,313 INFO mk20deck.daemon: input key 1 1 up
+2026-10-22 01:54:34,465 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:54:41,414 INFO mk20deck.daemon: input key 1 2 down
+2026-10-22 01:54:41,415 INFO mk20deck.daemon: input key 1 2 up
+2026-10-22 01:54:41,481 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 01:55:14,231 INFO mk20deck.daemon: input key 5 4 down
+2026-10-22 01:55:14,300 INFO mk20deck.daemon: input key 5 4 up
+2026-10-22 01:55:17,190 INFO mk20deck.daemon: input key 5 4 down
+2026-10-22 01:55:17,344 INFO mk20deck.daemon: input key 5 4 up
+2026-10-22 01:55:30,363 INFO mk20deck.daemon: input key 5 4 down
+2026-10-22 01:55:30,451 INFO mk20deck.daemon: input key 5 4 up
+2026-10-22 02:19:14,543 INFO mk20deck.link: ui liveness: 2396 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-22 02:19:14,959 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-22 02:19:14,960 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 02:19:14,963 INFO mk20deck.supervisor: 背光 80
+2026-10-22 02:19:16,168 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 02:39:06,558 INFO mk20deck.link: ui liveness: 987 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-22 02:39:07,001 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-22 02:39:07,001 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 02:39:07,005 INFO mk20deck.supervisor: 背光 80
+2026-10-22 02:39:08,208 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 03:31:14,174 INFO mk20deck.daemon: power event: display_sleep
+2026-10-22 03:42:31,995 INFO mk20deck.daemon: power event: display_wake
+2026-10-22 03:42:31,996 INFO mk20deck.supervisor: 唤醒（display_wake），重新握手
+2026-10-22 03:42:31,998 INFO mk20deck.link: ui liveness: 3156 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-22 03:42:34,198 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-22 03:42:34,199 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 03:42:34,204 INFO mk20deck.supervisor: 背光 80
+2026-10-22 03:42:35,408 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 04:59:37,906 INFO mk20deck.link: ui liveness: 3826 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-22 04:59:38,310 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat'], heartbeat every 1.20 s
+2026-10-22 04:59:38,310 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 04:59:38,313 INFO mk20deck.supervisor: 背光 80
+2026-10-22 04:59:39,525 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 05:00:25,582 INFO mk20deck.supervisor: 连接中断：写入失败（拔线？）: timed out
+2026-10-22 05:00:27,587 INFO mk20deck.link: ui liveness: 33 heartbeats accepted, 0 rejected, 1 timeouts, 0 re-hellos
+2026-10-22 05:00:29,199 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-22 05:01:05,133 INFO mk20deck.supervisor: 握手失败：Write timeout
+2026-10-22 05:01:22,829 INFO mk20deck.supervisor: 握手失败：write failed: [Errno 6] Device not configured
+2026-10-22 05:01:23,893 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-22 05:01:28,260 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat', 'ui.hidKeys'], heartbeat every 1.20 s
+2026-10-22 05:01:28,261 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 05:01:28,263 INFO mk20deck.supervisor: 背光 80
+2026-10-22 05:01:29,473 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 07:10:30,605 INFO mk20deck.link: ui liveness: 6402 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-22 07:10:30,882 INFO mk20deck.webui: 会话安排网页：http://127.0.0.1:8781/（用 mk20deck arrange 打开）
+2026-10-22 07:10:31,134 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat', 'ui.hidKeys'], heartbeat every 1.20 s
+2026-10-22 07:10:31,135 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 07:10:31,146 INFO mk20deck.supervisor: 背光 80
+2026-10-22 07:10:32,338 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 08:56:45,545 INFO mk20deck.link: ui liveness: 5271 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-22 08:56:46,072 INFO mk20deck.webui: 会话安排网页：http://127.0.0.1:8781/（用 mk20deck arrange 打开）
+2026-10-22 08:56:46,280 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat', 'ui.hidKeys'], heartbeat every 1.20 s
+2026-10-22 08:56:46,281 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 08:56:46,287 INFO mk20deck.supervisor: 背光 80
+2026-10-22 08:56:47,492 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-22 10:27:15,100 INFO mk20deck.daemon: input key 1 1 down
+2026-10-22 10:27:15,202 INFO mk20deck.daemon: input key 1 1 up
+2026-10-22 10:27:15,319 INFO mk20deck.controller: focus <session> (<title>): ok=True <message>
+2026-10-22 12:02:34,869 INFO mk20deck.link: ui liveness: 9222 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-22 12:02:35,693 INFO mk20deck.webui: 会话安排网页：http://127.0.0.1:8781/（用 mk20deck arrange 打开）
+2026-10-22 12:02:35,879 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=1 capabilities=['ui.page', 'ui.heartbeat', 'ui.hidKeys'], heartbeat every 1.20 s
+2026-10-22 12:02:35,880 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-22 12:02:35,883 INFO mk20deck.supervisor: 背光 80
+2026-10-22 12:02:37,092 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-23 00:48:19,421 INFO mk20deck.link: ui.heartbeat rejected (unavailable or invalid UI request): ui.hello again
+2026-10-23 00:48:19,425 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=2 capabilities=['ui.page', 'ui.heartbeat', 'ui.hidKeys'], heartbeat every 1.20 s
+2026-10-23 05:24:52,580 INFO mk20deck.supervisor: 连接中断：写入失败（拔线？）: timed out
+2026-10-23 05:24:54,590 INFO mk20deck.link: ui liveness: 51699 heartbeats accepted, 1 rejected, 4 timeouts, 1 re-hellos
+2026-10-23 05:24:56,164 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-23 05:25:31,882 INFO mk20deck.supervisor: 握手失败：Write timeout
+2026-10-23 05:25:47,848 INFO mk20deck.supervisor: 握手失败：write failed: [Errno 6] Device not configured
+2026-10-23 05:25:48,918 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-23 05:25:53,238 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 capabilities=['ui.page', 'ui.heartbeat', 'ui.hidKeys'], heartbeat every 1.20 s
+2026-10-23 05:25:53,240 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-23 05:25:53,242 INFO mk20deck.supervisor: 背光 80
+2026-10-23 05:25:54,443 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-23 05:27:21,195 INFO mk20deck.link: ui liveness: 72 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-23 05:27:22,064 INFO mk20deck.webui: 会话安排网页：http://127.0.0.1:8781/（用 mk20deck arrange 打开）
+2026-10-23 05:27:22,281 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 hid_generation=0 page=L1 capabilities=['ui.page', 'ui.heartbeat', 'ui.hidKeys'], heartbeat every 1.20 s
+2026-10-23 05:27:22,282 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-23 05:27:22,286 INFO mk20deck.supervisor: 背光 80
+2026-10-23 05:27:23,496 INFO mk20deck.link: ui.heartbeat accepted (first)
+2026-10-23 20:01:22,385 INFO mk20deck.supervisor: 连接中断：连续 3 帧无 ACK
+2026-10-23 20:01:22,389 INFO mk20deck.link: ui liveness: 43361 heartbeats accepted, 0 rejected, 3 timeouts, 0 re-hellos
+2026-10-23 20:01:27,949 INFO mk20deck.supervisor: 握手失败：timed out
+2026-10-23 20:01:31,523 INFO mk20deck.supervisor: 无法打开 tcp://172.30.250.2:17890: timed out — 若 ScreenKey 在运行，请退出后重试
+2026-10-23 20:01:40,148 INFO mk20deck.supervisor: 握手失败：timed out
+2026-10-23 20:01:44,304 INFO mk20deck.supervisor: 无法打开 tcp://169.254.7.2:17890: timed out — 若 ScreenKey 在运行，请退出后重试
+2026-10-23 20:01:48,427 INFO mk20deck.supervisor: 未找到 MK20 CDC 端口，等待接入
+2026-10-23 20:52:20,318 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 hid_generation=0 page=L1 capabilities=['ui.page', 'ui.heartbeat', 'ui.hidKeys'], heartbeat every 1.20 s
+2026-10-23 20:52:20,320 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-23 20:52:20,323 INFO mk20deck.supervisor: 背光 80
+2026-10-23 20:52:21,530 INFO mk20deck.link: ui.heartbeat accepted (first)

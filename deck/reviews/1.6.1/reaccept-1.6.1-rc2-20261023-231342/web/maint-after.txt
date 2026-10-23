@@ -1,0 +1,10 @@
+verbose=0
+/data/mk20/state/maint:
+drwx------    2 root     root          4096 Jan  4 11:45 .
+drwxrwxrwx    3 root     root          4096 Jan  4 11:44 ..
+-rw-------    1 root     root            10 Jan  4 11:45 debug.conf
+
+/tmp/mk20/maint:
+drwx------    2 root     root            60 Jan  4 11:45 .
+drwx------    4 root     root           660 Jan  4 11:45 ..
+-r--r--r--    1 root     root            98 Jan  4 11:45 state.json

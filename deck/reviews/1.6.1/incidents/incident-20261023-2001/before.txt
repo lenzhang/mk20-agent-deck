@@ -1,0 +1,7 @@
+{"version":"mk20-kbd-0.3","mode":"normal","estopped":0,"gd32_rw":1,"knob_init":"ok","knob_ok":6,"knob_timeouts":0,"knob_tx_errors":0,"panels_written":21,"panels_dirty":0,"write_errors":0,"key_events":0,"knob_events":0,"echo_frames":0,"other_frames":0,"jpg_ok":26153,"jpg_bad":0,"jpg_size":0,"json_in":43440,"host":1,"host_tx_errors":0,"host_tx_timeouts":0,"backlight":80,"hid_open":1,"hid_reopens":0,"hid_replaced":0}
+
+tcp    65562      0 172.30.250.2:17890      172.30.250.1:59456      ESTABLISHED 
+tcp    65562      0 169.254.7.2:17890       172.30.250.1:59471      ESTABLISHED 
+0 0xbec459b800000003 0x1000 0x0 0xc0d04f44 0xc090bb2000100cc0 0xc7aee400 0xbec45730 0x111f6
+voluntary_ctxt_switches:	368144
+nonvoluntary_ctxt_switches:	513057

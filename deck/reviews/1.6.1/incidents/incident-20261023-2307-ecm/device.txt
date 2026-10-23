@@ -1,0 +1,42 @@
+[   34.469258] VE: disable hw clock
+[   34.469354] disable_cedar_hw_clk,592
+[   35.687598] usb0-vbus: disabling
+[   35.893136] handle_ep0: ep0 setup end
+[   40.904404] handle_ep0: ep0 setup end
+[   42.483242] handle_ep0: ep0 setup end
+[   47.491472] handle_ep0: ep0 setup end
+[   49.078846] handle_ep0: ep0 setup end
+[   54.092170] handle_ep0: ep0 setup end
+[   55.663696] handle_ep0: ep0 setup end
+[   57.119082] regulator-dummy: Underflow of regulator enable count
+[   57.119753] android_work: sent uevent USB_STATE=DISCONNECTED
+[   57.470253] usb_f_ecm: loading out-of-tree module taints kernel.
+[   57.478370] using random self ethernet address
+[   57.478391] using random host ethernet address
+[   57.519818] file system registered
+[   57.574971] read descriptors
+[   57.575000] read strings
+[   57.578387] usb0: HOST MAC 02:11:22:33:44:56
+[   57.578630] usb0: MAC 02:11:22:33:44:55
+[   57.926007] sunxi_set_cur_vol_work()397 WARN: get power supply failed
+[   57.973669] android_work: sent uevent USB_STATE=CONNECTED
+[   57.981309] configfs-gadget gadget: high-speed config #1: c
+[   57.981541] android_work: sent uevent USB_STATE=CONFIGURED
+[   58.006308] ERR: Operation not supported
+[   58.006853] handle_ep0: ep0 setup end
+[   58.017227] handle_ep0: ep0 setup end
+[   58.078863] handle_ep0: ep0 setup end
+[   58.079622] handle_ep0: ep0 setup end
+[   58.080026] handle_ep0: ep0 setup end
+[   58.857261] handle_ep0: ep0 setup end
+[   60.505778] handle_ep0: ep0 setup end
+---
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+  usb0:      28       1    0    0    0     0          0         0      126       3    0    0    0     0       0          0
+    lo:  188216    2406    0    0    0     0          0         0   188216    2406    0    0    0     0       0          0
+ wlan0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+---
+1
+up
+[1;34macm.usb0[0m  [1;34mecm.usb0[0m  [1;34mffs.adb[0m   [1;34mhid.usb0[0m

@@ -1,0 +1,32 @@
+[   31.985317] handle_ep0: ep0 setup end
+[   35.688904] usb0-vbus: disabling
+[   36.998860] handle_ep0: ep0 setup end
+[   38.588546] handle_ep0: ep0 setup end
+[   43.599466] handle_ep0: ep0 setup end
+[   45.191393] handle_ep0: ep0 setup end
+[   50.202174] handle_ep0: ep0 setup end
+[   51.803373] handle_ep0: ep0 setup end
+[   54.748670] regulator-dummy: Underflow of regulator enable count
+[   54.749702] android_work: sent uevent USB_STATE=DISCONNECTED
+[   55.102581] usb_f_ecm: loading out-of-tree module taints kernel.
+[   55.116880] using random self ethernet address
+[   55.116901] using random host ethernet address
+[   55.152210] file system registered
+[   55.207143] read descriptors
+[   55.207174] read strings
+[   55.210266] usb0: HOST MAC 02:11:22:33:44:56
+[   55.218938] usb0: MAC 02:11:22:33:44:55
+[   55.586722] sunxi_set_cur_vol_work()397 WARN: get power supply failed
+[   55.633867] android_work: sent uevent USB_STATE=CONNECTED
+[   55.642638] configfs-gadget gadget: high-speed config #1: c
+[   55.642939] android_work: sent uevent USB_STATE=CONFIGURED
+[   55.664722] ERR: Operation not supported
+[   55.665068] handle_ep0: ep0 setup end
+[   55.677177] handle_ep0: ep0 setup end
+[   55.692056] handle_ep0: ep0 setup end
+[   55.692946] handle_ep0: ep0 setup end
+[   55.693320] handle_ep0: ep0 setup end
+[   56.484138] handle_ep0: ep0 setup end
+[   58.131062] handle_ep0: ep0 setup end
+[   58.198723] handle_ep0: ep0 setup end
+[   58.199129] handle_ep0: ep0 setup end

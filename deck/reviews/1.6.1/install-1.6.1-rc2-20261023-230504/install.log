@@ -1,0 +1,7 @@
+release 1.6.1 sha256 4ba75ecf4aa7a1d69eb34f3bb287849a7297fb2164064cf22a5e57af72d077f1
+/Users/dev/mk20-backup/releases/mk20-fw-1.6.1.tar: 1 file pushed, 0 skipped. 7.7 MB/s (2723840 bytes in 0.337s)
+ok: 1.6.1 installed; ok: 1.6.1 pending; reboot to start probation
+rc=0
+reboot requested (watcher -> hardreset, WDT reset in ~30 s)
+current=B 26 1.6.1 good=1.6.1 pending= attempts= active=1.6.1 last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)
+OK: 1.6.1 confirmed good
