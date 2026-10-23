@@ -1,0 +1,1 @@
+paircode.txt / pair.json (one-time pairing code, CSRF value of the logged-out test session) left out on purpose.
