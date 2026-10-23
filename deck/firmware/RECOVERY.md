@@ -67,6 +67,7 @@ Symptoms and where to go:
 | ping to 172.30.250.2 fails, adb works | Mac/device subnet mismatch (device rolled back to 1.0.x) | `mk20_host_net.py sync` |
 | blank/error panels, USB present | kbd/status/panel failure or safe mode | K4 section above, then 0 / 2 |
 | Mac daemon connects time out, adb + ping work, keys dark | pty input stall (2026-10-23 on 1.6.0-rc4). 1.6.1+ heals itself: `/tmp/mk20/bridge.log` `pty input stalled N s: flushed (#k)` (once per streak), `/tmp/mk20/bridge.stalls` = total, kbd.status `host_flushes`; the Mac reconnects | INSTALL.md §6 soak `host_link` |
+| Mac daemon cannot connect, ping 172.30.250.2 fails, adb works; device usb0 RX frozen (`/proc/net/dev`), health `usb.ecm_state` `stalled` / `gave-up` | ECM host→device dead with the gadget configured (2026-10-23 23:07 on 1.6.1-rc2). 1.6.2+ re-arms itself (one soft re-enumeration, ≤ 3 per hour; mk20d.log `ecm`, gadget.log `REARM`); on probation it is not confirmed (rollback). Gave up / older release: reboot via `cmd-reboot` (the proven fix); a manual re-arm is below | 1 (`cmd-reboot`) |
 | USB keeps re-enumerating | flap; release flapmon requests loader A/B after 5 drops in 60 s (Mac sleep/suspend is not counted, 1.1.2+) | 0, then 1 |
 | `good=` empty / `stub: … mismatch` | release or rescue files corrupt | 2 / 3 |
 | nothing enumerates after a power cycle | boot image or kernel broken | 5 |
@@ -79,6 +80,7 @@ Symptoms and where to go:
 | `mk20-gadget-nohid` | composite without HID (ECM + ADB + bridge). Not a fix for the ep3 kernel: 1.1.x releases don't run on it at all (see level 5) |
 | `mk20-no-adb` | no adb in any mode |
 | `mk20-no-router` | (1.2.0+) the on-board router (`mk20d router` → `bin/mk20-router`, PTT → HID) is not started; same as `FEATURE_ROUTER=0` in mk20.conf or env `MK20_ROUTER=0`. To stop it now without a reboot: `touch /tmp/mk20-router-stop; killall mk20-router` (the stop file keeps the mk20d supervisor from restarting it; SIGTERM/SIGINT make the router send an all-keys-up report before it exits, so no modifier stays held; avoid `kill -9`). The router never gates confirm |
+| `mk20-no-ecm-rearm` | (1.6.2+) the ECM RX watchdog only observes and reports (no re-enumeration); the probation gate still requires host→device traffic when a host is present, so a stall then fails probation without a re-arm. Read at every watchdog step (no reboot needed) |
 | `mk20-no-release` | loader skips releases: legacy `boot-every/` jobs only (stock + adb keeper) |
 | `mk20-no-watch` | boot stub does nothing at all: pure vendor behaviour, no rescue watcher, no adb |
 
@@ -86,6 +88,17 @@ Over adb: `$MK20_ADB shell 'touch /mnt/SDCARD/mk20-no-composite && sync'`, then 
 MK20 first** (rootfs and overlay live on the card), then put the TF card in the Mac (if macOS offers to
 "Initialize" the card, click **Ignore**; never Initialize or Erase) (the FAT volume mounts in Finder), create the empty file, eject cleanly, and put the card back.
 Delete the flag to undo.
+
+**Manual ECM re-arm (1.6.2+)**, e.g. to try the soft path before a reboot: one soft re-enumeration of the running
+composite, queued to the watcher (adb drops for a few seconds; HID re-enumerates; nothing else restarts):
+
+```sh
+$MK20_ADB shell 'MK20_REL=/tmp/mk20/rel MK20_GADGET_LOG=/data/mk20/logs/gadget.log sh /tmp/mk20/gadget-boot.sh --rearm'
+$MK20_ADB shell 'grep -E "REARM|rearm" /data/mk20/logs/gadget.log | tail -n 5'    # after adb is back
+```
+
+It is refused (logged, nothing touched) during a setup/rollback, an install, a queued watcher job, within
+flapmon's window after a link drop, or with no host configured. Never run `--rearm-now` from an adb shell.
 
 Commands the watcher polls for every 2 s:
 - `cmd-reboot`: hardreset.
