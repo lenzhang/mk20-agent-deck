@@ -94,9 +94,10 @@ def _drain(s, n, timeout=10.0):
     return got
 
 
+@pytest.mark.parametrize("flag", ["--tap", "--stall-file"])
 @pytest.mark.parametrize("tap", ["rel/path", "/" + "x" * 120])
-def test_tap_bad_args(br, tmp_path, tap):
-    r = subprocess.run([str(br), "--listen", "127.0.0.1:18040", "--tap", tap, "--link", str(tmp_path / "l")],
+def test_tap_bad_args(br, tmp_path, tap, flag):
+    r = subprocess.run([str(br), "--listen", "127.0.0.1:18040", flag, tap, "--link", str(tmp_path / "l")],
                        capture_output=True, text=True, timeout=5)
     assert r.returncode == 2
 
@@ -270,19 +271,26 @@ def test_pty_stall_keeps_the_bridge_responsive_then_flushes(br, tmp_path):
         select.select([c1], [], [], 1.0)
         c1.setblocking(True)
         assert _recv_exact(c1, 8, 1.0) == b"kd-out-1"
-        # a new client is accepted (replaces c1) and gets KD output, still before the stall flush
+        # a new client is accepted (replaces c1, drops c1's pending bytes: rc2) and gets KD output, before any flush
         c2 = socket.create_connection(("127.0.0.1", 18050), timeout=1.0); time.sleep(0.1)
         os.write(slave, b"kd-out-2")
         assert _recv_exact(c2, 8, 1.0) == b"kd-out-2"
         assert _closed(c1, 1.0)                        # replaced
+        assert any(re.search(r"client connected via 127\.0\.0\.1:18050 \(\d+ pending bytes of the previous client dropped\)$", l)
+                   for _, l in err.lines), err.lines
         t_c2 = time.monotonic()
+        assert not err.stalls() and t_c2 - t0 < 2.0
+        c2.settimeout(None); c2.setblocking(False)
+        t0 = time.monotonic()
+        _flood_until_blocked(c2)                       # c2's own bytes are stuck now: its stall
         st = err.wait_stall(1, 6.0)
         assert len(st) == 1, err.lines
         t_line, line = st[0]
         assert t_line > t_c2, "c2 was served only after the flush: the loop was blocked"
         m = re.search(r"pty input stalled (\d+) s: flushed \(#1\); (\d+) pending bytes dropped, client closed$", line)
         assert m and m.group(1) == "2" and 0 < int(m.group(2)) <= 4096, line
-        assert 2.0 <= t_line - t0 <= 5.0, t_line - t0  # 2 s without write progress (PTY_STALL_MS)
+        assert 2.0 <= t_line - t0 <= 6.0, t_line - t0  # 2 s without write progress (PTY_STALL_MS)
+        c2.setblocking(True)
         assert _closed(c2, 2.0)                        # the current client is closed: the host reconnects
         with pytest.raises(BlockingIOError):           # TCIFLUSH emptied the slave input (flip buffer + ldisc)
             os.read(slave, 65536)
@@ -346,3 +354,136 @@ def test_slow_reader_never_triggers_the_stall_flush(br, tmp_path):
         assert p.poll() is None
     finally:
         p.terminate(); p.wait(5)
+
+
+
+# ---- rc2 (Kimi K3 1.6.1-rc1 MINORs 1, 2, 4) ----
+@pytest.fixture(scope="module")
+def br_fast(tmp_path_factory):
+    """The same source with short streak timers (6 s quiet ends a streak, a count every 7 s); release: 60 s / 10 min.
+    A session that nobody reads stalls 2-4.5 s after it starts here (the pty keeps taking small writes for a while)."""
+    out = tmp_path_factory.mktemp("brf") / "bridge"
+    subprocess.run(["gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-DSTALL_STREAK_MS=6000", "-DSTALL_SUMMARY_MS=7000",
+                    "-o", str(out), str(SRC)], check=True)
+    return out
+
+
+def test_release_streak_timers():
+    src = SRC.read_text()
+    assert re.search(r"#define STALL_STREAK_MS 60000\b", src) and re.search(r"#define STALL_SUMMARY_MS 600000\b", src)
+    assert re.search(r"#define PTY_STALL_MS 2000\b", src)
+
+
+def test_replacing_client_never_inherits_the_old_clients_stall(br, tmp_path):
+    """MINOR 1: c1's stuck bytes are dropped when c2 replaces it, so c2 (sending nothing) is not closed 2 s later;
+    c2's own stuck bytes then stall it after 2 s."""
+    p, link = _start(br, tmp_path, 18052)
+    err = _Err(p)
+    try:
+        slave = os.open(link, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)   # never read
+        c1 = socket.create_connection(("127.0.0.1", 18052)); time.sleep(0.1)
+        c1.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384); c1.setblocking(False)
+        _flood_until_blocked(c1)
+        c2 = socket.create_connection(("127.0.0.1", 18052)); time.sleep(0.1)
+        assert _closed(c1, 1.0)
+        drop = [l for _, l in err.lines if l.startswith("client connected") and "pending bytes of the previous client dropped" in l]
+        assert len(drop) == 1 and re.search(r"\((\d+) pending", drop[0]) and 0 < int(re.search(r"\((\d+) pending", drop[0])[1]) <= 4096, err.lines
+        time.sleep(6.0)   # c1's stuck bytes would stall within 2-4.5 s (1.6.1-rc1 then closed c2); c2 sent nothing
+        assert not err.stalls(), err.lines
+        os.write(slave, b"still-here")
+        assert _recv_exact(c2, 10, 1.0) == b"still-here"   # c2 open and served
+        c2.setblocking(False); t0 = time.monotonic()
+        _flood_until_blocked(c2)
+        st = err.wait_stall(1, 6.0)
+        assert len(st) == 1 and 2.0 <= st[0][0] - t0 <= 6.0 and st[0][1].endswith("client closed"), err.lines
+        c2.setblocking(True)
+        assert _closed(c2, 2.0)
+    finally:
+        p.terminate(); p.wait(5)
+
+
+def _stall_once(port, err, n, timeout=8.0):
+    """One host session whose bytes never reach a reader: connect, flood, wait until the bridge closed it (stall #n)."""
+    c = socket.create_connection(("127.0.0.1", port)); time.sleep(0.05)
+    c.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384); c.setblocking(False)
+    chunk = b"z" * 16384; end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            c.send(chunk)
+        except BlockingIOError:
+            time.sleep(0.02)
+        except (BrokenPipeError, ConnectionResetError):
+            break
+        try:
+            if c.recv(4096) == b"":
+                break
+        except BlockingIOError:
+            pass
+        except ConnectionResetError:
+            break
+    c.close()
+    end = time.monotonic() + 2
+    while time.monotonic() < end and not _count(err, n):
+        time.sleep(0.02)
+
+
+def _count(err, n):
+    return any(f"(#{n})" in l for _, l in err.lines) or err.file_n() >= n
+
+
+def test_persistent_stall_logs_once_per_streak_and_counts_in_the_stall_file(br_fast, tmp_path):
+    """MINOR 2: a persistent stall with a host that keeps reconnecting logs the first stall in full, then only a count
+    (every STALL_SUMMARY_MS and when STALL_STREAK_MS pass without a stall); a later stall starts a new streak.
+    MINOR 4: --stall-file holds the total ("N\n", 0 at start), removed on exit."""
+    sf = tmp_path / "bridge.stalls"
+    link = tmp_path / "link"
+    p = subprocess.Popen([str(br_fast), "--listen", "127.0.0.1:18053", "--link", str(link), "--stall-file", str(sf)],
+                         stderr=subprocess.PIPE, text=True)
+    err = _Err(p)
+    err.file_n = lambda: int(sf.read_text() or 0) if sf.exists() else -1
+    try:
+        for _ in range(100):
+            if link.exists() and sf.exists():
+                break
+            time.sleep(0.05)
+        assert sf.read_text() == "0\n" and oct(sf.stat().st_mode & 0o777) == "0o644"
+        slave = os.open(link, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)   # nobody reads: every session stalls
+        n = 0
+        while n < 8 and not any(l.startswith("pty input still stalling") for _, l in err.lines):
+            n += 1
+            _stall_once(18053, err, n)
+            assert sf.read_text() == f"{n}\n", (n, err.lines)
+        full = [l for _, l in err.lines if l.startswith("pty input stalled")]
+        assert n >= 2 and len(full) == 1 and "(#1)" in full[0], err.lines   # one full line for the whole streak
+        still = [l for _, l in err.lines if l.startswith("pty input still stalling")]
+        assert len(still) == 1 and re.fullmatch(rf"pty input still stalling: {n} stalls in \d+ s \(#{n}\)", still[0]), err.lines
+        end = time.monotonic() + 9
+        while time.monotonic() < end and not any("stall streak over" in l for _, l in err.lines):
+            time.sleep(0.05)
+        over = [l for _, l in err.lines if "stall streak over" in l]
+        assert over and re.fullmatch(rf"pty input stall streak over: {n} stalls in \d+ s \(#{n}\)", over[0]), err.lines
+        _stall_once(18053, err, n + 1)                 # after the streak: a new one, logged in full again
+        full = [l for _, l in err.lines if l.startswith("pty input stalled")]
+        assert len(full) == 2 and f"(#{n + 1})" in full[1] and sf.read_text() == f"{n + 1}\n", err.lines
+        assert not list(tmp_path.glob("*.tmp")) and p.poll() is None
+        os.close(slave)
+    finally:
+        p.terminate(); p.wait(5)
+    assert not sf.exists() and not link.exists()       # SIGTERM removes the link and the stall file
+
+
+def test_stall_file_unavailable_continues(br, tmp_path):
+    link = tmp_path / "link"
+    p = subprocess.Popen([str(br), "--listen", "127.0.0.1:18054", "--link", str(link),
+                          "--stall-file", str(tmp_path / "nodir" / "bridge.stalls")], stderr=subprocess.PIPE, text=True)
+    try:
+        for _ in range(100):
+            if link.exists():
+                break
+            time.sleep(0.05)
+        mac = socket.create_connection(("127.0.0.1", 18054)); time.sleep(0.1)
+        fd = os.open(link, os.O_RDWR | os.O_NOCTTY); os.write(fd, b"ok"); time.sleep(0.1)
+        assert mac.recv(10) == b"ok"
+    finally:
+        p.terminate(); err = p.communicate(timeout=5)[1]
+    assert "stall file" in err and "continuing without it" in err

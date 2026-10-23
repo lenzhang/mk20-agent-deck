@@ -18,6 +18,11 @@
 // "pty input stalled N s: flushed (#k)", the pending bytes are discarded and the current client is closed (the host
 // reconnects and re-hellos; the host protocol resyncs on its frame magic). KD->client forwarding, accepting and
 // replacing clients and the tap keep working while the pty input is stalled.
+// rc2 (Kimi K3 rc1 MINORs): a new client drops the previous session's pending bytes (logged), so a later stall can
+// only close the client whose bytes are stuck; stalls are logged once per streak (a stall within STALL_STREAK_MS of the
+// previous one continues it: no line, a count every STALL_SUMMARY_MS and one when it ends), so a persistent stall with
+// a host that keeps reconnecting cannot fill bridge.log; --stall-file PATH holds the total stall count ("N\n", written
+// atomically at start and on every stall, removed on exit) for the soak.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +42,17 @@
 #include <time.h>
 static const char *linkp = "/dev/ttyGS0";
 static const char *tapp = NULL;
-static void cleanup(int s) { (void)s; unlink(linkp); if (tapp) unlink(tapp); _exit(0); }
+static const char *stallp = NULL;
+static void cleanup(int s) { (void)s; unlink(linkp); if (tapp) unlink(tapp); if (stallp) unlink(stallp); _exit(0); }
+static int stall_file(unsigned n) {   // total stall count for the soak; tmp + rename so a reader never sees a torn value
+  char tmp[128], b[16]; int l = snprintf(b, sizeof b, "%u\n", n);
+  if (!stallp || snprintf(tmp, sizeof tmp, "%s.tmp", stallp) >= (int)sizeof tmp) return -1;
+  int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
+  if (fd < 0) return -1;
+  ssize_t w = write(fd, b, (size_t)l);
+  if (close(fd) || w != l || rename(tmp, stallp)) { unlink(tmp); return -1; }
+  return 0;
+}
 static int tap_listen(const char *path) {  // -1 on failure (caller continues without a tap)
   struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
   if (strlen(path) >= sizeof a.sun_path) return -1;
@@ -56,6 +71,12 @@ static int tap_listen(const char *path) {  // -1 on failure (caller continues wi
 // in well under that; only a reader that is gone or a stalled kernel input path holds it for 2 s.
 #define PTY_STALL_MS 2000
 #define PEND_MAX 4096   // bounded: one client read; the client is not read again until it is written
+#ifndef STALL_STREAK_MS   // -D only in tests/test_bridge.py's short-timer build; the release uses these values
+#define STALL_STREAK_MS 60000     // a stall within 60 s of the previous one belongs to the same streak (not logged)
+#endif
+#ifndef STALL_SUMMARY_MS
+#define STALL_SUMMARY_MS 600000   // a streak still going logs its count every 10 min
+#endif
 static long long mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 // Non-blocking write of the pending bytes. Returns bytes written (0 = pty full: wait for POLLOUT), -1 on a hard error.
 static ssize_t wpend(int fd, const char *b, size_t *off, size_t len, long long *prog) {
@@ -98,6 +119,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--link") && i + 1 < argc) linkp = argv[++i];
     else if (!strcmp(argv[i], "--dev") && i + 1 < argc && strlen(argv[i + 1]) < 16) dev = argv[++i];
     else if (!strcmp(argv[i], "--tap") && i + 1 < argc && argv[i + 1][0] == '/' && strlen(argv[i + 1]) < 100) tapp = argv[++i];
+    else if (!strcmp(argv[i], "--stall-file") && i + 1 < argc && argv[i + 1][0] == '/' && strlen(argv[i + 1]) < 100) stallp = argv[++i];
     else { fprintf(stderr, "bad argument %s\n", argv[i]); return 2; }
   }
   if (!nl) { fprintf(stderr, "usage: ttygs_tcp_bridge --listen ADDR:PORT [--listen ...] --link PATH\n"); return 2; }
@@ -123,9 +145,11 @@ int main(int argc, char **argv) {
   unlink(linkp); if (symlink(sn, linkp)) { perror("symlink"); return 1; }
   for (int i = 0; i < nl; i++) fprintf(stderr, "bridge v4 %s <-> %s\n", sn, ls_s[i]);
   int tl = -1, tc = -1;
+  if (stallp && stall_file(0)) { fprintf(stderr, "stall file %s unavailable: %s (continuing without it)\n", stallp, strerror(errno)); stallp = NULL; }
   if (tapp) { tl = tap_listen(tapp); if (tl < 0) { fprintf(stderr, "tap %s unavailable: %s (continuing without tap)\n", tapp, strerror(errno)); tapp = NULL; } else fprintf(stderr, "tap %s\n", tapp); }
   int cl = -1; char buf[4096];
-  char pend[PEND_MAX]; size_t plen = 0, poff = 0; long long prog = 0; unsigned stalls = 0;   // client->pty pending bytes
+  char pend[PEND_MAX]; size_t plen = 0, poff = 0; long long prog = 0;   // client->pty pending bytes
+  unsigned stalls = 0, streak = 0; long long streak_t0 = 0, last_stall = 0, next_sum = 0;   // stall count, current streak
   for (;;) {
     struct pollfd p[4 + MAXL]; int np = 0;
     p[np++] = (struct pollfd){m, (short)(POLLIN | (poff < plen ? POLLOUT : 0)), 0};
@@ -134,8 +158,11 @@ int main(int argc, char **argv) {
     int tli = -1, tci = -1;
     if (tl >= 0) { tli = np; p[np++] = (struct pollfd){tl, POLLIN, 0}; }
     if (tc >= 0) { tci = np; p[np++] = (struct pollfd){tc, POLLIN, 0}; }
+    long long due = -1;   // next deadline: pending bytes' stall check, the end of a logged-quiet streak
+    if (poff < plen) due = prog + PTY_STALL_MS;
+    if (streak > 1 && (due < 0 || last_stall + STALL_STREAK_MS < due)) due = last_stall + STALL_STREAK_MS;
     int to = -1;
-    if (poff < plen) { long long left = prog + PTY_STALL_MS - mono_ms(); to = left < 0 ? 0 : (int)left; }
+    if (due >= 0) { long long left = due - mono_ms(); to = left < 0 ? 0 : (int)left; }
     if (poll(p, np, to) < 0) { if (errno == EINTR) continue; break; }
     if (tli >= 0 && (p[tli].revents & POLLIN)) {
       int n = accept4(tl, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
@@ -147,7 +174,13 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < nl; i++) if (p[1 + i].revents & POLLIN) {
       int n = accept4(ls[i], NULL, NULL, SOCK_CLOEXEC);
-      if (n >= 0) { if (cl >= 0) close(cl); cl = n; ci = -1; setsockopt(cl, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one); fprintf(stderr, "client connected via %s\n", ls_s[i]); }
+      if (n >= 0) {
+        size_t drop = plen - poff;   // the previous session's unwritten bytes: the new one starts with its own preamble
+        if (cl >= 0) close(cl);
+        cl = n; ci = -1; plen = poff = 0; setsockopt(cl, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        if (drop) fprintf(stderr, "client connected via %s (%zu pending bytes of the previous client dropped)\n", ls_s[i], drop);
+        else fprintf(stderr, "client connected via %s\n", ls_s[i]);
+      }
     }
     if ((p[0].revents & (POLLERR | POLLNVAL)) && !(p[0].revents & POLLIN)) usleep(10000);   // no busy spin on a bad master
     if (p[0].revents & (POLLIN | POLLHUP)) {
@@ -170,12 +203,24 @@ int main(int argc, char **argv) {
         if (poff == plen) plen = poff = 0;
       } else if (r == 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) { close(cl); cl = -1; fprintf(stderr, "client gone\n"); }
     }
-    if (poff < plen && mono_ms() - prog >= PTY_STALL_MS) {   // stalled pty input path: flush the slave, resync the host
-      long long secs = (mono_ms() - prog) / 1000;
+    long long now = mono_ms();
+    if (streak && now - last_stall >= STALL_STREAK_MS) {   // quiet for 60 s: the streak is over
+      if (streak > 1) fprintf(stderr, "pty input stall streak over: %u stalls in %lld s (#%u)\n", streak, (last_stall - streak_t0) / 1000, stalls);
+      streak = 0;
+    }
+    if (poff < plen && now - prog >= PTY_STALL_MS) {   // stalled pty input path: flush the slave, resync the host
       int fr = tcflush(keep, TCIFLUSH);
       stalls++;
-      fprintf(stderr, "pty input stalled %lld s: %s (#%u); %zu pending bytes dropped%s\n", secs,
-              fr ? "flush FAILED" : "flushed", stalls, plen - poff, cl >= 0 ? ", client closed" : "");
+      if (stallp) stall_file(stalls);
+      if (!streak) {   // first stall of a streak: the full line
+        streak = 1; streak_t0 = now; next_sum = now + STALL_SUMMARY_MS;
+        fprintf(stderr, "pty input stalled %lld s: %s (#%u); %zu pending bytes dropped%s\n", (now - prog) / 1000,
+                fr ? "flush FAILED" : "flushed", stalls, plen - poff, cl >= 0 ? ", client closed" : "");
+      } else if (++streak && now >= next_sum) {   // same streak: silent, a count every 10 min
+        next_sum = now + STALL_SUMMARY_MS;
+        fprintf(stderr, "pty input still stalling: %u stalls in %lld s (#%u)\n", streak, (now - streak_t0) / 1000, stalls);
+      }
+      last_stall = now;
       plen = poff = 0;
       if (cl >= 0) { close(cl); cl = -1; }
     }

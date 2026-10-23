@@ -473,6 +473,20 @@ def test_gadget_tap_omitted_in_kbd_mode(tmp_path):
         assert ("--tap" in r.stdout) == want
 
 
+@pytest.mark.skipif(not BB, reason="BusyBox unavailable")
+def test_gadget_bridge_stall_file_for_the_release_bridge_only(tmp_path):
+    """1.6.1: the release bridge (v4) writes its pty stall count for the soak, in kbd and KD mode; a legacy /data
+    bridge (no MK20_REL) has no --stall-file and must not get it (it exits 2 on an unknown flag)."""
+    line = [l for l in G.splitlines() if "--stall-file" in l and "BRIDGE_LISTEN=" in l]
+    assert len(line) == 1 and "/tmp/mk20/bridge.stalls" in line[0]
+    sf, launch = G.index("--stall-file /tmp"), G.index("$BR $BRIDGE_LISTEN --link /dev/ttyGS0")
+    assert sf < launch and "mkdir -p /tmp/mk20\n" in G[sf:launch]   # the bridge writes 0 at start: the dir exists
+    for rel_, kbd, want in (("x", "0", True), ("x", "1", True), ("", "0", False), ("", "1", False)):
+        r = subprocess.run([BB, "sh", "-c", f'BRIDGE_LISTEN=L; {line[0]}; echo "$BRIDGE_LISTEN"'],
+                           env={"MK20_REL": rel_, "MK20_KBD": kbd, "PATH": os.environ["PATH"]}, capture_output=True, text=True)
+        assert r.stdout.strip() == ("L --stall-file /tmp/mk20/bridge.stalls" if want else "L")
+
+
 HOLDER = r'''import os, signal, sys, time
 # fake mk20-kbd: holds the "hidg0" file open; mode: close (SIGUSR1 closes fd), ignore (USR1 ignored), stubborn (+TERM)
 hid, mode, ready = sys.argv[2], sys.argv[3], sys.argv[4]

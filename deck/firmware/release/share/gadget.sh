@@ -432,6 +432,8 @@ else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
 # 1.2.0: KD->host copy for the on-board router (release bridge only; a legacy /data bridge has no --tap)
 # mk20-kbd mode (MK20_KBD=1 from mk20d): no KD output to tap, mk20-kbd owns ttyGS0 and hidg0 itself
 [ -n "${MK20_REL:-}" ] && [ "${MK20_KBD:-0}" != 1 ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --tap /tmp/mk20/kd-tap.sock"
+# 1.6.1: total pty input stall count for the soak (release bridge v4 only; a legacy /data bridge has no --stall-file)
+[ -n "${MK20_REL:-}" ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --stall-file /tmp/mk20/bridge.stalls"
 rm -f /tmp/mk20-bridge-stop
 # ---- PTY bridge for mk20-kbd; stock binaries/scripts remain untouched ----
 mkdir -p /tmp/mk20
