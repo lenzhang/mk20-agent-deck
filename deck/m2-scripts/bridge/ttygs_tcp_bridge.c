@@ -23,6 +23,8 @@
 // previous one continues it: no line, a count every STALL_SUMMARY_MS and one when it ends), so a persistent stall with
 // a host that keeps reconnecting cannot fill bridge.log; --stall-file PATH holds the total stall count ("N\n", written
 // atomically at start and on every stall, removed on exit) for the soak.
+// 1.6.2: a stall-file write that fails at run time (it was silent) is logged once per stall streak:
+// "stall file PATH write failed: <errno> (count N not recorded; logged once per streak)"; the file keeps the last count.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,12 +47,13 @@ static const char *tapp = NULL;
 static const char *stallp = NULL;
 static void cleanup(int s) { (void)s; unlink(linkp); if (tapp) unlink(tapp); if (stallp) unlink(stallp); _exit(0); }
 static int stall_file(unsigned n) {   // total stall count for the soak; tmp + rename so a reader never sees a torn value
-  char tmp[128], b[16]; int l = snprintf(b, sizeof b, "%u\n", n);
-  if (!stallp || snprintf(tmp, sizeof tmp, "%s.tmp", stallp) >= (int)sizeof tmp) return -1;
+  char tmp[128], b[16]; int l = snprintf(b, sizeof b, "%u\n", n);   // -1: errno says why (kept across the cleanup)
+  if (!stallp || snprintf(tmp, sizeof tmp, "%s.tmp", stallp) >= (int)sizeof tmp) { errno = ENAMETOOLONG; return -1; }
   int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
   if (fd < 0) return -1;
-  ssize_t w = write(fd, b, (size_t)l);
-  if (close(fd) || w != l || rename(tmp, stallp)) { unlink(tmp); return -1; }
+  ssize_t w = write(fd, b, (size_t)l); int e = w < 0 ? errno : EIO;
+  if (close(fd)) { if (w == l) e = errno; w = -1; }
+  if (w != l || rename(tmp, stallp)) { if (w == l) e = errno; unlink(tmp); errno = e; return -1; }
   return 0;
 }
 static int tap_listen(const char *path) {  // -1 on failure (caller continues without a tap)
@@ -150,6 +153,7 @@ int main(int argc, char **argv) {
   int cl = -1; char buf[4096];
   char pend[PEND_MAX]; size_t plen = 0, poff = 0; long long prog = 0;   // client->pty pending bytes
   unsigned stalls = 0, streak = 0; long long streak_t0 = 0, last_stall = 0, next_sum = 0;   // stall count, current streak
+  int sf_warned = 0;   // 1.6.2: a failed stall-file write is logged once per streak (was silent)
   for (;;) {
     struct pollfd p[4 + MAXL]; int np = 0;
     p[np++] = (struct pollfd){m, (short)(POLLIN | (poff < plen ? POLLOUT : 0)), 0};
@@ -211,14 +215,18 @@ int main(int argc, char **argv) {
     if (poff < plen && now - prog >= PTY_STALL_MS) {   // stalled pty input path: flush the slave, resync the host
       int fr = tcflush(keep, TCIFLUSH);
       stalls++;
-      if (stallp) stall_file(stalls);
+      int sfr = stallp ? stall_file(stalls) : 0, sfe = errno;
       if (!streak) {   // first stall of a streak: the full line
-        streak = 1; streak_t0 = now; next_sum = now + STALL_SUMMARY_MS;
+        streak = 1; streak_t0 = now; next_sum = now + STALL_SUMMARY_MS; sf_warned = 0;
         fprintf(stderr, "pty input stalled %lld s: %s (#%u); %zu pending bytes dropped%s\n", (now - prog) / 1000,
                 fr ? "flush FAILED" : "flushed", stalls, plen - poff, cl >= 0 ? ", client closed" : "");
       } else if (++streak && now >= next_sum) {   // same streak: silent, a count every 10 min
         next_sum = now + STALL_SUMMARY_MS;
         fprintf(stderr, "pty input still stalling: %u stalls in %lld s (#%u)\n", streak, (now - streak_t0) / 1000, stalls);
+      }
+      if (sfr && !sf_warned) {   // the soak's count is stale from here: say so, once per streak (the file keeps the last good count)
+        sf_warned = 1;
+        fprintf(stderr, "stall file %s write failed: %s (count %u not recorded; logged once per streak)\n", stallp, strerror(sfe), stalls);
       }
       last_stall = now;
       plen = poff = 0;

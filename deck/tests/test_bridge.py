@@ -487,3 +487,57 @@ def test_stall_file_unavailable_continues(br, tmp_path):
     finally:
         p.terminate(); err = p.communicate(timeout=5)[1]
     assert "stall file" in err and "continuing without it" in err
+
+
+# ---- 1.6.2: a run-time stall-file write failure was silent ----
+def test_stall_file_runtime_write_failure_logged_once_per_streak(br_fast, tmp_path):
+    """The stall file worked at start, then a write fails (its .tmp name is a directory: open(O_TRUNC) fails with
+    EISDIR even as root): one line per stall streak, the file keeps the last good count, stall handling unchanged;
+    once writable again the count is current (no line)."""
+    sf = tmp_path / "bridge.stalls"
+    link = tmp_path / "link"
+    p = subprocess.Popen([str(br_fast), "--listen", "127.0.0.1:18055", "--link", str(link), "--stall-file", str(sf)],
+                         stderr=subprocess.PIPE, text=True)
+    err = _Err(p)
+    err.file_n = lambda: -1
+
+    def fails():
+        return [l for _, l in err.lines if l.startswith("stall file ")]
+
+    def streak_over(k):
+        end = time.monotonic() + 9
+        while time.monotonic() < end and len([l for _, l in err.lines if "stall streak over" in l]) < k:
+            time.sleep(0.05)
+        return [l for _, l in err.lines if "stall streak over" in l]
+    try:
+        for _ in range(100):
+            if link.exists() and sf.exists():
+                break
+            time.sleep(0.05)
+        assert sf.read_text() == "0\n"
+        (tmp_path / "bridge.stalls.tmp").mkdir()
+        slave = os.open(link, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)   # nobody reads: every session stalls
+        _stall_once(18055, err, 1)
+        _stall_once(18055, err, 2)
+        f = fails()
+        assert len(f) == 1 and re.fullmatch(rf"stall file {re.escape(str(sf))} write failed: Is a directory "
+                                            r"\(count 1 not recorded; logged once per streak\)", f[0]), err.lines
+        assert sf.read_text() == "0\n"                       # the last good count
+        over = streak_over(1)
+        assert over and re.fullmatch(r"pty input stall streak over: 2 stalls in \d+ s \(#2\)", over[0]), err.lines
+        _stall_once(18055, err, 3)                           # a new streak: logged again, once
+        f = fails()
+        assert len(f) == 2 and "(count 3 not recorded; logged once per streak)" in f[1], err.lines
+        (tmp_path / "bridge.stalls.tmp").rmdir()             # writable again: current, silent
+        _stall_once(18055, err, 4)
+        assert sf.read_text() == "4\n" and len(fails()) == 2 and p.poll() is None, err.lines
+        os.close(slave)
+    finally:
+        p.terminate(); p.wait(5)
+    assert not sf.exists()
+
+
+def test_stall_file_failure_is_reported_in_source():
+    """Static: the run-time write result is checked (it used to be discarded)."""
+    src = SRC.read_text()
+    assert "if (stallp) stall_file(stalls);" not in src and "sf_warned" in src
