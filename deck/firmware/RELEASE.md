@@ -70,6 +70,21 @@ nothing after "未找到 MK20 CDC 端口" for 50 min.
   adb calls, summary/ok accounting over reboot and restart), `tests/test_reconnect_devtest.py` +2 (10 min lines,
   counted from the loss, silent while connected).
 
+rc1 host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 1276 passed / 1 skipped
+(rc4 1272: +2 bridge, +2 supervisor), agent 398, onboard 16545 (TSan build 16545), kbd 4219 ASan + 4219 TSan (rc4
+4191), safe mode 2 scenarios, e2e OK (incl. the host silence backstop), ui 41405, 374 goldens unchanged, sim 38,
+tools 79 passed / 1 skipped (soak +4), shellcheck clean, release binaries match source. `make mac-test` (macOS,
+native, on an export of the committed tree): 817 passed / 460 skipped, no failures. E-stop latencies over three e2e
+runs (one beside a concurrent mac-test): socket e-stop -> all-up 1.3–1.6 ms; stalled host 0.1–1.2 ms, its K2 hold
+1005.4–1015.6 ms; blocked status worker 0.1–0.9 / 1001.1–1021.9 ms (`--no-host`: the backstop is not even reached).
+`bin/ttygs_tcp_bridge` sha256 `6fa0fd8ea1b16386000f9ee48c71ecbd9a85089caa1fd01bb0a38fc303dcf24f` (398572 B),
+`bin/mk20-kbd` sha256 `3cda8c67477188e4a62ecf0fe9d3a5fa0fc15b2d0de657c164232570ebde6c2f` (595288 B), both static
+ARM EABI5. `mk20-fw-1.6.1.tar` (rc1, 14 files, reproducible: a rebuild from a `git archive` of the commit gives the
+same sha) sha256 `36c5b3987b12c8de2887b16245b06f9325c8e6bd7d04f8eb637532aa6e37ee02`.
+**No device acceptance claimed** (a real stall cannot be provoked on demand; on hardware check that the bridge
+log stays free of `pty input stalled` and `host_flushes` stays 0 while the Mac is connected, and the soak's
+`host_link`).
+
 ## 1.6.0-rc4: host protocol additions (same-page ui.page, hello page, generation reset, 会话安排 key)
 
 `firmware/VERSION` is **1.6.0** (MINOR: host-visible protocol additions); build id **rc4** (rc1–rc3 below,
