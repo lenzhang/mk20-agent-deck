@@ -61,14 +61,16 @@ sh tools/mk20-install.sh ~/mk20-backup/releases/mk20-fw-<v>.tar --reboot --wait
   - the self-test fails;
   - the composite fails its own setup during probation (1.1.1+);
   - nothing confirms within 600 s.
-- **Host-traffic gate (1.6.2):** when a host is present and awake (UDC `configured`) and has enabled ECM (usb0
+- **Host-traffic gate (1.7.0):** when a host is present and awake (UDC `configured`) and has enabled ECM (usb0
   carrier 1), probation also requires host→device traffic on usb0: a short ping/ARP probe toward the Mac must make
   usb0 RX grow (mk20deck's own traffic usually already does). A host that reads the device but delivers nothing
-  (the 2026-10-23 23:07 fault) gets one soft re-enumeration (`gadget.sh --rearm-now`) and a second probe; still
-  dead = FAIL = no confirm = the loader rolls back (deadline reset, then the good release). A Mac that is asleep
-  (bus suspended), unplugged, or has not enabled ECM skips the gate (INFO); it never fails an install. The Mac
-  side must answer ARP on the probed addresses (the Serial service at 172.30.250.1/24, §5) or run mk20deck. After
-  the confirm, `mk20d maint` keeps watching (ECM RX watchdog, ≤ 3 re-arms per hour; health `usb.ecm_*`).
+  (the 2026-10-23 23:07 fault) gets one soft re-enumeration (`gadget.sh --rearm-now`) and must then **answer** (an
+  echo reply, or mk20deck reconnecting); still dead = FAIL = no confirm = the loader rolls back (deadline reset,
+  then the good release). A Mac that is asleep (bus suspended), unplugged, or has not enabled ECM skips the gate
+  (INFO); a stall the gate could not try to fix (re-arm busy for 90 s, disabled by `mk20-no-ecm-rearm`, …) is a
+  WARN, not judged; neither fails an install. The Mac side must answer ARP/ping on the probed addresses (the Serial
+  service at 172.30.250.1/24, §5) or run mk20deck. After the confirm, `mk20d maint` keeps watching (ECM RX
+  watchdog, ≤ 3 re-arms per hour, then one watcher reboot; health `usb.ecm_*`).
 - If the installer refuses with "is pending", the previous install hasn't been booted yet. Reboot, or let
   probation finish.
 
@@ -78,7 +80,7 @@ Check:
 $MK20_ADB shell 'sh /data/mk20/rescue/loader.sh status'          # current=.. good=<v> pending= ...
 $MK20_ADB shell '/data/mk20/releases/<v>/sbin/mk20d health'       # JSON, "status":"ok"
 $MK20_ADB shell 'cat /data/mk20/state/hardreset.last'             # fat_ro=y mount_hung=n (clean FAT remount)
-$MK20_ADB shell 'grep -E "ecm|selftest" /data/mk20/logs/mk20d.log | tail -n 5'   # 1.6.2: the gate's PASS/INFO line
+$MK20_ADB shell 'grep -E "ecm|selftest" /data/mk20/logs/mk20d.log | tail -n 5'   # 1.7.0: the gate's PASS/INFO line
 ```
 
 Logs: `/data/mk20/logs/{mk20d,gadget}.log` (rotated), `/mnt/SDCARD/mk20/logs/{loader,watcher}.log`, and

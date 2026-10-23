@@ -43,7 +43,7 @@ static const struct { int fb; uint8_t usage; } HOST_HID_KEYS[] = {
  * L4 回 L1 press kept across a same-page ui.page 60 s after the first such request. */
 #define HID_PTT_MAX_MS 600000
 #define KEEP_MAX_MS 60000
-/* 1.6.2 (the residual Kimi K3 accepted for 1.6.0/1.6.1): a host key (owner 1: a session / mode key, the Mac mode key
+/* 1.7.0 (the residual Kimi K3 accepted for 1.6.0/1.6.1): a host key (owner 1: a session / mode key, the Mac mode key
  * fb20, the host half of a forwarded ⌫/⏎/Esc or digit) whose GD32 up is lost and that no same-page request bounded
  * had no time bound. No Mac gesture needs it held longer than its 600 ms long press (mk20deck controller: the slot
  * pick-up and MODE -> L4 fire once at LONG_PRESS, nothing happens later in a hold; PTT and ⌫/⏎/Esc are HID owners with
@@ -73,7 +73,7 @@ struct onboard_s {
     int key_owner[20], knob_down[2], knob_long[2];
     uint8_t hid_usage[20]; int64_t hid_at[20];
     /* 1.6.0: a host key or L4 回 L1 press (owner 1/4) still held across a same-page ui.page has no lost-up
-     * bound but this (>= 5: the 10 s cut, PTT: its caps; 1.6.2: owner 1 also HOST_KEY_MAX_MS from its press): kept to
+     * bound but this (>= 5: the 10 s cut, PTT: its caps; 1.7.0: owner 1 also HOST_KEY_MAX_MS from its press): kept to
      * keep_until (request + HID_KEY_HOLD_MS; a new GD32 down of that key renews it, never past keep_max). 0 = none. */
     int64_t keep_until[20], keep_max[20]; /* keep_max: absolute (request + KEEP_MAX_MS) */
     int64_t press_at[20]; /* original press of a held key (live page); a PTT's HID_PTT_MAX_MS counts from it */

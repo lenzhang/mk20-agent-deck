@@ -489,7 +489,7 @@ def test_stall_file_unavailable_continues(br, tmp_path):
     assert "stall file" in err and "continuing without it" in err
 
 
-# ---- 1.6.2: a run-time stall-file write failure was silent ----
+# ---- 1.7.0: a run-time stall-file write failure was silent ----
 def test_stall_file_runtime_write_failure_logged_once_per_streak(br_fast, tmp_path):
     """The stall file worked at start, then a write fails (its .tmp name is a directory: open(O_TRUNC) fails with
     EISDIR even as root): one line per stall streak, the file keeps the last good count, stall handling unchanged;

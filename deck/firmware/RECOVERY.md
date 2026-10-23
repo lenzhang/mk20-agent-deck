@@ -67,7 +67,7 @@ Symptoms and where to go:
 | ping to 172.30.250.2 fails, adb works | Mac/device subnet mismatch (device rolled back to 1.0.x) | `mk20_host_net.py sync` |
 | blank/error panels, USB present | kbd/status/panel failure or safe mode | K4 section above, then 0 / 2 |
 | Mac daemon connects time out, adb + ping work, keys dark | pty input stall (2026-10-23 on 1.6.0-rc4). 1.6.1+ heals itself: `/tmp/mk20/bridge.log` `pty input stalled N s: flushed (#k)` (once per streak), `/tmp/mk20/bridge.stalls` = total, kbd.status `host_flushes`; the Mac reconnects | INSTALL.md §6 soak `host_link` |
-| Mac daemon cannot connect, ping 172.30.250.2 fails, adb works; device usb0 RX frozen (`/proc/net/dev`), health `usb.ecm_state` `stalled` / `gave-up` | ECM host→device dead with the gadget configured (2026-10-23 23:07 on 1.6.1-rc2). 1.6.2+ re-arms itself (one soft re-enumeration, ≤ 3 per hour; mk20d.log `ecm`, gadget.log `REARM`); on probation it is not confirmed (rollback). Gave up / older release: reboot via `cmd-reboot` (the proven fix); a manual re-arm is below | 1 (`cmd-reboot`) |
+| Mac daemon cannot connect, ping 172.30.250.2 fails, adb works; device usb0 RX frozen (`/proc/net/dev`), health `usb.ecm_state` `stalled` / `gave-up` | ECM host→device dead with the gadget configured (2026-10-23 23:07 on 1.6.1-rc2). 1.7.0+ re-arms itself (one soft re-enumeration, ≤ 3 per hour, recovered only when the Mac answers; mk20d.log `ecm`, gadget.log `REARM`), then requests one watcher reboot (not again on the next boot: `/data/mk20/state/ecm-reboots`; delete it to re-allow); on probation it is not confirmed (rollback). Older release / gave up: reboot via `cmd-reboot` (the proven fix); a manual re-arm is below | 1 (`cmd-reboot`) |
 | USB keeps re-enumerating | flap; release flapmon requests loader A/B after 5 drops in 60 s (Mac sleep/suspend is not counted, 1.1.2+) | 0, then 1 |
 | `good=` empty / `stub: … mismatch` | release or rescue files corrupt | 2 / 3 |
 | nothing enumerates after a power cycle | boot image or kernel broken | 5 |
@@ -80,7 +80,7 @@ Symptoms and where to go:
 | `mk20-gadget-nohid` | composite without HID (ECM + ADB + bridge). Not a fix for the ep3 kernel: 1.1.x releases don't run on it at all (see level 5) |
 | `mk20-no-adb` | no adb in any mode |
 | `mk20-no-router` | (1.2.0+) the on-board router (`mk20d router` → `bin/mk20-router`, PTT → HID) is not started; same as `FEATURE_ROUTER=0` in mk20.conf or env `MK20_ROUTER=0`. To stop it now without a reboot: `touch /tmp/mk20-router-stop; killall mk20-router` (the stop file keeps the mk20d supervisor from restarting it; SIGTERM/SIGINT make the router send an all-keys-up report before it exits, so no modifier stays held; avoid `kill -9`). The router never gates confirm |
-| `mk20-no-ecm-rearm` | (1.6.2+) the ECM RX watchdog only observes and reports (no re-enumeration); the probation gate still requires host→device traffic when a host is present, so a stall then fails probation without a re-arm. Read at every watchdog step (no reboot needed) |
+| `mk20-no-ecm-rearm` | (1.7.0+) the ECM RX watchdog only observes and reports: no re-enumeration, no watcher reboot; the probation gate reports a stall as a WARN (not judged) instead of failing. Read at every watchdog step (no reboot needed) |
 | `mk20-no-release` | loader skips releases: legacy `boot-every/` jobs only (stock + adb keeper) |
 | `mk20-no-watch` | boot stub does nothing at all: pure vendor behaviour, no rescue watcher, no adb |
 
@@ -89,16 +89,39 @@ MK20 first** (rootfs and overlay live on the card), then put the TF card in the 
 "Initialize" the card, click **Ignore**; never Initialize or Erase) (the FAT volume mounts in Finder), create the empty file, eject cleanly, and put the card back.
 Delete the flag to undo.
 
-**Manual ECM re-arm (1.6.2+)**, e.g. to try the soft path before a reboot: one soft re-enumeration of the running
-composite, queued to the watcher (adb drops for a few seconds; HID re-enumerates; nothing else restarts):
+**Manual ECM re-arm (1.7.0+)**, e.g. to exercise `gadget.sh --rearm-now` once on hardware before trusting the
+watchdog, or to try the soft path before a reboot. It must run **detached from adb**: `--rearm-now` stops and
+restarts adbd, adbd kills the whole process group of an `adb shell` when that session ends, and the device BusyBox
+has no `setsid` (`deck/tests/fixtures/device-commands.txt`) — a foreground or `&` run from adb would be killed between
+the unbind and the bind (the T113 drops off USB until a power cycle, NOTES-crash-20261018). The detached path is the
+watcher queue: `gadget.sh --rearm` writes `/mnt/SDCARD/job.sh`, the watcher (outside adb) runs exactly
+`MK20_REARM_MANUAL=1 … sh /tmp/mk20/gadget-boot.sh --rearm-now` detached (`MK20_REARM_MANUAL=1` only exempts the adb
+command that queued it from the "adb session" refusal; it is not counted in the watchdog's budget).
 
 ```sh
-$MK20_ADB shell 'MK20_REL=/tmp/mk20/rel MK20_GADGET_LOG=/data/mk20/logs/gadget.log sh /tmp/mk20/gadget-boot.sh --rearm'
-$MK20_ADB shell 'grep -E "REARM|rearm" /data/mk20/logs/gadget.log | tail -n 5'    # after adb is back
+# 0. before (read-only): usb0, listeners, host state, the log tail
+$MK20_ADB shell 'cat /sys/class/net/usb0/ifindex; ifconfig usb0; ifconfig usb0:1; netstat -ltn | grep -E ":(17890|8780) "; cat /sys/class/udc/*/state; tail -n 3 /data/mk20/logs/gadget.log'
+# 1. queue ONE re-arm (prints "queued to watcher"; within ~2 s adb, HID and ECM drop for a few seconds)
+$MK20_ADB shell 'rm -f /tmp/mk20/rearm.last; MK20_REL=/tmp/mk20/rel MK20_GADGET_LOG=/data/mk20/logs/gadget.log sh /tmp/mk20/gadget-boot.sh --rearm'
+# 2. wait for adb (it re-enumerates with the composite), then read the result
+until $MK20_ADB shell true >/dev/null 2>&1; do sleep 2; done
+$MK20_ADB shell 'cat /tmp/mk20/rearm.last; grep -E "REARM|rearm" /data/mk20/logs/gadget.log | tail -n 12'
+$MK20_ADB shell 'cat /sys/class/net/usb0/ifindex; ifconfig usb0; ifconfig usb0:1; netstat -ltn | grep -E ":(17890|8780) "; cat /sys/class/udc/*/state'
+$MK20_ADB shell 'grep flapmon /data/mk20/logs/gadget.log | tail -n 3; grep -E "web|ecm" /data/mk20/logs/mk20d.log | tail -n 3; sh /data/mk20/rescue/loader.sh status'
 ```
 
-It is refused (logged, nothing touched) during a setup/rollback, an install, a queued watcher job, within
-flapmon's window after a link drop, or with no host configured. Never run `--rearm-now` from an adb shell.
+Reading it: `rearm.last` is `rc=0 up=… re-enumerated` and gadget.log has `REARM begin …` then `REARM OK udc=…
+state=configured adbd=<pid> usb0=kept|reconfigured` (`reconfigured` = the re-bind re-registered usb0 and the three
+ifconfig lines, the bridge and the web were redone: then also `REARM: usb0 re-created/bare (ifindex A -> B)` and
+`REARM: restarting the bridge`, and mk20d.log `web … usb0 re-created: re-binding`). Afterwards `ifconfig usb0` must
+show `inet addr:172.30.250.2` and `MTU:478`, `ifconfig usb0:1` `inet addr:169.254.7.2`, netstat both
+`172.30.250.2:17890` and `169.254.7.2:17890` plus `:8780`, the UDC `configured`; on the Mac mk20deck reconnects
+(`ui.hello`) and the keyboard types; flapmon shows at most 1–2 `link drop` lines and no `FLAPPING`; the loader
+status is unchanged. `rc=4 … refused: <reason>` = nothing was touched (a flapmon drop in the last 65 s, an adb
+shell left open, a push into `/data/mk20/incoming`, no host configured, …): fix the reason and queue again.
+`rc=1` = aborted before any USB change (mk20-kbd did not release hidg0). `rc=2` = USB not restored: the watcher
+hard-resets the board ~30 s later (the intended recovery). If adb has not come back after ~2 min (no rc 2 reset
+either): a USB power cycle.
 
 Commands the watcher polls for every 2 s:
 - `cmd-reboot`: hardreset.

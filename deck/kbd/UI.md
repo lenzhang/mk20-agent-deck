@@ -94,7 +94,7 @@ their option menus.
   slot select/focus/pick-up or any other Mac action, even when its option mode ended a moment earlier. The HID
   path never waits for or depends on the host.
 
-## 1.6.2 host key lost-up cap (the 1.6.0/1.6.1 residual; PATCH)
+## 1.7.0 host key lost-up cap (the 1.6.0/1.6.1 residual)
 
 - **Rule.** A held host key (owner 1: a session / mode key, the Mac mode key fb20, the PTT-ignored digit, or the
   host half an e-stop / SUSPECT left of a forwarded ⌫/⏎/Esc or digit) ends `HOST_KEY_MAX_MS` = **60 s after its
@@ -103,7 +103,10 @@ their option menus.
   reports its up, so phantom downs stay inert; stderr `mk20-kbd: host key held N s: released (lost key-up guard)`.
   Repeated GD32 downs of the held key are the same press (rc4) and never renew it. A same-page bound
   (`keep_until`) that is due first ends the key first with its own line; when both are due in the same tick the
-  same-page bound runs first. The poll timeout includes the deadline. Everything else is unchanged: real releases,
+  same-page bound runs first. The poll timeout includes the deadline. **Accepted (Kimi K3 1.6.2-rc1 review,
+  MINOR):** a same-page request late in a hold (more than 50 s after the press) no longer gets its full 10 s
+  `keep_until` window — the press cap ends the key at 60 s from the press, earlier than that window; the bound only
+  exists for a lost GD32 up, and 60 s is already far beyond any gesture. Everything else is unchanged: real releases,
   boundaries, host loss, e-stops, the 5 s post-e-stop resync, the HID caps (10 s ⌫/⏎/Esc and digits, PTT 120 s /
   10 min).
 - **Why 60 s is never too short on the Mac:** mk20deck's controller decides every host-key gesture by 600 ms: a slot
@@ -213,7 +216,7 @@ falls back to its 1.5.1 behaviour when the hello carries no `page`. Tests: `kbd/
   gestures are bounded on its side, and how long a host key may legitimately be held is the Mac's decision (a
   cut would end real holds the Mac interprets). Proposal for 1.6.1: a generous owner-1 cap (e.g. 60 s from the
   press, ended with the host up and `cut_latch` like the other guards) once mk20deck confirms no gesture needs
-  longer holds. **Resolved in 1.6.2** (section above): 60 s from the press; no mk20deck gesture times a hold
+  longer holds. **Resolved in 1.7.0** (section above): 60 s from the press; no mk20deck gesture times a hold
   beyond its 600 ms long press. Log-only nit, same review: when a forwarded key (owner 6) or digit (owner 7) is turned into its
   host half (owner 1) by an e-stop / SUSPECT, `press_at` keeps the original press, so a later same-page bound's
   log line names the time since that press (not since the conversion).

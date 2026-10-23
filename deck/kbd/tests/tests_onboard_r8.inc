@@ -1,4 +1,4 @@
-/* 1.6.2: a held host key (owner 1) whose GD32 up is lost and that no same-page request bounded is ended 60 s after
+/* 1.7.0: a held host key (owner 1) whose GD32 up is lost and that no same-page request bounded is ended 60 s after
  * its press like the other lost key-up guards: the host gets its up, the key is inert (cut latch) until the GD32
  * reports the up. Covers a session key, the Mac mode key fb20, a slot cut while another key came and went, the
  * PTT-ignored digit (owner 1 from its press) and a forwarded fb17 whose host half (owner 1) outlives its 10 s HID

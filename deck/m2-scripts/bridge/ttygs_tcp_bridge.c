@@ -23,7 +23,7 @@
 // previous one continues it: no line, a count every STALL_SUMMARY_MS and one when it ends), so a persistent stall with
 // a host that keeps reconnecting cannot fill bridge.log; --stall-file PATH holds the total stall count ("N\n", written
 // atomically at start and on every stall, removed on exit) for the soak.
-// 1.6.2: a stall-file write that fails at run time (it was silent) is logged once per stall streak:
+// 1.7.0: a stall-file write that fails at run time (it was silent) is logged once per stall streak:
 // "stall file PATH write failed: <errno> (count N not recorded; logged once per streak)"; the file keeps the last count.
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -153,7 +153,7 @@ int main(int argc, char **argv) {
   int cl = -1; char buf[4096];
   char pend[PEND_MAX]; size_t plen = 0, poff = 0; long long prog = 0;   // client->pty pending bytes
   unsigned stalls = 0, streak = 0; long long streak_t0 = 0, last_stall = 0, next_sum = 0;   // stall count, current streak
-  int sf_warned = 0;   // 1.6.2: a failed stall-file write is logged once per streak (was silent)
+  int sf_warned = 0;   // 1.7.0: a failed stall-file write is logged once per streak (was silent)
   for (;;) {
     struct pollfd p[4 + MAXL]; int np = 0;
     p[np++] = (struct pollfd){m, (short)(POLLIN | (poff < plen ? POLLOUT : 0)), 0};
