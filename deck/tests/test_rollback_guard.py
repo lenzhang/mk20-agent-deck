@@ -144,7 +144,7 @@ def test_spawned_daemons_close_mutex_fd():
     for line in G.splitlines():
         code = line.split(" #")[0]
         if _re.search(r"[^&]&\s*(#.*)?$", code.rstrip()) and "kill" not in code and "cleanup )" not in code \
-                and "setup_main )" not in code:   # owner-local supervised children keep fd 7 on purpose
+                and "setup_main )" not in code and "rearm_main )" not in code:   # owner-local supervised children keep fd 7 on purpose
             assert "7>&-" in code, line
 
 

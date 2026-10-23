@@ -9,6 +9,9 @@
 # optional agent runtime joins that process only with FEATURE_AGENT=1 + kbd.sock. Run-level
 # permission stays off; web/agent health is INFO/WARN only. Log /tmp/mk20/agent.log.
 # Boot first puts /run/mk20 on a 512 KiB tmpfs (rootfs /run is the TF-card overlay); a failure is WARN only.
+# 1.6.2: mk20d maint runs the ECM RX watchdog (host present + ECM active + usb0 RX frozen + probe -> one soft
+# re-enumeration via gadget.sh --rearm-now, <= 3/h, then give up); on probation boot confirms only with proven
+# host->device traffic when a host is present (ecm_gate). health usb.ecm_*; selftest INFO/WARN ecm line.
 R=${MK20_ROOT:-}
 REL=${MK20_REL:-$(cd "$(dirname "$0")/.." && pwd)}
 V=${MK20_VERSION:-$(sed -n 's/^version=//p' "$REL/MANIFEST" 2>/dev/null)}
@@ -245,6 +248,172 @@ kbd_child_stop() { # our own unreaped child only; bounded graceful stop
 }
 wdt_armed() { ${MK20_UBUS:-ubus} call system watchdog 2>/dev/null | grep -q '"running"'; }
 
+# ---- 1.6.2 ECM RX watchdog (mk20d maint) + probation confirm gate (boot) ----
+# Incident 2026-10-23 23:07: after a reboot host->device was dead (gadget configured, usb0 carrier 1, usb0 RX frozen at
+# 1 packet while the Mac kept sending), yet the selftest passed and the release was confirmed; a watcher hardreset
+# fixed it. The fault is proven when the host is present and awake (UDC "configured": a sleeping Mac suspends the bus,
+# an unplugged/charger port is not configured), its ECM driver runs the data interface (usb0 carrier 1), usb0 RX has
+# not grown for ECM_STALL_S, and a probe shows the host reads the device but nothing it sends arrives: ping (ARP
+# first) toward the host addresses makes usb0 TX grow - u_ether counts a TX packet only when its IN transfer
+# completed, i.e. the host polled the bulk IN endpoint - while usb0 RX stays put. A healthy host answers the ARP in
+# milliseconds; a host that does not read usb0 completes no TX (no action). Action: gadget.sh --rearm-now (ONE soft
+# re-enumeration under the transition mutex; flapmon/install/rollback/adb rules there), at most ECM_REARM_MAX per
+# ECM_REARM_WIN s, then give up for this boot (health usb.ecm_gave_up, selftest WARN). FAT mk20-no-ecm-rearm:
+# observe and report only. State (this boot): $TM/ecm.state; health/selftest only read it.
+ECM_ST=$TM/ecm.state
+NETDEV=${MK20_NETDEV:-/proc/net/dev}; ARPF=${MK20_ARP:-/proc/net/arp}
+ecm_k() { case "$1" in ''|*[!0-9]*) echo "$2";; *) if [ ${#1} -le 5 ] && [ "$1" -ge "$3" ] && [ "$1" -le "$4" ]; then echo "$1"; else echo "$2"; fi;; esac; }
+ecm_init() {
+  [ "${ECM_INIT:-}" = 1 ] && return 0; ECM_INIT=1
+  ECM_STALL_S=$(ecm_k "${MK20_ECM_STALL_S:-}" 60 1 3600)        # usb0 RX frozen this long before a probe
+  ECM_PROBE_S=$(ecm_k "${MK20_ECM_PROBE_S:-}" 8 1 60)           # probe window (> the 5 s ARP delay of a stale entry)
+  ECM_GATE_WAIT_S=$(ecm_k "${MK20_ECM_GATE_WAIT_S:-}" 90 0 300) # gate: wait out a busy re-arm (flap window, transition)
+  ECM_RECONF_S=$(ecm_k "${MK20_ECM_RECONF_S:-}" 30 1 120)       # gate: the host configures the re-enumerated device
+  ECM_REARM_MAX=3; ECM_REARM_WIN=3600
+}
+ecm_up() { if [ -n "${MK20_UPTIME_CMD:-}" ]; then num "$($MK20_UPTIME_CMD)"; else cut -d. -f1 /proc/uptime; fi; }
+udc_state() { local u; u=$(cat "$G/UDC" 2>/dev/null); case "$u" in ''|*/*|.*) return 0;; esac; head -n 1 "$R/sys/class/udc/$u/state" 2>/dev/null; }
+usb0_carrier() { [ "$(cat "$R/sys/class/net/usb0/carrier" 2>/dev/null)" = 1 ]; }
+ecm_counts() { # "rx_packets tx_packets" of usb0, empty if absent (/proc/net/dev: rx = field 2, tx = field 10)
+  sed -n 's/^ *usb0://p' "$NETDEV" 2>/dev/null | awk 'NR==1 && NF>=10 && $2 ~ /^[0-9]+$/ && $10 ~ /^[0-9]+$/ {print $2, $10}'; }
+ecm_hosts() { # host IPv4s to probe: learned on usb0 (ARP), the subnet's .1, the link-local .1 (at most 4)
+  { awk 'NR>1 && $6=="usb0" && $3!="0x0" && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $1}' "$ARPF" 2>/dev/null
+    echo "${ECM_HOST_IP:-}"; echo "${MK20_LL_HOST_IP:-169.254.7.1}"; } | awk 'NF && !s[$0]++' | head -n 4; }
+ecm_probe() { # $1 rx $2 tx at the start: ping (ARP first) the host addresses <= ECM_PROBE_S s, stop early when usb0 RX
+  # grows or the host leaves; EP_RX/EP_TX = last counts; rc 0 = RX grew (the host answered or sent anything)
+  local pids h i c; pids=""; EP_RX=$1; EP_TX=$2
+  for h in $(ecm_hosts); do ping "$h" </dev/null >/dev/null 2>&1 5>&- & pids="$pids $!"; done
+  i=0; while [ "$i" -lt $((ECM_PROBE_S * 4)) ]; do
+    sleep 0.25 5>&-; i=$((i + 1))
+    c=$(ecm_counts); [ -n "$c" ] && { EP_RX=${c% *}; EP_TX=${c#* }; }
+    [ "$EP_RX" != "$1" ] && break
+    [ "$(udc_state)" = configured ] || break
+  done
+  for h in $pids; do kill "$h" 2>/dev/null; done; for h in $pids; do wait "$h" 2>/dev/null; done
+  [ "$EP_RX" != "$1" ]; }
+ecm_load() { # whitelisted key=value state; anything unexpected is ignored (defaults)
+  local k v
+  ES_STATE=idle; ES_RX=; ES_SINCE=; ES_STALLS=0; ES_REARMS=0; ES_RECOV=0; ES_PROBES=0; ES_GAVEUP=0; ES_EPISODE=0; ES_EPRA=0
+  ES_TIMES=; ES_KEV=; ES_NOTE=
+  [ -f "$ECM_ST" ] && [ ! -L "$ECM_ST" ] && [ "$(wc -c < "$ECM_ST")" -le 1024 ] || return 0
+  while IFS='=' read -r k v; do
+    case "$k" in
+      state) case "$v" in idle|absent|suspended|inactive|ok|host-idle|stalled|gave-up) ES_STATE=$v;; esac;;
+      rx) case "$v" in ''|*[!0-9]*) ;; *) ES_RX=$v;; esac;;
+      since) case "$v" in ''|*[!0-9]*) ;; *) ES_SINCE=$v;; esac;;
+      stalls) ES_STALLS=$(num "$v");; rearms) ES_REARMS=$(num "$v");; recoveries) ES_RECOV=$(num "$v");;
+      probes) ES_PROBES=$(num "$v");; ep_rearms) ES_EPRA=$(num "$v");; kev) ES_KEV=$(num "$v");;
+      gave_up) [ "$v" = 1 ] && ES_GAVEUP=1;; episode) [ "$v" = 1 ] && ES_EPISODE=1;;
+      times) echo "$v" | grep -Eq '^[0-9]+( [0-9]+){0,7}$' && ES_TIMES=$v;;
+      note) case "$v" in *[!a-z]*) ;; *) ES_NOTE=$v;; esac;;
+    esac
+  done < "$ECM_ST"; }
+ecm_save() {
+  ( umask 077; t=$(mktemp "$TM/.ecm.XXXXXX") || exit 1
+    printf 'state=%s\nrx=%s\nsince=%s\nstalls=%s\nrearms=%s\nrecoveries=%s\nprobes=%s\ngave_up=%s\nepisode=%s\nep_rearms=%s\ntimes=%s\nkev=%s\nnote=%s\n' \
+      "$ES_STATE" "$ES_RX" "$ES_SINCE" "$ES_STALLS" "$ES_REARMS" "$ES_RECOV" "$ES_PROBES" "$ES_GAVEUP" "$ES_EPISODE" "$ES_EPRA" \
+      "$ES_TIMES" "$ES_KEV" "$ES_NOTE" > "$t" && mv -f "$t" "$ECM_ST" || { rm -f "$t"; exit 1; } ); }
+ecm_note() { [ "$ES_NOTE" = "$1" ] && return 0; ES_NOTE=$1; log "$2" ecm "$3"; }   # once per episode and reason
+ecm_episode_end() { # usb0 RX grew while a stall episode was open
+  [ "$ES_EPISODE" = 1 ] || return 0
+  if [ "$ES_EPRA" -gt 0 ]; then ES_RECOV=$((ES_RECOV + 1)); log INFO ecm "host->device traffic back after $ES_EPRA re-arm(s) (usb0 rx $1)"
+  else log INFO ecm "host->device traffic back without a re-arm (usb0 rx $1)"; fi
+  ES_EPISODE=0; ES_EPRA=0; ES_NOTE=; [ "$ES_STATE" = gave-up ] && ES_STATE=ok; return 0; }
+ecm_rearm_try() { # $1 watchdog|gate, $2 1 = keyboard in use (defer). ER_RC: gadget.sh --rearm-now rc, 4 deferred, 7 off
+  local now n t keep gen
+  now=$(ecm_up)
+  if [ -f "$S/mk20-no-ecm-rearm" ]; then ER_RC=7; ecm_note disabled INFO "re-arm disabled by FAT mk20-no-ecm-rearm: observe only"; return 0; fi
+  [ "$ES_GAVEUP" = 1 ] && { ER_RC=7; return 0; }
+  n=0; keep=""; for t in $ES_TIMES; do [ $((now - t)) -lt "$ECM_REARM_WIN" ] && { n=$((n + 1)); keep="$keep $t"; }; done; ES_TIMES=${keep# }
+  if [ "$n" -ge "$ECM_REARM_MAX" ]; then
+    ES_GAVEUP=1; ES_STATE=gave-up; ER_RC=7
+    log ERROR ecm "host->device still dead after $n re-arms within ${ECM_REARM_WIN}s: giving up until reboot (watcher cmd-reboot recovers)"
+    return 0; fi
+  if [ "${2:-0}" = 1 ]; then ER_RC=4; ecm_note typing INFO "re-arm deferred: keyboard in use"; return 0; fi
+  [ -f "$TM/gadget-boot.sh" ] || { ER_RC=6; ecm_note na WARN "re-arm impossible: no $TM/gadget-boot.sh"; return 0; }
+  gen=$(head -n 1 "$TM/composite.gen" 2>/dev/null)
+  MK20_GEN=$gen MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log sh "$TM/gadget-boot.sh" --rearm-now </dev/null >> "$LOGDIR/gadget.log" 2>&1 5>&- 6>&- 7>&- 8>&- 9>&-
+  ER_RC=$?
+  case "$ER_RC" in
+    0|1|2|3) ES_REARMS=$((ES_REARMS + 1)); ES_EPRA=$((ES_EPRA + 1)); ES_TIMES="${ES_TIMES:+$ES_TIMES }$now"; ES_NOTE=
+      log WARN ecm "re-arm #$ES_REARMS ($1): gadget.sh --rearm-now rc=$ER_RC$([ "$ER_RC" = 0 ] && echo ' (re-enumerated)')";;
+    4) ecm_note busy INFO "re-arm deferred: gadget.sh busy (rc 4, reason in gadget.log)";;
+    5) ecm_note stale INFO "re-arm skipped: stale composite generation (rc 5)";;
+    *) ecm_note na WARN "re-arm not applicable (rc $ER_RC, reason in gadget.log): observe only";;
+  esac; }
+ecm_tick() { # one watchdog step (mk20d maint, every ECM_TICK_S); logs only on changes
+  local now c rx tx st kev typing age
+  ecm_init; ecm_load; now=$(ecm_up)
+  kev=$(jnum key_events); typing=0; [ -n "$ES_KEV" ] && [ "$kev" != "$ES_KEV" ] && typing=1; ES_KEV=$kev
+  c=$(ecm_counts); rx=${c% *}; tx=${c#* }
+  if [ -z "$c" ]; then ES_STATE=idle; ES_RX=; ES_SINCE=$now; ecm_save; return 0; fi
+  if [ -z "$ES_RX" ] || [ -z "$ES_SINCE" ] || [ "$rx" -lt "$ES_RX" ]; then ES_RX=$rx; ES_SINCE=$now   # (re)baseline
+  elif [ "$rx" -gt "$ES_RX" ]; then ecm_episode_end "$rx"; ES_RX=$rx; ES_SINCE=$now; fi
+  if ! composite_up || [ ! -f "$TM/gadget.env" ] || [ -f "$TM/gadget.busy" ]; then ES_STATE=idle; ES_SINCE=$now; ecm_save; return 0; fi
+  st=$(udc_state)
+  if [ "$st" != configured ] || ! usb0_carrier; then   # no host / asleep / ECM not enabled by the host
+    case "$st" in suspended) ES_STATE=suspended;; configured) ES_STATE=inactive;; *) ES_STATE=absent;; esac
+    ES_SINCE=$now; ecm_save; return 0; fi   # the window starts again once the host is back
+  age=$((now - ES_SINCE))
+  if [ "$age" -lt "$ECM_STALL_S" ]; then
+    if [ "$ES_EPISODE" != 1 ]; then ES_STATE=ok; elif [ "$ES_GAVEUP" != 1 ]; then ES_STATE=stalled; else ES_STATE=gave-up; fi
+    ecm_save; return 0; fi
+  ES_PROBES=$((ES_PROBES + 1))
+  if ecm_probe "$rx" "$tx"; then ecm_episode_end "$EP_RX"; ES_STATE=ok; ES_RX=$EP_RX; ES_SINCE=$(ecm_up); ecm_save; return 0; fi
+  ES_RX=$EP_RX; ES_SINCE=$(ecm_up)   # the next probe after another window
+  [ "$(udc_state)" = configured ] || { ecm_save; return 0; }                             # the host left meanwhile
+  if [ "$EP_TX" = "$tx" ]; then [ "$ES_EPISODE" = 1 ] || ES_STATE=host-idle; ecm_save; return 0; fi   # host not reading
+  if [ "$ES_EPISODE" != 1 ]; then
+    ES_EPISODE=1; ES_EPRA=0; ES_NOTE=; ES_STALLS=$((ES_STALLS + 1))
+    log WARN ecm "host->device stall #$ES_STALLS: usb0 rx $rx frozen ${age}s (udc configured, carrier 1); probe tx +$((EP_TX - tx)) rx +0"
+  fi
+  ES_STATE=stalled
+  ecm_rearm_try watchdog "$typing"   # after a give-up: ER_RC 7, nothing touched (observe and report only)
+  [ "$ES_GAVEUP" = 1 ] && ES_STATE=gave-up
+  ecm_save; }
+ecm_gate() { # probation confirm gate: prints its result line; rc 1 = FAIL (no confirm -> the loader rolls back)
+  local st c rx tx w
+  ecm_init; ecm_load
+  composite_up && [ -f "$TM/gadget.env" ] || { echo "INFO ecm gate: no composite"; return 0; }
+  st=$(udc_state)
+  [ "$st" = configured ] || { echo "INFO ecm gate skipped: no host (udc ${st:-unbound}: asleep, unplugged or charger)"; return 0; }
+  usb0_carrier || { echo "INFO ecm gate skipped: host has not enabled ECM (usb0 carrier 0)"; return 0; }
+  c=$(ecm_counts); [ -n "$c" ] || { echo "FAIL ecm gate: no usb0 counters"; return 1; }
+  rx=${c% *}; tx=${c#* }
+  if ecm_probe "$rx" "$tx"; then
+    ES_STATE=ok; ES_RX=$EP_RX; ES_SINCE=$(ecm_up); ecm_save; echo "PASS ecm host traffic (usb0 rx $rx -> $EP_RX)"; return 0; fi
+  st=$(udc_state)
+  [ "$st" = configured ] || { echo "INFO ecm gate skipped: host left during the probe (udc ${st:-unbound})"; return 0; }
+  if [ "$EP_TX" = "$tx" ]; then echo "WARN ecm gate: host not reading usb0 (rx $rx, tx $tx unchanged in ${ECM_PROBE_S}s)"; return 0; fi
+  ES_EPISODE=1; ES_EPRA=0; ES_NOTE=; ES_STALLS=$((ES_STALLS + 1)); ES_STATE=stalled
+  log WARN ecm "gate: host->device stall #$ES_STALLS: usb0 rx $rx frozen (udc configured, carrier 1); probe tx +$((EP_TX - tx)) rx +0"
+  w=0; while :; do
+    ecm_rearm_try gate 0
+    [ "$ER_RC" = 4 ] && [ "$w" -lt "$ECM_GATE_WAIT_S" ] || break
+    sleep 5; w=$((w + 5))
+  done
+  ecm_save
+  [ "$ER_RC" = 0 ] || { echo "FAIL ecm host->device dead: usb0 rx $rx frozen while the host reads usb0 (re-arm rc=$ER_RC)"; return 1; }
+  w=0; while { [ "$(udc_state)" != configured ] || ! usb0_carrier; } && [ "$w" -lt "$ECM_RECONF_S" ]; do sleep 1; w=$((w + 1)); done
+  c=$(ecm_counts); rx=${c% *}; tx=${c#* }
+  if [ -n "$c" ] && [ "$(udc_state)" = configured ] && ecm_probe "$rx" "$tx"; then
+    ecm_episode_end "$EP_RX"; ES_STATE=ok; ES_RX=$EP_RX; ES_SINCE=$(ecm_up); ecm_save
+    echo "PASS ecm host traffic after re-arm (usb0 rx $rx -> $EP_RX)"; return 0; fi
+  ES_RX=${EP_RX:-$rx}; ES_SINCE=$(ecm_up); ecm_save
+  echo "FAIL ecm host->device dead after re-arm (udc $(udc_state), usb0 rx ${rx:-?})"; return 1; }
+ecm_report() { # selftest INFO/WARN only (never FAIL: on probation the boot gate decides)
+  local c st
+  composite_up || return 0
+  ecm_init; ecm_load; c=$(ecm_counts); st=$(udc_state)
+  if [ "$ES_EPISODE" = 1 ] && [ "$ES_GAVEUP" = 1 ] && [ "$ES_STATE" = gave-up ]; then
+    echo "WARN ecm host->device stalled: gave up after $ES_REARMS re-arm(s) (max $ECM_REARM_MAX per hour; reboot via watcher cmd-reboot)"
+  elif [ "$ES_EPISODE" = 1 ] && [ "$ES_STATE" = stalled ]; then
+    echo "WARN ecm host->device stalled (usb0 rx ${c%% *} frozen; $ES_EPRA re-arm(s) so far)"
+  elif [ "$ES_GAVEUP" = 1 ]; then echo "INFO ecm re-arm off for this boot (gave up after $ES_REARMS re-arms)"
+  elif [ "$ES_STALLS" -gt 0 ]; then echo "INFO ecm host->device stalls $ES_STALLS, re-arms $ES_REARMS, recovered $ES_RECOV"
+  elif [ -n "$c" ]; then echo "INFO ecm usb0 rx ${c%% *} tx ${c##* } (udc ${st:-unbound})"; fi
+  return 0; }
+
 selftest() { # FAIL = host-independent breakage. KD is forbidden in every mode. The link-local rescue listener is
   # mandatory (1.1.0): it is the subnet-independent path, so a release that loses it must not be confirmed.
   local f n; f=0
@@ -270,6 +439,7 @@ selftest() { # FAIL = host-independent breakage. KD is forbidden in every mode. 
     listening "${MK20_LL_IP:-169.254.7.2}:$BRIDGE_PORT" && echo "PASS bridge link-local" || { echo "FAIL bridge not on link-local"; f=1; }
     listening "0.0.0.0:$BRIDGE_PORT" && { echo "FAIL bridge on 0.0.0.0"; f=1; }
     if [ -e "$C/hid.usb0" ]; then [ -e "$R/dev/hidg0" ] && echo "PASS hid" || { echo "FAIL no hidg0"; f=1; }; fi
+    ecm_report   # 1.6.2: INFO/WARN only (the probation host-traffic gate runs in boot)
   else echo "WARN composite down (ACM$([ -e "$C/ffs.adb" ] && echo +adb))"
     for n in /data/appLunch.sh /data/setusbconfig; do shim_mounted "$n" && { echo "FAIL shim still mounted on $n with composite down"; f=1; }; done; fi
   n=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); case "$n" in ''|*[!0-9]*) ;; *) [ "$n" -lt 1024 ] && echo "WARN FAT free ${n} KiB";; esac
@@ -286,9 +456,10 @@ jstr() { # JSON string: drop control bytes, escape backslash and quote
   printf '"%s"' "$(printf '%s' "$1" | tr '\n\t' '  ' | LC_ALL=C tr -cd ' -~' | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 jbool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
 health() {
-  local kl up fat dat mem links l st rc mounts ht
+  local kl up fat dat mem links l st rc mounts ht ec
   cfg_load
   agent_status_load
+  ecm_init; ecm_load; ec=$(ecm_counts)
   kl=$(kernel_line); up=$(cut -d. -f1 /proc/uptime)
   fat=$(df -Pk "$S" 2>/dev/null | awk 'END{print $4}'); dat=$(df -Pk "$MK20_HOME" 2>/dev/null | awk 'END{print $4}')
   mem=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
@@ -302,8 +473,11 @@ health() {
     printf '"version":%s,"uptime_s":%s,' "$(jstr "$V")" "$(num "$up")"
     printf '"kernel":{"p4":%s,"name":%s,"features":%s},' "$(jstr "$(p4sha)")" "$(jstr "$(echo "$kl" | cut -d' ' -f2)")" "$(jstr "$(echo "$kl" | cut -d' ' -f3)")"
     printf '"vendor":%s,' "$(jstr "$(vendor_check)")"
-    printf '"usb":{"udc":%s,"state":%s,"functions":%s,"composite":%s},' "$(jstr "$(cat "$G/UDC" 2>/dev/null)")" \
+    printf '"usb":{"udc":%s,"state":%s,"functions":%s,"composite":%s,' "$(jstr "$(cat "$G/UDC" 2>/dev/null)")" \
       "$(jstr "$(cat "$R"/sys/class/udc/*/state 2>/dev/null | head -n 1)")" "$(jstr "$links")" "$(jbool composite_up)"
+    printf '"ecm_state":%s,"ecm_rx_packets":%s,"ecm_tx_packets":%s,"ecm_rx_stalls":%s,"ecm_rearms":%s,"ecm_recoveries":%s,"ecm_probes":%s,"ecm_gave_up":%s},' \
+      "$(jstr "$ES_STATE")" "$(num "${ec%% *}")" "$(num "${ec##* }")" "$ES_STALLS" "$ES_REARMS" "$ES_RECOV" "$ES_PROBES" \
+      "$([ "$ES_GAVEUP" = 1 ] && echo true || echo false)"
     printf '"net":{"usb0":%s,"mtu":%s,"subnet":%s,"bridge":%s,"hidg0_writable":%s},' "$(jstr "$(ifconfig usb0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')")" \
       "$(num "$(cat "$R/sys/class/net/usb0/mtu" 2>/dev/null)")" "$(jstr "$ECM_SUBNET")" "$(jbool listening "$ECM_IP:$BRIDGE_PORT")" "$(jbool test -w "$R/dev/hidg0")"
     printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,"run_tmpfs":%s,' "$(num "$(kd_count)")" "$(jbool pidof adbd)" \
@@ -344,6 +518,7 @@ stock_adb() { # legacy adb.sh semantics: add adb beside ACM; on failure or lost 
     done ) </dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- &
 }
 
+[ "${MK20D_LIB:-}" = 1 ] && return 0 2>/dev/null   # tests: source the functions only
 case "${1:-}" in
 boot)
   cfg_load
@@ -433,6 +608,15 @@ boot)
   if [ $MODE = composite ] && [ "$grc" != 0 ] && [ "$(cat "$MK20_HOME/state/pending" 2>/dev/null)" = "$V" ]; then
     r="$r
 FAIL composite setup rc=$grc during probation"; src=1; fi
+  # 1.6.2 (incident 2026-10-23 23:07): on probation a host that is present and awake (UDC configured) with ECM active
+  # (usb0 carrier 1) must deliver host->device traffic: probe, at most one re-arm, probe again (ecm_gate). No host
+  # (asleep/unplugged/charger) or ECM not enabled by the host = INFO, never a failure. FAIL = not confirmed -> the
+  # loader's deadline reset -> rollback to the good release (the reset also re-enumerates).
+  if [ $MODE = composite ] && [ "$grc" = 0 ] && [ $src = 0 ] && probation; then
+    eg=$(ecm_gate); egrc=$?
+    r="$r
+$eg"; [ $egrc = 0 ] || src=1
+  fi
   echo "$r" > "$TM/selftest.txt"; log INFO selftest "rc=$src try=$try mode=$MODE $(echo "$r" | tr '\n' ';')"
   # per-boot records: selftest-last.json + selftest-1..4.json (previous boots)
   ST=$MK20_HOME/state; for k in 3 2 1; do [ -f "$ST/selftest-$k.json" ] && mv -f "$ST/selftest-$k.json" "$ST/selftest-$((k+1)).json"; done
@@ -459,17 +643,25 @@ health) health;;
 maint)
   exec 5>"$TM/mk20d-maint.lock"; flock -n 5 || exit 0   # single instance for the lifetime of the loop
   log INFO maint "start pid=$$"
+  # 1.6.2: the loop ticks every ECM_TICK_S for the ECM RX watchdog; rotation + health keep their MK20_MAINT_S period
+  ECM_TICK_S=${MK20_ECM_TICK_S:-5}; case "$ECM_TICK_S" in ''|.*|*[!0-9.]*) ECM_TICK_S=5;; esac
+  mnext=0
   while :; do
-    cfg_load
-    log_rotate "$LOGDIR/mk20d.log"; log_rotate "$LOGDIR/gadget.log"
-    b=$TM/bridge.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }   # O_APPEND writers keep appending
-    b=$TM/router.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
-    b=$TM/kbd.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
-    b=$TM/agent.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
-    # debug adbd logs every adb command into tmpfs RAM (~1 MB/h under soak/test polling): cap it like the others
-    b=$R/tmp/adbd.log; [ -f "$b" ] && [ ! -L "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
-    health > /dev/null 2>&1
-    sleep "${MK20_MAINT_S:-300}" 5>&-   # the lock dies with this loop, not with an orphaned sleep
+    mnow=$(cut -d. -f1 /proc/uptime)
+    if [ "$mnow" -ge "$mnext" ]; then
+      cfg_load
+      log_rotate "$LOGDIR/mk20d.log"; log_rotate "$LOGDIR/gadget.log"
+      b=$TM/bridge.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }   # O_APPEND writers keep appending
+      b=$TM/router.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
+      b=$TM/kbd.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
+      b=$TM/agent.log; [ -f "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
+      # debug adbd logs every adb command into tmpfs RAM (~1 MB/h under soak/test polling): cap it like the others
+      b=$R/tmp/adbd.log; [ -f "$b" ] && [ ! -L "$b" ] && [ "$(wc -c < "$b")" -gt 262144 ] && { tail -c 65536 "$b" > "$b.t" && cat "$b.t" > "$b"; rm -f "$b.t"; }
+      health > /dev/null 2>&1
+      mnext=$((mnow + $(num "${MK20_MAINT_S:-300}")))
+    fi
+    ecm_tick   # bounded: a probe <= ECM_PROBE_S, a re-arm bounded by gadget.sh's own supervisor
+    sleep "$ECM_TICK_S" 5>&-   # the lock dies with this loop, not with an orphaned sleep
   done;;
 router)
   exec 5>"$TM/router.lock"; flock -n 5 || exit 0
