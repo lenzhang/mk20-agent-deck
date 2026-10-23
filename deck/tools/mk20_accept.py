@@ -66,7 +66,20 @@ def run_proc(cmd: list[str], timeout: float, env: dict | None = None) -> tuple[i
         return 124, "", "timeout"
 
 
+# The device's debug adbd reads each host packet with one unaligned bulk read: a request ("shell:<cmd>" + NUL) over
+# 512 bytes can fail with EOVERFLOW, adbd drops the transport and reopens functionfs, and the WHOLE USB gadget
+# re-enumerates (HID keyboard + ECM link drop; seen 2026-10-23 00:48 with a 661-byte request). Never send one.
+ADB_SHELL_MAX = 480
+
+
+def adb_payload_len(cmd: str) -> int:
+    return len(("shell:" + cmd).encode()) + 1
+
+
 def sh(cmd: str, timeout: float = 20) -> tuple[int, str]:
+    n = adb_payload_len(cmd)
+    if n > ADB_SHELL_MAX:
+        raise ValueError(f"adb shell request of {n} bytes > {ADB_SHELL_MAX} (device adbd EOVERFLOW re-enumerates USB)")
     rc, o, _ = run_proc(adb_cmd() + ["shell", cmd], timeout)
     return rc, o
 

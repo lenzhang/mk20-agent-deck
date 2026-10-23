@@ -81,7 +81,11 @@ def _device(monkeypatch, health, meminfo=""):
     """sample() against a fake adb/device and Mac network (no subprocesses). Returns the adb shell commands."""
     def sh(cmd, timeout=20):
         calls.append(cmd)
-        return (0, "up") if cmd == "echo up" else (0, "kd=\nkbd=321\nlogkb=12 34\nbridgelog=99\n" + meminfo)
+        if cmd == "echo up":
+            return 0, "up"
+        if cmd == soak.MEMINFO_SH:
+            return 0, meminfo
+        return 0, "kd=\nkbd=321\nlogkb=12 34\nbridgelog=99\n"
     calls: list = []
     def run_proc(cmd, timeout, env=None):
         if cmd[0] == "route":
@@ -189,13 +193,14 @@ def test_meminfo_shell_command_on_device_awk(tmp_path):
     assert out.stdout == "meminfo=\n" and soak.parse_meminfo("") == dict.fromkeys(soak.MEMINFO_KEYS)
 
 
-def test_sample_reads_meminfo_in_the_existing_adb_call(monkeypatch):
+def test_sample_reads_meminfo_in_its_own_short_adb_call(monkeypatch):
     h = {"status": "ok", "uptime_s": 3600, "kd": 0, "selftest": {"pass": True}, "usb": {"composite": True}}
     one = " ".join(f"{k}:{v}" for k, v in MEMINFO_WANT.items())
     calls = _device(monkeypatch, h, meminfo=f"meminfo={one}\n")
     s = soak.sample(deep=False)
     assert s["ok"] is True and s["meminfo"] == MEMINFO_WANT and s["kbd_pid"] == "321" and s["bridge_log_b"] == "99"
-    assert len(calls) == 2 and soak.MEMINFO_SH in calls[1] and "echo kd=" in calls[1]   # no extra adb round-trip
+    assert calls == ["echo up", calls[1], soak.MEMINFO_SH] and "echo kd=" in calls[1]   # one extra short call
+    assert all(soak.acc.adb_payload_len(c) <= 400 for c in calls)   # well below the 512-byte adbd limit
     for out in ("", "meminfo=\n", "meminfo=Slab:oops\n"):              # old/odd output: nulls, sample still ok
         _device(monkeypatch, h, meminfo=out)
         s = soak.sample(deep=False)
@@ -296,3 +301,23 @@ def test_summary_kernel_mem_slopes_restart_at_reboot(tmp_path, monkeypatch):
     assert abs(km["sunreclaim_kb_h"]) < 2 and sm["kernel_mem_trend"] == "insufficient"
     assert km["SUnreclaim"]["first"] == 13000 and km["SUnreclaim"]["max"] == 13000 + 50 * 23 and km["SUnreclaim"]["last"] == 11820
     assert km["mem_avail_kb_h"] == 0.0
+
+
+def test_every_adb_request_of_a_sample_stays_far_below_the_adbd_limit(monkeypatch):
+    # The device's adbd fails a request over 512 bytes (EOVERFLOW) and the whole USB gadget re-enumerates.
+    h = {"status": "ok", "uptime_s": 3600, "kd": 0, "selftest": {"pass": True}, "usb": {"composite": True}}
+    calls = _device(monkeypatch, h)
+    soak.sample(deep=True)
+    assert calls and max(soak.acc.adb_payload_len(c) for c in calls) <= 400
+
+
+def test_accept_sh_refuses_an_oversized_adb_request(monkeypatch):
+    sent = []
+    monkeypatch.setattr(soak.acc, "run_proc", lambda cmd, timeout, env=None: sent.append(cmd) or (0, "ok", ""))
+    monkeypatch.setattr(soak.acc, "adb_cmd", lambda: ["adb"])
+    ok = "x" * (soak.acc.ADB_SHELL_MAX - len("shell:") - 1)
+    assert soak.acc.adb_payload_len(ok) == soak.acc.ADB_SHELL_MAX and soak.acc.sh(ok)[0] == 0 and len(sent) == 1
+    with pytest.raises(ValueError, match="EOVERFLOW"):
+        soak.acc.sh(ok + "y")
+    assert len(sent) == 1   # never sent
+    assert soak.acc.adb_payload_len("ü") == len("shell:") + 2 + 1   # bytes, not characters

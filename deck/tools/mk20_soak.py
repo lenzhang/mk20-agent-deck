@@ -17,7 +17,7 @@ restarts, rollbacks newer than the one present at start, composite losses, min m
 "selftest_warn": samples per distinct WARN/FAIL message (durations such as "12s" folded to "Ns").
 Kernel memory (slow kernel leaks hide under a flat MemAvailable; SLUB without SLUB_DEBUG: no /proc/slabinfo):
 every sample keeps "meminfo" = /proc/meminfo MemAvailable, MemFree, Slab, SReclaimable, SUnreclaim, Shmem,
-Cached in kB (read in the same adb shell call as the pids; a missing/unparsable field is null). The summary's
+Cached in kB (one short adb shell call; a missing/unparsable field is null). The summary's
 "kernel_mem" has first/last/min/max of Slab and SUnreclaim over the run and least-squares slopes in kB/h of
 SUnreclaim and MemAvailable since the last reboot (null below 6 samples or 1 h). "kernel_mem_trend":
 "growing" = SUnreclaim slope > 50 kB/h (= 1.2 MB/day) over >= 6 h, in the whole span AND in each half of it
@@ -171,9 +171,12 @@ def sample(deep: bool) -> dict:
                       # after a pid wrap, reported the shell as a "restart" every sample (10-20/21 overnight soak).
                       "echo kbd=$(for p in $(pidof mk20-kbd); do grep -q -- --run /proc/$p/cmdline && echo $p; done | head -n 1); "
                       "echo logkb=$(du -k /data/mk20/logs /mnt/SDCARD/mk20/logs 2>/dev/null | awk '{print $1}' | tr '\\n' ' '); "
-                      "echo bridgelog=$(wc -c < /tmp/mk20/bridge.log 2>/dev/null); " + MEMINFO_SH)
+                      "echo bridgelog=$(wc -c < /tmp/mk20/bridge.log 2>/dev/null)")
         f = dict(l.split("=", 1) for l in o.splitlines() if "=" in l)
-        s["meminfo"] = parse_meminfo(f.get("meminfo"))   # same adb call: adbd (debug) logs every command to tmpfs
+        # Own short call: appending it to the pid probe above would push that request to ~464 bytes, too close to
+        # the 512-byte adbd limit (acc.ADB_SHELL_MAX).
+        _, mo = acc.sh(MEMINFO_SH, timeout=10)
+        s["meminfo"] = parse_meminfo(dict(l.split("=", 1) for l in mo.splitlines() if "=" in l).get("meminfo"))
         s["kd_pid"] = f.get("kd", "").strip()
         s["kbd_pid"] = f.get("kbd", "").strip()
         s["log_kb"] = f.get("logkb", "").strip()
