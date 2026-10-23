@@ -34,7 +34,17 @@ Review records: `deck/reviews/1.7.0/fw162-rc1-kimi-k3.md` (1.6.2-rc1 NO-GO), `fw
   setup without the alias (record `ll=0`, usb0 kept and re-created) re-arms with no reboot; without a record the
   alias is required exactly if it was up; setup records the alias result before the bridge starts.
 
-1.7.0-rc2 host validation: EVIDENCE-RC2
+rc2 host validation only (Docker mk20-build:trixie, BusyBox 1.27.2, nothing else running beside it): `make test` green
+on the first run — tests 1398 passed / 1 skipped (rc1 1389: +9 `test_ecm_watchdog.py`), agent 398, onboard 16683, kbd
+4219 ASan + 4219 TSan, safe mode 2 scenarios, e2e OK, ui 41405, 374 goldens unchanged, sim 38, tools 83 passed / 1
+skipped, shellcheck clean, release binaries match source. `make mac-test` (macOS, native, on a `git archive` export
+of 841bf74): 824 passed / 575 skipped, no failures. E-stop latencies unchanged (socket e-stop -> all-up 1.4 ms;
+stalled host 0.1–0.2 ms, its K2 hold 1011.8 ms; blocked status worker 0.8 / 1008.4 ms). The two orphan tests fail on
+the rc1 mk20d. `sbin/mk20d` sha256 `84114c573eadafd0708cffed5a4b0461d447e1b5ad65fbac97df7338b1a67348`,
+`share/gadget.sh` `984ad3297440ec621bf4008ca9bbbfed98e5d827f621481473304905ede2aa9c`; the binaries and the other 10
+files are identical to rc1. `mk20-fw-1.7.0.tar` (rc2, 14 files, 2754560 B; two builds from independent `git archive`
+exports of 841bf74 are byte-identical) sha256 `07fdb48077f05543cdb728122dfcc22a202ff0247c8ec1778be4d4a254ae3876`
+(`~/worktrees/rel-1.7.0-rc2/`). **No device acceptance claimed** (the hardware checks listed under rc1 below apply).
 
 ### 1.7.0-rc1
 
