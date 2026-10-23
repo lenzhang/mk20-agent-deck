@@ -194,6 +194,82 @@ def test_supervisor_reports_busy_port_without_killing():
     assert len(msgs) == 1 and "ScreenKey" in msgs[0]
 
 
+def _down_notes(sup):
+    return [m for _, m in sup.stats.events if m.startswith("仍未连接 MK20")]
+
+
+def test_supervisor_logs_while_it_cannot_connect_at_least_every_10_min():
+    """2026-10-23: after "未找到 MK20 CDC 端口" the daemon log was silent for 50 min. While nothing connects it now
+    logs one line with the elapsed time every down_note_s (10 min); the repeated port message itself stays once."""
+    cfg = DeckConfig()
+    t = [1000.0]
+    sup = Supervisor(_ctl(FakeClock()), lambda: [], lambda p: None, default_renderer_factory(cfg), cfg,
+                     retry_s=0.01, clock=lambda: t[0])
+    assert sup.down_note_s == 600.0
+    stop = threading.Event()
+    th = threading.Thread(target=sup.run, args=(stop,), daemon=True)
+    th.start()
+    try:
+        assert wait_until(lambda: any("未找到 MK20 CDC 端口" in m for _, m in sup.stats.events))
+        t[0] = 1000 + 599
+        time.sleep(0.2)
+        assert _down_notes(sup) == []
+        t[0] = 1000 + 600
+        assert wait_until(lambda: len(_down_notes(sup)) == 1)
+        assert _down_notes(sup) == ["仍未连接 MK20：已 10 分钟（最近：未找到 MK20 CDC 端口，等待接入）"]
+        t[0] = 1000 + 1199
+        time.sleep(0.2)
+        assert len(_down_notes(sup)) == 1
+        t[0] = 1000 + 3050                                   # 50 min (the incident): at least one line per 10 min
+        assert wait_until(lambda: len(_down_notes(sup)) == 2)
+        assert _down_notes(sup)[-1].startswith("仍未连接 MK20：已 50 分钟")
+        msgs = [m for _, m in sup.stats.events]
+        assert msgs.count("未找到 MK20 CDC 端口，等待接入") == 1   # the port message is still said once
+    finally:
+        stop.set()
+        th.join(3)
+    assert not th.is_alive()
+
+
+def test_supervisor_down_time_counts_from_the_loss_and_never_while_connected():
+    cfg = DeckConfig()
+    cfg.preamble_flush = 0
+    cfg.ack_timeout_s = 0.2
+    cfg.heartbeat_s = 0.05
+    cfg.poll_interval_s = 0.5
+    t = [0.0]
+    state = {"dev": MockDevice(), "present": True}
+    sup = Supervisor(_ctl(FakeClock()), lambda: ["/dev/mock"] if state["present"] else [],
+                     lambda port: state["dev"], default_renderer_factory(cfg), cfg, retry_s=0.05, clock=lambda: t[0])
+    stop = threading.Event()
+    th = threading.Thread(target=sup.run, args=(stop,), daemon=True)
+    th.start()
+    try:
+        assert wait_until(lambda: sup.stats.connects == 1)
+        t[0] = 7200.0                                        # connected for 2 h: nothing to report
+        time.sleep(0.3)
+        assert _down_notes(sup) == []
+        state["dev"].unplugged = True
+        state["present"] = False
+        assert wait_until(lambda: any("连接中断" in m for _, m in sup.stats.events))
+        t[0] = 7200.0 + 599
+        time.sleep(0.2)
+        assert _down_notes(sup) == []                         # counted from the loss, not from the start
+        t[0] = 7200.0 + 660
+        assert wait_until(lambda: len(_down_notes(sup)) == 1)
+        assert _down_notes(sup)[0].startswith("仍未连接 MK20：已 11 分钟")
+        state["dev"] = MockDevice()
+        state["present"] = True
+        assert wait_until(lambda: sup.stats.connects == 2)
+        t[0] = 7200.0 + 5000                                 # connected again: silent
+        time.sleep(0.3)
+        assert len(_down_notes(sup)) == 1
+    finally:
+        stop.set()
+        th.join(3)
+    assert not th.is_alive()
+
+
 # ------------------------------------------------------------------ devtest
 def _scripted(state, fw_base, power):
     def dev():

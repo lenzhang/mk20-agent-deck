@@ -45,6 +45,12 @@ class Supervisor:
     _last_port_msg: str = ""
     calls: object | None = None  # webui.LoopCalls: arrange-page changes, run on this thread (also while unplugged)
     arrange: object | None = None  # webui.ArrangeServer for the keyboard's 会话安排 key (ui.openArrange); None = off
+    # While it cannot (re)connect: one line with the elapsed time at least this often (2026-10-23 incident: after the
+    # last "未找到 MK20 CDC 端口" the log stayed silent for 50 min while the keyboard's bridge was stuck).
+    down_note_s: float = 600.0
+    clock: Callable[[], float] = time.monotonic
+    _down_since: float | None = None  # not connected since (clock); None while connected
+    _down_noted: float = 0.0
 
     def _wait(self, stop: threading.Event, secs: float) -> None:
         """``stop.wait`` that keeps serving queued arrange-page calls while no device is connected."""
@@ -58,6 +64,17 @@ class Supervisor:
             if left <= 0:
                 return
             self.calls.wait(min(left, 0.5))
+
+    def _note_down(self) -> None:
+        """Every ``down_note_s`` without a connection: one line with the elapsed time and the last reason."""
+        if self._down_since is None:
+            return
+        now = self.clock()
+        if now - self._down_noted < self.down_note_s:
+            return
+        self._down_noted = now
+        mins = int((now - self._down_since) // 60)
+        self.stats.note(f"仍未连接 MK20：已 {mins} 分钟（最近：{self._last_port_msg or '等待接入'}）")
 
     def _say_once(self, msg: str) -> None:
         if msg != self._last_port_msg:
@@ -85,9 +102,11 @@ class Supervisor:
 
     def run(self, stop: threading.Event, max_connects: int | None = None) -> SupervisorStats:
         cfg = self.cfg
+        self._down_since = self._down_noted = self.clock()
         while not stop.is_set():
             if max_connects is not None and self.stats.connects >= max_connects:
                 break
+            self._note_down()
             ports = [cfg.port] if cfg.port != "auto" else self.find_ports()
             if not ports:
                 self._say_once("未找到 MK20 CDC 端口，等待接入")
@@ -117,6 +136,7 @@ class Supervisor:
                 renderer.layout = link.handshake(cfg.fw_coord_base)
                 self.stats.connects += 1
                 self._last_port_msg = ""
+                self._down_since = None
                 self.stats.note(f"已连接 {ports[0]} 画布 {renderer.layout.width}x{renderer.layout.height}"
                                 f"{'（猜测）' if renderer.layout.guessed else ''}")
                 self.apply_backlight(link)
@@ -134,6 +154,8 @@ class Supervisor:
                 if stop.is_set() and link.connected:
                     d.offline_frame("守护进程已退出")
                 link.close()
+                if self._down_since is None:  # was connected: the down time counts from this loss
+                    self._down_since = self._down_noted = self.clock()
             self._wait(stop, max(settle, 0.5))
         return self.stats
 
