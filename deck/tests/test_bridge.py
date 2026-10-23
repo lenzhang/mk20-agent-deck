@@ -1,5 +1,6 @@
-"""M2: ttygs_tcp_bridge v3 (host build of the same source): strict args, multi-listen, client replacement, --tap."""
-import os, shutil, socket, subprocess, time
+"""M2: ttygs_tcp_bridge v4 (host build of the same source): strict args, multi-listen, client replacement, --tap,
+non-blocking pty master with stall flush (1.6.1)."""
+import os, re, select, shutil, socket, subprocess, threading, time
 import pytest
 from conftest import DECK
 
@@ -187,3 +188,161 @@ def test_tap_unavailable_continues(br, tmp_path):
     finally:
         p.terminate(); err = p.communicate(timeout=5)[1]
     assert "continuing without tap" in err
+
+
+
+# ---- v4 (firmware 1.6.1): never block the loop on the pty master; flush a stalled pty input path ----
+class _Err:
+    """Collects the bridge's stderr lines with their arrival time (monotonic)."""
+    def __init__(self, p):
+        self.lines: list = []
+        self._t = threading.Thread(target=self._run, args=(p,), daemon=True)
+        self._t.start()
+
+    def _run(self, p):
+        for line in p.stderr:
+            self.lines.append((time.monotonic(), line.rstrip("\n")))
+
+    def stalls(self):
+        return [(t, l) for t, l in self.lines if "pty input stalled" in l]
+
+    def wait_stall(self, n, timeout):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and len(self.stalls()) < n:
+            time.sleep(0.02)
+        return self.stalls()
+
+
+def _recv_exact(s, n, timeout=3.0):
+    s.settimeout(timeout); got = b""
+    while len(got) < n:
+        c = s.recv(n - len(got))
+        if not c:
+            break
+        got += c
+    return got
+
+
+def _closed(s, timeout=2.0):
+    """True once the peer closed s (EOF or RST); unread data is skipped."""
+    s.settimeout(timeout); end = time.monotonic() + timeout
+    try:
+        while time.monotonic() < end:
+            if s.recv(65536) == b"":
+                return True
+    except (ConnectionResetError, BrokenPipeError):
+        return True
+    except socket.timeout:
+        return False
+    return False
+
+
+def _flood_until_blocked(c, quiet=0.3, limit=1.5):
+    """Send on non-blocking c until sends have failed with EAGAIN for `quiet` s (the bridge stopped reading)."""
+    chunk = bytes(range(256)) * 64; blocked = None; end = time.monotonic() + limit; sent = 0
+    while time.monotonic() < end:
+        try:
+            sent += c.send(chunk); blocked = None
+        except BlockingIOError:
+            blocked = blocked or time.monotonic()
+            if time.monotonic() - blocked >= quiet:
+                return sent
+            time.sleep(0.005)
+    raise AssertionError(f"client never blocked ({sent} bytes sent): the bridge kept reading a full pty")
+
+
+def test_pty_stall_keeps_the_bridge_responsive_then_flushes(br, tmp_path):
+    """Incident 2026-10-23 (1.6.0-rc4): a pty slave whose input nobody consumes + a flooding client. The bridge must
+    keep serving (master->client forwarding, a new client accepted) while the pty input is full, flush the slave's
+    input after PTY_STALL_MS = 2 s without write progress (one log line, pending bytes dropped, current client closed),
+    and carry normal traffic once a reader appears."""
+    p, link = _start(br, tmp_path, 18050)
+    err = _Err(p)
+    try:
+        slave = os.open(link, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)   # the "KD side": written, never read (yet)
+        c1 = socket.create_connection(("127.0.0.1", 18050)); time.sleep(0.1)
+        c1.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384); c1.setblocking(False)
+        t0 = time.monotonic()
+        _flood_until_blocked(c1)                       # pty input full, bridge pending full, TCP backpressure
+        assert not err.stalls() and p.poll() is None
+        # master -> client still forwarded while the client -> pty direction is blocked
+        os.write(slave, b"kd-out-1")
+        select.select([c1], [], [], 1.0)
+        c1.setblocking(True)
+        assert _recv_exact(c1, 8, 1.0) == b"kd-out-1"
+        # a new client is accepted (replaces c1) and gets KD output, still before the stall flush
+        c2 = socket.create_connection(("127.0.0.1", 18050), timeout=1.0); time.sleep(0.1)
+        os.write(slave, b"kd-out-2")
+        assert _recv_exact(c2, 8, 1.0) == b"kd-out-2"
+        assert _closed(c1, 1.0)                        # replaced
+        t_c2 = time.monotonic()
+        st = err.wait_stall(1, 6.0)
+        assert len(st) == 1, err.lines
+        t_line, line = st[0]
+        assert t_line > t_c2, "c2 was served only after the flush: the loop was blocked"
+        m = re.search(r"pty input stalled (\d+) s: flushed \(#1\); (\d+) pending bytes dropped, client closed$", line)
+        assert m and m.group(1) == "2" and 0 < int(m.group(2)) <= 4096, line
+        assert 2.0 <= t_line - t0 <= 5.0, t_line - t0  # 2 s without write progress (PTY_STALL_MS)
+        assert _closed(c2, 2.0)                        # the current client is closed: the host reconnects
+        with pytest.raises(BlockingIOError):           # TCIFLUSH emptied the slave input (flip buffer + ldisc)
+            os.read(slave, 65536)
+        # a reader appears: normal traffic in both directions, no further stall
+        got = bytearray(); stop = threading.Event()
+
+        def reader():
+            while not stop.is_set():
+                r, _, _ = select.select([slave], [], [], 0.05)
+                if r:
+                    try:
+                        got.extend(os.read(slave, 65536))
+                    except BlockingIOError:
+                        pass
+        th = threading.Thread(target=reader, daemon=True); th.start()
+        c3 = socket.create_connection(("127.0.0.1", 18050)); time.sleep(0.1)
+        payload = os.urandom(256 * 1024)
+        c3.sendall(payload)
+        end = time.monotonic() + 10
+        while len(got) < len(payload) and time.monotonic() < end:
+            time.sleep(0.02)
+        stop.set(); th.join(2)
+        assert bytes(got) == payload
+        os.write(slave, b"kd-out-3")
+        assert _recv_exact(c3, 8, 1.0) == b"kd-out-3"
+        assert len(err.stalls()) == 1 and p.poll() is None
+    finally:
+        p.terminate(); p.wait(5)
+
+
+def test_slow_reader_never_triggers_the_stall_flush(br, tmp_path):
+    """A reader that pauses 1.2 s at a time (< PTY_STALL_MS) while the client floods: no flush, every byte in order."""
+    p, link = _start(br, tmp_path, 18051)
+    err = _Err(p)
+    try:
+        slave = os.open(link, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        c = socket.create_connection(("127.0.0.1", 18051)); time.sleep(0.1)
+        payload = os.urandom(256 * 1024)
+        th = threading.Thread(target=c.sendall, args=(payload,), daemon=True); th.start()
+        got = bytearray()
+        for i in range(3):                             # pause with the pty full, then read ~64 KiB
+            time.sleep(1.2)
+            while len(got) < 64 * 1024 * (i + 1):
+                r, _, _ = select.select([slave], [], [], 0.2)
+                if not r:
+                    break
+                try:
+                    got.extend(os.read(slave, 4096))
+                except BlockingIOError:
+                    pass
+        end = time.monotonic() + 10
+        while len(got) < len(payload) and time.monotonic() < end:
+            r, _, _ = select.select([slave], [], [], 0.05)
+            if r:
+                try:
+                    got.extend(os.read(slave, 65536))
+                except BlockingIOError:
+                    pass
+        th.join(2)
+        assert bytes(got) == payload and not err.stalls(), err.lines
+        assert p.poll() is None
+    finally:
+        p.terminate(); p.wait(5)
