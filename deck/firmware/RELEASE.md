@@ -4,7 +4,39 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
-## 1.7.0-rc1: ECM host→device watchdog + host-traffic confirm gate (incident 2026-10-23 23:07)
+## 1.7.0-rc2: ECM host→device watchdog + host-traffic confirm gate (incident 2026-10-23 23:07)
+
+### 1.7.0-rc2: Kimi K3 1.7.0-rc1 delta (GO) MAJOR + MINORs
+
+Build id **rc2**: `sh tools/mk20-release-build.sh firmware out rc2`; VERSION stays 1.7.0 (rc1 never installed).
+Review records: `deck/reviews/1.7.0/fw162-rc1-kimi-k3.md` (1.6.2-rc1 NO-GO), `fw170-rc1-kimi-k3.md` (1.7.0-rc1 GO, all
+1.6.2 items FIXED, no USB-bricking path, ecm-reboots bounded). Changed against rc1: `sbin/mk20d` and
+`share/gadget.sh`; the binaries are identical to rc1.
+
+- **MAJOR (mk20d probe):** the rc1 probe wrapped each ping in a looping subshell and killed only that subshell, so
+  a ping that does not exit by itself (the non-fancy `ping HOST`) was orphaned, one per host address every
+  verification round (process/memory growth over a long episode; late replies inflating usb0 RX). Now each round
+  backgrounds every ping as itself (its pid is the ping), kills and reaps exactly those at the end of the round,
+  and reads the reply from its exit status. `ping -c 1 -W 1` is preferred (confirmed on the device: BusyBox 1.27.2
+  `ping -c 1 -W 1 127.0.0.1` rc 0); plain `ping HOST` stays the fallback and cannot orphan either.
+- **MINOR (adb push / install):** besides the install inboxes (`/data/mk20/incoming` — where
+  `tools/mk20-install.sh` pushes — and `/tmp/mk20/incoming`), the loader's staging (`releases/.staging.tar`,
+  `releases/.incoming-*`, present only while `loader install` runs) refuses a re-arm, so an install in progress is
+  never interrupted.
+- **MINOR (alias):** setup_main only WARNs when the `usb0:1` link-local alias fails (the bridge then listens on the
+  ECM address only); it now records what it achieved (`/tmp/mk20/usb0.setup` `ll=1|0`), and a re-arm restores and
+  requires exactly that (the alias and its listener only with `ll=1`; without a record: as it was before the
+  re-arm), so a board running without the alias no longer gets rc 2 → reboot on its first re-arm.
+- **Accepted, documented:** a permanent adbd child keeps the re-arm refused (logged once per episode; the watchdog
+  keeps observing, the gate reports WARN, nothing fails).
+- Tests: `test_ecm_watchdog.py` +9 — no ping survives a probe, fancy and non-fancy (a ping that never exits by
+  itself; both fail on the rc1 mk20d), the fancy argv; loader staging (`.staging.tar`, `.incoming-*`) refused; a
+  setup without the alias (record `ll=0`, usb0 kept and re-created) re-arms with no reboot; without a record the
+  alias is required exactly if it was up; setup records the alias result before the bridge starts.
+
+1.7.0-rc2 host validation: EVIDENCE-RC2
+
+### 1.7.0-rc1
 
 `firmware/VERSION` is **1.7.0** (MINOR by the rule below: a new self-test gate); build id **rc1**:
 `sh tools/mk20-release-build.sh firmware out rc1`. feature/fw-1.6.2 = release/1.6.1 (8d08ca9: 1.6.1-rc2 + its
@@ -36,7 +68,8 @@ it (re-acceptance PASS).
   state file) — its ECM driver runs the data interface (usb0 carrier 1), usb0 RX has not grown for **60 s**, and a
   probe proves the host reads the device while nothing it sends arrives: BusyBox `ping` toward the host addresses
   (learned on usb0 from ARP, the subnet's `.1`, `169.254.7.1`; ARP first; `ping -c 1 -W 1` when the BusyBox has
-  FEATURE_FANCY_PING — tested on loopback — else plain `ping HOST`) for ≤ 8 s makes usb0 TX grow — u_ether counts a
+  FEATURE_FANCY_PING — tested on loopback, the device has it — else plain `ping HOST`; rc2: rounds of 1 s, every
+  ping the probe's own child, killed and reaped each round) for ≤ 8 s makes usb0 TX grow — u_ether counts a
   TX packet only when its IN transfer completed, i.e. the host polled the bulk IN endpoint — and RX stays put. A
   healthy host answers the ARP in milliseconds (an idle Mac without mk20deck is probed, answers, and nothing
   happens); a host that completes no TX (not polling usb0, e.g. asleep without a USB suspend) is `host-idle`: no
@@ -103,9 +136,9 @@ it (re-acceptance PASS).
   (descriptors before bind), let adbd bind the UDC (stock adbd does) or bind it once ep1 exists, then **the ECM
   netdev**: wait for `/sys/class/net/usb0`; unchanged ifindex + address + MTU 478 + `usb0:1` alias = kept as it
   is; otherwise (the re-bind re-registered it bare: no address, MTU 1500 — losing the sunxi_udc ≤ 512 B PIO
-  workaround — new ifindex) setup_main's three lines again: `ifconfig usb0 mtu 478`, `ifconfig usb0 $ECM_IP
-  netmask $ECM_MASK up`, `ifconfig usb0:1 $LL_IP netmask 255.255.0.0 up` (`MK20_LL_IP` now in gadget.env and the
-  GENV whitelist), verified; a re-created usb0 (or a missing bridge listener) restarts the bridge through its own
+  workaround — new ifindex) setup_main's lines again: `ifconfig usb0 mtu 478`, `ifconfig usb0 $ECM_IP netmask
+  $ECM_MASK up`, and `ifconfig usb0:1 $LL_IP netmask 255.255.0.0 up` if setup had the alias (rc2: its record
+  `/tmp/mk20/usb0.setup`; `MK20_LL_IP` in gadget.env and the GENV whitelist), verified; a re-created usb0 (or a missing bridge listener) restarts the bridge through its own
   loop (SIGTERM; the loop starts a new one after 1 s; both listeners verified — the old ones were SO_BINDTODEVICE on
   the old ifindex; mk20-kbd reopens its pty on EIO) and asks `mk20d web` to re-bind mk20-agent (also
   SO_BINDTODEVICE usb0; `/tmp/mk20/web.rebind`, not counted as a crash); wait for hidg0, remove the stop file
@@ -120,7 +153,8 @@ it (re-acceptance PASS).
 - **Refused with nothing touched (rc 4)** while the transition mutex is held (setup/rollback), a watcher job /
   `cmd-rollback` / `cmd-reboot` is queued, the loader install or state lock is held, **adbd has any child** (an
   `adb shell` or any adb command), **a file in an install inbox (`/data/mk20/incoming`, `/tmp/mk20/incoming`)
-  changed within 120 s** (an `adb push` writes there without an adbd child; killing adbd would cut it), a teardown
+  changed within 120 s** (an `adb push` writes there without an adbd child; killing adbd would cut it) or the
+  loader's staging exists (rc2: `releases/.staging.tar`, `.incoming-*`), a teardown
   marker exists (`gadget.busy`, flapmon/kbd/router stop files), the host is not configured, or flapmon logged a
   link drop within FLAP_WINDOW + 5 s. A permanently present adbd child would keep it refused: logged once per
   episode, the watchdog keeps observing and the gate does not judge.
@@ -823,7 +857,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
-| 1.7.0 | 2026-10-24 | **1.7.0-rc1** (first built as 1.6.2-rc1: Kimi K3 NO-GO, never installed; renamed: a new self-test gate is MINOR): ECM host→device fault of the 1.6.1-rc2 install (2026-10-23 23:07: after the probation reboot the gadget was configured, usb0 carrier 1, usb0 RX frozen at 1 packet while the Mac sent; the selftest passed and 1.6.1 was confirmed; a hardreset fixed it). mk20d maint ECM RX watchdog: host present and awake (UDC configured, never suspended) + ECM active (carrier 1) + usb0 RX frozen 60 s + a ping/ARP probe whose TX completes while RX stays put → `gadget.sh --rearm-now` (ONE soft re-enumeration of the existing composite: HID quiesced, adbd restarted, unbind/bind, then usb0 re-configured if the re-bind left it bare (MTU 478, address, link-local alias), bridge and web re-bound; under the transition mutex; refused during setup/rollback/install/adb sessions or pushes, within flapmon's window or with FLAP_DROPS < 4); recovered only on an answer from the host (echo reply or a new bridge client); ≤ 3 re-arms per rolling hour, then one watcher `cmd-reboot`, at most once in a row across boots; health `usb.ecm_*`, selftest INFO/WARN; FAT `mk20-no-ecm-rearm` = observe only. Probation gate: with a host present and ECM active, confirm only after proven host→device traffic, or an answer after the gate's own re-arm; no host = skipped; a stall the gate could not try to fix = WARN, not judged; FAIL → no confirm → loader rollback. Bridge: a run-time stall-file write failure is logged once per streak. mk20-kbd: an owner-1 host key with a lost GD32 up ends 60 s after its press (host up + cut latch). `sbin/mk20d`, `share/gadget.sh`, `bin/ttygs_tcp_bridge`, `bin/mk20-kbd` changed. |
+| 1.7.0 | 2026-10-24 | **1.7.0-rc1** (first built as 1.6.2-rc1: Kimi K3 NO-GO, never installed; renamed: a new self-test gate is MINOR): ECM host→device fault of the 1.6.1-rc2 install (2026-10-23 23:07: after the probation reboot the gadget was configured, usb0 carrier 1, usb0 RX frozen at 1 packet while the Mac sent; the selftest passed and 1.6.1 was confirmed; a hardreset fixed it). mk20d maint ECM RX watchdog: host present and awake (UDC configured, never suspended) + ECM active (carrier 1) + usb0 RX frozen 60 s + a ping/ARP probe whose TX completes while RX stays put → `gadget.sh --rearm-now` (ONE soft re-enumeration of the existing composite: HID quiesced, adbd restarted, unbind/bind, then usb0 re-configured if the re-bind left it bare (MTU 478, address, link-local alias), bridge and web re-bound; under the transition mutex; refused during setup/rollback/install/adb sessions or pushes, within flapmon's window or with FLAP_DROPS < 4); recovered only on an answer from the host (echo reply or a new bridge client); ≤ 3 re-arms per rolling hour, then one watcher `cmd-reboot`, at most once in a row across boots; health `usb.ecm_*`, selftest INFO/WARN; FAT `mk20-no-ecm-rearm` = observe only. Probation gate: with a host present and ECM active, confirm only after proven host→device traffic, or an answer after the gate's own re-arm; no host = skipped; a stall the gate could not try to fix = WARN, not judged; FAIL → no confirm → loader rollback. Bridge: a run-time stall-file write failure is logged once per streak. mk20-kbd: an owner-1 host key with a lost GD32 up ends 60 s after its press (host up + cut latch). `sbin/mk20d`, `share/gadget.sh`, `bin/ttygs_tcp_bridge`, `bin/mk20-kbd` changed. **rc2** (Kimi K3 rc1 delta GO + MAJOR/MINORs): every probe ping is the probe's own child, killed and reaped each 1 s round (rc1 orphaned a non-exiting `ping HOST` per round), `ping -c 1 -W 1` preferred; the loader's staging also blocks a re-arm; a re-arm restores/requires the link-local alias only if setup had it (setup records `ll=`). `sbin/mk20d` + `share/gadget.sh` changed against rc1. |
 | 1.6.1 | 2026-10-23 | **1.6.1-rc1**: host link self-healing after the 1.6.0-rc4 incident (2026-10-23 20:01, 51 min without a host link: the bridge blocked in a pty master write while the 5.4.61 slave input path stalled with its flip buffer full and n_tty empty; a one-off `tcflush(slave, TCIFLUSH)` recovered it). Bridge v4: non-blocking master, bounded 4 KiB pending buffer on POLLOUT with TCP backpressure, 2 s without write progress → TCIFLUSH on the slave + one log line + pending dropped + client closed; KD→client and accepts keep working. mk20-kbd: 5 s host silence → TCIFLUSH at most once per 5 s (`host_flushes`). Soak: `host_link` liveness (json_in must grow while a client is connected). mk20deck: a line every 10 min while it cannot connect. `bin/ttygs_tcp_bridge` + `bin/mk20-kbd` changed. **rc2** (Kimi K3 GO + 4 MINORs): a replacing client drops the old session's pending bytes (a stall can no longer close it for them); stall log once per streak (+ count every 10 min / at the end); bridge `--stall-file /tmp/mk20/bridge.stalls` (gadget.sh, release bridge only) and soak `host_link: "self-healed"` / `host_link_selfheals` / `bridge_stalls_total` / `host_flushes_total`; the accepted µs flush race documented. `bin/ttygs_tcp_bridge` + `share/gadget.sh` changed against rc1. |
 | 1.6.0 | 2026-10-22 | **1.6.0-rc1**: host protocol additions — a same-page `ui.page` only redraws (held PTT / ⌫ / ⏎ / Esc / digit keep their owners and HID state; a route change keeps the full boundary); `ui.hello` names the route (`"page":"L1"\|"L4"\|"none"`), a route changed while no host was ONLINE is K2-tapped before that reply; a fresh `ui.hello` resets `generation` / `hid_generation` to 0; LS fb17 会话安排 sends `{"method":"ui.openArrange"}` (mk20deck opens the 会话安排 page through a one-time link file). Mac: hello page seeds the page belief (no same-page request after a reconnect), hello generations taken as authoritative under a lock (exhaustion recovers), ui.openArrange handler. Only `bin/mk20-kbd` changed. **rc2** (Kimi K3 NO-GO fixes): PTT lost-up cap 120 s (kept host key / 回 L1 across a same-page request: 10 s after it); post-e-stop pause keeps owners through a repeated GD32 down and 回 L1 is inert there (both pre-existing in 1.5.1); mk20deck drops numbered requests decided before a hello, follows a keyboard K2 made while PROBING (no pull-back), arrange access log without query strings. **rc3** (Kimi K3 GO + 2 MINORs): absolute caps per press (PTT 10 min, kept key 60 s) that repeated GD32 downs cannot extend, cut keys inert until their up; the 5 s e-stop pause resync also releases held owners (pre-existing in 1.5.1). **rc4** (Kimi K3 GO + 2 MINORs, 1 nit): same-page bound cleared on every owner-ending path; a repeated GD32 down of a held host key is not forwarded again; keep-cut log shows the real held time. |
 | 1.5.1 | 2026-10-22 | **Production `v1.5.1` (2026-10-23)** = build rc1 + Mac f8de052 after a 24 h soak PASS (288 samples, all zero). **1.5.1-rc1**: option mode — tapping a hook-tracked session that waits for input/approval clears rows 1–3 and shows its options on the top row (labels from Claude AskUserQuestion / fixed permission labels / digits); host→device `ui.hidKeys` maps fb1..fb15 to momentary HID digits (allow-list 1–9, L1 only, cleared on page/host/e-stop, 30 s expiry); digits ignored while PTT is held. |

@@ -114,11 +114,12 @@ Reading it: `rearm.last` is `rc=0 up=… re-enumerated` and gadget.log has `REAR
 state=configured adbd=<pid> usb0=kept|reconfigured` (`reconfigured` = the re-bind re-registered usb0 and the three
 ifconfig lines, the bridge and the web were redone: then also `REARM: usb0 re-created/bare (ifindex A -> B)` and
 `REARM: restarting the bridge`, and mk20d.log `web … usb0 re-created: re-binding`). Afterwards `ifconfig usb0` must
-show `inet addr:172.30.250.2` and `MTU:478`, `ifconfig usb0:1` `inet addr:169.254.7.2`, netstat both
-`172.30.250.2:17890` and `169.254.7.2:17890` plus `:8780`, the UDC `configured`; on the Mac mk20deck reconnects
+show `inet addr:172.30.250.2` and `MTU:478`, `ifconfig usb0:1` `inet addr:169.254.7.2` and netstat
+`169.254.7.2:17890` if setup had the alias (`cat /tmp/mk20/usb0.setup` = `ll=1`; `ll=0` = setup's WARN, then neither
+is required), netstat `172.30.250.2:17890` plus `:8780`, the UDC `configured`; on the Mac mk20deck reconnects
 (`ui.hello`) and the keyboard types; flapmon shows at most 1–2 `link drop` lines and no `FLAPPING`; the loader
 status is unchanged. `rc=4 … refused: <reason>` = nothing was touched (a flapmon drop in the last 65 s, an adb
-shell left open, a push into `/data/mk20/incoming`, no host configured, …): fix the reason and queue again.
+shell left open, a push into `/data/mk20/incoming` or a running `loader install`, no host configured, …): fix the reason and queue again.
 `rc=1` = aborted before any USB change (mk20-kbd did not release hidg0). `rc=2` = USB not restored: the watcher
 hard-resets the board ~30 s later (the intended recovery). If adb has not come back after ~2 min (no rc 2 reset
 either): a USB power cycle.
