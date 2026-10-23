@@ -94,6 +94,27 @@ their option menus.
   slot select/focus/pick-up or any other Mac action, even when its option mode ended a moment earlier. The HID
   path never waits for or depends on the host.
 
+## 1.6.2 host key lost-up cap (the 1.6.0/1.6.1 residual; PATCH)
+
+- **Rule.** A held host key (owner 1: a session / mode key, the Mac mode key fb20, the PTT-ignored digit, or the
+  host half an e-stop / SUSPECT left of a forwarded ⌫/⏎/Esc or digit) ends `HOST_KEY_MAX_MS` = **60 s after its
+  press** (`press_at`; for a converted host half the original press) like the other lost key-up guards: the host
+  gets its up (`pending_up`, once — a queued up is not repeated), the key is latched (`cut_latch`) until the GD32
+  reports its up, so phantom downs stay inert; stderr `mk20-kbd: host key held N s: released (lost key-up guard)`.
+  Repeated GD32 downs of the held key are the same press (rc4) and never renew it. A same-page bound
+  (`keep_until`) that is due first ends the key first with its own line; when both are due in the same tick the
+  same-page bound runs first. The poll timeout includes the deadline. Everything else is unchanged: real releases,
+  boundaries, host loss, e-stops, the 5 s post-e-stop resync, the HID caps (10 s ⌫/⏎/Esc and digits, PTT 120 s /
+  10 min).
+- **Why 60 s is never too short on the Mac:** mk20deck's controller decides every host-key gesture by 600 ms: a slot
+  tap focuses on release (< 600 ms), its long press picks the slot up at 600 ms (once; "the release does nothing
+  else"; a picked-up slot drops back 8 s after the last input, independent of the hold), MODE taps cycle the mode
+  and its long press goes to L4 at 600 ms (once); 新会话 / mode select / 回 L1 act on the press. Nothing in it times a
+  hold beyond the long press, the Mac PTT and ⌫/⏎/Esc are HID (owners 2 and 5 with their own caps), and knob holds
+  are decided on the device. A 60 s hold therefore only ever ends what the Mac already finished with; what the Mac
+  sees is the same as a release at that moment.
+- Tests: `kbd/tests/tests_onboard_r8.inc` (onboard_test; 19 checks fail with the cap removed).
+
 ## 1.6.1 host link self-healing (incident 2026-10-23 on 1.6.0-rc4; PATCH)
 
 After 14.5 h the host link stalled for 51 min: the bridge sat in a blocking `write()` to the pty master because the
@@ -192,7 +213,8 @@ falls back to its 1.5.1 behaviour when the hello carries no `page`. Tests: `kbd/
   gestures are bounded on its side, and how long a host key may legitimately be held is the Mac's decision (a
   cut would end real holds the Mac interprets). Proposal for 1.6.1: a generous owner-1 cap (e.g. 60 s from the
   press, ended with the host up and `cut_latch` like the other guards) once mk20deck confirms no gesture needs
-  longer holds. Log-only nit, same review: when a forwarded key (owner 6) or digit (owner 7) is turned into its
+  longer holds. **Resolved in 1.6.2** (section above): 60 s from the press; no mk20deck gesture times a hold
+  beyond its 600 ms long press. Log-only nit, same review: when a forwarded key (owner 6) or digit (owner 7) is turned into its
   host half (owner 1) by an e-stop / SUSPECT, `press_at` keeps the original press, so a later same-page bound's
   log line names the time since that press (not since the conversion).
   Why it is safe: (1) nothing new is pressed — the page is not live until the fresh frame and the grace window

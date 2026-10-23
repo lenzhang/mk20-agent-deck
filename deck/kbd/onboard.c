@@ -43,6 +43,13 @@ static const struct { int fb; uint8_t usage; } HOST_HID_KEYS[] = {
  * L4 回 L1 press kept across a same-page ui.page 60 s after the first such request. */
 #define HID_PTT_MAX_MS 600000
 #define KEEP_MAX_MS 60000
+/* 1.6.2 (the residual Kimi K3 accepted for 1.6.0/1.6.1): a host key (owner 1: a session / mode key, the Mac mode key
+ * fb20, the host half of a forwarded ⌫/⏎/Esc or digit) whose GD32 up is lost and that no same-page request bounded
+ * had no time bound. No Mac gesture needs it held longer than its 600 ms long press (mk20deck controller: the slot
+ * pick-up and MODE -> L4 fire once at LONG_PRESS, nothing happens later in a hold; PTT and ⌫/⏎/Esc are HID owners with
+ * their own caps), so it ends HOST_KEY_MAX_MS after its press like the other lost key-up guards: host up sent, cut
+ * latch until the GD32 reports the up. Repeated GD32 downs of the held key are the same press (rc4): no renewal. */
+#define HOST_KEY_MAX_MS 60000
 /* L1 option mode (host ui.hidKeys, user decision 2026-10-22): the Mac maps up to 9 of fb1..fb15 to the
  * digits 1..9 while an agent asks a numbered choice. The map lives only on the live L1 page and only
  * HID_MAP_MS after the last accepted request (the Mac refreshes it every ~10 s while it is shown). */
@@ -66,8 +73,8 @@ struct onboard_s {
     int key_owner[20], knob_down[2], knob_long[2];
     uint8_t hid_usage[20]; int64_t hid_at[20];
     /* 1.6.0: a host key or L4 回 L1 press (owner 1/4) still held across a same-page ui.page has no lost-up
-     * bound of its own (owners >= 5 have the 10 s cut, the PTT its caps): it is kept until keep_until (request
-     * + HID_KEY_HOLD_MS; a new GD32 down of that key renews it, never past keep_max). 0 = none. */
+     * bound but this (>= 5: the 10 s cut, PTT: its caps; 1.6.2: owner 1 also HOST_KEY_MAX_MS from its press): kept to
+     * keep_until (request + HID_KEY_HOLD_MS; a new GD32 down of that key renews it, never past keep_max). 0 = none. */
     int64_t keep_until[20], keep_max[20]; /* keep_max: absolute (request + KEEP_MAX_MS) */
     int64_t press_at[20]; /* original press of a held key (live page); a PTT's HID_PTT_MAX_MS counts from it */
     /* Keys ended by a lost key-up guard (10 s cut, PTT caps, same-page bound): inert until the GD32 reports
@@ -579,6 +586,12 @@ void onboard_tick(kbd_t *k, int64_t now)
             release_key(k,i);
         }
     }
+    /* after the same-page bound (it ends first when both are due: its own log line); a queued up is not repeated */
+    for (int i = 0; i < 20; i++) if (o->key_owner[i] == 1 && !(o->pending_up & (1u << i)) && now - o->press_at[i] >= HOST_KEY_MAX_MS) {
+        fprintf(stderr, "mk20-kbd: host key held %d s: released (lost key-up guard)\n", (int)((now - o->press_at[i]) / 1000));
+        o->cut_latch |= 1u << i;
+        release_key(k,i);
+    }
     for (int i = 0; i < 20; i++) if (o->key_owner[i] >= 5 && now - o->hid_at[i] >= HID_KEY_HOLD_MS) {
         fprintf(stderr, "mk20-kbd: Mac key held %d s: released (lost key-up guard)\n", HID_KEY_HOLD_MS / 1000);
         o->cut_latch |= 1u << i;
@@ -1044,6 +1057,8 @@ int onboard_timeout(kbd_t *k, int64_t now, int dflt)
         if (at-now < left) left=at-now;
     }
     for (int i=0;i<20;i++) if (o->keep_until[i] && o->keep_until[i]-now < left) left=o->keep_until[i]-now;
+    for (int i=0;i<20;i++) if (o->key_owner[i]==1 && !(o->pending_up&(1u<<i)) && o->press_at[i]+HOST_KEY_MAX_MS-now < left)
+        left=o->press_at[i]+HOST_KEY_MAX_MS-now;
     if (o->hid_mapped && o->hid_map_at+HID_MAP_MS-now < left) left=o->hid_map_at+HID_MAP_MS-now;
     return left < 0 ? 0 : (int)left;
 }
