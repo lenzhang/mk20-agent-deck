@@ -32,6 +32,19 @@ Review record: `deck/reviews/1.6.1/fw161-rc1-kimi-k3.md`. Changed against rc1: `
   `--stall-file` arguments) and the rc1 stall test updated (the replacing client's own bytes stall it);
   `tests/test_mk20d_kbd.py` +1 (gadget.sh flag only with `MK20_REL`); `tools/test_mk20_soak.py` +4.
 
+rc2 host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 1283 passed / 1 skipped
+(rc1 1276: +6 bridge, +1 gadget), agent 398, onboard 16545 (TSan build 16545), kbd 4219 ASan + 4219 TSan, safe mode
+2 scenarios, e2e OK, ui 41405, 374 goldens unchanged, sim 38, tools 83 passed / 1 skipped (soak +4), shellcheck
+clean, release binaries match source. `make mac-test` (macOS, native, on a `git archive` export of the commit): 817
+passed / 467 skipped, no failures. E-stop latencies unchanged (socket e-stop -> all-up 1.3 ms; stalled host 0.2–0.5
+ms, its K2 hold 1010.3 ms; blocked status worker 0.2 / 1001.4 ms). The new bridge tests were run 3x in a row (29/29
+each); the replacing-client test fails on the rc1 source. `bin/ttygs_tcp_bridge` sha256
+`0dbb85719d1b3509737467546c6fce34d95ed70e12a2d03067a00352a83c0c1a` (398572 B, static ARM EABI5), `share/gadget.sh`
+`59874785bf918c2c8a5b7dddcaa71d3b0efec5a1bc783206974585ab1593ae80`; `bin/mk20-kbd` unchanged from rc1
+(`3cda8c67…6c2f`). `mk20-fw-1.6.1.tar` (rc2, 14 files, reproducible: a rebuild from a `git archive` of the commit is
+byte-identical) sha256 `4ba75ecf4aa7a1d69eb34f3bb287849a7297fb2164064cf22a5e57af72d077f1`.
+**No device acceptance claimed.**
+
 ### 1.6.1-rc1
 
 `firmware/VERSION` is **1.6.1** (PATCH: no host-visible protocol change); build id **rc1**:
