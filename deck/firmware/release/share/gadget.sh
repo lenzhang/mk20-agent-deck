@@ -37,6 +37,7 @@ if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
       MK20_ECM_IP) MK20_ECM_IP=$v;; MK20_ECM_MASK) MK20_ECM_MASK=$v;; MK20_DEV_MAC) MK20_DEV_MAC=$v;; MK20_HOST_MAC) MK20_HOST_MAC=$v;;
       MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
       MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;; MK20_HID_SCROLL) MK20_HID_SCROLL=$v;; MK20_KBD) MK20_KBD=$v;;
+      MK20_LL_IP) MK20_LL_IP=$v;;   # 1.7.0: --rearm-now restores the alias it set up
     esac; done < "$GENV"
   else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) m="release mode: no $GENV (gates not passed at boot) -> refused"; echo "$m"
     echo "gadget $(cut -d' ' -f1 /proc/uptime): $m" >> "$LOG" 2>/dev/null; exit 1;; esac; fi   # r8 #1: detached jobs have no stdout
@@ -61,7 +62,7 @@ MODE=${1:-}
 if [ "$MODE" != --run ] && [ "$MODE" != --boot ] && [ "$MODE" != --rollback-now ] && [ "$MODE" != --rearm-now ]; then
   Q=/mnt/SDCARD/job.sh; [ -e $Q ] && { echo "watcher queue busy ($Q exists)"; exit 1; }
   A=--run; [ "${1:-}" = --rollback-queued ] && A=--rollback-now
-  M=""; [ "${1:-}" = --rearm ] && { A=--rearm-now; M="MK20_REARM_MANUAL=1 "; }   # 1.6.2 operator re-arm (drops adb too)
+  M=""; [ "${1:-}" = --rearm ] && { A=--rearm-now; M="MK20_REARM_MANUAL=1 "; }   # 1.7.0 operator re-arm (drops adb too)
   # Opus r7 BLOCKER: the watcher kills a job tree after MK20_JOB_TIMEOUT (300 s) - shorter than the setup/rollback
   # supervisors' own bounds - so the transition is detached from the job (reparented to init, no FAT job log held).
   echo "( ${M}MK20_REL=${MK20_REL:-} MK20_GADGET_LOG=$LOG sh $(readlink -f "$0") $A </dev/null >/dev/null 2>&1 7>&- & ); echo started" > $Q.tmp
@@ -323,33 +324,69 @@ if [ "${1:-}" = --rollback-now ]; then
   stuck "queued/manual rollback not verified after $RBA attempts" rollback-NOT-verified-ESCALATED
 fi
 # <<< rollback-block
-# >>> rearm-block (1.6.2; tests extract from the rollback-block start to the rearm-block end)
+# >>> rearm-block (1.7.0; tests extract from the rollback-block start to the rearm-block end)
 # ECM re-arm = ONE soft re-enumeration of the EXISTING composite, for mk20d's ECM RX watchdog and its probation gate
 # (incident 2026-10-23 23:07: after a reboot host->device was dead - gadget configured, usb0 carrier 1, usb0 RX frozen
 # at 1 packet while the host kept sending - and only a hardreset fixed it). No configfs function/link change, no KD,
-# no bridge/flapmon/mk20-kbd restart; on the live gadget it repeats setup_main's bring-up order: quiesce HID (router
-# stop file + SIGUSR1: mk20-kbd closes every hidg0 fd and keeps running; never an fd across a UDC change), stop adbd
+# no flapmon/mk20-kbd restart; on the live gadget it repeats setup_main's bring-up order: quiesce HID (router stop
+# file + SIGUSR1: mk20-kbd closes every hidg0 fd and keeps running; never an fd across a UDC change), stop adbd
 # (FunctionFS closed), unbind, start adbd (descriptors before bind), let adbd bind the UDC or bind it once ep1 exists,
-# wait for hidg0, remove the stop file (mk20-kbd reopens hidg0). mk20-kbd is never killed: still holding hidg0 after
-# ~3 s = abort before any USB change. Refused with nothing touched (rc 4, retry later) while the transition mutex is
-# held (setup/rollback), a watcher job / cmd-rollback / cmd-reboot is queued, the loader install/state lock is held,
-# an adb session runs, a teardown marker exists, the host is not configured (asleep/unplugged: no re-enumeration
-# for an absent host), or flapmon logged a link drop within FLAP_WINDOW+5 s: flapmon's window then holds only this
+# then the ECM netdev: if the re-bind left usb0 bare (re-created: no address, MTU 1500, new ifindex) setup_main's
+# three ifconfig lines again (MTU 478 = the sunxi_udc PIO workaround, the ECM address, the usb0:1 link-local alias);
+# a re-created usb0 (or a missing listener) also restarts the bridge through its own loop and asks mk20d web to
+# re-bind (both use SO_BINDTODEVICE usb0); wait for hidg0, remove the stop file (mk20-kbd reopens hidg0). mk20-kbd is
+# never killed: still holding hidg0 after ~3 s = abort before any USB change. Refused with nothing touched (rc 4,
+# retry later) while the transition mutex is held (setup/rollback), a watcher job / cmd-rollback / cmd-reboot is
+# queued, the loader install/state lock is held, adbd has any child (an adb shell/command) or a file in an install
+# inbox (/data/mk20/incoming, /tmp/mk20/incoming) changed within 120 s (an adb push in progress: killing adbd would
+# cut it), a teardown marker exists, the host is not configured (asleep/unplugged: no re-enumeration for an absent
+# host), or flapmon logged a link drop within FLAP_WINDOW+5 s: flapmon's window then holds only this
 # re-enumeration's 1-2 drops, and FLAP_DROPS >= 4 is required, so a re-arm can never trip flapmon's rollback.
-# Only mk20d (detached maint loop / boot) and the watcher queue (--rearm, operator: MK20_REARM_MANUAL=1 skips the adb
-# session check, the session that queued it) run it: never from an adb shell.
-# rc: 0 re-enumerated (UDC bound again) | 1 aborted before any USB change, or timed out with the UDC bound + adbd up |
-#     2 UDC not bound again -> watcher cmd-reboot (WDT hardreset; mk20-no-composite NOT set) | 3 stuck (unkillable
-#     child) -> escalated like setup/rollback | 4 busy (retry later) | 5 stale generation |
+# Only mk20d (detached maint loop / boot) and the watcher queue (--rearm, operator: MK20_REARM_MANUAL=1 skips the
+# adbd-child check, the adb command that queued it) run it: never from an adb shell. Result: /tmp/mk20/rearm.last.
+# rc: 0 re-enumerated (UDC bound, usb0 configured, listeners up) | 1 aborted before any USB change, or timed out with
+#     the UDC bound + adbd up | 2 USB not restored (UDC unbound / usb0 not configurable / bridge not back) ->
+#     watcher cmd-reboot (WDT hardreset; mk20-no-composite NOT set) | 3 stuck (unkillable child) -> escalated like
+#     setup/rollback | 4 busy (retry later) | 5 stale generation |
 #     6 not applicable (no release composite, FLAP_DROPS < 4, mk20-router owns the HID, no /bin/adbd)
 flap_recent() { # $1 s: 0 if flapmon (same log, same uptime clock) logged a link drop that recently
   fr_now=$(cut -d. -f1 /proc/uptime)
   fr_t=$(cat "$LOG.1" "$LOG" 2>/dev/null | tail -n 400 | sed -n 's/^flapmon \([0-9][0-9]*\): link drop.*/\1/p' | tail -n 1)
   [ -n "$fr_t" ] && [ $((fr_now - fr_t)) -le "$1" ]; }
 ra_held() { ( exec 6>"$1" && ! flock -n 6 ) 2>/dev/null; }   # a live owner holds that lock
-ra_adb_session() { # an `adb shell` / adb command runs = a shell child of adbd (any other helper child is ignored)
-  for ra_a in $(pidof adbd 2>/dev/null); do for ra_c in $(kids "$ra_a"); do
-    case "$(cat "/proc/$ra_c/comm" 2>/dev/null)" in sh|ash|bash|busybox) return 0;; esac; done; done; return 1; }
+ra_adb_session() { # adbd runs anything for a client (adb shell / an adb command: a child process)
+  for ra_a in $(pidof adbd 2>/dev/null); do [ -n "$(kids "$ra_a")" ] && return 0; done; return 1; }
+ra_push_recent() { # an adb push writes into an install inbox (no adbd child): a file there changed within 120 s
+  ra_now=$(date +%s)
+  for ra_f in /data/mk20/incoming/* /tmp/mk20/incoming/*; do [ -f "$ra_f" ] || continue
+    ra_m=$(date -r "$ra_f" +%s 2>/dev/null) || continue
+    [ $((ra_now - ra_m)) -le 120 ] && [ $((ra_now - ra_m)) -ge -120 ] && return 0; done; return 1; }
+ra_last() { echo "rc=$1 up=$(cut -d' ' -f1 /proc/uptime) $2" > /tmp/mk20/rearm.last 2>/dev/null; }   # the operator reads it
+ra_ifc() { ifconfig "$1" 2>/dev/null; }
+ra_has_cfg() { # usb0 carries setup_main's configuration (address, MTU 478, link-local alias)
+  ra_ifc usb0 | grep -qF "inet addr:$ECM_IP " && ra_ifc usb0 | grep -q "MTU:478 " && ra_ifc usb0:1 | grep -qF "inet addr:$LL_IP "; }
+ra_listen() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }
+ra_listeners() { ra_listen "$ECM_IP:$BRIDGE_PORT" && ra_listen "$LL_IP:$BRIDGE_PORT"; }
+ra_netcfg() { # 0 = usb0 configured as setup_main left it (redone if the re-bind re-created it bare); RNET=1 = re-created
+  RNET=0; ra_ix=$(cat /sys/class/net/usb0/ifindex 2>/dev/null)
+  [ "$ra_ix" = "$RIFX" ] && ra_has_cfg && return 0
+  RNET=1; log "REARM: usb0 re-created/bare (ifindex ${RIFX:-?} -> ${ra_ix:-?}) -> mtu 478, $ECM_IP, usb0:1 $LL_IP again"
+  ifconfig usb0 mtu 478 2>>"$LOG"; ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG"
+  ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"
+  ra_has_cfg || { log "REARM FAIL: usb0 not configured again ($(ra_ifc usb0 | tr -s ' \n' ' ' | cut -c1-160))"; return 1; }
+  touch /tmp/mk20/web.rebind 2>/dev/null   # mk20d web re-binds mk20-agent (SO_BINDTODEVICE usb0), not counted as a crash
+  return 0; }
+ra_bridge() { # both bridge listeners up, re-bound to a re-created usb0 (SO_BINDTODEVICE): restart through its own loop
+  [ "$RNET" = 0 ] && ra_listeners && return 0
+  bl=$(cat /tmp/mk20-bridge-loop.pid 2>/dev/null)
+  case "$bl" in ''|*[!0-9]*|0|1) bl="";; esac
+  [ -n "$bl" ] && [ ! -f /tmp/mk20-bridge-stop ] && kill -0 "$bl" 2>/dev/null || { log "REARM FAIL: no bridge loop to restart the bridge"; return 1; }
+  ob=$(pidof ttygs_tcp_bridge 2>/dev/null); log "REARM: restarting the bridge (${ob:-none}) through its loop $bl"
+  for b in $ob; do kill "$b" 2>/dev/null; done   # SIGTERM: it removes its link; the loop starts a new one after 1 s
+  i=0; while [ $i -lt 15 ]; do al=""; for b in $ob; do kill -0 "$b" 2>/dev/null && al=1; done; [ -z "$al" ] && break; sleep 0.2; i=$((i+1)); done
+  i=0; while ! ra_listeners && [ $i -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  ra_listeners || { log "REARM FAIL: bridge listeners not back on $ECM_IP and $LL_IP:$BRIDGE_PORT"; return 1; }
+  return 0; }
 ra_reboot() { # the documented reboot path, bounded like escalate() (a hung FAT write cannot wedge the mutex)
   log "REARM: $1 -> cmd-reboot (watcher WDT hardreset)"; rm -f /tmp/mk20/rearm-reboot.ok
   ( touch "${MK20_FLAP_REBOOT:-/mnt/SDCARD/cmd-reboot}" && touch /tmp/mk20/rearm-reboot.ok; sync ) </dev/null 7>&- &
@@ -357,6 +394,7 @@ ra_reboot() { # the documented reboot path, bounded like escalate() (a hung FAT 
 rearm_main() {
   rhid=0; [ -e $C/hid.usb0 ] && rhid=1
   radb=0; [ -e $C/ffs.adb ] && radb=1
+  RIFX=$(cat /sys/class/net/usb0/ifindex 2>/dev/null)
   log "REARM begin udc=$RUDC gen=${MK20_GEN:-?} hid=$rhid adb=$radb usb0 rx/tx=$(sed -n 's/^ *usb0://p' /proc/net/dev 2>/dev/null | awk '{print $2"/"$10}')"
   if [ $rhid = 1 ]; then
     touch /tmp/mk20-router-stop || { log "REARM ABORT: cannot write the HID stop file"; exit 1; }
@@ -378,25 +416,29 @@ rearm_main() {
   i=0; while [ -z "$(udc_now)" ] && [ $i -lt 10 ]; do echo "$RUDC" > $G/UDC 2>>"$LOG"; sleep 0.5; i=$((i+1)); done
   [ "$(udc_now)" = "$RUDC" ] || { log "REARM FAIL: UDC not bound again (got '$(udc_now)')"; exit 2; }
   [ $unbound = 1 ] || { log "REARM FAIL: UDC could not be unbound (nothing re-enumerated; adbd restarted)"; exit 2; }
+  i=0; while [ ! -d /sys/class/net/usb0 ] && [ $i -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  [ -d /sys/class/net/usb0 ] || { log "REARM FAIL: no usb0 netdev after the bind"; exit 2; }
+  ra_netcfg || exit 2
+  ra_bridge || exit 2
   if [ $rhid = 1 ]; then
     i=0; while [ ! -e /dev/hidg0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
     [ -e /dev/hidg0 ] || log "REARM WARN: no /dev/hidg0 after the bind (mk20-kbd keeps retrying the open)"
   fi
   rm -f /tmp/mk20-router-stop   # mk20-kbd reopens hidg0 (all-keys-up first)
-  log "REARM OK udc=$(udc_now) state=$(cat "/sys/class/udc/$RUDC/state" 2>/dev/null) adbd=$(pidof adbd 2>/dev/null)"
+  log "REARM OK udc=$(udc_now) state=$(cat "/sys/class/udc/$RUDC/state" 2>/dev/null) adbd=$(pidof adbd 2>/dev/null) usb0=$([ "$RNET" = 1 ] && echo reconfigured || echo kept)"
   exit 0
 }
 if [ "${1:-}" = --rearm-now ]; then
   RAT=$(uint_cap "${MK20_REARM_TIMEOUT:-}" 90 10 300)   # rearm_main worst case ~35 s
-  ra_no() { log "rearm refused (rc $1): $2"; exit "$1"; }
+  ra_no() { log "rearm refused (rc $1): $2"; ra_last "$1" "refused: $2"; exit "$1"; }
   [ -n "${MK20_REL:-}" ] && [ -f "$GENV" ] || ra_no 6 "not a release composite (no $GENV)"
-  gen_stale && { log "rearm: stale generation ${MK20_GEN:-} (current $(cat "$GENF" 2>/dev/null)) -> ignored"; exit 5; }
+  gen_stale && { log "rearm: stale generation ${MK20_GEN:-} (current $(cat "$GENF" 2>/dev/null)) -> ignored"; ra_last 5 stale; exit 5; }
   [ -e $C/ecm.usb0 ] || ra_no 6 "no ecm.usb0 in the composite"
   { [ "$FLAP_DROPS" -ge 4 ] && [ "$FLAP_WINDOW" -ge 1 ]; } 2>/dev/null || ra_no 6 "FLAP_DROPS=$FLAP_DROPS < 4 (one re-enumeration counts 1-2 flapmon drops)"
   [ -z "$(router_pids)" ] || ra_no 6 "mk20-router owns the HID (developer router mode)"
   [ -e $C/ffs.adb ] && [ ! -x /bin/adbd ] && ra_no 6 "no /bin/adbd for ffs.adb"
   tl_lock 1 || ra_no 4 "transition mutex busy (setup/rollback in progress) or lock error"   # held until exit
-  gen_stale && { log "rearm: stale generation ${MK20_GEN:-} -> ignored"; exit 5; }
+  gen_stale && { log "rearm: stale generation ${MK20_GEN:-} -> ignored"; ra_last 5 stale; exit 5; }
   for f in /tmp/mk20/gadget.busy /tmp/mk20-flapmon-stop /tmp/mk20-kbd-stop /tmp/mk20-router-stop \
            /mnt/SDCARD/cmd-rollback /mnt/SDCARD/cmd-reboot /mnt/SDCARD/job.sh; do [ -e "$f" ] && ra_no 4 "$f present"; done
   ra_held /tmp/mk20/install.lock && ra_no 4 "release install in progress (install.lock)"
@@ -405,20 +447,22 @@ if [ "${1:-}" = --rearm-now ]; then
   [ -n "$RUDC" ] && [ "$(udc_now)" = "$RUDC" ] || ra_no 4 "UDC not bound"
   [ "$(cat "/sys/class/udc/$RUDC/state" 2>/dev/null)" = configured ] || ra_no 4 "host not configured (asleep/unplugged)"
   flap_recent $((FLAP_WINDOW + 5)) && ra_no 4 "flapmon link drop within $((FLAP_WINDOW + 5))s"
-  [ "${MK20_REARM_MANUAL:-}" = 1 ] || ! ra_adb_session || ra_no 4 "adb session active"   # a queued operator --rearm knows
+  [ "${MK20_REARM_MANUAL:-}" = 1 ] || ! ra_adb_session || ra_no 4 "adb session active (adbd has a child)"   # operator: the queuing command
+  ra_push_recent && ra_no 4 "install inbox changed within 120 s (adb push in progress?)"
   trap '' HUP
   # owner-local bounded child (like setup_main): it inherits fd 7 on purpose, so the mutex stays held while it mutates
   ( trap - EXIT INT TERM; rearm_main ) </dev/null &
   RP=$!
   bounded_wait $RP "$RAT"; bw=$?
-  [ $bw = 2 ] && stuck "rearm tree $RP unkillable after ${RAT}s (D state)" rearm-STUCK
+  [ $bw = 2 ] && { ra_last 3 stuck; stuck "rearm tree $RP unkillable after ${RAT}s (D state)" rearm-STUCK; }
   rrc=$BW_RC; [ $bw = 0 ] || { log "REARM TIMEOUT: exceeded ${RAT}s -> killed+reaped own tree $RP"; rrc=2; }
   if [ "$rrc" = 2 ]; then
     [ -n "$(udc_now)" ] || echo "$RUDC" > $G/UDC 2>>"$LOG"
     if [ $bw != 0 ] && [ "$(udc_now)" = "$RUDC" ] && { [ ! -e $C/ffs.adb ] || [ -n "$(pidof adbd 2>/dev/null)" ]; }; then
-      rm -f /tmp/mk20-router-stop; log "REARM: UDC bound (and adbd up) after the timeout"; exit 1; fi
-    ra_reboot "re-enumeration did not complete (udc='$(udc_now)')"; exit 2
+      rm -f /tmp/mk20-router-stop; log "REARM: UDC bound (and adbd up) after the timeout"; ra_last 1 timeout; exit 1; fi
+    ra_reboot "re-enumeration did not complete (udc='$(udc_now)')"; ra_last 2 "USB not restored: cmd-reboot"; exit 2
   fi
+  ra_last "$rrc" "$([ "$rrc" = 0 ] && echo re-enumerated || echo "aborted before any USB change")"
   exit "$rrc"
 fi
 # <<< rearm-block

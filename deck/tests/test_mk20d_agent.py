@@ -555,6 +555,22 @@ def test_web_adds_agent_runtime_only_with_feature_and_socket(dev, rel, web):
     assert p.wait(8) == 0
 
 
+def test_web_rebinds_after_a_rearm_recreated_usb0(dev, rel, web):
+    """1.7.0: gadget.sh --rearm-now re-created usb0 (tmp/mk20/web.rebind): the listener (SO_BINDTODEVICE usb0) restarts
+    once, consumed, not counted as a crash."""
+    p = dev.start(rel / "sbin/mk20d", "web")
+    assert wait(lambda: calls(dev))
+    dev.p("tmp/mk20/web.rebind").touch()
+    assert wait(lambda: len(calls(dev)) == 2, 6)
+    assert calls(dev)[1]["args"] == web_args(dev, "172.30.9.2")
+    assert not dev.p("tmp/mk20/web.rebind").exists() and not dev.p("tmp/mk20/agent-crash.times").exists()
+    assert "INFO mk20d web v=9.9.9 usb0 re-created: re-binding" in dev.read("data/mk20/logs/mk20d.log")
+    time.sleep(1.5)
+    assert len(calls(dev)) == 2                                    # once per request
+    dev.p("tmp/mk20-agent-stop").touch()
+    assert p.wait(8) == 0
+
+
 def test_web_crash_restarts_with_backoff(dev, rel, web):
     (dev.mock / "crash").touch()
     p = dev.start(rel / "sbin/mk20d", "web")
