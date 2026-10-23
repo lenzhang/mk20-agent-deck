@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 from conftest import BB, FW
@@ -161,6 +162,34 @@ def test_probe_works_with_a_busybox_without_fancy_ping(ecm, rel):
     tick(ecm, rel, at=1000)
     s = tick(ecm, rel, at=1061)
     assert s["state"] == "ok" and s["stalls"] == "0" and "172.30.250.1" in lines(ecm, "ping.calls")
+
+
+def _alive(pid):
+    try:
+        return "\nState:\tZ" not in Path(f"/proc/{pid}/status").read_text()
+    except OSError:
+        return False
+
+
+@pytest.mark.parametrize("fancy", [True, False])
+def test_probe_never_leaves_a_ping_behind(ecm, rel, fancy):
+    """Kimi K3 1.7.0-rc1 MAJOR: a ping that does not exit by itself (the non-fancy `ping HOST`) was orphaned when its
+    wrapper subshell was killed, one per host every verification round. Each ping is now the probe's own child: killed
+    and reaped at the end of its round, whatever it does. The fancy form is `ping -c 1 -W 1 HOST` (on the device)."""
+    (ecm.mock / "ping.hang").touch()
+    if not fancy:
+        (ecm.mock / "ping.nonfancy").touch()
+    tick(ecm, rel, at=1000)
+    tick(ecm, rel, at=1061)                        # the stall probe (TX grows, nothing back) + a re-arm
+    for t in (1076, 1092, 1108):                   # three answer checks inside the episode
+        s = tick(ecm, rel, at=t)
+    assert s["episode"] == "1" and s["probes"] == "4"
+    pids = [int(x) for x in lines(ecm, "ping.pids")]
+    assert len(pids) == 8                          # 4 probes x 2 host addresses, 1 round each (MK20_ECM_PROBE_S=1)
+    time.sleep(0.5)
+    assert [p for p in pids if _alive(p)] == []
+    want = (lambda h: f"-c 1 -W 1 {h}") if fancy else (lambda h: h)
+    assert all(a == want(a.split()[-1]) for a in lines(ecm, "ping.args")), lines(ecm, "ping.args")
 
 
 def test_watchdog_stall_rearms_once_then_recovers_on_an_answer(ecm, rel):
@@ -605,7 +634,7 @@ while :; do u=$(cat $T/g/UDC 2>/dev/null)
 FAKE_BRIDGE = r'''#!/bin/sh
 T=__T__; echo $$ > $T/bridge.pid; echo "bridge-start ifindex=$(cat $T/sysnet/usb0/ifindex 2>/dev/null)" >> $T/calls
 trap 'rm -f $T/listen $T/bridge.pid; exit 0' TERM
-printf '%s\n' 172.30.250.2:17890 169.254.7.2:17890 > $T/listen
+if [ -f $T/bridge.listen ]; then cat $T/bridge.listen > $T/listen; else printf '%s\n' 172.30.250.2:17890 169.254.7.2:17890 > $T/listen; fi
 while :; do sleep 0.1; done
 '''
 STUBS = r'''log() { echo "$*" >> $T/log; }
@@ -642,12 +671,13 @@ class Rearm:
         self.dev, self.t, self.procs = dev, t, []
         g = t / "g"
         for d in ("g/configs/c.1/ecm.usb0", "g/configs/c.1/hid.usb0", "g/configs/c.1/ffs.adb", "mk20", "sd",
-                  f"udc/{UDC}", "ffs", "sysnet/usb0", "if", "incoming", "mk20/incoming"):
+                  f"udc/{UDC}", "ffs", "sysnet/usb0", "if", "incoming", "mk20/incoming", "releases"):
             (t / d).mkdir(parents=True, exist_ok=True)
         (g / "UDC").write_text(UDC + "\n")
         (t / f"udc/{UDC}/state").write_text("configured\n")
         (t / "mk20/gadget.env").write_text("MK20_ECM_IP=172.30.250.2\n")
         (t / "mk20/composite.gen").write_text("57-1234\n")
+        (t / "mk20/usb0.setup").write_text("ll=1\n")                      # setup_main's record: alias up
         (t / "sysnet/usb0/ifindex").write_text("4\n"); (t / "ifindex.next").write_text("5\n")
         for n, v in (("usb0.addr", "172.30.250.2"), ("usb0.mask", "255.255.255.0"), ("usb0.mtu", "478"),
                      ("usb0:1.addr", "169.254.7.2"), ("usb0:1.mask", "255.255.0.0")):
@@ -663,7 +693,8 @@ class Rearm:
                          ("/tmp/mk20-flapmon-stop", f"{t}/fstop"), ("/tmp/mk20-bridge-loop.pid", f"{t}/bloop.pid"),
                          ("/tmp/mk20-bridge-stop", f"{t}/bstop"), ("/tmp/mk20/", f"{t}/mk20/"),
                          ("/tmp/adbd.log", f"{t}/adbd.log"), ("/mnt/SDCARD/", f"{t}/sd/"),
-                         ("/data/mk20/incoming", f"{t}/incoming"), ("/sys/class/udc", f"{t}/udc"),
+                         ("/data/mk20/incoming", f"{t}/incoming"), ("/data/mk20/releases", f"{t}/releases"),
+                         ("/sys/class/udc", f"{t}/udc"),
                          ("/sys/class/net/usb0", f"{t}/sysnet/usb0"), ("/dev/usb-ffs/adb/ep1", f"{t}/ffs/ep1"),
                          ("/dev/hidg0", f"{t}/hidg0"), ("/bin/adbd", f"{t}/adbd"), ("/proc/net/dev", f"{t}/netdev")):
             body = body.replace(old, new)
@@ -771,7 +802,7 @@ def test_rearm_reenumerates_the_existing_composite(ra):
     assert c[2] == "adbd-start udc=" and c[3] == "adbd-bound" and len(c) == 4, c   # usb0 lived on: no ifconfig
     assert ra.udc() == UDC and not (ra.t / "rstop").exists()           # mk20-kbd may reopen hidg0
     assert links(ra) == ["ecm.usb0", "ffs.adb", "hid.usb0"]             # configfs untouched
-    assert "REARM begin udc=musb-hdrc.1.auto gen=57-1234 hid=1 adb=1 usb0 rx/tx=1/3" in ra.log()
+    assert "REARM begin udc=musb-hdrc.1.auto gen=57-1234 hid=1 adb=1 ll=1 usb0 rx/tx=1/3" in ra.log()
     assert "REARM OK udc=musb-hdrc.1.auto state=configured" in ra.log() and "usb0=kept" in ra.log()
     assert not (ra.t / "mk20/web.rebind").exists() and ra.last().startswith("rc=0 ") and ra.last().endswith(" re-enumerated")
     assert not (ra.t / "sd/cmd-reboot").exists() and not (ra.t / "sd/mk20-no-composite").exists()
@@ -820,6 +851,45 @@ def test_rearm_that_cannot_restore_usb0_requests_the_watcher_reboot(ra, what):
     assert want in ra.log() and ra.last().startswith("rc=2 ")
 
 
+def _no_alias(ra):
+    for n in ("usb0:1.addr", "usb0:1.mask"):
+        (ra.t / "if" / n).unlink()
+    (ra.t / "bridge.listen").write_text("172.30.250.2:17890\n")       # setup_main: bridge on the ECM address only
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_rearm_requires_no_more_than_setup_achieved(ra, recreate):
+    """Kimi K3 1.7.0-rc1 MINOR: setup_main only WARNs when the usb0:1 alias fails (the bridge then listens on the ECM
+    address only, record ll=0); a re-arm must not fail (rc 2 -> reboot) for the alias setup never had."""
+    (ra.t / "mk20/usb0.setup").write_text("ll=0\n"); _no_alias(ra)
+    no_hid_no_adb(ra); ra.bridge_loop(); ra.kernel(recreate=recreate)
+    r = ra.run()
+    assert r.returncode == 0, ra.log()
+    c = ra.calls()
+    assert not [x for x in c if x.startswith("ifconfig usb0:1")] and not (ra.t / "sd/cmd-reboot").exists()
+    assert ("ifconfig usb0 mtu 478" in c) == recreate and (ra.t / "listen").read_text().split() == ["172.30.250.2:17890"]
+    assert "ll=0" in ra.log() and "REARM OK" in ra.log()
+
+
+@pytest.mark.parametrize("alias", [True, False])
+def test_rearm_without_a_setup_record_keeps_what_was_there(ra, alias):
+    """No record (a setup that did not write one): the alias is required exactly if it is up before the re-arm."""
+    (ra.t / "mk20/usb0.setup").unlink()
+    if not alias:
+        _no_alias(ra)
+    no_hid_no_adb(ra); ra.bridge_loop(); ra.kernel(recreate=True)
+    r = ra.run()
+    assert r.returncode == 0, ra.log()
+    assert ("ifconfig usb0:1 169.254.7.2 netmask 255.255.0.0 up" in ra.calls()) == alias and f"ll={int(alias)}" in ra.log()
+
+
+def test_setup_records_the_alias_result_for_the_rearm():
+    setup = GS[GS.index("setup_main() {"):]
+    blk = setup[setup.index("LLOK=0"):setup.index('echo "ll=$LLOK" > /tmp/mk20/usb0.setup')]
+    assert 'BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"; LLOK=1' in blk and 'log "WARN link-local alias' in blk
+    assert setup.index('echo "ll=$LLOK" > /tmp/mk20/usb0.setup') < setup.index("/tmp/mk20-bridge-loop.pid")   # before the bridge
+
+
 def test_rearm_binds_itself_when_adbd_does_not(ra):
     ra.kbd(); ra.adbd(binds=False); ra.kernel(recreate=False)
     r = ra.run()
@@ -863,7 +933,8 @@ def _adbd_with_child(ra, child):
     ("loader", "loader state change in progress"), ("unbound", "UDC not bound"), ("suspended", "host not configured"),
     ("not attached", "host not configured"), ("flapdrop", "flapmon link drop within 65s"),
     ("adb-shell", "adb session active (adbd has a child)"), ("adb-child", "adb session active (adbd has a child)"),
-    ("push-data", "install inbox changed within 120 s"), ("push-tmp", "install inbox changed within 120 s")])
+    ("push-data", "install in progress"), ("push-tmp", "install in progress"),
+    ("staging-tar", "install in progress (loader staging"), ("staging-dir", "install in progress (loader staging")])
 def test_rearm_refused_with_nothing_touched(ra, why, msg):
     held = None
     if why == "mutex":
@@ -891,6 +962,10 @@ def test_rearm_refused_with_nothing_touched(ra, why, msg):
         (ra.t / "incoming/upload.tar").write_text("x")
     elif why == "push-tmp":
         (ra.t / "mk20/incoming/upload.tar").write_text("x")
+    elif why == "staging-tar":   # loader install: its private copy of the tarball (Kimi K3 1.7.0-rc1 MINOR)
+        (ra.t / "releases/.staging.tar").write_text("x")
+    elif why == "staging-dir":   # loader install: the extract directory
+        (ra.t / "releases/.incoming-1.7.0").mkdir()
     before = ra.udc()
     try:
         r = ra.run()

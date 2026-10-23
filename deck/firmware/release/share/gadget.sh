@@ -332,14 +332,16 @@ fi
 # file + SIGUSR1: mk20-kbd closes every hidg0 fd and keeps running; never an fd across a UDC change), stop adbd
 # (FunctionFS closed), unbind, start adbd (descriptors before bind), let adbd bind the UDC or bind it once ep1 exists,
 # then the ECM netdev: if the re-bind left usb0 bare (re-created: no address, MTU 1500, new ifindex) setup_main's
-# three ifconfig lines again (MTU 478 = the sunxi_udc PIO workaround, the ECM address, the usb0:1 link-local alias);
+# ifconfig lines again (MTU 478 = the sunxi_udc PIO workaround, the ECM address, and the usb0:1 link-local alias if
+# setup_main had it: /tmp/mk20/usb0.setup ll=1; setup only WARNs when it fails, so a re-arm requires no more);
 # a re-created usb0 (or a missing listener) also restarts the bridge through its own loop and asks mk20d web to
 # re-bind (both use SO_BINDTODEVICE usb0); wait for hidg0, remove the stop file (mk20-kbd reopens hidg0). mk20-kbd is
 # never killed: still holding hidg0 after ~3 s = abort before any USB change. Refused with nothing touched (rc 4,
 # retry later) while the transition mutex is held (setup/rollback), a watcher job / cmd-rollback / cmd-reboot is
-# queued, the loader install/state lock is held, adbd has any child (an adb shell/command) or a file in an install
-# inbox (/data/mk20/incoming, /tmp/mk20/incoming) changed within 120 s (an adb push in progress: killing adbd would
-# cut it), a teardown marker exists, the host is not configured (asleep/unplugged: no re-enumeration for an absent
+# queued, the loader install/state lock is held, adbd has any child (an adb shell/command; a permanent one keeps it
+# refused: accepted, WARN only), a file in an install inbox (/data/mk20/incoming, /tmp/mk20/incoming) changed within
+# 120 s (an adb push in progress: killing adbd would cut it) or the loader's staging (releases/.staging.tar,
+# .incoming-*) exists, a teardown marker exists, the host is not configured (asleep/unplugged: no re-enumeration for an absent
 # host), or flapmon logged a link drop within FLAP_WINDOW+5 s: flapmon's window then holds only this
 # re-enumeration's 1-2 drops, and FLAP_DROPS >= 4 is required, so a re-arm can never trip flapmon's rollback.
 # Only mk20d (detached maint loop / boot) and the watcher queue (--rearm, operator: MK20_REARM_MANUAL=1 skips the
@@ -356,23 +358,26 @@ flap_recent() { # $1 s: 0 if flapmon (same log, same uptime clock) logged a link
 ra_held() { ( exec 6>"$1" && ! flock -n 6 ) 2>/dev/null; }   # a live owner holds that lock
 ra_adb_session() { # adbd runs anything for a client (adb shell / an adb command: a child process)
   for ra_a in $(pidof adbd 2>/dev/null); do [ -n "$(kids "$ra_a")" ] && return 0; done; return 1; }
-ra_push_recent() { # an adb push writes into an install inbox (no adbd child): a file there changed within 120 s
+ra_push_recent() { # an install in progress without a lock yet: an adb push into an inbox (no adbd child) = a file there
+  # changed within 120 s; the loader's staging copy / extract dir exist only while `loader install` runs
+  for ra_f in /data/mk20/releases/.staging.tar /data/mk20/releases/.incoming-*; do [ -e "$ra_f" ] && return 0; done
   ra_now=$(date +%s)
   for ra_f in /data/mk20/incoming/* /tmp/mk20/incoming/*; do [ -f "$ra_f" ] || continue
     ra_m=$(date -r "$ra_f" +%s 2>/dev/null) || continue
     [ $((ra_now - ra_m)) -le 120 ] && [ $((ra_now - ra_m)) -ge -120 ] && return 0; done; return 1; }
 ra_last() { echo "rc=$1 up=$(cut -d' ' -f1 /proc/uptime) $2" > /tmp/mk20/rearm.last 2>/dev/null; }   # the operator reads it
 ra_ifc() { ifconfig "$1" 2>/dev/null; }
-ra_has_cfg() { # usb0 carries setup_main's configuration (address, MTU 478, link-local alias)
-  ra_ifc usb0 | grep -qF "inet addr:$ECM_IP " && ra_ifc usb0 | grep -q "MTU:478 " && ra_ifc usb0:1 | grep -qF "inet addr:$LL_IP "; }
+ra_has_cfg() { # usb0 carries what setup_main achieved: address, MTU 478, and the link-local alias if setup had it (RLL)
+  ra_ifc usb0 | grep -qF "inet addr:$ECM_IP " && ra_ifc usb0 | grep -q "MTU:478 " &&
+    { [ "$RLL" != 1 ] || ra_ifc usb0:1 | grep -qF "inet addr:$LL_IP "; }; }
 ra_listen() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }
-ra_listeners() { ra_listen "$ECM_IP:$BRIDGE_PORT" && ra_listen "$LL_IP:$BRIDGE_PORT"; }
+ra_listeners() { ra_listen "$ECM_IP:$BRIDGE_PORT" && { [ "$RLL" != 1 ] || ra_listen "$LL_IP:$BRIDGE_PORT"; }; }
 ra_netcfg() { # 0 = usb0 configured as setup_main left it (redone if the re-bind re-created it bare); RNET=1 = re-created
   RNET=0; ra_ix=$(cat /sys/class/net/usb0/ifindex 2>/dev/null)
   [ "$ra_ix" = "$RIFX" ] && ra_has_cfg && return 0
-  RNET=1; log "REARM: usb0 re-created/bare (ifindex ${RIFX:-?} -> ${ra_ix:-?}) -> mtu 478, $ECM_IP, usb0:1 $LL_IP again"
+  RNET=1; log "REARM: usb0 re-created/bare (ifindex ${RIFX:-?} -> ${ra_ix:-?}) -> mtu 478, $ECM_IP$([ "$RLL" = 1 ] && echo ", usb0:1 $LL_IP") again"
   ifconfig usb0 mtu 478 2>>"$LOG"; ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG"
-  ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"
+  [ "$RLL" = 1 ] && ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"   # only what setup had (it WARNs otherwise)
   ra_has_cfg || { log "REARM FAIL: usb0 not configured again ($(ra_ifc usb0 | tr -s ' \n' ' ' | cut -c1-160))"; return 1; }
   touch /tmp/mk20/web.rebind 2>/dev/null   # mk20d web re-binds mk20-agent (SO_BINDTODEVICE usb0), not counted as a crash
   return 0; }
@@ -395,7 +400,10 @@ rearm_main() {
   rhid=0; [ -e $C/hid.usb0 ] && rhid=1
   radb=0; [ -e $C/ffs.adb ] && radb=1
   RIFX=$(cat /sys/class/net/usb0/ifindex 2>/dev/null)
-  log "REARM begin udc=$RUDC gen=${MK20_GEN:-?} hid=$rhid adb=$radb usb0 rx/tx=$(sed -n 's/^ *usb0://p' /proc/net/dev 2>/dev/null | awk '{print $2"/"$10}')"
+  # the alias as setup_main left it (its record), else as it is right now (a setup without a record)
+  RLL=$(sed -n 's/^ll=\([01]\)$/\1/p' /tmp/mk20/usb0.setup 2>/dev/null | head -n 1)
+  [ -n "$RLL" ] || { RLL=0; ra_ifc usb0:1 | grep -qF "inet addr:$LL_IP " && RLL=1; }
+  log "REARM begin udc=$RUDC gen=${MK20_GEN:-?} hid=$rhid adb=$radb ll=$RLL usb0 rx/tx=$(sed -n 's/^ *usb0://p' /proc/net/dev 2>/dev/null | awk '{print $2"/"$10}')"
   if [ $rhid = 1 ]; then
     touch /tmp/mk20-router-stop || { log "REARM ABORT: cannot write the HID stop file"; exit 1; }
     kh=$(kbd_hid_holders); for kp in $kh; do kill -USR1 "$kp" 2>/dev/null; done
@@ -448,7 +456,7 @@ if [ "${1:-}" = --rearm-now ]; then
   [ "$(cat "/sys/class/udc/$RUDC/state" 2>/dev/null)" = configured ] || ra_no 4 "host not configured (asleep/unplugged)"
   flap_recent $((FLAP_WINDOW + 5)) && ra_no 4 "flapmon link drop within $((FLAP_WINDOW + 5))s"
   [ "${MK20_REARM_MANUAL:-}" = 1 ] || ! ra_adb_session || ra_no 4 "adb session active (adbd has a child)"   # operator: the queuing command
-  ra_push_recent && ra_no 4 "install inbox changed within 120 s (adb push in progress?)"
+  ra_push_recent && ra_no 4 "install in progress (loader staging, or an install inbox changed within 120 s)"
   trap '' HUP
   # owner-local bounded child (like setup_main): it inherits fd 7 on purpose, so the mutex stays held while it mutates
   ( trap - EXIT INT TERM; rearm_main ) </dev/null &
@@ -571,8 +579,10 @@ sleep 1
 ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
 ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG" || die "usb0 ip"
 BRIDGE_LISTEN="--dev usb0 --listen $ECM_IP:$BRIDGE_PORT"
-if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"
+LLOK=0
+if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"; LLOK=1
 else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
+echo "ll=$LLOK" > /tmp/mk20/usb0.setup   # 1.7.0: what --rearm-now must restore (the alias is optional, as here)
 # 1.2.0: KD->host copy for the on-board router (release bridge only; a legacy /data bridge has no --tap)
 # mk20-kbd mode (MK20_KBD=1 from mk20d): no KD output to tap, mk20-kbd owns ttyGS0 and hidg0 itself
 [ -n "${MK20_REL:-}" ] && [ "${MK20_KBD:-0}" != 1 ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --tap /tmp/mk20/kd-tap.sock"

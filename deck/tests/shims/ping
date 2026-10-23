@@ -7,10 +7,11 @@
 #   ping.answer        the host answers: usb0 RX +1, rc 0
 #   ping.rxonly        frames arrive (usb0 RX +1) but no echo reply (rc 1): e.g. a bare usb0 the Mac keeps ARPing
 #   ping.nonfancy      a BusyBox without FEATURE_FANCY_PING: any option is a bad host (rc 1, no side effects)
+#   ping.hang          after its effect it never exits by itself (only a signal ends it): every pid -> ping.pids
 for h in "$@"; do :; done
 if [ -f "$MOCK_DIR/ping.nonfancy" ]; then case "$1" in -*) echo "ping: bad address '$1'" >&2; exit 1;; esac; fi
 [ "$h" = 127.0.0.1 ] && exit 0
-echo "$h" >> "$MOCK_DIR/ping.calls"
+echo "$h" >> "$MOCK_DIR/ping.calls"; echo "$*" >> "$MOCK_DIR/ping.args"; echo $$ >> "$MOCK_DIR/ping.pids"
 f=${MK20_NETDEV:-}
 [ -n "$f" ] && [ -f "$f" ] || exit 1
 tx=1; [ -f "$MOCK_DIR/ping.notx" ] && tx=0
@@ -20,4 +21,6 @@ rx=0; rc=1
 exec 9>"$f.lock"; flock -x 9
 awk -v tx="$tx" -v rx="$rx" '/^ *usb0:/ { sub(/^ *usb0:/, ""); $2 += rx; $10 += tx; print "  usb0: " $0; next } { print }' \
   "$f" > "$f.t.$$" && mv -f "$f.t.$$" "$f"
+exec 9>&-
+if [ -f "$MOCK_DIR/ping.hang" ]; then trap 'exit 143' TERM INT; while :; do sleep 0.2; done; fi
 exit "$rc"
