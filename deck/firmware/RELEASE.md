@@ -139,8 +139,26 @@ it (re-acceptance PASS).
   key came and went, the PTT-ignored digit and an e-stop host half under a phantom-down storm; holds up to 59 s, the
   600 ms long press, a same-page bound due first, never a second up. 19 checks fail on the 1.6.1 onboard.c.
 
-1.6.2-rc1 host validation: see the evidence below (filled in after the runs).
-**No device acceptance claimed.**
+rc1 host validation only (Docker mk20-build:trixie, BusyBox 1.27.2): `make test` green — tests 1356 passed / 1 skipped
+(rc2 1283: +71 `test_ecm_watchdog.py`, +2 bridge), agent 398, onboard 16683 (rc2 16545; TSan build 16683), kbd 4219
+ASan + 4219 TSan, safe mode 2 scenarios, e2e OK, ui 41405, 374 goldens unchanged, sim 38, tools 83 passed / 1
+skipped, shellcheck clean, release binaries match source. The first full run had one timing failure in the TSan
+build of `test_kbd` (screen-writer coalescing, `tests_k3.inc:428`; `screen.c` untouched) while two release builds
+and mac-test ran beside it; that binary passed 5/5 alone and the full rerun (alone) is the green one above.
+`make mac-test` (macOS, native, on a `git archive` export of df88a28): 821 passed / 536 skipped, no failures (rc2
+817 / 467: +4 static ECM/re-arm checks; the new BusyBox and bridge tests are Linux-only). E-stop latencies unchanged
+(socket e-stop -> all-up 1.7 ms; stalled host 0.2–0.5 ms, its K2 hold 1022.5 ms; blocked status worker 0.4 / 1006.8
+ms). The bridge stall-file tests ran 3x in a row (4/4 each); the new bridge test fails on the 1.6.1 source and 19 r8
+checks fail on the 1.6.1 `onboard.c`. `bin/ttygs_tcp_bridge` sha256
+`776b17285e416f7b90011fe4404b2ea4630c5b8b8a7d81bb2a9d5d6ae0a27147` (398572 B), `bin/mk20-kbd`
+`8f04f7ac1b652a56d00a694ac8f67bd17b652cd515e6c7db482612f0d543c2ca` (595288 B), both static ARM EABI5;
+`sbin/mk20d` `954464ff0757cb9b19a5d0519e02f6455a47ae9803a9e2eb0994450a857df713`, `share/gadget.sh`
+`cf118e8c65d2c099a6750b984d58126304bfefb4d51d94888ef56a1bf3eaf0b1`; `bin/mk20-router`, `bin/mk20-agent` and the
+other 8 files identical to rc2. `mk20-fw-1.6.2.tar` (rc1, 14 files, 2744320 B; two builds from independent `git
+archive` exports of df88a28 are byte-identical) sha256 `3487bd43b24002cd5db9d81e6f6f08fd637fa88b5f1bfd46ed54eee786c8d4ee`
+(`~/worktrees/rel-1.6.2-rc1/`). **No device acceptance claimed** (on hardware: install, check the gate's `PASS ecm
+host traffic` line in mk20d.log, `usb.ecm_state` `ok` in health, and once the manual `--rearm` from RECOVERY.md:
+gadget.log `REARM OK`, HID/ECM/adb back, flapmon not tripped).
 
 ## 1.6.1-rc2: host link self-healing (pty input stall, incident 2026-10-23)
 
