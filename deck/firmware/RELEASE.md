@@ -201,7 +201,25 @@ Review record: the coordinator's relay of Kimi K3 on `release/1.6.1..feature/fw-
   key came and went, the PTT-ignored digit and an e-stop host half under a phantom-down storm; holds up to 59 s, the
   600 ms long press, a same-page bound due first, never a second up. 19 checks fail on the 1.6.1 onboard.c.
 
-1.7.0-rc1 host validation: EVIDENCE-PLACEHOLDER
+rc1 host validation only (Docker mk20-build:trixie, BusyBox 1.27.2, nothing else running beside it): `make test` green
+on the first run — tests 1389 passed / 1 skipped (1.6.1-rc2 1283: +103 `test_ecm_watchdog.py`, +2 bridge, +1 web
+re-bind), agent 398, onboard 16683 (1.6.1-rc2 16545), kbd 4219 ASan + 4219 TSan, safe mode 2 scenarios, e2e OK,
+ui 41405, 374 goldens unchanged, sim 38, tools 83 passed / 1 skipped, shellcheck clean, release binaries match
+source. The rearm block's 61 tests ran twice in a row (61/61 each). `make mac-test` (macOS, native, on a `git archive`
+export of e459085): 823 passed / 567 skipped, no failures (the new BusyBox, gadget and bridge tests are Linux-only).
+E-stop latencies unchanged (socket e-stop -> all-up 1.4 ms; stalled host 0.1–0.5 ms, its K2 hold 1008.3 ms; blocked
+status worker 0.2 / 1002.1 ms). The new bridge test fails on the 1.6.1 source and 19 r8 checks fail on the 1.6.1
+`onboard.c`. `sbin/mk20d` sha256 `e65763500895797f35f7d825b639d0b4e7ef45bc38fa39c9edb4d4958ef96fa7`,
+`share/gadget.sh` `4ddeb63f1115d263c6aed6f152b4c1af607e635404abb0aecb7ddedbf13b9974`, `bin/ttygs_tcp_bridge`
+`776b17285e416f7b90011fe4404b2ea4630c5b8b8a7d81bb2a9d5d6ae0a27147` (398572 B), `bin/mk20-kbd`
+`8f04f7ac1b652a56d00a694ac8f67bd17b652cd515e6c7db482612f0d543c2ca` (595288 B), both static ARM EABI5 (the binaries
+are those of 1.6.2-rc1; the review fixes are in the two scripts); the other 10 files identical to 1.6.1-rc2.
+`mk20-fw-1.7.0.tar` (rc1, 14 files, 2754560 B; two builds from independent `git archive` exports of e459085 are
+byte-identical) sha256 `1321c4853b6533026378c4884c5aa5922b94e50ade59cceece0f855cc4f7f6dc` (`~/worktrees/rel-1.7.0-rc1/`).
+**No device acceptance claimed.** On hardware, before trusting the watchdog: the manual `--rearm-now` run from
+RECOVERY.md once (`rearm.last` rc=0, `REARM OK … usb0=kept|reconfigured`, usb0 MTU 478 + both addresses, both
+bridge listeners and :8780, mk20deck reconnects, HID types, flapmon not tripped), then the install's gate line in
+mk20d.log (`PASS ecm host traffic …`) and `usb.ecm_state` `ok` in health.
 
 ## 1.6.1-rc2: host link self-healing (pty input stall, incident 2026-10-23)
 
