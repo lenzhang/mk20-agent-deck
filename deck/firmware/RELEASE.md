@@ -4,6 +4,72 @@ Applies to: Waveshare MK20 (Allwinner T113, Tina Linux 5.4.61 #221, BusyBox 1.27
 layer on `/data` (ext4/UDISK). It never writes the rootfs. Kernels are only swapped as whole boot images (p4,
 see RECOVERY.md level 5).
 
+## 1.6.1-rc1: host link self-healing (pty input stall, incident 2026-10-23)
+
+`firmware/VERSION` is **1.6.1** (PATCH: no host-visible protocol change); build id **rc1**:
+`sh tools/mk20-release-build.sh firmware out rc1`. fix/pty-stall = release/1.6.0 (8155e84, 1.6.0-rc4) + this work.
+`bin/ttygs_tcp_bridge` and `bin/mk20-kbd` changed (rebuilt static armhf); `bin/mk20-router`, `bin/mk20-agent` and
+every script are byte-identical. Rules and the safety argument: kbd/UI.md "1.6.1 host link self-healing".
+
+**Incident** (1.6.0-rc4, 2026-10-23 20:01, after 14.5 h; `~/mk20-backup/incident-20261023-2001/NOTES.md`): the
+Mac lost its acks ("连续 3 帧无 ACK") and every reconnect timed out for 51 min. The bridge was blocked in
+`write(/dev/ptmx, 4096)` (wchan `wait_woken`): the slave's input flip buffer was full while the slave line
+discipline was empty (a 2 s read of `/dev/pts/0` got 0 bytes) and mk20-kbd polled it healthily with POLLIN — the
+5.4.61 pty input path stopped pushing the flip buffer to n_tty. Blocked there, the bridge read no client (Recv-Q
+65562 on both sockets) and served no new one. A one-off `tcflush(slave, TCIFLUSH)` unstuck it at once (bridge
+resumed, Mac re-hello OK). The soak stayed "ok" throughout (no host-link liveness check), and mk20deck logged
+nothing after "未找到 MK20 CDC 端口" for 50 min.
+
+### `bin/ttygs_tcp_bridge` v4
+
+- The pty master is `O_NONBLOCK`; the blocking `wall()` for client→pty is gone. Client bytes go through one
+  bounded 4 KiB pending buffer written on POLLOUT; the client is not read while it holds bytes (TCP backpressure to
+  the Mac, never a silent drop).
+- Stall: pending bytes with no write progress for `PTY_STALL_MS` = **2 s** → `tcflush(slave, TCIFLUSH)` on the
+  slave fd the bridge holds, one `/tmp/mk20/bridge.log` line `pty input stalled N s: flushed (#k); P pending bytes
+  dropped, client closed`, pending bytes discarded, the current client closed (the Mac reconnects and re-hellos;
+  frames resync on the magic). KD→client keeps being forwarded and new clients are accepted during a stall.
+- Unchanged: multi-listen, client replacement, `--tap`, SO_BINDTODEVICE, the link symlink, strict arguments,
+  KD→client drop-on-backpressure.
+
+### `bin/mk20-kbd`
+
+- Host silence backstop: host fd open and no host byte for `KBD_HOST_SILENCE_MS` = **5 s** →
+  `tcflush(host_fd, TCIFLUSH)` at most once per 5 s while the silence lasts (skipped while the fd is readable),
+  `kbd.status` `host_flushes`, one log line per silence streak (`mk20-kbd: host link silent 5 s: input flushed
+  (#k)`). Catches input stuck in the flip buffer while the master still has room (invisible to the bridge).
+  Harmless when the Mac is not connected (empty input).
+- Safety: TCIFLUSH discards only host→device input that was never delivered; by 5 s of host silence the keyboard
+  has already passed SUSPECT (3 s: host-owned keys released, option map cleared) and host loss (5 s: fresh hello
+  required). Nothing safety-related is host→device (e-stops and HID cuts are local, HID goes to `/dev/hidg0`,
+  device→host output is never flushed). One non-blocking ioctl per 5 s at most, after the pass's safety tick, GD32
+  input, control socket and HID service; the poll timeout is unchanged.
+
+### Host tools / mk20deck
+
+- `tools/mk20_soak.py`: per sample `kbd_link` (`json_in`, `jpg_ok`, `host`, `host_flushes`) from the kbd status
+  already inside the health JSON (no new adb call; every request still ≤ 400 bytes). `bridge_clients` ≥ 1 in two
+  consecutive samples with `json_in` not increased (the Mac heartbeats every 1.2 s) → `"host_link": "stalled"`,
+  sample not ok; summary `host_link_stalls` / `first_host_link_stall` (reboot / mk20-kbd restart / missing data:
+  `unknown`; no client: `idle`). INSTALL.md §6.
+- mk20deck `Supervisor`: while it cannot (re)connect, one line at least every 10 min with the elapsed time and the
+  last reason (`仍未连接 MK20：已 N 分钟（最近：…）`), counted from the loss; nothing while connected.
+
+### Tests
+
+- `tests/test_bridge.py` +2 on the real binary: an unread slave + a flooding client → master→client still forwarded
+  and a new client accepted before the flush, flush 2–5 s after the flood began with the exact log line, current
+  client closed, slave input empty, then 256 KiB client→slave and KD→client with a reader, one stall in total; a
+  reader that pauses 1.2 s at a time never triggers it (every byte in order). The stall test fails on the 1.6.0
+  bridge (master→client not forwarded while it is blocked).
+- `kbd/tests/tests_k3.inc` `test_kbd_host_silence` (test_kbd 4191 → 4219 checks, ASan + TSan): threshold, once per
+  5 s, log once per streak, readable bytes kept, undelivered input discarded (canonical-mode model), status
+  counter, closed / non-tty host fd; fails with the flush removed. `kbd/tests/e2e_run.py` on the real binary:
+  heartbeats every 1 s → no flush in 7 s, then one flush in 6.5 s of silence, the log line once, the link answers.
+- `tools/test_mk20_soak.py` +4 (status parsing incl. a 700-byte cut, state rules, sample recording without extra
+  adb calls, summary/ok accounting over reboot and restart), `tests/test_reconnect_devtest.py` +2 (10 min lines,
+  counted from the loss, silent while connected).
+
 ## 1.6.0-rc4: host protocol additions (same-page ui.page, hello page, generation reset, 会话安排 key)
 
 `firmware/VERSION` is **1.6.0** (MINOR: host-visible protocol additions); build id **rc4** (rc1–rc3 below,
@@ -436,7 +502,7 @@ A release lives in `/data/mk20/releases/<semver>/`:
 | `share/vendor.sha256` | expected hashes of the 4 vendor files the KD shims depend on |
 | `bin/mk20-kbd` | Default UI/HID daemon; static safe-mode panels after crash loops, K2 e-stop retained |
 | `bin/mk20-router` | Legacy router for developer kbd opt-out only |
-| `bin/ttygs_tcp_bridge` | static ARM PTY↔TCP bridge (bound to `usb0`, explicit `--listen` only) |
+| `bin/ttygs_tcp_bridge` | static ARM PTY↔TCP bridge (bound to `usb0`, explicit `--listen` only; 1.6.1+: non-blocking pty master, 2 s stall flush) |
 | `lib/usb_f_ecm.ko` | ECM function module for the #221 kernel |
 | `MANIFEST` | `name/version/build/kernels` header, `--`, then `sha256 mode path` for every file |
 
@@ -484,6 +550,7 @@ same tarball sha. It rejects symlinks, unsafe names and a bad VERSION.
 
 | version | date (SGT) | changes |
 |---|---|---|
+| 1.6.1 | 2026-10-23 | **1.6.1-rc1**: host link self-healing after the 1.6.0-rc4 incident (2026-10-23 20:01, 51 min without a host link: the bridge blocked in a pty master write while the 5.4.61 slave input path stalled with its flip buffer full and n_tty empty; a one-off `tcflush(slave, TCIFLUSH)` recovered it). Bridge v4: non-blocking master, bounded 4 KiB pending buffer on POLLOUT with TCP backpressure, 2 s without write progress → TCIFLUSH on the slave + one log line + pending dropped + client closed; KD→client and accepts keep working. mk20-kbd: 5 s host silence → TCIFLUSH at most once per 5 s (`host_flushes`). Soak: `host_link` liveness (json_in must grow while a client is connected). mk20deck: a line every 10 min while it cannot connect. `bin/ttygs_tcp_bridge` + `bin/mk20-kbd` changed. |
 | 1.6.0 | 2026-10-22 | **1.6.0-rc1**: host protocol additions — a same-page `ui.page` only redraws (held PTT / ⌫ / ⏎ / Esc / digit keep their owners and HID state; a route change keeps the full boundary); `ui.hello` names the route (`"page":"L1"\|"L4"\|"none"`), a route changed while no host was ONLINE is K2-tapped before that reply; a fresh `ui.hello` resets `generation` / `hid_generation` to 0; LS fb17 会话安排 sends `{"method":"ui.openArrange"}` (mk20deck opens the 会话安排 page through a one-time link file). Mac: hello page seeds the page belief (no same-page request after a reconnect), hello generations taken as authoritative under a lock (exhaustion recovers), ui.openArrange handler. Only `bin/mk20-kbd` changed. **rc2** (Kimi K3 NO-GO fixes): PTT lost-up cap 120 s (kept host key / 回 L1 across a same-page request: 10 s after it); post-e-stop pause keeps owners through a repeated GD32 down and 回 L1 is inert there (both pre-existing in 1.5.1); mk20deck drops numbered requests decided before a hello, follows a keyboard K2 made while PROBING (no pull-back), arrange access log without query strings. **rc3** (Kimi K3 GO + 2 MINORs): absolute caps per press (PTT 10 min, kept key 60 s) that repeated GD32 downs cannot extend, cut keys inert until their up; the 5 s e-stop pause resync also releases held owners (pre-existing in 1.5.1). **rc4** (Kimi K3 GO + 2 MINORs, 1 nit): same-page bound cleared on every owner-ending path; a repeated GD32 down of a held host key is not forwarded again; keep-cut log shows the real held time. |
 | 1.5.1 | 2026-10-22 | **Production `v1.5.1` (2026-10-23)** = build rc1 + Mac f8de052 after a 24 h soak PASS (288 samples, all zero). **1.5.1-rc1**: option mode — tapping a hook-tracked session that waits for input/approval clears rows 1–3 and shows its options on the top row (labels from Claude AskUserQuestion / fixed permission labels / digits); host→device `ui.hidKeys` maps fb1..fb15 to momentary HID digits (allow-list 1–9, L1 only, cleared on page/host/e-stop, 30 s expiry); digits ignored while PTT is held. |
 | 1.5.0 | 2026-10-22 | **1.5.0-rc1**: user layout — L1 rows 1–3 = 15 sessions (tap = switch), bottom row 按住说话 / ⌫ 删除 (HID Backspace) / ⏎ 发送·可以 (Return) / ✗ 不行 (Escape) / 模式; L4 row1 DESK HERD TMUX ＋新会话 回L1 (local Back fb14 -> fb5); fb17–19 holds cut at 10 s. |

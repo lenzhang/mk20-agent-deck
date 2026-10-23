@@ -66,6 +66,7 @@ Symptoms and where to go:
 |---|---|---|
 | ping to 172.30.250.2 fails, adb works | Mac/device subnet mismatch (device rolled back to 1.0.x) | `mk20_host_net.py sync` |
 | blank/error panels, USB present | kbd/status/panel failure or safe mode | K4 section above, then 0 / 2 |
+| Mac daemon connects time out, adb + ping work, keys dark | pty input stall (2026-10-23 on 1.6.0-rc4). 1.6.1+ heals itself: `/tmp/mk20/bridge.log` `pty input stalled N s: flushed (#k)`, kbd.status `host_flushes`; the Mac reconnects | INSTALL.md §6 soak `host_link` |
 | USB keeps re-enumerating | flap; release flapmon requests loader A/B after 5 drops in 60 s (Mac sleep/suspend is not counted, 1.1.2+) | 0, then 1 |
 | `good=` empty / `stub: … mismatch` | release or rescue files corrupt | 2 / 3 |
 | nothing enumerates after a power cycle | boot image or kernel broken | 5 |

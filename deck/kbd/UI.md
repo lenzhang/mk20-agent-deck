@@ -94,6 +94,51 @@ their option menus.
   slot select/focus/pick-up or any other Mac action, even when its option mode ended a moment earlier. The HID
   path never waits for or depends on the host.
 
+## 1.6.1 host link self-healing (incident 2026-10-23 on 1.6.0-rc4; PATCH)
+
+After 14.5 h the host link stalled for 51 min: the bridge sat in a blocking `write()` to the pty master because the
+slave's input flip buffer was full, while the slave line discipline was empty (a 2 s read of `/dev/pts/0` got
+nothing) and mk20-kbd polled it in vain: the 5.4.61 pty input path stopped pushing the flip buffer to n_tty. The
+blocked bridge read no client and served no new one, so every Mac reconnect timed out. A one-off
+`tcflush(slave, TCIFLUSH)` unstuck it at once. Evidence: `~/mk20-backup/incident-20261023-2001/NOTES.md`.
+
+- **Bridge (`ttygs_tcp_bridge` v4).** The pty master is `O_NONBLOCK`; client→pty bytes go through one bounded
+  4 KiB pending buffer written on POLLOUT, and the client is not read while it holds bytes (TCP backpressure, never
+  a silent drop). Pending bytes without write progress for `PTY_STALL_MS` = **2 s** = a stalled input path:
+  `tcflush(slave, TCIFLUSH)` on the slave fd the bridge holds, one line `pty input stalled N s: flushed (#k); P
+  pending bytes dropped, client closed` in `/tmp/mk20/bridge.log`, pending bytes discarded, current client closed
+  (the Mac reconnects: preamble + `getInfo` + `ui.hello`). KD→client forwarding, accepting / replacing clients,
+  the tap, SO_BINDTODEVICE, multi-listen and the link symlink are unchanged and keep working during a stall.
+  2 s is far above the running loop's drain time (mk20-kbd polls its host fd, wakes on input or at least every
+  250 ms and reads up to 16 KiB per wake; the pty takes ~64 KiB) and below the Mac's patience (3 frames without ack
+  → reconnect). Not reading for 2 s happens only when mk20-kbd is not in its loop: not running (restart backoff)
+  or in its start-up GD32 knob init (normally < 1 s, ≤ 18 s if the GD32 never echoes). A Mac that connects then
+  fills the pty with its 1 MiB preamble, is closed after 2 s and reconnects until mk20-kbd reads again (1.6.0: the
+  whole bridge blocked instead, no client served).
+- **mk20-kbd backstop.** With the host fd open and no host byte read for `KBD_HOST_SILENCE_MS` = **5 s**:
+  `tcflush(host_fd, TCIFLUSH)` at most once per 5 s while the silence lasts, skipped while the fd is readable (the
+  loop reads that next pass), counted in `kbd.status` `host_flushes`, logged once per silence streak
+  (`mk20-kbd: host link silent 5 s: input flushed (#k)`). It covers a stall the bridge cannot see (input stuck in
+  the flip buffer while the master still has room). Harmless with no Mac: the input is empty.
+- **What a flush can drop.** Only host→device bytes the kernel holds but never delivered, plus (bridge) the ≤ 4 KiB
+  the pty would not take. By then the session is already over on the keyboard: 5 s without a host byte is past
+  the ONLINE → SUSPECT (3 s, host-owned keys released, option map cleared) → host loss (5 s, fresh `ui.hello`
+  required) steps; a live Mac sends a heartbeat every 1.2 s, so the 5 s backstop never fires on a working link,
+  and the bridge's 2 s flush closes the client, so the Mac re-hellos and resends its state. Frames are CRC-checked
+  and resynced on the magic, and the Mac's 1 MiB `0` preamble on every connect clears any partial frame in the
+  parser. Nothing safety-related travels host→device: e-stops (K2, fb20, kbd.sock) and HID cuts are local, HID
+  goes out on `/dev/hidg0`, and device→host output is never flushed (TCIFLUSH = input only).
+- **Safety timing.** Both flushes are one non-blocking ioctl (no I/O wait), the kbd one after the pass's
+  safety tick, GD32 input, control socket and HID service, at most every 5 s; the poll timeout is unchanged. E-stop
+  latencies in e2e are unchanged.
+- Tests: `tests/test_bridge.py` (real binary: unread slave + flooding client → master→client still forwarded, a new
+  client accepted, flush ~2 s, one log line, slave input emptied, normal traffic with a reader; a reader pausing
+  1.2 s never triggers it; the stall test fails on the 1.6.0 bridge), `kbd/tests/tests_k3.inc`
+  `test_kbd_host_silence` (5 s threshold, once per 5 s, log once per streak, readable bytes kept, undelivered input
+  discarded, status counter, non-tty), `kbd/tests/e2e_run.py` (real binary: heartbeats keep it quiet, one flush
+  after 5 s silence, link answers), `tools/test_mk20_soak.py` (host link liveness), `tests/test_reconnect_devtest.py`
+  (mk20deck logs every 10 min while it cannot connect).
+
 ## 1.6.0 host protocol additions (integrator brief 2026-10-22; MINOR bump)
 
 Both directions stay compatible: an older mk20deck ignores the new hello field and the new event; a newer mk20deck
