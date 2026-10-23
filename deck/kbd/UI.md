@@ -115,11 +115,26 @@ blocked bridge read no client and served no new one, so every Mac reconnect time
   or in its start-up GD32 knob init (normally < 1 s, ≤ 18 s if the GD32 never echoes). A Mac that connects then
   fills the pty with its 1 MiB preamble, is closed after 2 s and reconnects until mk20-kbd reads again (1.6.0: the
   whole bridge blocked instead, no client served).
+- **Bridge rc2 (Kimi K3 rc1 MINORs).** A new client drops the previous session's pending bytes (logged on the
+  `client connected via …` line: `(P pending bytes of the previous client dropped)`), so a stall only ever closes the
+  client whose own bytes are stuck. Stalls are logged once per streak: the first in full; a stall within 60 s of the
+  previous one (`STALL_STREAK_MS`) is silent, a streak still going logs `pty input still stalling: S stalls in T s
+  (#k)` every 10 min (`STALL_SUMMARY_MS`), and `pty input stall streak over: S stalls in T s (#k)` after 60 s
+  without one. A persistent stall with a Mac reconnecting every few seconds therefore adds one stall line per
+  10 min (the `client connected` / `client gone` lines it also causes existed in 1.6.0; mk20d maint caps
+  `/tmp/mk20/bridge.log` at 256 KiB every 5 min, as before). `--stall-file /tmp/mk20/bridge.stalls` (release
+  bridge only, from gadget.sh) holds the total stall count `N\n` (0 at start, atomic tmp + rename on every stall,
+  removed on exit) for the soak.
 - **mk20-kbd backstop.** With the host fd open and no host byte read for `KBD_HOST_SILENCE_MS` = **5 s**:
   `tcflush(host_fd, TCIFLUSH)` at most once per 5 s while the silence lasts, skipped while the fd is readable (the
   loop reads that next pass), counted in `kbd.status` `host_flushes`, logged once per silence streak
   (`mk20-kbd: host link silent 5 s: input flushed (#k)`). It covers a stall the bridge cannot see (input stuck in
-  the flip buffer while the master still has room). Harmless with no Mac: the input is empty.
+  the flip buffer while the master still has room). Harmless with no Mac: the input is empty (it then flushes
+  every 5 s, so `host_flushes` only means something while a Mac is connected).
+  Accepted race: bytes that reach the slave between the "not readable" poll and the ioctl (microseconds, plus the
+  flip-buffer push latency) are discarded too. Only the first bytes after ≥ 5 s of host silence can hit it — a new
+  or returning session, whose 1 MiB `0` preamble absorbs it; otherwise the Mac misses an ack and reconnects /
+  re-hellos within seconds.
 - **What a flush can drop.** Only host→device bytes the kernel holds but never delivered, plus (bridge) the ≤ 4 KiB
   the pty would not take. By then the session is already over on the keyboard: 5 s without a host byte is past
   the ONLINE → SUSPECT (3 s, host-owned keys released, option map cleared) → host loss (5 s, fresh `ui.hello`
@@ -133,10 +148,12 @@ blocked bridge read no client and served no new one, so every Mac reconnect time
   latencies in e2e are unchanged.
 - Tests: `tests/test_bridge.py` (real binary: unread slave + flooding client → master→client still forwarded, a new
   client accepted, flush ~2 s, one log line, slave input emptied, normal traffic with a reader; a reader pausing
-  1.2 s never triggers it; the stall test fails on the 1.6.0 bridge), `kbd/tests/tests_k3.inc`
+  1.2 s never triggers it; the stall test fails on the 1.6.0 bridge; rc2: a replacing client is not closed for the
+  old client's stuck bytes, streak logging + stall file with short test timers), `kbd/tests/tests_k3.inc`
   `test_kbd_host_silence` (5 s threshold, once per 5 s, log once per streak, readable bytes kept, undelivered input
   discarded, status counter, non-tty), `kbd/tests/e2e_run.py` (real binary: heartbeats keep it quiet, one flush
-  after 5 s silence, link answers), `tools/test_mk20_soak.py` (host link liveness), `tests/test_reconnect_devtest.py`
+  after 5 s silence, link answers), `tools/test_mk20_soak.py` (host link liveness, rc2: self-heal accounting),
+  `tests/test_mk20d_kbd.py` (gadget.sh `--stall-file` for the release bridge only), `tests/test_reconnect_devtest.py`
   (mk20deck logs every 10 min while it cannot connect).
 
 ## 1.6.0 host protocol additions (integrator brief 2026-10-22; MINOR bump)

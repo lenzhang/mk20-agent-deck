@@ -134,6 +134,10 @@ int kbd_host_silence(kbd_t *k, int64_t now)
     if (k->host_flush_ms && now - k->host_flush_ms < KBD_HOST_SILENCE_MS) return 0;   /* at most once per 5 s */
     struct pollfd pf = {k->host_fd, POLLIN, 0};
     if (poll(&pf, 1, 0) > 0 && (pf.revents & POLLIN)) return 0;   /* readable: the loop reads it next, not stalled */
+    /* Accepted race (Kimi K3 1.6.1-rc1 MINOR 3): bytes reaching the slave between this poll and the tcflush below (a
+     * microsecond window plus the flip-buffer push latency) are discarded too. Only the first bytes after >= 5 s of
+     * host silence can hit it, i.e. a new or returning session: its 1 MiB '0' preamble absorbs it, otherwise the Mac
+     * misses an ack and reconnects / re-hellos within seconds (3 frames without ack). */
     k->host_flush_ms = now;
     if (tcflush(k->host_fd, TCIFLUSH)) return 0;
     k->st.host_flushes++;
