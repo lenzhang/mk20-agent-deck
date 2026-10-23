@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
 #include <unistd.h>
 
 int64_t kbd_now(kbd_t *k)
@@ -120,6 +121,27 @@ static void host_write(kbd_t *k)
         k->st.host_tx_errors++;
         if (errno == EAGAIN) k->st.host_tx_timeouts++;
     }
+}
+
+void kbd_host_rx(kbd_t *k, int64_t now)
+{
+    k->host_rx_ms = now; k->host_silent = 0;
+}
+
+int kbd_host_silence(kbd_t *k, int64_t now)
+{
+    if (k->host_fd < 0 || now - k->host_rx_ms < KBD_HOST_SILENCE_MS) return 0;
+    if (k->host_flush_ms && now - k->host_flush_ms < KBD_HOST_SILENCE_MS) return 0;   /* at most once per 5 s */
+    struct pollfd pf = {k->host_fd, POLLIN, 0};
+    if (poll(&pf, 1, 0) > 0 && (pf.revents & POLLIN)) return 0;   /* readable: the loop reads it next, not stalled */
+    k->host_flush_ms = now;
+    if (tcflush(k->host_fd, TCIFLUSH)) return 0;
+    k->st.host_flushes++;
+    if (k->host_silent) return 1;
+    k->host_silent = 1;
+    fprintf(stderr, "mk20-kbd: host link silent %lld s: input flushed (#%u)\n",
+            (long long)((now - k->host_rx_ms) / 1000), k->st.host_flushes);
+    return 2;
 }
 
 void kbd_host_drain(kbd_t *k)
@@ -502,11 +524,11 @@ int kbd_write_status(kbd_t *k, const char *path)
     fprintf(f, "{\"version\":\"%s\",\"mode\":\"%s\",\"estopped\":%d,\"gd32_rw\":%d,\"knob_init\":\"%s\",\"knob_ok\":%d,\"knob_timeouts\":%d,"
                "\"knob_tx_errors\":%d,\"panels_written\":%d,\"panels_dirty\":%d,\"write_errors\":%u,\"key_events\":%u,\"knob_events\":%u,"
                "\"echo_frames\":%u,\"other_frames\":%u,\"jpg_ok\":%u,\"jpg_bad\":%u,\"jpg_size\":%u,\"json_in\":%u,"
-               "\"host\":%d,\"host_tx_errors\":%u,\"host_tx_timeouts\":%u,\"backlight\":%d,\"hid_open\":%d,\"hid_reopens\":%u,\"hid_replaced\":%u}\n",
+               "\"host\":%d,\"host_tx_errors\":%u,\"host_tx_timeouts\":%u,\"host_flushes\":%u,\"backlight\":%d,\"hid_open\":%d,\"hid_reopens\":%u,\"hid_replaced\":%u}\n",
             k->version, k->safe_mode ? "safe" : "normal", k->ctl ? k->ctl->estopped : 0, k->gd32_rw, gd32_knob_state_name(ks->state), ks->ok_count, ks->timeouts, ks->tx_errors,
             panels_written, dirty, werr, k->st.key_events, k->st.knob_events, k->st.echo_frames,
             k->st.other_frames, k->st.jpg_ok, k->st.jpg_bad, k->st.jpg_size, k->st.json_in, k->host_fd >= 0,
-            k->st.host_tx_errors, k->st.host_tx_timeouts, k->backlight, k->hid ? k->hid->fd >= 0 : -1, k->hid ? k->hid->reopens : 0u,
+            k->st.host_tx_errors, k->st.host_tx_timeouts, k->st.host_flushes, k->backlight, k->hid ? k->hid->fd >= 0 : -1, k->hid ? k->hid->reopens : 0u,
             k->hid ? k->hid->replaced : 0u);
     if (fclose(f)) { unlink(tmp); return -1; }
     return rename(tmp, path);

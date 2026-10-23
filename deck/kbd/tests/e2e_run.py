@@ -4,7 +4,7 @@ Checks: knob init frames on the wire + echo, key/knob events -> keyStateChanged,
 getInfo, ack-paced cmd-100 JPEG -> fb files (logical panel -> physical /dev/fbN), --pattern,
 setBacklight ack, status file,
 --no-gd32-write and the kill file (tty opened O_RDONLY, nothing written)."""
-import io, json, os, pty, select, signal, subprocess, sys, tempfile, time, tty
+import io, json, os, pty, re, select, signal, subprocess, sys, tempfile, time, tty
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from mk20deck import protocol as P  # noqa: E402
@@ -233,6 +233,47 @@ def blocked_status_worker(tmp):
             check(p.returncode == 0 and time.monotonic() - t1 < 3, f"bounded shutdown with a stuck worker rc={p.returncode}")
             cs.close()
             for fd in (hr, gm, hm, *keep): os.close(fd)
+
+def host_silence_backstop(tmp):
+    """1.6.1 (incident 2026-10-23: a stalled pty input path): with the host link open and no host byte for 5 s the
+    real binary flushes its host input (TCIFLUSH; kbd.status host_flushes, one log line per silence streak); host
+    bytes (heartbeats every 1 s) keep it from flushing; the link still answers afterwards."""
+    case = os.path.join(tmp, "silence"); os.mkdir(case)
+    p, gm, hm, fb, st, keep = start(case, ["--no-gd32-write"])
+    err = b""
+
+    def pump(secs, beat):   # drain the daemon's replies; optionally one host frame per second
+        out = b""; end = time.monotonic() + secs; nxt = 0.0
+        while time.monotonic() < end:
+            if beat and time.monotonic() >= nxt:
+                os.write(hm, P.encode_frame(P.CMD_JSON, b'{"method":"ui.heartbeat"}', 0xFFFFFFFE)); nxt = time.monotonic() + 1
+            r, _, _ = select.select([hm], [], [], 0.05)
+            if r: out += os.read(hm, 65536)
+        return out
+    try:
+        par = P.FrameParser()
+        os.write(hm, b"0" * 4096 + P.encode_frame(P.CMD_JSON, b'{"method":"getInfo"}', 5))
+        fr = par.feed(pump(0.5, False))
+        check(any(f.frame_id == 5 and f.json() and f.json().get("ack_method") == "getInfo" for f in fr), "silence: getInfo answered")
+        par.feed(pump(7.0, True))                             # host bytes every 1 s for 7 s: never a silence flush
+        s = json.load(open(st))
+        check(s.get("host_flushes") == 0 and s.get("json_in", 0) >= 7, f"silence: no flush while host bytes arrive {s}")
+        t0 = time.monotonic()
+        par.feed(pump(6.5, False))                            # silent host: one flush ~5 s after the last heartbeat
+        s = json.load(open(st))
+        check(s.get("host_flushes") == 1 and s.get("host") == 1, f"silence: one flush after 5 s {s}")
+        os.write(hm, P.encode_frame(P.CMD_JSON, b'{"method":"getInfo"}', 7))
+        fr = par.feed(pump(0.5, False))
+        check(any(f.frame_id == 7 for f in fr), "silence: link answers after the flush")
+        print(f"e2e: host silence backstop: no flush with 1 s heartbeats, 1 flush in {time.monotonic() - t0:.1f} s of silence, link OK")
+    finally:
+        p.send_signal(signal.SIGTERM)
+        try: err = p.communicate(timeout=3)[1] or b""
+        except subprocess.TimeoutExpired: p.kill(); err = p.communicate()[1] or b""
+        for fd in (gm, hm, *keep): os.close(fd)
+    lines = [l for l in err.decode(errors="replace").splitlines() if "host link silent" in l]
+    check(len(lines) == 1 and re.fullmatch(r"mk20-kbd: host link silent 5 s: input flushed \(#1\)", lines[0]),
+          f"silence: one log line {lines}")
 
 def main():
     global heartbeat_fd, heartbeat_at
@@ -567,6 +608,7 @@ def main():
         os.close(hrc)
         stalled_host_safety(tmp)
         blocked_status_worker(tmp)
+        host_silence_backstop(tmp)
 
         # read-only modes: flag and kill file
         kill = os.path.join(tmp, "nowrite")

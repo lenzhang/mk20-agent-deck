@@ -181,7 +181,7 @@ static int run(const struct run_opts *o)
     gd32_parser gp; gd32_parser_init(&gp);
     /* host link first, so key events arriving during knob init (<= 18 s worst case if the
      * GD32 never echoes) are still forwarded */
-    if (!o->safe_mode && !o->no_host && (k.host_fd = open_host(o->host)) >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
+    if (!o->safe_mode && !o->no_host && (k.host_fd = open_host(o->host)) >= 0) { kbd_host_rx(&k, mono_ms()); fprintf(stderr, "mk20-kbd: host link %s open\n", o->host); }
     int64_t next_host_try = mono_ms() + 1000;
     if (no_write) {
         k.knob.state = 4;
@@ -204,7 +204,7 @@ static int run(const struct run_opts *o)
         if (!o->safe_mode && !o->no_host && k.host_fd < 0 && now >= next_host_try) {
             k.host_fd = open_host(o->host);
             next_host_try = now + 1000;
-            if (k.host_fd >= 0) fprintf(stderr, "mk20-kbd: host link %s open\n", o->host);
+            if (k.host_fd >= 0) { kbd_host_rx(&k, mono_ms()); fprintf(stderr, "mk20-kbd: host link %s open\n", o->host); }
         }
         kbd_service(&k, mono_ms());
         now = mono_ms();
@@ -233,6 +233,7 @@ static int run(const struct run_opts *o)
         if (r > 0 && k.host_fd >= 0 && pf[1].fd >= 0 && (pf[1].revents & (POLLIN | POLLERR | POLLHUP))) {
             ssize_t n = read(k.host_fd, buf, sizeof buf);
             if (n > 0) {
+                kbd_host_rx(&k, mono_ms());
                 if (safety) { kbd_host_push(&k, buf, (size_t)n); host_work = 1; }
                 else kbd_host_feed(&k, buf, (size_t)n);
             }
@@ -241,6 +242,8 @@ static int run(const struct run_opts *o)
                 fprintf(stderr, "mk20-kbd: host link closed, retrying\n");
             }
         }
+        /* After the GD32/safety/control/HID work of this pass: one non-blocking ioctl at most every 5 s. */
+        kbd_host_silence(&k, mono_ms());
         if (host_work) {
             host_frame f;
             if (host_next(&k.hp, &f)) kbd_on_host_frame(&k, &f);

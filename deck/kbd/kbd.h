@@ -19,6 +19,9 @@ typedef struct kbd_s {
     size_t host_rx_barrier; /* unread bytes queued before the latest route boundary */
     int host_fd;          /* -1 = no host link (local mode) */
     int host_tx_stuck;    /* last reply timed out: next ones fail fast until a write succeeds */
+    int64_t host_rx_ms;   /* last host byte read (or the host link opened): host silence backstop */
+    int64_t host_flush_ms;/* last silence flush; 0 = none yet */
+    int host_silent;      /* the current silence streak has been logged */
     int safe_mode;        /* static rescue panels; no host/UI/agent features */
     struct devstat_s *safe_ds; uint16_t *safe_px; /* safe mode: usb0 IP + web pairing code (worker) */
     char safe_ip[16], safe_pair_raw[7], safe_pair[7]; int safe_stale;
@@ -38,7 +41,7 @@ typedef struct kbd_s {
     struct {
         uint32_t jpg_ok, jpg_bad, jpg_size, tiles, json_in, json_unsupported, json_bad,
                  key_events, knob_events, echo_frames, other_frames, keycode_nonzero,
-                 host_tx, host_tx_errors, host_tx_timeouts, flush_errors, panel_writes;
+                 host_tx, host_tx_errors, host_tx_timeouts, flush_errors, panel_writes, host_flushes;
     } st;
 } kbd_t;
 
@@ -76,5 +79,14 @@ void kbd_draw_key(kbd_t *k, int row, int col, int pressed);
 int kbd_json_str(const char *s, size_t n, const char *key, char *out, size_t cap);
 int kbd_json_int(const char *s, size_t n, const char *key, long *v);
 #define KBD_HOST_TX_MS 200   /* legacy wait; with ctl/K2 safety, host sends never wait */
+/* Host silence backstop (1.6.1, incident 2026-10-23): with the host fd open and no host byte read for
+ * KBD_HOST_SILENCE_MS, tcflush(host_fd, TCIFLUSH) at most once per KBD_HOST_SILENCE_MS while the silence lasts
+ * (counted in st.host_flushes, logged once per streak). It only discards host->device input the kernel holds but
+ * never delivered (a stalled pty flip buffer); bytes already readable are left alone. Never touches the GD32, HID,
+ * e-stop or output paths. kbd_host_rx(): host bytes were read / the link opened. kbd_host_silence(): 0 = nothing,
+ * 1 = flushed, 2 = flushed and logged (first flush of a streak). */
+#define KBD_HOST_SILENCE_MS 5000
+void kbd_host_rx(kbd_t *k, int64_t now_ms);
+int kbd_host_silence(kbd_t *k, int64_t now_ms);
 int kbd_write_status(kbd_t *k, const char *path);
 #endif

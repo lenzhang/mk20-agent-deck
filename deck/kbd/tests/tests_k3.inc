@@ -2,7 +2,9 @@
 #include "gd32io.h"
 #include "jpeg.h"
 #include "kbd.h"
+#include <pty.h>
 #include <signal.h>
+#include <termios.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -316,6 +318,60 @@ static void test_kbd_core(void)
     for (int i = 1; i <= 21; i++) { snprintf(path, sizeof path, "%s/fb%d", dir, i); unlink(path); }
     for (int i = 0; i < 4; i++) { snprintf(path, sizeof path, "%s/%s", bl, blf[i]); unlink(path); }
     rmdir(dir); rmdir(bl);
+}
+
+/* ---- 1.6.1 host silence backstop (incident 2026-10-23: stalled pty input path) ---- */
+static int wait_readable(int fd, int ms) { struct pollfd pf = {fd, POLLIN, 0}; return poll(&pf, 1, ms) > 0 && (pf.revents & POLLIN); }
+
+static void test_kbd_host_silence(void)
+{
+    char dir[] = "/tmp/mk20silXXXXXX", path[256], b[64];
+    CHECK(mkdtemp(dir) != NULL);
+    for (int i = 1; i <= 21; i++) { snprintf(path, sizeof path, "%s/fb%d", dir, i); FILE *f = fopen(path, "w"); if (f) fclose(f); }
+    kbd_t k; CHECK(kbd_init(&k, dir, "", "test-1") == 0);
+    CHECK(k.host_fd == -1 && kbd_host_silence(&k, 1000000) == 0 && k.st.host_flushes == 0);   /* no host link: never */
+    int m, s; struct termios raw;
+    CHECK(openpty(&m, &s, NULL, NULL, NULL) == 0);
+    CHECK(tcgetattr(s, &raw) == 0); cfmakeraw(&raw); CHECK(tcsetattr(s, TCSANOW, &raw) == 0);   /* like open_host() */
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+    k.host_fd = s; kbd_host_rx(&k, 1000);                                  /* link opened at t=1 s */
+    CHECK(kbd_host_silence(&k, 1000 + KBD_HOST_SILENCE_MS - 1) == 0 && k.st.host_flushes == 0);
+    CHECK(kbd_host_silence(&k, 6000) == 2 && k.st.host_flushes == 1);      /* 5 s silent: flushed + logged */
+    CHECK(kbd_host_silence(&k, 6001) == 0 && kbd_host_silence(&k, 10999) == 0 && k.st.host_flushes == 1);   /* <= 1 per 5 s */
+    CHECK(kbd_host_silence(&k, 11000) == 1 && k.st.host_flushes == 2);     /* same streak: flushed, not logged again */
+    /* bytes the loop can read are never flushed (poll would have woken it; it reads them next) */
+    CHECK(write(m, "abc", 3) == 3 && wait_readable(s, 1000));
+    CHECK(kbd_host_silence(&k, 16000) == 0 && k.st.host_flushes == 2);
+    CHECK(read(s, b, sizeof b) == 3 && !memcmp(b, "abc", 3));
+    kbd_host_rx(&k, 16000);                                                /* host bytes: the streak ends */
+    CHECK(kbd_host_silence(&k, 20999) == 0 && kbd_host_silence(&k, 21000) == 2 && k.st.host_flushes == 3);   /* new streak: logged */
+    CHECK(write(m, "xyz", 3) == 3 && wait_readable(s, 1000) && read(s, b, sizeof b) == 3 && !memcmp(b, "xyz", 3));   /* link still works */
+    /* input the kernel holds but does not deliver is discarded. Model: canonical mode keeps a line without its
+     * newline unreadable (no POLLIN), as the stalled flip buffer did in raw mode on 5.4.61. */
+    struct termios canon = raw; canon.c_lflag |= ICANON; CHECK(tcsetattr(s, TCSANOW, &canon) == 0);
+    CHECK(write(m, "stuck", 5) == 5 && !wait_readable(s, 100));
+    kbd_host_rx(&k, 30000);
+    CHECK(kbd_host_silence(&k, 35000) == 2 && k.st.host_flushes == 4);
+    CHECK(write(m, "ok\n", 3) == 3 && wait_readable(s, 1000));
+    ssize_t n = read(s, b, sizeof b); CHECK(n == 3 && !memcmp(b, "ok\n", 3));   /* without the flush: "stuckok\n" */
+    CHECK(tcsetattr(s, TCSANOW, &raw) == 0);
+    /* status: counted */
+    snprintf(path, sizeof path, "%s/status.json", dir);
+    CHECK(kbd_write_status(&k, path) == 0);
+    FILE *f = fopen(path, "r"); char sbuf[2048] = {0}; if (f) { CHECK(fread(sbuf, 1, sizeof sbuf - 1, f) > 0); fclose(f); }
+    CHECK(strstr(sbuf, "\"host_flushes\":4,") != NULL && strstr(sbuf, "\"host\":1,") != NULL);
+    unlink(path);
+    /* host link closed: nothing, however long */
+    k.host_fd = -1; CHECK(kbd_host_silence(&k, 99000000) == 0 && k.st.host_flushes == 4);
+    /* not a tty (tcflush fails): not counted, retried at most once per 5 s */
+    int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    k.host_fd = sv[0]; kbd_host_rx(&k, 100000);
+    CHECK(kbd_host_silence(&k, 105000) == 0 && k.host_flush_ms == 105000 && k.st.host_flushes == 4);
+    CHECK(kbd_host_silence(&k, 109999) == 0 && k.host_flush_ms == 105000);
+    close(sv[0]); close(sv[1]); close(m); close(s);
+    k.host_fd = -1; kbd_free(&k);
+    for (int i = 1; i <= 21; i++) { snprintf(path, sizeof path, "%s/fb%d", dir, i); unlink(path); }
+    rmdir(dir);
 }
 
 /* ---- per-bus writer threads ---- */
