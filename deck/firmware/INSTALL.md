@@ -192,4 +192,9 @@ Host link (1.6.1): each sample keeps `kbd_link` (`json_in`, `jpg_ok`, `host`, `h
 status inside the health JSON, no extra adb call). The Mac sends a heartbeat every 1.2 s, so with `bridge_clients`
 >= 1 in two consecutive samples `json_in` must grow; if it does not, the sample is `"host_link": "stalled"` and not
 ok (`ok` / `idle` = no client / `unknown` = first sample, missing data, reboot or mk20-kbd restart). The summary
-counts `host_link_stalls` (`first_host_link_stall`).
+counts `host_link_stalls` (`first_host_link_stall`). Self-healing (1.6.1-rc2): each sample also keeps
+`bridge_stalls` (`/tmp/mk20/bridge.stalls`, the bridge's total pty stall count, read in the meminfo call); a sample
+that is not stalled is `"host_link": "self-healed"` (still ok) when that count grew, or when `host_flushes` grew while
+a client was connected in both samples and `json_in` grew. Summary: `host_link_selfheals`
+(`first_host_link_selfheal`), `bridge_stalls_total`, `host_flushes_total` (connected intervals only: with no Mac
+connected mk20-kbd flushes its empty input every 5 s).

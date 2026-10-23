@@ -30,6 +30,14 @@ client is connected json_in must grow: bridge_clients >= 1 in this and the previ
 increased -> "host_link": "stalled" and the sample is NOT ok ("ok": json_in grew; "idle": no client in one of the
 two samples; "unknown": no previous sample / missing data / reboot / mk20-kbd restart between them). The summary
 counts "host_link_stalls" and keeps "first_host_link_stall".
+Self-healing (1.6.1-rc2): every sample also keeps "bridge_stalls" = the bridge's total pty stall count
+(/tmp/mk20/bridge.stalls, read in the meminfo call; null when absent: bridge down or older firmware). A sample that
+is not stalled becomes "host_link": "self-healed" (still ok, but visible) when the bridge stall count grew since the
+previous sample, or when json_in grew with a client in both samples and kbd_link.host_flushes grew too (mk20-kbd
+flushed after >= 5 s of host silence: a stall, or the Mac went away and came back in between). Summary:
+"host_link_selfheals" / "first_host_link_selfheal", "bridge_stalls_total" (sum of increases; a bridge restart starts
+over at 0) and "host_flushes_total" (increases over intervals with a client in both samples only: with no Mac
+connected mk20-kbd flushes its empty input every 5 s, which means nothing).
 Stop early: kill the process (pid in <out>/soak.pid); the summary is still written.
 """
 from __future__ import annotations
@@ -56,6 +64,9 @@ _LEVEL = re.compile(r"(?:^|(?<=\s))(?=(?:PASS|INFO|WARN|FAIL) )")
 MEMINFO_KEYS = ("MemAvailable", "MemFree", "Slab", "SReclaimable", "SUnreclaim", "Shmem", "Cached")
 # device side (BusyBox 1.27.2 awk): one line "meminfo=MemFree:41000 MemAvailable:52000 Cached:9000 ..." (kB)
 MEMINFO_SH = "echo meminfo=$(awk '/^(" + "|".join(MEMINFO_KEYS) + "):/{print $1 $2}' /proc/meminfo 2>/dev/null)"
+BRIDGE_STALLS_FILE = "/tmp/mk20/bridge.stalls"   # ttygs_tcp_bridge --stall-file (1.6.1): total pty stalls, "N\n"
+STALLS_SH = f"echo bstalls=$(cat {BRIDGE_STALLS_FILE} 2>/dev/null)"
+MEM_SH = MEMINFO_SH + "; " + STALLS_SH          # one short adb call per sample (~200 bytes)
 _MEMINFO = re.compile(r"(?<![\w(])([A-Za-z]\w*):\s*(\d+)(?!\w)")
 SLOPE_MIN_N, SLOPE_MIN_H = 6, 1.0        # a slope needs >= 6 samples spanning >= 1 h
 TREND_KB_H, TREND_MIN_H = 50.0, 6.0      # "growing": SUnreclaim > 50 kB/h sustained over >= 6 h
@@ -182,23 +193,41 @@ def kbd_link(status) -> dict:
     return out
 
 
-def host_link_state(prev, cur) -> str:
-    """"stalled" | "ok" | "idle" | "unknown" for sample `cur` against the previous sample `prev` (module docstring)."""
+def _delta(a, b):
+    return b - a if _num(a) and _num(b) else None
+
+
+def host_link(prev, cur) -> tuple:
+    """(state, host_flushes increase or None, bridge stall increase or None) for sample `cur` against `prev`.
+    state: "stalled" | "self-healed" | "ok" | "idle" | "unknown" (module docstring)."""
     if not isinstance(prev, dict) or not isinstance(cur, dict):
-        return "unknown"
+        return "unknown", None, None
+    ev = cur.get("event") or ""
+    pk, ck = prev.get("kbd_pid"), cur.get("kbd_pid")
+    restarted = "reboot" in ev or "kd-restart" in ev or bool(pk and ck and pk != ck)   # counters start over
+    pl, cl = prev.get("kbd_link") or {}, cur.get("kbd_link") or {}
+    fd = None if restarted else _delta(pl.get("host_flushes"), cl.get("host_flushes"))
+    fd = fd if fd is None or fd >= 0 else None
+    sd = None if "reboot" in ev else _delta(prev.get("bridge_stalls"), cur.get("bridge_stalls"))
+    if sd is not None and sd < 0:
+        sd = cur.get("bridge_stalls")                  # the bridge restarted: its count starts over at 0
     pc, cc = prev.get("bridge_clients"), cur.get("bridge_clients")
     if not (_num(pc) and _num(cc)):
-        return "unknown"
-    if pc < 1 or cc < 1:
-        return "idle"
-    pj, cj = (prev.get("kbd_link") or {}).get("json_in"), (cur.get("kbd_link") or {}).get("json_in")
-    ev = cur.get("event") or ""
-    if not (_num(pj) and _num(cj)) or "reboot" in ev or "kd-restart" in ev:
-        return "unknown"
-    pk, ck = prev.get("kbd_pid"), cur.get("kbd_pid")
-    if pk and ck and pk != ck:
-        return "unknown"   # mk20-kbd restarted (its counters start over)
-    return "ok" if cj > pj else "stalled"
+        state = "unknown"
+    elif pc < 1 or cc < 1:
+        state = "idle"
+    elif restarted or not (_num(pl.get("json_in")) and _num(cl.get("json_in"))):
+        state = "unknown"
+    else:
+        state = "ok" if cl["json_in"] > pl["json_in"] else "stalled"
+    if state in ("ok", "idle") and ((sd or 0) > 0 or (state == "ok" and (fd or 0) > 0)):
+        state = "self-healed"
+    return state, fd, sd
+
+
+def host_link_state(prev, cur) -> str:
+    """"stalled" | "self-healed" | "ok" | "idle" | "unknown" for sample `cur` against `prev` (module docstring)."""
+    return host_link(prev, cur)[0]
 
 
 def sample(deep: bool) -> dict:
@@ -229,8 +258,11 @@ def sample(deep: bool) -> dict:
         f = dict(l.split("=", 1) for l in o.splitlines() if "=" in l)
         # Own short call: appending it to the pid probe above would push that request to ~464 bytes, too close to
         # the 512-byte adbd limit (acc.ADB_SHELL_MAX).
-        _, mo = acc.sh(MEMINFO_SH, timeout=10)
-        s["meminfo"] = parse_meminfo(dict(l.split("=", 1) for l in mo.splitlines() if "=" in l).get("meminfo"))
+        _, mo = acc.sh(MEM_SH, timeout=10)
+        mf = dict(l.split("=", 1) for l in mo.splitlines() if "=" in l)
+        s["meminfo"] = parse_meminfo(mf.get("meminfo"))
+        bs = (mf.get("bstalls") or "").strip()
+        s["bridge_stalls"] = int(bs) if bs.isdigit() else None
         s["kd_pid"] = f.get("kd", "").strip()
         s["kbd_pid"] = f.get("kbd", "").strip()
         s["log_kb"] = f.get("logkb", "").strip()
@@ -305,9 +337,10 @@ def main() -> int:
     km_pts: dict = {"SUnreclaim": [], "MemAvailable": []}   # (host epoch, kB) since the last reboot
     km_since = None
     summary: dict = {"start": stamp, "samples": 0, "kernel_mem": None, "kernel_mem_trend": "insufficient",
-                     "host_link_stalls": 0, "first_host_link_stall": None}
+                     "host_link_stalls": 0, "first_host_link_stall": None, "host_link_selfheals": 0,
+                     "first_host_link_selfheal": None, "bridge_stalls_total": 0, "host_flushes_total": 0}
     prev = None                                          # previous sample (host link liveness)
-    hl_stalls, first_hl = 0, None
+    hl_stalls, first_hl, hl_heals, first_heal, br_stalls, kb_flushes = 0, None, 0, None, 0, 0
     try:
         while not STOP and time.time() < end:
             t = time.time()
@@ -364,11 +397,17 @@ def main() -> int:
                 if _num(v):
                     km_pts[k].append((t, v))
                     km_since = km_since or s.get("time")
-            s["host_link"] = host_link_state(prev, s)
+            s["host_link"], fd, sd = host_link(prev, s)
             if s["host_link"] == "stalled":              # connected but nothing reaches mk20-kbd: not ok
                 s["ok"] = False
                 hl_stalls += 1
                 first_hl = first_hl or s.get("time")
+            elif s["host_link"] == "self-healed":         # still ok: the firmware recovered on its own
+                hl_heals += 1
+                first_heal = first_heal or s.get("time")
+            br_stalls += sd if sd and sd > 0 else 0
+            if fd and fd > 0 and all(_num(x.get("bridge_clients")) and x["bridge_clients"] >= 1 for x in (prev, s)):
+                kb_flushes += fd
             prev = s
             for key in {problem_key(x) for x in s.get("selftest_warn") or [] if isinstance(x, str)}:
                 warn_counts[key] = warn_counts.get(key, 0) + 1
@@ -383,7 +422,9 @@ def main() -> int:
                        "selftest_warn": dict(sorted(warn_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
                        "kernel_mem": kernel_mem_summary(km_stats, km_pts, km_since),
                        "kernel_mem_trend": kernel_mem_trend(km_pts["SUnreclaim"]),
-                       "host_link_stalls": hl_stalls, "first_host_link_stall": first_hl}
+                       "host_link_stalls": hl_stalls, "first_host_link_stall": first_hl,
+                       "host_link_selfheals": hl_heals, "first_host_link_selfheal": first_heal,
+                       "bridge_stalls_total": br_stalls, "host_flushes_total": kb_flushes}
             _write_json(sm, summary)
             while not STOP and time.time() < min(end, t + a.interval):
                 time.sleep(1)

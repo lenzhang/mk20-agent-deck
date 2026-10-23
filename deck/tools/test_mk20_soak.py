@@ -39,6 +39,7 @@ def test_events_and_summary(tmp_path, monkeypatch):
     assert sm["min_mem_kb"] == 50000 and sm["min_fat_free_kb"] == 1200
     assert sm["kernel_mem_trend"] == "insufficient" and sm["kernel_mem"]["SUnreclaim"] is None   # no meminfo: no crash
     assert sm["host_link_stalls"] == 0 and sm["first_host_link_stall"] is None             # no bridge data: no stall
+    assert sm["host_link_selfheals"] == 0 and sm["bridge_stalls_total"] == 0 and sm["host_flushes_total"] == 0
 
 
 def test_keyboard_owner_restart_counts_mk20_kbd(tmp_path, monkeypatch):
@@ -78,14 +79,14 @@ def test_selftest_problems_bounded():
     assert got[0].startswith("WARN w0 ") and got[7].startswith("WARN w7 ")
 
 
-def _device(monkeypatch, health, meminfo=""):
+def _device(monkeypatch, health, meminfo="", bstalls=""):
     """sample() against a fake adb/device and Mac network (no subprocesses). Returns the adb shell commands."""
     def sh(cmd, timeout=20):
         calls.append(cmd)
         if cmd == "echo up":
             return 0, "up"
-        if cmd == soak.MEMINFO_SH:
-            return 0, meminfo
+        if cmd == soak.MEM_SH:
+            return 0, meminfo + bstalls
         return 0, "kd=\nkbd=321\nlogkb=12 34\nbridgelog=99\n"
     calls: list = []
     def run_proc(cmd, timeout, env=None):
@@ -202,7 +203,7 @@ def test_sample_reads_meminfo_in_its_own_short_adb_call(monkeypatch):
     calls = _device(monkeypatch, h, meminfo=f"meminfo={one}\n")
     s = soak.sample(deep=False)
     assert s["ok"] is True and s["meminfo"] == MEMINFO_WANT and s["kbd_pid"] == "321" and s["bridge_log_b"] == "99"
-    assert calls == ["echo up", calls[1], soak.MEMINFO_SH] and "echo kd=" in calls[1]   # one extra short call
+    assert calls == ["echo up", calls[1], soak.MEM_SH] and "echo kd=" in calls[1]   # one extra short call
     assert all(soak.acc.adb_payload_len(c) <= 400 for c in calls)   # well below the 512-byte adbd limit
     for out in ("", "meminfo=\n", "meminfo=Slab:oops\n"):              # old/odd output: nulls, sample still ok
         _device(monkeypatch, h, meminfo=out)
@@ -411,3 +412,82 @@ def test_summary_marks_stalled_host_link_samples_not_ok(tmp_path, monkeypatch):
     sm = _summary(tmp_path)
     assert sm["host_link_stalls"] == 3 and sm["first_host_link_stall"] == "t2"
     assert sm["failed"] == 3 and sm["first_fail"] == "t2"
+
+
+
+# ---- 1.6.1-rc2 (Kimi K3 rc1 MINOR 4): stalls healed between two samples are visible ----
+def test_stalls_shell_command_on_device(tmp_path):
+    bb = _busybox()
+    if not bb:
+        pytest.skip("BusyBox unavailable: the device-side snippet must be tested with BusyBox (MK20_TEST_BUSYBOX)")
+    fx = pathlib.Path(soak.HERE).parent / "tests/fixtures/device-commands.txt"
+    if fx.exists():
+        assert "cat" in fx.read_text().split("\n")
+    assert soak.MEM_SH.startswith(soak.MEMINFO_SH + "; ") and soak.MEM_SH.endswith(soak.STALLS_SH)
+    assert soak.BRIDGE_STALLS_FILE == "/tmp/mk20/bridge.stalls" and soak.BRIDGE_STALLS_FILE in soak.STALLS_SH
+    d = tmp_path / "bin"
+    d.mkdir()
+    (d / "cat").symlink_to(bb)
+    f = tmp_path / "bridge.stalls"
+    f.write_text("7\n")
+    for content, want in (("7\n", "bstalls=7\n"), (None, "bstalls=\n")):
+        if content is None:
+            f.unlink()
+        cmd = soak.STALLS_SH.replace(soak.BRIDGE_STALLS_FILE, str(f))
+        out = subprocess.run([bb, "sh", "-c", cmd], capture_output=True, text=True, env={"PATH": str(d)}, timeout=10)
+        assert out.returncode == 0 and out.stdout == want
+
+
+def test_sample_records_bridge_stalls_in_the_meminfo_call(monkeypatch):
+    h = {"status": "ok", "uptime_s": 3600, "kd": 0, "selftest": {"pass": True}, "usb": {"composite": True}}
+    for out, want in (("bstalls=3\n", 3), ("bstalls=\n", None), ("", None), ("bstalls=x\n", None), ("bstalls=-1\n", None)):
+        calls = _device(monkeypatch, h, meminfo="meminfo=Slab:1\n", bstalls=out)
+        s = soak.sample(deep=False)
+        assert s["bridge_stalls"] == want and s["ok"] is True and s["meminfo"]["Slab"] == 1
+        assert len(calls) == 3 and max(soak.acc.adb_payload_len(c) for c in calls) <= 400
+
+
+def test_host_link_self_healed_rules():
+    def smp(clients, json_in, flushes=0, stalls=0, **kw):
+        return dict({"bridge_clients": clients, "kbd_pid": "7", "bridge_stalls": stalls,
+                     "kbd_link": {"json_in": json_in, "host_flushes": flushes}}, **kw)
+    hl = soak.host_link
+    assert hl(smp(1, 100), smp(1, 200)) == ("ok", 0, 0)
+    assert hl(smp(1, 100, stalls=2), smp(1, 200, stalls=3)) == ("self-healed", 0, 1)        # the bridge flushed
+    assert hl(smp(1, 100, flushes=4), smp(1, 200, flushes=5)) == ("self-healed", 1, 0)      # mk20-kbd flushed
+    assert hl(smp(1, 100, stalls=2), smp(1, 100, stalls=3)) == ("stalled", 0, 1)            # not healed: stalled wins
+    assert hl(smp(0, 100, flushes=4), smp(1, 200, flushes=90)) == ("idle", 86, 0)           # Mac away: flushes mean nothing
+    assert hl(smp(0, 100, stalls=1), smp(1, 200, stalls=2)) == ("self-healed", 0, 1)
+    assert hl(smp(1, 100, stalls=9), smp(1, 200, stalls=2)) == ("self-healed", 0, 2)        # bridge restarted: 0 -> 2
+    assert hl(smp(1, 100, stalls=9), smp(1, 200, stalls=0)) == ("ok", 0, 0)
+    assert hl(smp(1, 900, flushes=8), smp(1, 3, flushes=1, event="kd-restart")) == ("unknown", None, 0)
+    assert hl(smp(1, 900, stalls=4), smp(1, 3, stalls=0, event="reboot")) == ("unknown", None, None)
+    assert hl(smp(1, 100, stalls=None), smp(1, 200, stalls=1)) == ("ok", 0, None)            # older firmware: no file
+    assert soak.host_link_state(smp(1, 100, stalls=1), smp(1, 200, stalls=2)) == "self-healed"
+    assert hl(None, smp(1, 1)) == ("unknown", None, None)
+
+
+def test_summary_counts_self_heals_and_flush_totals(tmp_path, monkeypatch):
+    monkeypatch.setenv("MK20_ADB", "true")
+
+    def smp(up, clients, json_in, flushes, stalls, pid="7", restarts=0):
+        return {"health": {"uptime_s": up, "kbd": {"restarts": restarts}}, "bridge_clients": clients, "kbd_pid": pid,
+                "bridge_stalls": stalls, "kbd_link": {"json_in": json_in, "jpg_ok": 1, "host": 1, "host_flushes": flushes}}
+    seq = [smp(100, 1, 100, 0, 0),     # t0 unknown (first)
+           smp(400, 1, 350, 0, 0),     # t1 ok
+           smp(700, 1, 600, 0, 2),     # t2 self-healed: 2 bridge stalls between t1 and t2
+           smp(1000, 1, 850, 3, 2),    # t3 self-healed: mk20-kbd flushed 3x while connected
+           smp(1300, 0, 850, 60, 2),   # t4 idle: Mac gone, 57 empty-input flushes (not counted)
+           smp(1600, 1, 900, 61, 2),   # t5 idle (previous had no client), 1 flush not counted
+           smp(1900, 1, 900, 61, 3),   # t6 stalled (json_in frozen) although the bridge stalled once: not ok
+           smp(2200, 1, 1200, 61, 3)]  # t7 ok
+    _timed(monkeypatch, seq)
+    monkeypatch.setattr("sys.argv", ["x", "--hours", "100", "--interval", "0", "--out", str(tmp_path)])
+    assert soak.main() == 0
+    lines = [json.loads(l) for l in next(p for p in tmp_path.iterdir() if p.name.endswith(".jsonl")).read_text().splitlines()]
+    assert [x["host_link"] for x in lines] == ["unknown", "ok", "self-healed", "self-healed", "idle", "idle", "stalled", "ok"]
+    assert [x["ok"] for x in lines] == [True] * 6 + [False, True]
+    sm = _summary(tmp_path)
+    assert sm["host_link_selfheals"] == 2 and sm["first_host_link_selfheal"] == "t2"
+    assert sm["bridge_stalls_total"] == 3 and sm["host_flushes_total"] == 3
+    assert sm["host_link_stalls"] == 1 and sm["failed"] == 1
