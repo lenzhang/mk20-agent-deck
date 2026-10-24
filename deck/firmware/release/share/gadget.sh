@@ -339,10 +339,10 @@ fi
 # never killed: still holding hidg0 after ~3 s = abort before any USB change. Refused with nothing touched (rc 4,
 # retry later) while the transition mutex is held (setup/rollback), a watcher job / cmd-rollback / cmd-reboot is
 # queued, the loader install/state lock is held, adbd has any child (an adb shell/command; a permanent one keeps it
-# refused: accepted, WARN only), a file in an install inbox (/data/mk20/incoming, /tmp/mk20/incoming) changed within
-# 120 s (an adb push in progress: killing adbd would cut it) or the loader's staging (releases/.staging.tar,
-# .incoming-*) exists, a teardown marker exists, the host is not configured (asleep/unplugged: no re-enumeration for an absent
-# host), or flapmon logged a link drop within FLAP_WINDOW+5 s: flapmon's window then holds only this
+# refused: accepted, WARN only), adbd holds a file open in an install inbox (/data/mk20/incoming, /tmp/mk20/incoming:
+# an adb push, killing adbd would cut it) or the loader's staging (releases/.staging.tar, .incoming-*) exists, a
+# teardown marker exists, the host is not configured (asleep/unplugged: no re-enumeration for an absent host), or this
+# boot's flapmon counted a link drop within FLAP_WINDOW+5 s (its tmpfs record): flapmon's window then holds only this
 # re-enumeration's 1-2 drops, and FLAP_DROPS >= 4 is required, so a re-arm can never trip flapmon's rollback.
 # Only mk20d (detached maint loop / boot) and the watcher queue (--rearm, operator: MK20_REARM_MANUAL=1 skips the
 # adbd-child check, the adb command that queued it) run it: never from an adb shell. Result: /tmp/mk20/rearm.last.
@@ -351,20 +351,24 @@ fi
 #     watcher cmd-reboot (WDT hardreset; mk20-no-composite NOT set) | 3 stuck (unkillable child) -> escalated like
 #     setup/rollback | 4 busy (retry later) | 5 stale generation |
 #     6 not applicable (no release composite, FLAP_DROPS < 4, mk20-router owns the HID, no /bin/adbd)
-flap_recent() { # $1 s: 0 if flapmon (same log, same uptime clock) logged a link drop that recently
+flap_recent() { # $1 s: 0 if THIS boot's flapmon counted a link drop that recently. 1.7.0-rc3: its tmpfs record only;
+  # rc2 read the persistent gadget.log, whose last drop line could be from an earlier boot (uptime 71272 vs now 165:
+  # "recent" until the new uptime passed it, ~20 h: every re-arm refused right after a reboot). Age < 0 = stale.
+  fr_t=$(head -n 1 /tmp/mk20/flapmon.last-drop 2>/dev/null)
+  case "$fr_t" in ''|*[!0-9]*) return 1;; esac
   fr_now=$(cut -d. -f1 /proc/uptime)
-  fr_t=$(cat "$LOG.1" "$LOG" 2>/dev/null | tail -n 400 | sed -n 's/^flapmon \([0-9][0-9]*\): link drop.*/\1/p' | tail -n 1)
-  [ -n "$fr_t" ] && [ $((fr_now - fr_t)) -le "$1" ]; }
+  [ $((fr_now - fr_t)) -ge 0 ] && [ $((fr_now - fr_t)) -le "$1" ]; }
 ra_held() { ( exec 6>"$1" && ! flock -n 6 ) 2>/dev/null; }   # a live owner holds that lock
 ra_adb_session() { # adbd runs anything for a client (adb shell / an adb command: a child process)
   for ra_a in $(pidof adbd 2>/dev/null); do [ -n "$(kids "$ra_a")" ] && return 0; done; return 1; }
-ra_push_recent() { # an install in progress without a lock yet: an adb push into an inbox (no adbd child) = a file there
-  # changed within 120 s; the loader's staging copy / extract dir exist only while `loader install` runs
+ra_install_active() { # an install in progress that holds no lock (yet): the loader's staging copy / extract dir (they
+  # exist only while `loader install` runs; its boot removes stale ones), or adbd writing an adb push into an install
+  # inbox = an open adbd fd there (no adbd child for a push). No file times: there is no RTC, the wall clock restarts
+  # at every boot, so an mtime cannot tell this boot from an earlier one (1.7.0-rc3; rc2 used a 120 s mtime window).
   for ra_f in /data/mk20/releases/.staging.tar /data/mk20/releases/.incoming-*; do [ -e "$ra_f" ] && return 0; done
-  ra_now=$(date +%s)
-  for ra_f in /data/mk20/incoming/* /tmp/mk20/incoming/*; do [ -f "$ra_f" ] || continue
-    ra_m=$(date -r "$ra_f" +%s 2>/dev/null) || continue
-    [ $((ra_now - ra_m)) -le 120 ] && [ $((ra_now - ra_m)) -ge -120 ] && return 0; done; return 1; }
+  for ra_a in $(pidof adbd 2>/dev/null); do for ra_f in /proc/"$ra_a"/fd/*; do
+    case "$(readlink "$ra_f" 2>/dev/null)" in /data/mk20/incoming/*|/tmp/mk20/incoming/*) return 0;; esac; done; done
+  return 1; }
 ra_last() { echo "rc=$1 up=$(cut -d' ' -f1 /proc/uptime) $2" > /tmp/mk20/rearm.last 2>/dev/null; }   # the operator reads it
 ra_ifc() { ifconfig "$1" 2>/dev/null; }
 ra_has_cfg() { # usb0 carries what setup_main achieved: address, MTU 478, and the link-local alias if setup had it (RLL)
@@ -456,7 +460,7 @@ if [ "${1:-}" = --rearm-now ]; then
   [ "$(cat "/sys/class/udc/$RUDC/state" 2>/dev/null)" = configured ] || ra_no 4 "host not configured (asleep/unplugged)"
   flap_recent $((FLAP_WINDOW + 5)) && ra_no 4 "flapmon link drop within $((FLAP_WINDOW + 5))s"
   [ "${MK20_REARM_MANUAL:-}" = 1 ] || ! ra_adb_session || ra_no 4 "adb session active (adbd has a child)"   # operator: the queuing command
-  ra_push_recent && ra_no 4 "install in progress (loader staging, or an install inbox changed within 120 s)"
+  ra_install_active && ra_no 4 "install in progress (loader staging, or adbd writing an install inbox)"
   trap '' HUP
   # owner-local bounded child (like setup_main): it inherits fd 7 on purpose, so the mutex stays held while it mutates
   ( trap - EXIT INT TERM; rearm_main ) </dev/null &
@@ -606,7 +610,7 @@ ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh.new && [ "$(sha256sum < 
   mv -f /tmp/mk20-gadget.sh.new /tmp/mk20-gadget.sh || { OK=0; die "cannot stage rollback copy"; }   # atomic: a running rollback keeps its file
 # flap monitor (both modes, share/flapmon.sh): >=5 configured->not-configured drops within 60 s -> rollback to
 # loader A/B via cmd-rollback. Host USB suspend (Mac sleep) is not a flap.
-rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready
+rm -f /tmp/mk20-flapmon-stop /tmp/mk20/flapmon.ready /tmp/mk20/flapmon.last-drop   # a new monitor: an empty window
 FMSRC=${MK20_REL:+$MK20_REL/share/flapmon.sh}
 { [ -n "$FMSRC" ] && cp -f "$FMSRC" /tmp/mk20-flapmon.sh.new && mv -f /tmp/mk20-flapmon.sh.new /tmp/mk20-flapmon.sh; } || { OK=0; die "no flapmon.sh in release"; }
 ( trap '' HUP INT; export MK20_REL="${MK20_REL:-}" MK20_GADGET_LOG="$LOG" MK20_GEN="$GEN" MK20_RB_CALLER_RETRIES=1
