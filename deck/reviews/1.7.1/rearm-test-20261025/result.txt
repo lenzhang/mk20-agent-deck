@@ -1,0 +1,4 @@
+rc=0 up=159.72 re-enumerated
+gadget 165.67: rearm refused (rc 4): flapmon link drop within 65s
+gadget 156.78: REARM begin udc=4100000.udc-controller gen=? hid=1 adb=1 ll=1 usb0 rx/tx=12440/4477
+gadget 159.57: REARM OK udc=4100000.udc-controller state=not attached adbd=10381 usb0=kept

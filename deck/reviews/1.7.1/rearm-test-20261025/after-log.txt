@@ -1,0 +1,8 @@
+flapmon 71272: link drop (not attached), 1 in 60s
+gadget 165.67: rearm refused (rc 4): flapmon link drop within 65s
+flapmon 157: link drop (not attached), 1 in 60s
+157
+355313 59.98 INFO mk20d web v=1.7.1 start pid=2850
+355313 60.07 INFO mk20d web v=1.7.1 mode=web url=http://172.30.250.2:8780
+355344 91.03 INFO mk20d selftest v=1.7.1 rc=0 try=1 mode=composite PASS kd=0 (mk20-kbd mode);PASS mk20-kbd running;PASS kbd status fresh (1s);PASS kbd gd32 knob
+current=B 28 1.7.1 good=1.7.1 pending= attempts= active=1.7.1 last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)

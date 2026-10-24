@@ -1,0 +1,152 @@
+{
+ "time": "2026-10-25 01:19:12 +08",
+ "pass": true,
+ "results": [
+  {
+   "check": "adb shell",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "loader: good release current, none pending",
+   "pass": true,
+   "detail": "current=A 27 1.7.0 good=1.7.0 pending= attempts= active=1.7.0 last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)"
+  },
+  {
+   "check": "health: status ok",
+   "pass": true,
+   "detail": "v=1.7.0 status=ok"
+  },
+  {
+   "check": "health: composite + kd=0 + mk20-kbd running (normal) + watchdog + selftest",
+   "pass": true,
+   "detail": "PASS kd=0 (mk20-kbd mode) PASS mk20-kbd running PASS kbd status fresh (1s) PASS kbd gd32 knob_ok=6 frames=0 PASS kbd panels 21/21 PASS udc bound PASS ttyGS0 PASS watchdog armed PASS bridge 172.30.250.2:17890 PASS bridge link-local PASS hid INFO ecm usb0 rx 607109 tx 229039 (udc configured) INFO /run/mk20 on tmpfs INFO router not running INFO web running (http://172.30.250.2:8780) INFO agent disabled"
+  },
+  {
+   "check": "health: headroom (FAT >= 1024 KiB, mem >= 20 MiB)",
+   "pass": true,
+   "detail": "fat=1210 mem=75672"
+  },
+  {
+   "check": "mac: MK20 interface present",
+   "pass": true,
+   "detail": "en13"
+  },
+  {
+   "check": "mac: route to device via MK20 interface (not TUN)",
+   "pass": true,
+   "detail": "172.30.250.2 -> en13"
+  },
+  {
+   "check": "ping device (primary)",
+   "pass": true,
+   "detail": "loss=0.0% avg=0.854ms"
+  },
+  {
+   "check": "bridge listening on primary + link-local (device netstat)",
+   "pass": true,
+   "detail": "primary=True ll=True"
+  },
+  {
+   "check": "ping link-local 169.254.7.2 (bound)",
+   "pass": true,
+   "detail": "0.0% packet loss"
+  },
+  {
+   "check": "tcp bridge: active connects skipped (use --tcp when no other client uses the bridge)",
+   "pass": true,
+   "detail": "passive"
+  },
+  {
+   "check": "hid: Mac enumerates 1d6b:0104 keyboard",
+   "pass": true,
+   "detail": ""
+  }
+ ],
+ "health": {
+  "version": "1.7.0",
+  "uptime_s": 6012,
+  "kernel": {
+   "p4": "7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc",
+   "name": "ep5out",
+   "features": "acm,adb,ecm,hid"
+  },
+  "vendor": "ok",
+  "usb": {
+   "udc": "4100000.udc-controller",
+   "state": "configured",
+   "functions": "ecm.usb0 hid.usb0 ffs.adb ",
+   "composite": true,
+   "ecm_state": "ok",
+   "ecm_rx_packets": 607109,
+   "ecm_tx_packets": 229039,
+   "ecm_rx_stalls": 0,
+   "ecm_rearms": 0,
+   "ecm_recoveries": 0,
+   "ecm_probes": 0,
+   "ecm_gave_up": false,
+   "ecm_reboots": 0
+  },
+  "net": {
+   "usb0": "172.30.250.2",
+   "mtu": 478,
+   "subnet": "172.30.250.0/24",
+   "bridge": true,
+   "hidg0_writable": true
+  },
+  "kd": 0,
+  "adbd": true,
+  "flapmon": true,
+  "maint": true,
+  "shim_mounts": 0,
+  "run_tmpfs": true,
+  "router": {
+   "enabled": true,
+   "running": false,
+   "loop": false,
+   "tap": false
+  },
+  "kbd": {
+   "enabled": true,
+   "mode": "normal",
+   "running": true,
+   "restarts": 0,
+   "recent_crashes": 0,
+   "degraded": "",
+   "status": "{\"version\":\"mk20-kbd-0.3\",\"mode\":\"normal\",\"estopped\":0,\"gd32_rw\":1,\"knob_init\":\"ok\",\"knob_ok\":6,\"knob_timeouts\":0,\"knob_tx_errors\":0,\"panels_written\":21,\"panels_dirty\":0,\"write_errors\":0,\"key_events\":0,\"knob_events\":0,\"echo_frames\":0,\"other_frames\":0,\"jpg_ok\":2963,\"jpg_bad\":0,\"jpg_size\":0,\"json_in\":4926,\"host\":1,\"host_tx_errors\":0,\"host_tx_timeouts\":0,\"host_flushes\":0,\"backlight\":80,\"hid_open\":1,\"hid_reopens\":0,\"hid_replaced\":0}"
+  },
+  "agent": {
+   "enabled": false,
+   "allowed": null,
+   "state": "unknown",
+   "provider": "unknown",
+   "route": "unknown",
+   "last_error_class": "unknown",
+   "running": true
+  },
+  "web": {
+   "enabled": true,
+   "running": true,
+   "url": "http://172.30.250.2:8780"
+  },
+  "watchdog": true,
+  "mem_avail_kb": 75672,
+  "fat_free_kb": 1210,
+  "data_free_kb": 2461340,
+  "release": {
+   "slot": "A",
+   "good": "1.7.0",
+   "pending": "",
+   "last_rollback": "1.3.0->1.2.1 not confirmed after 1 attempt(s)"
+  },
+  "config": {
+   "src": "defaults",
+   "warnings": ""
+  },
+  "selftest": {
+   "pass": true,
+   "detail": "PASS kd=0 (mk20-kbd mode) PASS mk20-kbd running PASS kbd status fresh (1s) PASS kbd gd32 knob_ok=6 frames=0 PASS kbd panels 21/21 PASS udc bound PASS ttyGS0 PASS watchdog armed PASS bridge 172.30.250.2:17890 PASS bridge link-local PASS hid INFO ecm usb0 rx 607109 tx 229039 (udc configured) INFO /run/mk20 on tmpfs INFO router not running INFO web running (http://172.30.250.2:8780) INFO agent disabled"
+  },
+  "status": "ok"
+ }
+}

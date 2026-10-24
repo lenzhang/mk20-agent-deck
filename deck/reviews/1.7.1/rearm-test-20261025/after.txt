@@ -1,0 +1,10 @@
+4
+usb0      Link encap:Ethernet  HWaddr 02:11:22:33:44:55  
+          inet addr:172.30.250.2  Bcast:172.30.250.255  Mask:255.255.255.0
+          UP BROADCAST RUNNING MULTICAST  MTU:478  Metric:1
+usb0:1    Link encap:Ethernet  HWaddr 02:11:22:33:44:55  
+          inet addr:169.254.7.2  Bcast:169.254.255.255  Mask:255.255.0.0
+tcp        0      0 169.254.7.2:17890       0.0.0.0:*               LISTEN      
+tcp        0      0 172.30.250.2:17890      0.0.0.0:*               LISTEN      
+tcp        0      0 172.30.250.2:8780       0.0.0.0:*               LISTEN      
+configured
