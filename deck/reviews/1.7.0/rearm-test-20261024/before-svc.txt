@@ -1,0 +1,7 @@
+tcp        0      0 169.254.7.2:17890       0.0.0.0:*               LISTEN      
+tcp        0      0 172.30.250.2:17890      0.0.0.0:*               LISTEN      
+tcp        0      0 172.30.250.2:8780       0.0.0.0:*               LISTEN      
+configured
+Command failed: Not found
+gadget 57.39: OK mode=--boot UDC=4100000.udc-controller links=MaxPower bmAttributes ecm.usb0 ffs.adb hid.usb0 strings  hidg0 usb0=172.30.250.2 bridge=[--dev usb0 --listen 172.30.250.2:17890 --listen 169.254.7.2:17890 --stall-file /tmp/mk20/bridge.stalls] kd= adbd=2719
+gadget 57.72: flap monitor started (pid 2794)

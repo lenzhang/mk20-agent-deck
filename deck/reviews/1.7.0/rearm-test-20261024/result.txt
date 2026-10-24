@@ -1,0 +1,2 @@
+rc=4 up=165.68 refused: flapmon link drop within 65s
+gadget 165.67: rearm refused (rc 4): flapmon link drop within 65s
