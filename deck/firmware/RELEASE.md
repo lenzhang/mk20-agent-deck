@@ -36,7 +36,20 @@ Build id **rc3**: `sh tools/mk20-release-build.sh firmware out rc3`; VERSION sta
   (2 cases); the push refusals now use an adbd stand-in holding the inbox file open. `test_flapmon.py` +2 (the
   record holds the last counted drop's uptime; a long suspend is not recorded).
 
-1.7.0-rc3 host validation: EVIDENCE-RC3
+rc3 host validation only (Docker mk20-build:trixie, BusyBox 1.27.2, nothing else running beside it): `make test` green
+on the first run — tests 1407 passed / 1 skipped (rc2 1398: +7 `test_ecm_watchdog.py`, +2 `test_flapmon.py`), agent
+398, onboard 16683, kbd 4219 ASan + 4219 TSan, safe mode 2 scenarios, e2e OK, ui 41405, 374 goldens unchanged, sim
+38, tools 83 passed / 1 skipped, shellcheck clean, release binaries match source. `make mac-test` (macOS, native, on
+a `git archive` export of 08f880a): 824 passed / 584 skipped, no failures. E-stop latencies unchanged (socket e-stop
+-> all-up 1.2 ms; stalled host 0.1–0.2 ms, its K2 hold 1003.0 ms; blocked status worker 0.8 / 1001.2 ms). The
+earlier-boot (larger and smaller uptime) and leftover-inbox tests fail on the rc2 gadget.sh. `sbin/mk20d` sha256
+`c2a85e1558c7ff977c8034fa10c96456f315d91be062f0e0a491d44e910f8c27`, `share/gadget.sh`
+`087b800a6a8d13b24c4bfbbb3766a89156acfafebe373ea166f8d72b77bf87db`, `share/flapmon.sh`
+`1c334a4ff4500e70311bf5b512ebb3d07cc745812308f23008855483b79408bf`; the binaries and the other 9 files are identical to
+rc2. `mk20-fw-1.7.0.tar` (rc3, 14 files, 2754560 B; two builds from independent `git archive` exports of 08f880a are
+byte-identical) sha256 `15d1ff9e8c09471aebe6e2206637615a05846b5262ebb836e14c00fd6c4d5caa` (`~/worktrees/rel-1.7.0-rc3/`).
+**No device acceptance claimed for rc3** (rc2 is installed and passed acceptance; the manual re-arm from RECOVERY.md is
+the open check: `rearm.last` rc=0, `REARM OK`, and `/tmp/mk20/flapmon.last-drop` absent or old).
 
 ### 1.7.0-rc2: Kimi K3 1.7.0-rc1 delta (GO) MAJOR + MINORs
 
