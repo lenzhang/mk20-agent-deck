@@ -1,28 +1,27 @@
-# MK20 "Agent 增强固件" — handoff (2026-10-23 23:20 SGT)
+# MK20 "Agent 增强固件" — handoff (2026-10-25 01:30 SGT)
 
 Goal: production-grade replacement firmware for the Waveshare MK20 keyboard (Allwinner T113, Tina 5.4.61,
 BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page. Live status: PROGRESS.md (main).
 
 ## Current state (2026-10-23 ~05:40) — user away for several days since 10-22 10:30 (autonomous mode)
-- **Production: tag `v1.5.1`** on release/1.5.1 f8de052 = fw 1.5.1 build rc1 (tar sha256
-  `3d7c14700b1bc8c7a172fae3e4078dea3493d012b1ffec04660c1429ef35e41b`, reproducible from the tag) + Mac mk20deck f8de052.
-  24 h soak PASS (10-22 05:02 → 10-23 05:02, 288 samples, all zero; memory flat).
-- **Device now: fw 1.6.1-rc2, good** (installed 10-23 23:07, slot B; 1.6.0 kept in A), tag `v1.6.1-rc2` (7103da8) on
-  **release/1.6.1**; tar ~/worktrees/rel-1.6.1-rc2/mk20-fw-1.6.1.tar sha256
-  `4ba75ecf4aa7a1d69eb34f3bb287849a7297fb2164064cf22a5e57af72d077f1` (reproduced). 1.6.1 = self-heal for the
-  **10-23 20:01 host-link stall** (kernel 5.4.61 pty input path stalled; the bridge sat in a blocking write to the pty
-  master for 51 min; a manual tcflush fixed it — evidence deck/reviews/1.6.1/incidents/): bridge v4 never blocks
-  (2 s stall → TCIFLUSH + client close, once-per-streak log, /tmp/mk20/bridge.stalls counter), mk20-kbd 5 s silence
-  flush backstop, soak host-link liveness. Kimi K3 rc1 GO, rc2 delta GO. **1.6.0-rc4 soak = FAIL** (that stall), no
-  v1.6.0 tag. v1.5.1 (production) has the same latent stall.
-- **Incident 2 (10-23 23:07):** after the 1.6.1 install reboot the ECM data path was dead host→device (device RX
-  frozen, Mac en13 Opkts frozen, ARP incomplete) although the gadget was CONFIGURED and loader confirmed good;
-  watcher cmd-reboot fixed it; re-acceptance PASS (`~/worktrees/mk20-reaccept.sh`). 1.6.2: ECM RX watchdog + confirm
-  must require ECM traffic.
-- **24 h soak on 1.6.1-rc2** started 10-23 23:15 (`~/mk20-backup/soak/soak-20261023-231513.*`, run from
-  ~/worktrees/mk20-rel-161/deck with `MK20_ADB=~/mk20-backup/mkadb.sh`; new tool records host_link + self-heals +
-  meminfo), selftest watcher, slab logger; patrol every 2 h (`~/worktrees/mk20-patrol.sh`, checks json_in growth);
-  verdict job 10-24 23:37 (session-only cron).
+- **Production: tag `v1.6.1`** on release/1.6.1 8d08ca9 = fw 1.6.1 build rc2 (tar sha256
+  `4ba75ecf4aa7a1d69eb34f3bb287849a7297fb2164064cf22a5e57af72d077f1`, reproducible) + Mac mk20deck 7103da8. 24 h soak PASS
+  (10-23 23:15 → 10-24 23:15, 288 samples, all zero incl. host-link stalls/self-heals). Supersedes v1.5.1 (which has the
+  latent kernel 5.4 pty input stall fixed in 1.6.1). Older: v1.5.1 (f8de052).
+- **Device now: fw 1.7.1-rc1, good** (installed 10-25 01:21, slot B; 1.7.0 build rc2 in A), tag `v1.7.1-rc1` (2b194f1) on
+  **release/1.7.1**; tar ~/worktrees/rel-1.7.1-rc1/mk20-fw-1.7.1.tar sha256
+  `06da8685530e396aa273dce44d257048fce3f154ff6d947c94ec4bdca1267b9b` (reproduced). 1.7.x = ECM RX watchdog (probe-proven
+  host→device stall → soft re-arm restoring usb0 MTU/IP/alias + bridge/web, answer-proven recovery, ≤3/h then one watcher
+  cmd-reboot) + probation gate (confirm only with proven host traffic) + bridge stall-file error log + 60 s cap for a lost
+  host-key up. Kimi K3: 1.6.2-rc1 NO-GO → 1.7.0-rc1/rc2/rc3 GO. On hardware: 1.7.0-rc2 refused every manual re-arm
+  (flap check read a previous boot's log line) → fixed in rc3 = 1.7.1-rc1 (new version: the loader refuses a different
+  1.7.0); **manual re-arm test PASS on 1.7.1** (rc=0, usb0 kept, Mac re-hello in ~7 s; deck/reviews/1.7.1/).
+- **24 h soak on 1.7.1-rc1** started 10-25 01:23 (`soak-20261025-012324`, run from ~/worktrees/mk20-rel-171/deck with
+  `MK20_ADB=~/mk20-backup/mkadb.sh`), selftest watcher, slab logger; patrol every 2 h (`~/worktrees/mk20-patrol.sh`);
+  verdict job 10-26 01:43 (session-only cron) → tag v1.7.1 if PASS.
+- **Incidents (all in deck/reviews/1.6.1/incidents/ + ANNOTATIONS):** 10-23 00:48 a 661-byte patrol adb request →
+  adbd EOVERFLOW → gadget re-enumeration (rule: adb payload < 512 B; tools guard 480 B); 10-23 20:01 host-link stall
+  51 min (kernel pty input stall, blocking bridge write) → 1.6.1; 10-23 23:07 ECM dead host→device after reboot → 1.7.x.
 - **Mac: mk20deck** LaunchAgent `com.leo.mk20-agent-deck` from `~/mk20-deploy` (detached at release/1.6.1 7103da8; state
   backups ~/mk20-backup/deck-state-*.tgz), venv `~/mk20-deploy/.venv`, config `~/.config/mk20-agent-deck/config.toml`
   (terminal_app=Ghostty, new session = `ccai sg`), logs `~/.config/mk20-agent-deck/logs/deck.err.log`, bridge
@@ -50,7 +49,7 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 `stat` (1.3.0 never confirmed), HOME host-loss livelock, test image lacked procps, soak/accept K4 rules.
 
 ## Branches (Gitea ssh://git@192.168.88.6:2222/leo/mk20-agent-deck.git)
-- **`release/1.6.0`** — current (feature/fw-1.6.0 + install evidence), tag v1.6.0-rc4. **`release/1.5.1`** — production
+- **`release/1.7.1`** — current (v1.7.1-rc1), `release/1.7.0` (v1.7.0-rc2), **`release/1.6.1`** — production tag **v1.6.1** (+ v1.6.1-rc2). `release/1.6.0` (feature/fw-1.6.0 + install evidence), tag v1.6.0-rc4. **`release/1.5.1`** — production
   tag **v1.5.1** (+ v1.5.1-rc1); merged there: feature/arrange-web, fix/page-sync, fix/devtest-hid-leak,
   fix/arrange-keepalive-cap, fix/arrange-linger-minors, fix/macos-test-gate. `release/1.5.0` (v1.5.0-rc1, **do not deploy
   the Mac from it**: pre-fix arrange code), `release/1.4.0` (v1.4.0-rc1 … v1.4.3-rc4). Open: fix/soak-slab, docs/prd-1.5.
@@ -93,7 +92,7 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 3. codex hooks reinstall (changes ~/.codex). 4. Decide: production build with adb OFF by default (adb = unauthenticated root
    over USB; maintenance toggle instead).
 **Autonomous:**
-5. 1.6.1-rc2 24 h soak → tag v1.6.1 (verdict job 10-24 23:37); then 1.6.2 (ECM RX watchdog, confirm needs ECM traffic, stall-file write errors logged, owner-1 60 s cap).
+5. 1.7.1-rc1 24 h soak → tag v1.7.1 (verdict job 10-26 01:43).
 7. 1.6.1 candidates: 60 s cap for an owner-1 host key with a lost up (UI.md residual), device settings-web link to 会话安排.
 8. Measure e-stop visual-feedback latency on device (needs a physical press).
 9. Not in this delivery: agent A8c merge, USB mic / UVC capture / charger-only / Mac reboot / TF restore rehearsal tests,
