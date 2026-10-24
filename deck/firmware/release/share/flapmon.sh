@@ -12,11 +12,15 @@
 # The rollback command bounds itself (gadget.sh --rollback-now: transition mutex + owner-local supervisor that kills
 # and reaps its own cleanup tree after MK20_RB_TIMEOUT), so a hung rollback returns rc!=0 here and is retried/escalated.
 # Writes the ready marker (MK20_FLAP_READY, default /tmp/mk20/flapmon.ready) once the lock is held.
-# Test env: MK20_UPTIME_CMD (seconds), MK20_FLAP_POLL (default 0.3), MK20_BUSY, MK20_FLAP_LOCK, MK20_FLAP_SUSP_S.
+# 1.7.0-rc3: every counted drop also goes to MK20_FLAP_LASTDROP (default /tmp/mk20/flapmon.last-drop, tmpfs: this boot
+# only, removed by gadget.sh at setup): "<uptime>" of the last drop, for gadget.sh --rearm-now's flap window (a persistent
+# log line from an earlier boot carries an uptime of that boot and must never count).
+# Test env: MK20_UPTIME_CMD (seconds), MK20_FLAP_POLL (default 0.3), MK20_BUSY, MK20_FLAP_LOCK, MK20_FLAP_SUSP_S,
+# MK20_FLAP_LASTDROP.
 [ $# -ge 7 ] && [ "$6" = -- ] || { echo "usage: flapmon.sh state window drops log stopfile -- cmd..." >&2; exit 2; }
 U=$1; W=$2; N=$3; LOG=$4; STOP=$5; shift 6
 case "$W$N" in ''|*[!0-9]*) echo "flapmon: window/drops must be integers" >&2; exit 2;; esac
-BUSY=${MK20_BUSY:-/tmp/mk20/gadget.busy}; SUSP=${MK20_FLAP_SUSP_S:-5}
+BUSY=${MK20_BUSY:-/tmp/mk20/gadget.busy}; SUSP=${MK20_FLAP_SUSP_S:-5}; LASTDROP=${MK20_FLAP_LASTDROP:-/tmp/mk20/flapmon.last-drop}
 LOCK=${MK20_FLAP_LOCK:-/tmp/mk20/flapmon.lock}; mkdir -p "$(dirname "$LOCK")"
 exec 8>"$LOCK"; i=0; while ! flock -n 8; do i=$((i+1)); [ $i -lt 10 ] && { sleep 0.5; continue; }
   { echo "flapmon $(cut -d. -f1 /proc/uptime): another monitor holds $LOCK" >> "$LOG"; exit 3; }; done
@@ -39,6 +43,7 @@ while [ ! -f "$STOP" ]; do
     fi
   fi
   if [ -n "$now" ]; then
+    echo "$now" > "$LASTDROP.t" 2>/dev/null && mv -f "$LASTDROP.t" "$LASTDROP" 2>/dev/null
     nt=""; cnt=0
     for t in $times $now; do [ $((now-t)) -le "$W" ] && { nt="$nt $t"; cnt=$((cnt+1)); }; done; times=$nt
     echo "flapmon $now: link drop ($s), $cnt in ${W}s" >> "$LOG"

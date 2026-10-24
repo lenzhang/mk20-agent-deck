@@ -339,6 +339,12 @@ ecm_save() {
     printf 'state=%s\nrx=%s\nsince=%s\nstalls=%s\nrearms=%s\nrecoveries=%s\nprobes=%s\ngave_up=%s\nepisode=%s\nep_rearms=%s\ntimes=%s\nkev=%s\nnote=%s\nlastv=%s\nclients=%s\nescalated=%s\n' \
       "$ES_STATE" "$ES_RX" "$ES_SINCE" "$ES_STALLS" "$ES_REARMS" "$ES_RECOV" "$ES_PROBES" "$ES_GAVEUP" "$ES_EPISODE" "$ES_EPRA" \
       "$ES_TIMES" "$ES_KEV" "$ES_NOTE" "$ES_LASTV" "$ES_CLI" "$ES_ESC" > "$t" && mv -f "$t" "$ECM_ST" || { rm -f "$t"; exit 1; } ); }
+ecm_sane() { # $1 = now: an uptime stamp ahead of now is from another boot/clock: stale (1.7.0-rc3; ecm.state is tmpfs,
+  # so this is defensive - the rule every uptime comparison here follows: never trust a stamp from before this boot)
+  local t keep; keep=""
+  for t in $ES_TIMES; do [ "$t" -le "$1" ] && keep="$keep $t"; done; ES_TIMES=${keep# }
+  if [ -n "$ES_SINCE" ] && [ "$ES_SINCE" -gt "$1" ]; then ES_SINCE=; fi
+  [ "$ES_LASTV" -gt "$1" ] && ES_LASTV=0; return 0; }
 ecm_note() { [ "$ES_NOTE" = "$1" ] && return 0; ES_NOTE=$1; log "$2" ecm "$3"; }   # once per episode and reason
 ecm_last_rearm() { local t l; l=0; for t in $ES_TIMES; do l=$t; done; echo "$l"; }
 ecm_episode_end() { # the host answered end to end while a stall episode was open
@@ -362,7 +368,7 @@ ecm_rearm_try() { # $1 watchdog|gate, $2 1 = keyboard in use (defer). ER_RC: gad
   [ "$ES_GAVEUP" = 1 ] && { ER_RC=7; return 0; }
   rb=$(ecm_rb_get)
   if [ "$rb" -ge 2 ]; then ER_RC=7; ecm_note loop WARN "re-arm off: $rb ECM reboots in a row without a working link since"; return 0; fi
-  n=0; keep=""; for t in $ES_TIMES; do [ $((now - t)) -lt "$ECM_REARM_WIN" ] && { n=$((n + 1)); keep="$keep $t"; }; done; ES_TIMES=${keep# }
+  n=0; keep=""; for t in $ES_TIMES; do [ "$t" -le "$now" ] && [ $((now - t)) -lt "$ECM_REARM_WIN" ] && { n=$((n + 1)); keep="$keep $t"; }; done; ES_TIMES=${keep# }
   if [ "$n" -ge "$ECM_REARM_MAX" ]; then ER_RC=7
     if [ "$1" = watchdog ]; then ecm_escalate; else ES_GAVEUP=1; ES_STATE=gave-up; fi; return 0; fi
   if [ "${2:-0}" = 1 ]; then ER_RC=4; ecm_note typing INFO "re-arm deferred: keyboard in use"; return 0; fi
@@ -380,7 +386,7 @@ ecm_rearm_try() { # $1 watchdog|gate, $2 1 = keyboard in use (defer). ER_RC: gad
   esac; }
 ecm_tick() { # one watchdog step (mk20d maint, every ECM_TICK_S); logs only on changes
   local now c rx tx st kev typing age
-  ecm_init; ecm_load; now=$(ecm_up)
+  ecm_init; ecm_load; now=$(ecm_up); ecm_sane "$now"
   kev=$(ecm_events); typing=0; [ -n "$ES_KEV" ] && [ "$kev" != "$ES_KEV" ] && typing=1; ES_KEV=$kev
   c=$(ecm_counts); rx=${c% *}; tx=${c#* }
   if [ -z "$c" ]; then ES_STATE=idle; ES_RX=; ES_SINCE=$now; ecm_save; return 0; fi
@@ -419,7 +425,7 @@ ecm_gate() { # probation confirm gate: prints its result line; rc 1 = FAIL (no c
   # not answer; a re-arm that could not be tried (busy/deferred for ECM_GATE_WAIT_S, disabled, not applicable,
   # aborted before any USB change) or unreadable counters = WARN, not judged (the other checks decide).
   local st c rx tx w kev k cli typing
-  ecm_init; ecm_load
+  ecm_init; ecm_load; ecm_sane "$(ecm_up)"
   composite_up && [ -f "$TM/gadget.env" ] || { echo "INFO ecm gate: no composite"; return 0; }
   st=$(udc_state)
   [ "$st" = configured ] || { echo "INFO ecm gate skipped: no host (udc ${st:-unbound}: asleep, unplugged or charger)"; return 0; }

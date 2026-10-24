@@ -17,7 +17,7 @@ def put(p: Path, text: str) -> None:
 def start(dev, tmp_path, window=60, drops=5, cmd=None):
     st, log, stop, mark, clock = (tmp_path / n for n in ("state", "fm.log", "stop", "rolled", "clock"))
     put(st, "configured\n"); put(clock, "100\n")
-    env = dict(dev.env, MK20_FLAP_POLL="0.05", MK20_BUSY=str(tmp_path / "busy"),
+    env = dict(dev.env, MK20_FLAP_POLL="0.05", MK20_BUSY=str(tmp_path / "busy"), MK20_FLAP_LASTDROP=str(tmp_path / "last-drop"),
                MK20_FLAP_LOCK=str(tmp_path / "fm.lock"), MK20_FLAP_READY=str(tmp_path / "ready"), MK20_UPTIME_CMD=f"cat {clock}")
     cmd = cmd or ["sh", "-c", f"echo 'roll back' >> '{mark}'"]
     p = subprocess.Popen(["sh", str(FM), str(st), str(window), str(drops), str(log), str(stop), "--", *cmd], env=env)
@@ -144,3 +144,15 @@ def test_refused_then_stale_clears_own_marker(dev, tmp_path, monkeypatch):
                           drops=2, cmd=["sh", "-c", cmd])
     assert "failed rc=4" in log and "stale (rc 5" in log and not busy
     assert not (tmp_path / "nocomp").exists()
+
+
+# ---- 1.7.0-rc3: this boot's last counted drop on tmpfs for gadget.sh --rearm-now (never a persistent log line) ----
+def test_counted_drops_record_the_last_drop_uptime(dev, tmp_path):
+    seq = [("not attached", 130), ("configured", 130), ("default", 145), ("configured", 145)]
+    n, log, _ = run_fm(dev, tmp_path, seq)
+    assert n == 0 and (tmp_path / "last-drop").read_text() == "145\n"
+
+
+def test_long_suspend_is_not_recorded_as_a_drop(dev, tmp_path):
+    n, log, _ = run_fm(dev, tmp_path, [("suspended", 100), ("configured", 160), ("suspended", 170), ("not attached", 300)])
+    assert n == 0 and "host suspend" in log and not (tmp_path / "last-drop").exists()

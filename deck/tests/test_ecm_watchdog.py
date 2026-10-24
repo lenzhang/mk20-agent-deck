@@ -400,6 +400,20 @@ def test_watchdog_counter_reset_rebaselines(ecm, rel):
     assert s["rx"] == "2" and s["since"] == "1061" and s["probes"] == "0" and not lines(ecm, "ping.calls")
 
 
+@pytest.mark.parametrize("episode", [False, True])
+def test_watchdog_stamps_from_another_boot_are_stale(ecm, rel, episode):
+    """1.7.0-rc3 audit: an uptime stamp ahead of now (another boot/clock) never blocks or delays anything."""
+    ecm.p("tmp/mk20/ecm.state").write_text(f"state=stalled\nrx=1\nsince=99999\nlastv=99999\ntimes=99990 99995\n"
+                                           f"episode={int(episode)}\nstalls={int(episode)}\n")
+    s = tick(ecm, rel, at=1000)
+    if episode:      # an answer check at once, then a re-arm (the future re-arm stamps are no budget, no "recent re-arm")
+        assert s["probes"] == "1" and s["rearms"] == "1" and s["times"] == "1000" and len(lines(ecm, "rearm.calls")) == 1
+    else:            # a fresh baseline: the stall window starts now
+        assert s["since"] == "1000" and s["probes"] == "0" and s["times"] == ""
+        s = tick(ecm, rel, at=1061)
+        assert s["stalls"] == "1" and len(lines(ecm, "rearm.calls")) == 1
+
+
 def test_watchdog_state_file_is_whitelisted(ecm, rel):
     ecm.p("tmp/mk20/ecm.state").write_text("state=$(reboot)\nrx=1;id\nsince=x\nstalls=9\ntimes=1 2 $(id)\nnote=a b\nlastv=-1\n")
     s = tick(ecm, rel, at=1000)
@@ -920,6 +934,21 @@ def _held(path):
     return f
 
 
+def _up():
+    return int(float(open("/proc/uptime").read().split()[0]))
+
+
+def _adbd_writing(ra, path):
+    """The adbd stand-in writing an adb push: the file open on fd 3, no child process (an adbd push has none)."""
+    p = subprocess.Popen([BB, "sh", "-c", 'exec 3>>"$1"; exec sleep 30', "_", str(path)])
+    ra.procs.append(p)
+    for _ in range(50):
+        if any(os.path.realpath(f"/proc/{p.pid}/fd/{fd}") == str(path) for fd in os.listdir(f"/proc/{p.pid}/fd")):
+            break
+        time.sleep(0.05)
+    (ra.t / "adbd.pid").write_text(f"{p.pid}\n")
+
+
 def _adbd_with_child(ra, child):
     p = subprocess.Popen([BB, "sh", "-c", f"{child}; :"])          # the stand-in adbd: one child running <child>
     ra.procs.append(p); time.sleep(0.3)
@@ -933,7 +962,7 @@ def _adbd_with_child(ra, child):
     ("loader", "loader state change in progress"), ("unbound", "UDC not bound"), ("suspended", "host not configured"),
     ("not attached", "host not configured"), ("flapdrop", "flapmon link drop within 65s"),
     ("adb-shell", "adb session active (adbd has a child)"), ("adb-child", "adb session active (adbd has a child)"),
-    ("push-data", "install in progress"), ("push-tmp", "install in progress"),
+    ("push-data", "adbd writing an install inbox"), ("push-tmp", "adbd writing an install inbox"),
     ("staging-tar", "install in progress (loader staging"), ("staging-dir", "install in progress (loader staging")])
 def test_rearm_refused_with_nothing_touched(ra, why, msg):
     held = None
@@ -951,17 +980,16 @@ def test_rearm_refused_with_nothing_touched(ra, why, msg):
         (ra.t / "g/UDC").write_text("\n")
     elif why in ("suspended", "not attached"):
         (ra.t / f"udc/{UDC}/state").write_text(why + "\n")
-    elif why == "flapdrop":
-        up = int(float(open("/proc/uptime").read().split()[0]))
-        (ra.t / "gadget.log").write_text(f"flapmon {up - 30}: link drop (not attached), 1 in 60s\n")
+    elif why == "flapdrop":    # this boot's flapmon counted a drop 30 s ago (its tmpfs record)
+        (ra.t / "mk20/flapmon.last-drop").write_text(f"{_up() - 30}\n")
     elif why == "adb-shell":   # an `adb shell` running: a sh child of adbd
         _adbd_with_child(ra, f'{BB} sh -c "sleep 30; :"')
     elif why == "adb-child":   # any other adbd child (e.g. a sync/push helper): refused too (Kimi K3 MINOR)
         _adbd_with_child(ra, "sleep 30")
-    elif why == "push-data":   # an adb push into the install inbox (no adbd child): its file is being written
-        (ra.t / "incoming/upload.tar").write_text("x")
+    elif why == "push-data":   # an adb push into the install inbox (no adbd child): adbd holds the file open
+        _adbd_writing(ra, ra.t / "incoming/upload.tar")
     elif why == "push-tmp":
-        (ra.t / "mk20/incoming/upload.tar").write_text("x")
+        _adbd_writing(ra, ra.t / "mk20/incoming/upload.tar")
     elif why == "staging-tar":   # loader install: its private copy of the tarball (Kimi K3 1.7.0-rc1 MINOR)
         (ra.t / "releases/.staging.tar").write_text("x")
     elif why == "staging-dir":   # loader install: the extract directory
@@ -977,12 +1005,39 @@ def test_rearm_refused_with_nothing_touched(ra, why, msg):
     assert "REARM begin" not in ra.log() and ra.last().startswith("rc=4 ") and "refused:" in ra.last()
 
 
-def test_rearm_old_flapmon_drop_and_old_inbox_file_do_not_block(ra):
-    up = int(float(open("/proc/uptime").read().split()[0]))
-    (ra.t / "gadget.log").write_text(f"flapmon {up - 70}: link drop (not attached), 1 in 60s\n")
-    f = ra.t / "incoming/upload.tar"; f.write_text("x"); old = time.time() - 600; os.utime(f, (old, old))   # a leftover
+@pytest.mark.parametrize("case", ["old-boot-larger", "old-boot-smaller", "record-old", "record-future", "inbox-leftover"])
+def test_rearm_ignores_earlier_boots_and_leftovers(ra, case):
+    """1.7.0-rc3 hardware finding (2026-10-24): rc2 took the last `flapmon N: link drop` line of the PERSISTENT gadget.log;
+    on the device it was from the previous boot (`flapmon 71272`) while the uptime was 165 -> a negative age passed
+    `-le 65` and every re-arm (watchdog and gate) was refused for ~20 h after a reboot. Persistent log lines never count
+    now (larger or smaller uptimes than now), this boot's tmpfs record counts only inside its window (a future stamp is
+    stale), and a leftover inbox file (no adbd writing it; no RTC: an mtime cannot tell boots apart) does not block."""
+    up = _up()
+    if case == "old-boot-larger":
+        (ra.t / "gadget.log").write_text(f"flapmon {up + 71000}: link drop (not attached), 1 in 60s\n")
+    elif case == "old-boot-smaller":           # inside the window by number, but from the earlier boot's log
+        (ra.t / "gadget.log.1").write_text(f"flapmon {up - 30}: link drop (default), 2 in 60s\n")
+        (ra.t / "gadget.log").write_text(f"flapmon {max(up - 10, 0)}: link drop (not attached), 1 in 60s\n")
+    elif case == "record-old":
+        (ra.t / "mk20/flapmon.last-drop").write_text(f"{up - 70}\n")
+    elif case == "record-future":
+        (ra.t / "mk20/flapmon.last-drop").write_text(f"{up + 71000}\n")
+    else:
+        (ra.t / "incoming/upload.tar").write_text("x")   # fresh mtime, nobody writing it
     no_hid_no_adb(ra)
     assert ra.run().returncode == 0, ra.log()
+    assert "rearm refused" not in ra.log()
+
+
+def test_rearm_device_replay_20261024(ra):
+    """The device's refusal replayed: a gadget.log of the earlier boot (its last drop at uptime 71272, the bind lines of
+    this boot at 57 s) and a fresh boot with no counted drop -> the re-arm runs."""
+    (ra.t / "gadget.log").write_text("flapmon 71272: link drop (not attached), 1 in 60s\n"
+                                     "gadget 57.39: OK mode=--boot UDC=4100000.udc-controller links=ecm.usb0 ffs.adb hid.usb0\n"
+                                     "gadget 57.72: flap monitor started (pid 2794)\n")
+    no_hid_no_adb(ra)
+    assert ra.run().returncode == 0, ra.log()
+    assert ra.last().startswith("rc=0 ")
 
 
 def test_rearm_queued_by_the_operator_runs_beside_its_adb_command(ra):
@@ -991,7 +1046,7 @@ def test_rearm_queued_by_the_operator_runs_beside_its_adb_command(ra):
     _adbd_with_child(ra, f'{BB} sh -c "sleep 30; :"')
     no_hid_no_adb(ra)
     assert ra.run({"MK20_REARM_MANUAL": "1"}).returncode == 0, ra.log()
-    (ra.t / "incoming/upload.tar").write_text("x")
+    _adbd_writing(ra, ra.t / "incoming/upload.tar")
     assert ra.run({"MK20_REARM_MANUAL": "1"}).returncode == 4
 
 
