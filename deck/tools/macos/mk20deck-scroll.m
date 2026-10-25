@@ -31,6 +31,7 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #include <dlfcn.h>
+#include <math.h>
 #include <errno.h>
 #include <mach-o/dyld.h>
 #include <spawn.h>
@@ -196,7 +197,9 @@ int main(int argc, char **argv) {
                 fx = strtod(argv[++i], &end);  // "FX,FY" exactly: no trailing junk (0.5,0.5x is a usage error)
                 if (end == NULL || *end != ',') return usage();
                 fy = strtod(end + 1, &end);
-                if (end == NULL || *end != '\0' || fx < 0 || fx > 1 || fy < 0 || fy > 1) return usage();
+                // NaN escapes every </> comparison ("nan,0.5" would otherwise pass): reject it explicitly
+                if (end == NULL || *end != '\0' || isnan(fx) || isnan(fy) || fx < 0 || fx > 1 || fy < 0 || fy > 1)
+                    return usage();
             } else {
                 return usage();
             }

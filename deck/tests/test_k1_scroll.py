@@ -670,6 +670,10 @@ def test_helper_compiles_signs_and_checks_without_trust(tmp_path):
     gone = subprocess.run([path, "--app", "com.example.mk20.none", "--lines", "3", "--dry-run"], capture_output=True,
                           text=True, timeout=10)
     assert gone.returncode == 4 and "not running" in gone.stderr
+    at = lambda v: subprocess.run([path, "--app", "x", "--lines", "3", "--at", v, "--dry-run"],
+                                  capture_output=True, timeout=10).returncode
+    assert at("nan,0.5") == 2 and at("0.5,nan") == 2 and at("0.5,0.5x") == 2  # NaN / junk: usage errors ...
+    assert at("0.6,0.45") == 4  # ... while a valid --at parses (x is simply not running)
     again = scrollhelper.build(SubprocessRunner(), path)
     assert again.ok and not again.built  # up to date: the binary (and a grant for it) stays
 
