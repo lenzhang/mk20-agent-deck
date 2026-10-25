@@ -21,7 +21,7 @@ from .controller import HID_FACES, Controller, KeyView, Role, slot_pos
 from .demo_data import DESKTOP_CAPS, demo_sessions
 from .layout import DeviceLayout
 from .link import DeviceLink
-from .model import Capabilities, Mode, Session, SessionId, State, Tool
+from .model import ActionResult, Capabilities, Mode, Session, SessionId, State, Tool
 from .render.canvas import Renderer, device_mockup
 from .render.fonts import font
 from .render.keys import render_key
@@ -43,7 +43,7 @@ def demo_adapters(herdr_unavailable: str = "herdr 未安装") -> dict[Mode, Mock
     tmux_caps = Capabilities(focus="未绑定终端 App，请在配置中设置", new_session="未配置新会话命令",
                              skill_current="投递语义未验证（P0 禁用）", skill_new_thread="tmux 无新线程预填",
                              send="投递语义未验证（P0 禁用）", stop="中断能力未按工具版本验证",
-                             approve="P1：请在终端内处理")
+                             approve="P1：请在终端内处理", scroll=None)
     tmux_sessions = demo_sessions(Mode.TMUX, (Tool.CCAI, Tool.CODEX))[:5]
     for s in tmux_sessions:
         s.state, s.state_reason = State.UNKNOWN, "tmux：无关联生命周期信号"
@@ -158,7 +158,8 @@ def shots(out_dir: str, animations: bool = True) -> list[tuple[str, str]]:
 
 TMUX_HOOK_CAPS = Capabilities(focus=None, new_session="未配置新会话命令", skill_current="投递语义未验证（P0 禁用）",
                               skill_new_thread="tmux 无新线程预填", send="投递语义未验证（P0 禁用）",
-                              stop="中断能力未按工具版本验证", approve="P1：请在终端内处理", precise_state=None)
+                              stop="中断能力未按工具版本验证", approve="P1：请在终端内处理", precise_state=None,
+                              scroll=None)
 _ATTN = [  # (worktree, tool, final state, reason)
     ("mk20-deck-attn", Tool.CCAI, State.ERROR, "turn 失败（Claude hook：API 错误）"),
     ("k4-install", Tool.CCAI, State.RUNNING, "运行中（Claude hook）"),
@@ -192,7 +193,7 @@ def attention_adapters() -> dict[Mode, MockAdapter]:
 
 
 def attention_shots(out_dir: str, animations: bool = True) -> list[tuple[str, str]]:
-    """tmux L1 with 2 needs_approval, 1 error, 1 done, rest running; K1 rotation; cross-mode counts."""
+    """tmux L1 with 2 needs_approval, 1 error, 1 done, rest running; taps, K1 scroll-back; cross-mode counts."""
     os.makedirs(out_dir, exist_ok=True)
     lay = DeviceLayout.default()
     made: list[tuple[str, str]] = []
@@ -223,20 +224,23 @@ def attention_shots(out_dir: str, animations: bool = True) -> list[tuple[str, st
             c.apply_background(m, None, str(e))
     clk.advance(2.0)
     save(c, clk, "attn-01-tmux-L1.png", "tmux L1：2 待审批 · 1 出错 · 1 完成 · 其余运行；副屏「桌面 1 待处理」")
-    c.on_knob(1, "cw")
+    tap(c, clk, 3, 1)  # S3: the first needs_approval
     clk.advance(0.5)
-    save(c, clk, "attn-02-k1-cw-first-approval.png", "K1 顺转 1 格 → 选中最急的「待审批」(S3)")
-    c.on_knob(1, "cw")
-    c.on_knob(1, "cw")
-    clk.advance(0.5)
-    save(c, clk, "attn-03-k1-cw-error.png", "再转 2 格：待审批 S6 → 出错 S1（顺序 审批>输入>出错>完成>槽位）")
-    c.on_knob(1, "cw")
-    clk.advance(0.5)
-    save(c, clk, "attn-04-k1-cw-done.png", "再转 1 格 → 完成未读 S8；按 K1 = 聚焦（同单击会话键）")
+    save(c, clk, "attn-02-tap-approval.png", "单击 S3 = 选中并置前「待审批」（K1 不再轮选会话）")
+    for _ in range(3):
+        c.on_knob(1, "ccw")
+        clk.advance(0.3)
+        c.tick()
+    save(c, clk, "attn-03-k1-scrollback.png", "逆时针转 K1 = 回看这个会话的历史；副屏「回看中 · 按 K1 回到最新」")
     c.on_knob(1, "down")
     c.on_knob(1, "up")
+    c.tick()
     clk.advance(0.3)
-    save(c, clk, "attn-05-k1-press-focus.png", "按 K1：聚焦选中会话（完成未读本地清除）")
+    save(c, clk, "attn-04-k1-press-latest.png", "按 K1 = 回到最新内容（tmux 退出 copy mode）")
+    clk.advance(2.0)
+    tap(c, clk, 3, 2)  # S8: done_unread
+    clk.advance(0.3)
+    save(c, clk, "attn-05-tap-done.png", "单击完成未读 S8：置前并本地清除提醒")
     clk.advance(2.0)
     c.on_knob(2, "down")
     c.on_knob(2, "up")
@@ -278,10 +282,11 @@ def layout_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]
     ads[Mode.TMUX] = MockAdapter(Mode.TMUX, tm, caps=TMUX_HOOK_CAPS, limited="状态来自 Claude/codex hooks")
     c2 = Controller(DeckConfig(default_mode=Mode.TMUX), ads, clock=clk2, wall=lambda: 1792244000.0, sim=True)
     c2.refresh()
-    c2.on_knob(1, "cw")  # K1: the most urgent session
+    urgent = next(i for i in range(15) if c2.mgr.session_at(i).state == State.NEEDS_APPROVAL)
+    tap(c2, clk2, *slot_pos(urgent))
     clk2.advance(2.0)
     c2.toast = None
-    save(c2, clk2, "l1v2-03-L1-tmux-mixed-tools.png", "tmux L1：ccai/codex 混排 15 会话，转 K1 选中最急的「待审批」")
+    save(c2, clk2, "l1v2-03-L1-tmux-mixed-tools.png", "tmux L1：ccai/codex 混排 15 会话，单击选中「待审批」")
     write_index(out_dir, made)
     return made
 
@@ -339,6 +344,53 @@ def move_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]]:
     return made
 
 
+def scroll_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]]:
+    """K1 scroll-back (user decision 2026-10-25): rotate = scroll the selected session's history, press = latest."""
+    from .scrollhelper import SETUP_HINT
+    os.makedirs(out_dir, exist_ok=True)
+    lay = DeviceLayout.default()
+    made: list[tuple[str, str]] = []
+
+    def save(c: Controller, clock: FakeClock, name: str, caption: str, clear_toast: bool = True) -> None:
+        if clear_toast:
+            c.toast = None
+        r = Renderer(lay, animations=animations)
+        view = c.view()
+        r.compose(view, clock.t - 0.25)
+        device_mockup(r.compose(view, clock.t), lay, title=f"MK20 Agent Deck · SIM · {caption}").save(
+            os.path.join(out_dir, name))
+        made.append((name, caption))
+
+    clk = FakeClock()
+    c = Controller(DeckConfig(default_mode=Mode.TMUX), attention_adapters(), clock=clk, wall=lambda: 1792244000.0,
+                   sim=True)
+    c.refresh()
+    tap(c, clk, 2, 1)  # S2: select + focus
+    clk.advance(1.0)
+    for _ in range(4):  # four detents, one every 50 ms: the 2nd pair already scrolls 6 lines each
+        c.on_knob(1, "ccw")
+        clk.advance(0.05)
+    c.tick()
+    save(c, clk, "scroll-01-tmux-scrolled-back.png", "逆时针转 K1：选中会话的 tmux 窗格进入回看（copy mode），副屏蓝条提示")
+    c.on_knob(1, "down")
+    c.on_knob(1, "up")
+    c.tick()
+    clk.advance(0.2)
+    save(c, clk, "scroll-02-k1-press-latest.png", "按 K1：回到最新内容（窗格退出 copy mode）", clear_toast=False)
+    clk2 = FakeClock()
+    ads = demo_adapters()
+    ads[Mode.DESKTOP].scroll_reply = ActionResult(False, SETUP_HINT, {"setup": "untrusted"})
+    c2 = _ctl(clk2, ads)
+    tap(c2, clk2, 3, 1)
+    clk2.advance(1.0)
+    c2.on_knob(1, "ccw")  # Desktop: brings the thread forward, then (after the settle) runs the helper
+    clk2.advance(0.5)
+    c2.tick()
+    save(c2, clk2, "scroll-03-desktop-needs-setup.png", "Codex 桌面：helper 未获辅助功能授权 → 副屏提示运行 mk20deck scroll-setup")
+    write_index(out_dir, made)
+    return made
+
+
 def option_adapters() -> dict[Mode, MockAdapter]:
     """tmux with a bound terminal (focus works) and three sessions waiting for a numbered choice."""
     ads = demo_adapters()
@@ -355,7 +407,7 @@ def option_adapters() -> dict[Mode, MockAdapter]:
                                                             "等待批准（Claude hook）")
     perm.prompt_kind = "permission"
     unk.tool, unk.title, unk.state, unk.state_reason = Tool.CODEX, "NAS挂载", State.NEEDS_INPUT, "等待输入（codex hook）"
-    caps = Capabilities(focus=None, new_session=None, skill_new_thread=None, approve="P1：请在终端内处理")
+    caps = Capabilities(focus=None, new_session=None, skill_new_thread=None, approve="P1：请在终端内处理", scroll=None)
     ads[Mode.TMUX] = MockAdapter(Mode.TMUX, ss, caps=caps, limited="状态来自 Claude/codex hooks")
     return ads
 

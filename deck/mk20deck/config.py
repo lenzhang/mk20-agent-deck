@@ -172,6 +172,9 @@ def load_config(path: str | None = None) -> DeckConfig:
         max_prompt_chars=int(cx.get("max_prompt_chars", 2000)),
         max_url_len=int(cx.get("max_url_len", 8000)),
         require_cwd_exists=bool(cx.get("require_cwd_exists", False)),
+        scroll_app=str(cx.get("scroll_app", "com.openai.codex")),
+        scroll_via=str(cx.get("scroll_via", "pid")),
+        scroll_helper=str(cx.get("scroll_helper", "")),
     )
     tm = d.get("tmux", {})
     cfg.tmux = TmuxConfig(

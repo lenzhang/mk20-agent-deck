@@ -93,3 +93,18 @@ class ModeAdapter:
 
     def set_effort(self, s: Session, level: str) -> ActionResult:
         return ActionResult(False, self.capabilities().effort_set or "此会话不支持")
+
+    # K1 scroll-back (2026-10-25).  ``lines`` > 0 = older (up), < 0 = newer (down).  ``detail["live"]``: the view is
+    # back at the latest content by itself (tmux left copy mode); ``detail["setup"]``: a one-time setup is missing
+    # (the message says what to run).
+    def scroll(self, s: Session, lines: int) -> ActionResult:
+        return ActionResult(False, self.capabilities().scroll or "此模式不支持回看")
+
+    def scroll_bottom(self, s: Session) -> ActionResult:
+        """K1 press: back to the latest content, out of any scroll-back state."""
+        return ActionResult(False, self.capabilities().scroll or "此模式不支持回看")
+
+    def scroll_release(self, s: Session) -> bool:
+        """The deck stops scrolling ``s`` (another session / mode, idle timeout): leave the scroll-back state if that
+        touches nothing else (tmux: only that pane).  True when the view is back at the latest content."""
+        return False

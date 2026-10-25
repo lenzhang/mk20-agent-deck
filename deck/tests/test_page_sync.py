@@ -464,8 +464,8 @@ def test_no_knob_long_press_page_change_on_ui_page_firmware(links):
     d.heartbeat, d._next_poll = 1e9, 1e12
     assert d.next_wait() > 1.0  # no 75 ms long-press wake-ups while waiting for a tap's up
     d.inject_knob(1, "up")
-    d.step()  # the tap: K1 on L1 = focus the selection
-    assert c.page == "L1" and c.toast[0] == "未选中会话 · 转 K1 选择" and pages(dev) == ["L1"]
+    d.step()  # the tap: K1 on L1 = back to the latest content of the selection (none here)
+    assert c.page == "L1" and c.toast[0] == "未选中会话 · 单击会话键选择" and pages(dev) == ["L1"]
     long_press_mode(d, clk)
     knob_tap(d, clk, 2, 2.0)  # a stalled K2 on L4 is a toggle, never the legacy "hold = 回到 L1" plus nothing
     assert c.page == "L1" and dev.route == "L1" and pages(dev) == ["L1", "L4", "L1"]

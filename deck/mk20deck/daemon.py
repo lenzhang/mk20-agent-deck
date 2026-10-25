@@ -577,6 +577,9 @@ class Daemon:
         deadline = getattr(self.controller, "option_deadline", lambda: None)()
         if deadline is not None:  # option mode: 30 s without input / 3 s after a choice
             waits.append(deadline - now)
+        deadline = getattr(self.controller, "scroll_deadline", lambda: None)()
+        if deadline is not None:  # K1 scroll-back: a send after the Desktop focus settle / the 2 min idle end
+            waits.append(deadline - now)
         hw = self._hid_wait(now)
         if hw is not None:  # ui.hidKeys refresh / retry
             waits.append(hw)

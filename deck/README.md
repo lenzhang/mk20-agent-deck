@@ -57,9 +57,10 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
 - **MODE (fb20)**: short press cycles Desktop → herdr → tmux (decided on release); long press ≥600 ms opens L4.
   The firmware forwards fb20 on L1/L4 while the keyboard agent is inactive (otherwise it is the e-stop).
 - **L4** (K2 short press toggles L1↔L4): DESK/HERD/TMUX switch mode and return to L1, ＋新会话 = new session in
-  the current mode (cwd of the confirmed selection), 回 L1. S1..S5 are not on L4 (use L1 or K1).
-- **K1**: rotate = move the selection in "needs me" order, press = focus the selection (while a slot is picked
-  up: cancel the move), hold = L4. **K2**: rotate
+  the current mode (cwd of the confirmed selection), 回 L1. S1..S5 are not on L4 (use L1).
+- **K1** (user decision 2026-10-25, see「K1 回看」below): rotate = **scroll the selected session's conversation
+  history** (ccw = older, cw = newer), press = **back to the latest content** (with a slot picked up: cancel the
+  move; in option mode: back to the session grid), hold = L4. K1 no longer walks the selection. **K2**: rotate
   scrolls the sub-screen summary, short = L1↔L4, hold = L1.
 - Slots: 15 per mode, sticky, strict-higher overflow replacement, pins/selection protected, `+N` overflow on the
   sub-screen. State files from the 8-slot layout (no `n_slots` field) migrate by physical key: A1..A4 → S1..S4,
@@ -231,10 +232,44 @@ deck 侧（`[tmux]`，见 `config.example.toml`）：窗格按命名（`ag-ccai-
 第 2–3 行清空；固件 1.5.1 起按选项键由键盘直接给前台窗口发一次数字（`ui.hidKeys`，按住也只一个；按住说话时忽略并
 提示「先松开按住说话」），Mac 只显示「已选 k」；Esc、K1、点暗键、换页 / 换模式、30 s 无输入、状态改变即返回。
 
-K1：**转 = 按「待审批 > 待输入 > 出错 > 完成未读 > 其余按槽位」顺序移动选中**；**按 = 聚焦选中会话**
-（同单击会话键）；长按仍进 L4。effort 不再映射到 K1（各模式本来都「此会话不支持」）。
+K1：**转 = 回看选中会话的对话历史**，**按 = 回到最新**（见下「K1 回看」）；长按仍进 L4。K1 不再轮选会话
+（2026-10-25 用户决定：选会话直接按键），effort 也不映射到 K1。
 其他模式每 10 s 后台轮询一次（`[deck] background_poll_s`，不阻塞帧循环），副屏顶部显示
 「tmux 2 待处理」，L4 模式键与 L1 模式键带琥珀角标。
+
+## K1 回看（2026-10-25）
+左旋钮 K1 只作用于**当前选中的会话**（单击会话键选中）：
+- **逆时针转 = 往上翻（更早）**，顺时针转 = 往下翻（更新）；每格 3 行，转得快（两格间隔 < 0.12 s）逐步加速到
+  每格 15 行。转动在一个循环步里合并成一次调用。没有回看时顺时针转只提示「已是最新」。
+- **按 K1 = 回到最新内容**并退出回看。选项模式里按 K1 仍是「回到会话列表」（此时转 K1 不回看，数字键要进提示框），
+  拿起移动中按 K1 仍是「取消移动」；长按 K1 不变（新固件由键盘自己判定 1 s 长按，进板载 HOME；旧固件 600 ms 进 L4）。
+- 回看中副屏底部蓝条「回看中 · 按 K1 回到最新」。结束：按 K1、选别的会话 / 单击会话键、切模式、观测到按住说话、
+  会话消失、**2 分钟不转 K1**（tmux 自动退出 copy mode；Codex 桌面只去掉提示，窗口不动——mk20deck 不会自己把
+  Codex 拉到前台）。按住说话时不回看（提示「按住说话中，暂不回看」）。
+- **tmux**：只操作选中会话自己的窗格（`tmux copy-mode -e -t <pane>` + `send-keys -t <pane> -X -N n scroll-up/down`，
+  按 K1 = `send-keys -X cancel`），不动鼠标、不抢焦点，窗格不在前台也照样翻；翻到底自动退出 copy mode。
+  注意回看中窗格处于 copy mode：这时直接打字会进 copy mode，先按 K1 回到最新（单击该会话键也会回到最新）。
+- **Codex 桌面**：先照常置前该线程（`codex://threads/<id>`），0.35 s 后由独立小程序 `mk20deck-scroll`
+  在 Codex 窗口里发滚轮事件（默认 `CGEventPostToPid` 直接投给 Codex，不移动鼠标）。只有这个小程序需要 macOS
+  「辅助功能」授权，Python 和终端都不需要。没装或没授权时副屏提示一次
+  「回看需要辅助功能授权：运行 mk20deck scroll-setup」，之后 20 s 内转 K1 什么都不做。
+- herdr：不支持（提示「回看不可用：herdr 未联调」）。
+
+**一次性设置（只为 Codex 桌面）**：
+```
+python3 -m mk20deck scroll-setup        # 需要 Xcode Command Line Tools（clang）
+```
+它用 clang 把 `tools/macos/mk20deck-scroll.m` 编译到 `~/.config/mk20-agent-deck/bin/mk20deck-scroll`（ad-hoc 签名，
+标识 `com.leo.mk20deck-scroll`），再让 macOS 弹出「“mk20deck-scroll”想使用辅助功能控制这台电脑」。然后在
+**系统设置 → 隐私与安全性 → 辅助功能** 里打开 **mk20deck-scroll** 的开关（列表里没有：点「+」，⌘⇧G 输入上面的路径），
+再运行一次 `scroll-setup` 看到「已授权」即可，mk20deck 不用重启。授权跟着二进制的哈希走：源码没变时 scroll-setup
+不会重编译；以后 helper 更新（或 `--rebuild`）后需要在列表里删掉旧条目（「−」）再授权一次。
+`--open-settings` 直接打开辅助功能设置页。helper 自检：`~/.config/mk20-agent-deck/bin/mk20deck-scroll --check`
+（`trusted: yes/no`，`responsible: self` 表示授权判定的是它自己而不是终端）。
+
+配置（`[codex_desktop]`，一般不用改）：`scroll_app = "com.openai.codex"`；`scroll_via = "pid"`（滚轮进不了 Codex 时改
+`"hid"`：在 Codex 窗口内的位置从系统事件入口发，仍不移动鼠标）；`scroll_helper = ""`（默认上面的路径）。
+截图：`python -m mk20deck sim-shots --scenario scroll --out <dir>`。
 
 ## P0 deviations / known limits
 - Canvas geometry is a guess until `getInfo`; firmware 0/1-based coords are inferred from getInfo rects (`fw_coord_base = "auto"`).

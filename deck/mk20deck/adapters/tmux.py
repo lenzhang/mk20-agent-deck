@@ -13,6 +13,9 @@ needs_input / done_unread / error / idle; without one the pane stays ``unknown``
 (pane existence and ``pane_current_command`` never prove a state, PRD §3.1).
 Focus requires a configured terminal App and exactly one attached client;
 otherwise disabled with "请绑定终端 App".
+K1 scroll-back (2026-10-25) uses tmux itself on the session's own pane, never the terminal's focus or the mouse:
+rotate = ``copy-mode -e`` + ``send-keys -X -N n scroll-up|scroll-down`` (``-e``: scrolling down to the bottom leaves
+copy mode), press / release = ``send-keys -X cancel`` (back to the live pane).
 """
 from __future__ import annotations
 
@@ -110,6 +113,7 @@ class TmuxAdapter(ModeAdapter):
             approve="P1：请在终端内处理",
             effort_set="此会话不支持",
             precise_state=None if self.hooked else "状态受限：tmux 无生命周期信号（未发现 hook 记录）",
+            scroll=None,
         )
 
     def status_limited(self) -> str | None:
@@ -241,3 +245,32 @@ class TmuxAdapter(ModeAdapter):
         args.append(self.cfg.new_session_cmd)
         r = self._tmux(*args)
         return ActionResult(r.returncode == 0, "已新建窗口" if r.returncode == 0 else "新建失败")
+
+    # ------------------------------------------------------------------ K1 scroll-back (copy mode of the pane)
+    def scroll(self, s: Session, lines: int) -> ActionResult:
+        if s.sid.generation != self.generation:
+            return ActionResult(False, "tmux server 已重启，身份失效")
+        pane, n = s.sid.native, str(min(abs(int(lines)), 1000))
+        if not lines:
+            return ActionResult(True, "")
+        if lines > 0:  # older: enter copy mode (a no-op when it already is) and scroll up
+            args = ["copy-mode", "-e", "-t", pane, ";", "send-keys", "-t", pane, "-X", "-N", n, "scroll-up"]
+        else:  # newer: only inside copy mode ("not in a mode" = already live)
+            args = ["send-keys", "-t", pane, "-X", "-N", n, "scroll-down"]
+        r = self._tmux(*args, ";", "display-message", "-p", "-t", pane, "#{pane_in_mode}")
+        if r.returncode == 0:
+            return ActionResult(True, "", {"live": r.stdout.strip() == "0"})
+        if lines < 0 and "not in a mode" in (r.stderr or ""):
+            return ActionResult(True, "", {"live": True})
+        return ActionResult(False, "tmux 回看失败" + (f"：{r.stderr.strip()[:30]}" if r.stderr.strip() else ""))
+
+    def scroll_bottom(self, s: Session) -> ActionResult:
+        if s.sid.generation != self.generation:
+            return ActionResult(False, "tmux server 已重启，身份失效")
+        r = self._tmux("send-keys", "-t", s.sid.native, "-X", "cancel")
+        if r.returncode == 0 or "not in a mode" in (r.stderr or ""):
+            return ActionResult(True, "", {"live": True})
+        return ActionResult(False, "tmux 回到最新失败" + (f"：{r.stderr.strip()[:30]}" if r.stderr.strip() else ""))
+
+    def scroll_release(self, s: Session) -> bool:
+        return self.scroll_bottom(s).ok

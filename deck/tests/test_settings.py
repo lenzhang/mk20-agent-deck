@@ -95,7 +95,7 @@ def test_controller_l4_k1_short_press_opens_and_renders(tmp_path):
     assert c.page == "L1"
 
 
-def test_controller_k1_short_press_on_l1_still_effort_toast(tmp_path):
+def test_controller_k1_short_press_on_l1_stays_on_l1(tmp_path):
     clk = FakeClock()
     c = Controller(DeckConfig(), demo_adapters(), clock=clk, sim=True, settings=page(tmp_path))
     c.on_knob(1, "down"); clk.advance(0.1); c.on_knob(1, "up")

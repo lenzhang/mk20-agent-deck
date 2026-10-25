@@ -8,7 +8,7 @@ from mk20deck import agentstate
 from mk20deck.adapters.base import RecordingRunner, RunResult
 from mk20deck.adapters.tmux import TmuxAdapter, TmuxConfig, title_from_cwd
 from mk20deck.config import DeckConfig
-from mk20deck.controller import Controller
+from mk20deck.controller import Controller, slot_pos
 from mk20deck.model import Mode, State, Tool
 from mk20deck.sim import FakeClock, demo_adapters
 
@@ -170,10 +170,10 @@ def test_done_cleared_on_focus_until_next_stop(sdir):
     c.refresh()
     idx = next(i for i in range(8) if c.mgr.session_at(i) and c.mgr.session_at(i).sid.native == "%0")
     assert c.mgr.session_at(idx).state == State.DONE_UNREAD
-    c.on_knob(1, "cw")  # K1: the done session is the only attention item → selected first
+    col, row = slot_pos(idx)
+    c.on_key(col, row, True)  # a tap selects and focuses the done session
+    c.on_key(col, row, False)
     assert c.mgr.selected_session().sid.native == "%0"
-    c.on_knob(1, "down")
-    c.on_knob(1, "up")  # K1 press → focus
     assert tm.r.calls[-1] == ["open", "-a", "Ghostty"]
     c.refresh()
     assert c.mgr.session_at(idx).state == State.IDLE  # same Stop record: stays cleared
