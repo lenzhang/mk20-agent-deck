@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>IOObjectClass</key>
+	<string>IORegistryEntry</string>
+	<key>IORegistryEntryChildren</key>
+	<array>
+		<dict>
+			<key>IOObjectClass</key>
+			<string>AppleT6000USBXHCI</string>
+			<key>IORegistryEntryChildren</key>
+			<array>
+				<dict>
+					<key>IOObjectClass</key>
+					<string>IOUSBHostDevice</string>
+					<key>IORegistryEntryChildren</key>
+					<array>
+						<dict>
+							<key>IOObjectClass</key>
+							<string>IOUSBHostDevice</string>
+							<key>IORegistryEntryChildren</key>
+							<array>
+								<dict>
+									<key>IOObjectClass</key>
+									<string>IOUSBHostDevice</string>
+									<key>IORegistryEntryName</key>
+									<string>USB Storage</string>
+									<key>USB Product Name</key>
+									<string>USB Storage</string>
+									<key>USB Vendor Name</key>
+									<string>Generic</string>
+									<key>idProduct</key>
+									<integer>1892</integer>
+									<key>idVendor</key>
+									<integer>1507</integer>
+									<key>locationID</key>
+									<integer>2170880</integer>
+									<key>sessionID</key>
+									<integer>16810801985683</integer>
+								</dict>
+								<dict>
+									<key>IOObjectClass</key>
+									<string>IOUSBHostDevice</string>
+									<key>IORegistryEntryName</key>
+									<string>USB 10/100/1000 LAN</string>
+									<key>USB Product Name</key>
+									<string>USB 10_100_1000 LAN</string>
+									<key>USB Vendor Name</key>
+									<string>Realtek</string>
+									<key>idProduct</key>
+									<integer>33107</integer>
+									<key>idVendor</key>
+									<integer>3034</integer>
+									<key>locationID</key>
+									<integer>2174976</integer>
+									<key>sessionID</key>
+									<integer>16810802190928</integer>
+								</dict>
+							</array>
+							<key>IORegistryEntryName</key>
+							<string>USB3.0 Hub</string>
+							<key>USB Product Name</key>
+							<string>USB3.0 Hub</string>
+							<key>USB Vendor Name</key>
+							<string>VIA Labs, Inc.</string>
+							<key>idProduct</key>
+							<integer>2071</integer>
+							<key>idVendor</key>
+							<integer>8457</integer>
+							<key>locationID</key>
+							<integer>2162688</integer>
+							<key>sessionID</key>
+							<integer>16810787954328</integer>
+						</dict>
+					</array>
+					<key>IORegistryEntryName</key>
+					<string>USB3.1 Hub</string>
+					<key>USB Product Name</key>
+					<string>USB3.1 Hub</string>
+					<key>USB Vendor Name</key>
+					<string>VIA Labs, Inc.</string>
+					<key>idProduct</key>
+					<integer>2084</integer>
+					<key>idVendor</key>
+					<integer>8457</integer>
+					<key>locationID</key>
+					<integer>2097152</integer>
+					<key>sessionID</key>
+					<integer>16810763957003</integer>
+				</dict>
+				<dict>
+					<key>IOObjectClass</key>
+					<string>IOUSBHostDevice</string>
+					<key>IORegistryEntryChildren</key>
+					<array>
+						<dict>
+							<key>IOObjectClass</key>
+							<string>IOUSBHostDevice</string>
+							<key>IORegistryEntryName</key>
+							<string>USB2.0 Hub</string>
+							<key>USB Product Name</key>
+							<string>USB2.0 Hub</string>
+							<key>USB Vendor Name</key>
+							<string>VIA Labs, Inc.</string>
+							<key>idProduct</key>
+							<integer>10263</integer>
+							<key>idVendor</key>
+							<integer>8457</integer>
+							<key>locationID</key>
+							<integer>1114112</integer>
+							<key>sessionID</key>
+							<integer>16810782736410</integer>
+						</dict>
+						<dict>
+							<key>IOObjectClass</key>
+							<string>IOUSBHostDevice</string>
+							<key>IORegistryEntryChildren</key>
+							<array>
+								<dict>
+									<key>IOObjectClass</key>
+									<string>IOUSBHostDevice</string>
+									<key>IORegistryEntryName</key>
+									<string>Maple 003</string>
+									<key>USB Product Name</key>
+									<string>Maple 003</string>
+									<key>USB Serial Number</key>
+									<string>LLM 003</string>
+									<key>USB Vendor Name</key>
+									<string>LeafLabs</string>
+									<key>idProduct</key>
+									<integer>3</integer>
+									<key>idVendor</key>
+									<integer>7855</integer>
+									<key>kUSBSerialNumberString</key>
+									<string>LLM 003</string>
+									<key>locationID</key>
+									<integer>1318912</integer>
+									<key>sessionID</key>
+									<integer>16810792315712</integer>
+								</dict>
+								<dict>
+									<key>IOObjectClass</key>
+									<string>IOUSBHostDevice</string>
+									<key>IORegistryEntryName</key>
+									<string>Serial</string>
+									<key>USB Product Name</key>
+									<string>Serial</string>
+									<key>USB Vendor Name</key>
+									<string>Allwinner Technology Inc.</string>
+									<key>idProduct</key>
+									<integer>260</integer>
+									<key>idVendor</key>
+									<integer>7531</integer>
+									<key>locationID</key>
+									<integer>1314816</integer>
+									<key>sessionID</key>
+									<integer>16814939482634</integer>
+								</dict>
+							</array>
+							<key>IORegistryEntryName</key>
+							<string>USB2.0 Hub</string>
+							<key>USB Product Name</key>
+							<string>USB2.0 Hub</string>
+							<key>idProduct</key>
+							<integer>1552</integer>
+							<key>idVendor</key>
+							<integer>1507</integer>
+							<key>locationID</key>
+							<integer>1310720</integer>
+							<key>sessionID</key>
+							<integer>16810785008028</integer>
+						</dict>
+						<dict>
+							<key>IOObjectClass</key>
+							<string>IOUSBHostDevice</string>
+							<key>IORegistryEntryName</key>
+							<string>HD Pro Webcam C920</string>
+							<key>USB Product Name</key>
+							<string>HD Pro Webcam C920</string>
+							<key>idProduct</key>
+							<integer>2093</integer>
+							<key>idVendor</key>
+							<integer>1133</integer>
+							<key>locationID</key>
+							<integer>1179648</integer>
+							<key>sessionID</key>
+							<integer>16810787401810</integer>
+						</dict>
+						<dict>
+							<key>IOObjectClass</key>
+							<string>IOUSBHostDevice</string>
+							<key>IORegistryEntryName</key>
+							<string>USB Billboard Device</string>
+							<key>USB Product Name</key>
+							<string>USB Billboard Device</string>
+							<key>USB Vendor Name</key>
+							<string>VIA Labs, Inc.</string>
+							<key>idProduct</key>
+							<integer>34852</integer>
+							<key>idVendor</key>
+							<integer>8457</integer>
+							<key>locationID</key>
+							<integer>1376256</integer>
+							<key>sessionID</key>
+							<integer>16810890589810</integer>
+						</dict>
+					</array>
+					<key>IORegistryEntryName</key>
+					<string>USB2.0 Hub</string>
+					<key>USB Product Name</key>
+					<string>USB2.0 Hub</string>
+					<key>USB Vendor Name</key>
+					<string>VIA Labs, Inc.</string>
+					<key>idProduct</key>
+					<integer>10276</integer>
+					<key>idVendor</key>
+					<integer>8457</integer>
+					<key>locationID</key>
+					<integer>1048576</integer>
+					<key>sessionID</key>
+					<integer>16810768180628</integer>
+				</dict>
+			</array>
+			<key>IORegistryEntryName</key>
+			<string>AppleT6000USBXHCI</string>
+			<key>locationID</key>
+			<integer>0</integer>
+		</dict>
+		<dict>
+			<key>IOObjectClass</key>
+			<string>AppleT6000USBXHCI</string>
+			<key>IORegistryEntryName</key>
+			<string>AppleT6000USBXHCI</string>
+			<key>locationID</key>
+			<integer>33554432</integer>
+		</dict>
+		<dict>
+			<key>IOObjectClass</key>
+			<string>AppleT6000USBXHCI</string>
+			<key>IORegistryEntryName</key>
+			<string>AppleT6000USBXHCI</string>
+			<key>locationID</key>
+			<integer>16777216</integer>
+		</dict>
+	</array>
+	<key>IORegistryEntryName</key>
+	<string>Root</string>
+</dict>
+</plist>

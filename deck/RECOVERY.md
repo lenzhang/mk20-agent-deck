@@ -49,6 +49,10 @@ python3 -m mk20deck via-restore ~/.config/mk20-agent-deck/backups/via-XXXX.json 
   以及 VIA raw HID 报告描述符（0xFF60/0x61）。
 - Mac 上的副本：`~/workspace/mk20-recovery/gd32/`（与 sha256 一起放的）。
 
+> **键盘自己停在 bootloader 不等于要刷机**：断电 / 上电后 Mac 上出现 “Maple 003”（`1eaf:0003`）、按键旋钮全失灵、
+> mk20deck 副屏出现红色横幅「按键控制器停在升级模式」——GD32 只是上电时没跳进键盘程序（2026-10-25 14:08），
+> **重新插拔 MK20 的 USB 线**即可，固件和键位都没坏（见 `firmware/RECOVERY.md` 症状表）。只有插拔后仍停在这里才考虑下面的重刷。
+
 步骤（**刷之前先做 §1 VIA 备份**）：
 1. `brew install dfu-util`
 2. 让 GD32 进 bootloader（**未在本机验证**，按可能性从高到低）：

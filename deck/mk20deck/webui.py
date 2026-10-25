@@ -59,6 +59,7 @@ from typing import Callable
 from urllib.parse import parse_qs
 
 from .adapters.base import BackendUnavailable
+from .controller import GD32_DFU_WEB
 from .model import MODE_CYCLE, PRIORITY, Mode, Session, State
 from .render.palette import MODE_NAME, MODE_STRIP, STATE_COLOR, STATE_TEXT
 from .rules import KIND_TEXT, KINDS, RULE_TOOLS, RulesSaveError, RulesStore, dir_name, worktree_root
@@ -391,7 +392,9 @@ class ArrangeService:
             "current_mode": ctl.mode.value,
             "link": link,
             "updated": time.strftime("%H:%M:%S", time.localtime(lp)) if lp else "--:--:--",
-            "warnings": [self.store.warning] if self.store.warning else [],
+            "warnings": ([self.store.warning] if self.store.warning else [])
+                        + ([GD32_DFU_WEB] if getattr(ctl, "gd32_dfu", False) else []),
+            "gd32_dfu": bool(getattr(ctl, "gd32_dfu", False)),  # hw/gd32watch: keys/knobs dead until a replug
             "modes": [self._mode_json(m, daemon) for m in MODE_CYCLE],
             "stale": False,
         }

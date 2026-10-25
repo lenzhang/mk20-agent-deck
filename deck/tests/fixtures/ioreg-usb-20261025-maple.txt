@@ -1,0 +1,51 @@
++-o Root  <class IORegistryEntry, id 0x100000100, retain 35>
+  +-o AppleT6000USBXHCI@00000000  <class AppleT6000USBXHCI, id 0x10000034d, registered, matched, active, busy 0 (2857492 ms), retain 755>
+  | +-o USB3.1 Hub@00200000  <class IOUSBHostDevice, id 0x100d6d832, registered, matched, active, busy 0 (1783 ms), retain 36>
+  | | +-o USB3.0 Hub@00210000  <class IOUSBHostDevice, id 0x100d6d886, registered, matched, active, busy 0 (1666 ms), retain 36>
+  | |   +-o USB Storage@00212000  <class IOUSBHostDevice, id 0x100d6d8cb, registered, matched, active, busy 0 (220 ms), retain 29>
+  | |   +-o USB 10/100/1000 LAN@00213000  <class IOUSBHostDevice, id 0x100d6d8d9, registered, matched, active, busy 0 (1398 ms), retain 34>
+  | +-o USB2.0 Hub@00100000  <class IOUSBHostDevice, id 0x100d6d845, registered, matched, active, busy 0 (8145 ms), retain 41>
+  |   +-o USB2.0 Hub@00110000  <class IOUSBHostDevice, id 0x100d6d85d, registered, matched, active, busy 0 (18 ms), retain 34>
+  |   +-o USB2.0 Hub@00140000  <class IOUSBHostDevice, id 0x100d6d86f, registered, matched, active, busy 0 (3673 ms), retain 36>
+  |   | +-o Maple 003@00142000  <class IOUSBHostDevice, id 0x100d6d8bc, registered, matched, active, busy 0 (600 ms), retain 24>
+  |   | +-o Serial@00141000  <class IOUSBHostDevice, id 0x100d6e17b, registered, matched, active, busy 0 (2564 ms), retain 115>
+  |   +-o HD Pro Webcam C920@00120000  <class IOUSBHostDevice, id 0x100d6d881, registered, matched, active, busy 0 (3899 ms), retain 40>
+  |   +-o USB Billboard Device@00150000  <class IOUSBHostDevice, id 0x100d6d94e, registered, matched, active, busy 0 (517 ms), retain 22>
+  +-o AppleT6000USBXHCI@02000000  <class AppleT6000USBXHCI, id 0x1000005c2, registered, matched, active, busy 0 (1031386 ms), retain 332>
+  +-o AppleT6000USBXHCI@01000000  <class AppleT6000USBXHCI, id 0x1000004d5, registered, matched, active, busy 0 (88455448 ms), retain 442>
++-o Maple 003@00142000  <class IOUSBHostDevice, id 0x100d6d8bc, registered, matched, active, busy 0 (600 ms), retain 24>
+    {
+      "sessionID" = 16810792315712
+      "USBSpeed" = 1
+      "UsbLinkSpeed" = 12000000
+      "idProduct" = 3
+      "iManufacturer" = 1
+      "bDeviceClass" = 0
+      "IOPowerManagement" = {"PowerOverrideOn"=Yes,"DevicePowerState"=2,"CurrentPowerState"=2,"CapabilityFlags"=32768,"MaxPowerState"=2,"DriverPowerState"=0}
+      "bcdDevice" = 513
+      "bMaxPacketSize0" = 64
+      "iProduct" = 2
+      "iSerialNumber" = 3
+      "bNumConfigurations" = 1
+      "UsbDeviceSignature" = <af1e030001024c4c4d20303033000000fe0102>
+      "USB Product Name" = "Maple 003"
+      "locationID" = 1318912
+      "bDeviceSubClass" = 0
+      "bcdUSB" = 256
+      "kUSBSerialNumberString" = "LLM 003"
+      "USB Address" = 7
+      "IOCFPlugInTypes" = {"9dc7b780-9ec0-11d4-a54f-000a27052861"="IOUSBHostFamily.kext/Contents/PlugIns/IOUSBLib.bundle"}
+      "kUSBCurrentConfiguration" = 1
+      "bDeviceProtocol" = 0
+      "USBPortType" = 0
+      "IOServiceDEXTEntitlements" = (("com.apple.developer.driverkit.transport.usb"))
+      "USB Vendor Name" = "LeafLabs"
+      "Device Speed" = 1
+      "idVendor" = 7855
+      "kUSBProductString" = "Maple 003"
+      "USB Serial Number" = "LLM 003"
+      "kUSBAddress" = 7
+      "kUSBVendorString" = "LeafLabs"
+    }
+    
+

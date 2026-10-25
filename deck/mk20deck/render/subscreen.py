@@ -13,6 +13,7 @@ W, H = 428, 142
 AMBER = (245, 180, 60)
 MOVE_PINK = (244, 114, 182)  # same as the picked-up key's dashed border
 OPTION_AMBER = (245, 158, 11)  # same as the option keys
+ALERT_RED = (220, 38, 38)  # persistent hardware banner (SubView.alert)
 
 
 def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
@@ -73,30 +74,33 @@ def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
         if line2 and not sv.moving:
             d.text((x - 90, 92), fit(d, line2, f12, W - 30), font=f12, fill=DIM)
 
-    # bottom: status-limited reason (AC11) + overflow + note
-    yb = 120
-    lim = sv.limited or ""
-    over = f"+{sv.overflow}" if sv.overflow else ""
-    if sv.overflow_attention:
-        over += f" · {sv.overflow_attention} 待处理"
-    ow = d.textbbox((0, 0), over, font=font(13, bold=True))[2] if over else 0
-    if not sv.option:  # option mode: the instruction banner takes the bottom line
-        d.text((12, yb), fit(d, lim, f12, W - 30 - ow), font=f12, fill=AMBER)
-        if over:
-            d.text((W - 10 - ow, yb - 1), over, font=font(13, bold=True), fill=TEXT)
-    if sv.moving:  # picked-up slot: one prominent instruction line (replaces summary / note / pin info)
-        fm = font(13, bold=True)
-        d.rounded_rectangle([8, 93, W - 8, 115], radius=8, fill=MOVE_PINK)
-        d.text((W / 2, 104), fit(d, sv.moving, fm, W - 28), font=fm, fill=(0, 0, 0), anchor="mm")
-    elif sv.option:  # option mode: the choice instruction (replaces summary / note)
-        fm = font(13, bold=True)
-        top = 112
-        d.rounded_rectangle([8, top, W - 8, top + 24], radius=8, fill=OPTION_AMBER)
-        d.text((W / 2, top + 12), fit(d, sv.option, fm, W - 28), font=fm, fill=(0, 0, 0), anchor="mm")
-    elif sv.note and s is not None and sv.page != "L4":
-        d.text((x, 106), fit(d, sv.note, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
-    elif sv.page == "L4" and s is not None and sv.pin_info:
-        d.text((x, 106), fit(d, sv.pin_info, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
+    if sv.alert:  # hardware problem (GD32 stuck in its DFU bootloader): replaces the whole bottom block
+        _draw_alert(d, sv)
+    else:
+        # bottom: status-limited reason (AC11) + overflow + note
+        yb = 120
+        lim = sv.limited or ""
+        over = f"+{sv.overflow}" if sv.overflow else ""
+        if sv.overflow_attention:
+            over += f" · {sv.overflow_attention} 待处理"
+        ow = d.textbbox((0, 0), over, font=font(13, bold=True))[2] if over else 0
+        if not sv.option:  # option mode: the instruction banner takes the bottom line
+            d.text((12, yb), fit(d, lim, f12, W - 30 - ow), font=f12, fill=AMBER)
+            if over:
+                d.text((W - 10 - ow, yb - 1), over, font=font(13, bold=True), fill=TEXT)
+        if sv.moving:  # picked-up slot: one prominent instruction line (replaces summary / note / pin info)
+            fm = font(13, bold=True)
+            d.rounded_rectangle([8, 93, W - 8, 115], radius=8, fill=MOVE_PINK)
+            d.text((W / 2, 104), fit(d, sv.moving, fm, W - 28), font=fm, fill=(0, 0, 0), anchor="mm")
+        elif sv.option:  # option mode: the choice instruction (replaces summary / note)
+            fm = font(13, bold=True)
+            top = 112
+            d.rounded_rectangle([8, top, W - 8, top + 24], radius=8, fill=OPTION_AMBER)
+            d.text((W / 2, top + 12), fit(d, sv.option, fm, W - 28), font=fm, fill=(0, 0, 0), anchor="mm")
+        elif sv.note and s is not None and sv.page != "L4":
+            d.text((x, 106), fit(d, sv.note, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
+        elif sv.page == "L4" and s is not None and sv.pin_info:
+            d.text((x, 106), fit(d, sv.pin_info, font(11), W - x - 10), font=font(11), fill=(150, 160, 190))
 
     if sv.toast:
         f = font(16, bold=True)
@@ -105,6 +109,17 @@ def render_sub(sv: SubView, t: float, heartbeat_on: bool = True) -> Image.Image:
         d.rounded_rectangle([x0, 46, x0 + tw, 82], radius=10, fill=(245, 245, 245), outline=(0, 0, 0), width=2)
         d.text((W / 2, 64), fit(d, sv.toast, f, tw - 16), font=f, fill=(10, 10, 10), anchor="mm")
     return img
+
+
+def _draw_alert(d: ImageDraw.ImageDraw, sv: SubView) -> None:
+    """Two-line red banner over the bottom 46 px (summary / note / status line): stays while ``sv.alert`` is set;
+    a toast still shows above it."""
+    top, bottom = 92, H - 4
+    d.rounded_rectangle([6, top, W - 6, bottom], radius=8, fill=ALERT_RED)
+    f1, f2 = font(14, bold=True), font(12)
+    d.text((W / 2, top + 13), fit(d, sv.alert, f1, W - 24), font=f1, fill=(255, 255, 255), anchor="mm")
+    if sv.alert_detail:
+        d.text((W / 2, top + 33), fit(d, sv.alert_detail, f2, W - 24), font=f2, fill=(254, 226, 226), anchor="mm")
 
 
 def render_offline(reason: str, when: str) -> Image.Image:

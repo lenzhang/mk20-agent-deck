@@ -70,10 +70,14 @@ def cmd_run(args) -> int:
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
+    from .hw.gd32watch import default_watch
+    gd32 = default_watch()  # macOS: read-only ioreg check every 30 s for the GD32 stuck in its DFU bootloader
+    if gd32 is not None:
+        gd32.start(stop)
     try:
         Supervisor(ctl, find_ports, open_transport, default_renderer_factory(cfg), cfg,
                    power=PowerMonitor.default(), bg_adapters=build_adapters(cfg), calls=calls,
-                   arrange=web).run(stop)  # web: the keyboard's 会话安排 key mints its one-time link here
+                   arrange=web, gd32=gd32).run(stop)  # web: the keyboard's 会话安排 key mints its one-time link here
     finally:
         if web is not None:
             web.stop()

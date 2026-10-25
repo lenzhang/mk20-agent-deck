@@ -148,6 +148,9 @@ class Daemon:
     # loop thread inside step() (never from the HTTP thread) and force a frame.
     calls: object | None = None
     bg_join_s: float = 6.0  # run() waits this long for its background poll thread to finish (adapter timeouts)
+    # hw/gd32watch.Gd32DfuWatch (process-wide, its own thread; None = off): its confirmed ``stuck`` state becomes the
+    # controller's GD32 DFU banner on every step (an attribute read, never the probe itself).
+    gd32: object | None = None
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -520,6 +523,8 @@ class Daemon:
         if self.calls is not None and self.calls.drain(self):
             force = True  # an arrange-page change: show it on the keyboard now
         self._drain_background()
+        if self.gd32 is not None and hasattr(self.controller, "set_gd32_dfu"):
+            self.controller.set_gd32_dfu(getattr(self.gd32, "stuck", False))  # a change bumps the version: a frame
         self.controller.tick()
         if self._sync_page(now):  # before the (possibly slow) poll: the keyboard switches at once ...
             force = True          # ... and gets the new page's full frame in this step (it shows a placeholder)
