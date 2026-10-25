@@ -50,7 +50,7 @@ from typing import Callable
 from . import protocol as P
 from .adapters.base import BackendUnavailable, ModeAdapter
 from .config import DeckConfig
-from .model import (ATTENTION_STATES, MODE_CYCLE, PRIORITY, ActionResult, Mode, Session, State, Tool)
+from .model import (ATTENTION_STATES, MODE_CYCLE, PRIORITY, ActionResult, Mode, Session, SessionId, State, Tool)
 from .settings import SettingsPage
 from .slots import N_SLOTS, SLOT_COLS, SlotManager
 
@@ -260,6 +260,8 @@ class _Scroll:
     """K1 scroll-back of one session (2026-10-25)."""
     key: str
     mode: Mode
+    native: str   # sid.native / sid.generation: the pane can outlive our session list (hook record expired)
+    generation: str
     last: float  # last K1 rotation (SCROLL_IDLE_S, acceleration)
     ready: float  # nothing is sent before this (Desktop: the thread was just brought forward)
     pending: int = 0  # lines not sent yet (> 0 = older)
@@ -673,10 +675,12 @@ class Controller:
             self._on_up(p.role, p, t)  # the press-time role owns the release (page may have changed)
         self._touch()
 
-    def on_knob(self, knob: int, kind: str, target: str | None = None) -> None:
+    def on_knob(self, knob: int, kind: str, target: str | None = None, t: float | None = None) -> None:
         """``target`` (daemon, ui.page firmware): for a K2 tap from the keyboard whose resulting page is known
         ("L1"/"L4"), go there instead of toggling — the keyboard already shows it (no pull-back if our page moved
-        meanwhile, e.g. a K2 on the keyboard while it was PROBING)."""
+        meanwhile, e.g. a K2 on the keyboard while it was PROBING).  ``t`` = the event time (the daemon passes
+        ``InputEvent.t``, when the keyboard sent it): a slow loop step (a background poll can take seconds) must
+        not make queued slow detents look fast for the scroll acceleration."""
         if self.page == "LS":
             if kind in ("cw", "ccw"):
                 self.settings.knob(knob, kind)
@@ -684,7 +688,7 @@ class Controller:
                 self.settings.knob(knob, "press")
             self._settings_after()
             return
-        t = self.clock()
+        t = self.clock() if t is None else t
         pk = ("knob", knob)
         if self.moving is not None:
             self.moving.last = t
@@ -781,7 +785,7 @@ class Controller:
             if not self._focus(s):
                 return None
             ready = t + SCROLL_FOCUS_SETTLE_S
-        self.scrolling = _Scroll(s.sid.key(), self.mode, last=t, ready=ready)
+        self.scrolling = _Scroll(s.sid.key(), self.mode, s.sid.native, s.sid.generation, last=t, ready=ready)
         return self.scrolling
 
     def _k1_rotate(self, direction: int, t: float) -> None:
@@ -848,6 +852,7 @@ class Controller:
             if not res.ok:
                 self.scrolling = None
                 self._scroll_failed(res, t)
+                self._scroll_release(sc, s)  # an earlier scroll may have left the tmux pane in copy mode
             elif res.detail.get("live"):  # tmux scrolled down out of copy mode by itself
                 self.scrolling = None
                 self._say(SCROLL_LIVE)
@@ -871,9 +876,16 @@ class Controller:
         if sc is None:
             return False
         self._touch()
-        s = self.managers[sc.mode].sessions.get(sc.key)
-        if not sc.active or s is None:
+        if not sc.active:
             return False
+        return self._scroll_release(sc, self.managers[sc.mode].sessions.get(sc.key))
+
+    def _scroll_release(self, sc: _Scroll, s: Session | None) -> bool:
+        """The session is already gone (it left the poll / the hook record expired): the tmux pane may still sit in
+        copy mode, so release it anyway through a minimal Session built from the identity stored in ``_Scroll``
+        (stale generation / dead pane: the adapter refuses without touching anything)."""
+        if s is None:
+            s = Session(SessionId(sc.mode, sc.native, sc.generation), Tool.OTHER, "")
         return bool(self.adapters[sc.mode].scroll_release(s))
 
     # ------------------------------------------------------------------ gestures

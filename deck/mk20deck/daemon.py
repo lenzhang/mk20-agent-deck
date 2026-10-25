@@ -280,9 +280,9 @@ class Daemon:
         else:
             target = self._k2_target(ev)
             if target is not None:
-                self.controller.on_knob(ev.a, str(ev.b), target=target)
+                self.controller.on_knob(ev.a, str(ev.b), target=target, t=ev.t)
             else:
-                self.controller.on_knob(ev.a, str(ev.b))
+                self.controller.on_knob(ev.a, str(ev.b), t=ev.t)
             if ev.a == 2 and ev.b == "up" and ev.rx is not None:
                 self._keyboard_k2_tap(ev.rx)
         if tr:

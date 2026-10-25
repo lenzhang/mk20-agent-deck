@@ -7,7 +7,8 @@ with the stable identifier ``com.leo.mk20deck-scroll`` and asks macOS for the pe
 dialog + an entry in 系统设置 → 隐私与安全性 → 辅助功能).
 
 The grant belongs to the binary's code hash: the helper is rebuilt only when its source (or the build flags) changed
-(``mk20deck-scroll.sha256`` next to it), so a re-run of scroll-setup keeps an existing grant.
+AND the installed binary still matches what was built (``mk20deck-scroll.sha256`` next to it: source digest + binary
+digest), so a re-run of scroll-setup keeps an existing grant and a corrupted / replaced binary is rebuilt.
 """
 from __future__ import annotations
 
@@ -53,13 +54,26 @@ def stamp_path(path: str) -> str:
     return path + ".sha256"
 
 
+def file_digest(path: str) -> str | None:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
 def up_to_date(path: str, src: str) -> bool:
+    """True when the stamp names this source AND the installed binary is still the one that was built."""
     try:
         with open(stamp_path(path), encoding="utf-8") as f:
-            stamp = f.read().strip()
+            src_d, _, bin_d = f.read().strip().partition(" ")
     except OSError:
         return False
-    return os.access(path, os.X_OK) and stamp == source_digest(src)
+    return (src_d == source_digest(src) and len(bin_d) == 64 and os.access(path, os.X_OK)
+            and bin_d == file_digest(path))
 
 
 def compile_argv(src: str, out: str, sysroot: str | None = None) -> list[str]:
@@ -126,7 +140,7 @@ def build(runner: Runner, path: str | None = None, src: str | None = None, force
         os.chmod(tmp, 0o755)
         os.replace(tmp, path)
         with open(stamp_path(path), "w", encoding="utf-8") as f:
-            f.write(source_digest(src) + "\n")
+            f.write(f"{source_digest(src)} {file_digest(path) or ''}\n")
         return BuildResult(True, f"已编译并签名（{IDENTIFIER}）：{path}", built=True, log=log)
     finally:
         if os.path.exists(tmp):

@@ -192,7 +192,11 @@ int main(int argc, char **argv) {
                 if (errno != 0 || end == NULL || *end != '\0' || lines == 0 || labs(lines) > MAX_LINES) return usage();
                 have_lines = YES;
             } else if (strcmp(a, "--at") == 0 && i + 1 < argc) {
-                if (sscanf(argv[++i], "%lf,%lf", &fx, &fy) != 2 || fx < 0 || fx > 1 || fy < 0 || fy > 1) return usage();
+                char *end = NULL;
+                fx = strtod(argv[++i], &end);  // "FX,FY" exactly: no trailing junk (0.5,0.5x is a usage error)
+                if (end == NULL || *end != ',') return usage();
+                fy = strtod(end + 1, &end);
+                if (end == NULL || *end != '\0' || fx < 0 || fx > 1 || fy < 0 || fy > 1) return usage();
             } else {
                 return usage();
             }

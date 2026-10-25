@@ -24,7 +24,7 @@ from mk20deck.config import DeckConfig, load_config
 from mk20deck.controller import (K1_NO_SESSION, SCROLL_FOCUS_SETTLE_S, SCROLL_HINT, SCROLL_IDLE_LIVE, SCROLL_IDLE_S,
                                  SCROLL_LATEST, SCROLL_LIVE, SCROLL_NOTE_S, SCROLL_OPTION, SCROLL_PTT,
                                  SCROLL_SETUP_QUIET_S, Controller, slot_pos)
-from mk20deck.daemon import Daemon
+from mk20deck.daemon import Daemon, InputEvent
 from mk20deck.demo_data import demo_sessions
 from mk20deck.layout import DeviceLayout
 from mk20deck.model import ActionResult, Mode, Session, SessionId, Tool
@@ -108,6 +108,23 @@ def test_fast_detents_accelerate_and_coalesce(tm):
     assert scrolls(ads)[-1] == 3 - 3 - 3
 
 
+def test_acceleration_uses_event_time_not_the_late_loop(tm):
+    """Review fix: detents queued 0.25 s apart while the loop step is slow (background polls take seconds) must
+    not look "fast" — the event times decide, not the clock when the loop finally runs."""
+    c, clk, ads, key = tm
+    t0 = clk.t
+    for dt in (0.0, 0.25, 0.5):
+        c.on_knob(1, "ccw", t=t0 + dt)
+    clk.advance(5.0)  # the loop runs only now (would have been 12 lines with the loop clock: 3+3+6)
+    c.tick()
+    assert scrolls(ads) == [3 + 3 + 3]
+    t1 = clk.t
+    for dt in (0.0, 0.05):  # genuinely fast detents still accelerate
+        c.on_knob(1, "ccw", t=t1 + dt)
+    c.tick()
+    assert scrolls(ads) == [9, 3 + 3]
+
+
 def test_cw_without_scrollback_is_already_latest(tm):
     c, clk, ads, key = tm
     c.on_knob(1, "cw")
@@ -159,6 +176,18 @@ def test_adapter_error_is_a_toast(tm):
     assert c.toast[0] == "tmux 回看失败：can't find pane" and c.scrolling is None
 
 
+def test_failed_scroll_still_puts_the_tmux_pane_back_live(tm):
+    """Review fix: a failed send must not leave the pane in copy mode from the scroll before it."""
+    c, clk, ads, key = tm
+    c.on_knob(1, "ccw")
+    c.tick()  # the pane is in copy mode now (the scroll succeeded)
+    ads[Mode.TMUX].scroll_reply = ActionResult(False, "tmux 回看失败：can't find pane")
+    c.on_knob(1, "ccw")
+    c.tick()
+    assert c.scrolling is None and c.toast[0] == "tmux 回看失败：can't find pane"
+    assert acts(ads, Mode.TMUX, "release") == [key]  # one pane-targeted cancel despite the failure
+
+
 # ------------------------------------------------------------------ controller: leaving the scroll-back
 def test_selection_change_and_tap_release_the_tmux_pane(tm):
     c, clk, ads, key = tm
@@ -173,8 +202,22 @@ def test_selection_change_and_tap_release_the_tmux_pane(tm):
     assert acts(ads, Mode.TMUX, "release") == [key, other] and c.scrolling is None
 
 
+class Capturing(MockAdapter):
+    """Records every Session scroll_release got (to see the minimal one built after the session vanished)."""
+
+    def __init__(self, inner: MockAdapter) -> None:
+        super().__init__(inner.mode, inner.sessions, caps=inner.caps, limited=inner.limited)
+        self.released: list[Session] = []
+
+    def scroll_release(self, s: Session) -> bool:
+        self.released.append(s)
+        return super().scroll_release(s)
+
+
 def test_mode_switch_and_vanishing_session_end_scrollback(tm):
     c, clk, ads, key = tm
+    ads[Mode.TMUX] = cap = Capturing(ads[Mode.TMUX])
+    c.adapters[Mode.TMUX] = cap
     c.on_knob(1, "ccw")
     c.tick()
     c.switch_mode(Mode.DESKTOP)
@@ -183,9 +226,13 @@ def test_mode_switch_and_vanishing_session_end_scrollback(tm):
     tap(c, clk, 1, 1)
     c.on_knob(1, "ccw")
     c.tick()
-    ads[Mode.TMUX].sessions = [s for s in ads[Mode.TMUX].sessions if s.sid.key() != key]
+    cap.sessions = [s for s in cap.sessions if s.sid.key() != key]
     c.refresh()
-    assert c.scrolling is None and acts(ads, Mode.TMUX, "release") == [key]  # gone: nothing to release
+    # the session is gone from the poll (e.g. its hook record expired), but its pane may still sit in copy mode:
+    # the release goes out anyway, to a minimal Session built from the identity stored in _Scroll
+    assert c.scrolling is None and acts(ads, Mode.TMUX, "release") == [key, key]
+    sid = cap.released[-1].sid
+    assert (sid.mode, sid.native, sid.generation) == (Mode.TMUX, key.rsplit(":", 1)[1], GEN)
 
 
 def test_idle_timeout_returns_to_latest(tm):
@@ -543,7 +590,8 @@ def test_scroll_setup_builds_signs_and_requests(tmp_path):
             f"{path}.build-{os.getpid()}"] in t.calls
     assert [c for c in t.calls if c[0] == path] == [[path, "--check"], [path, "--request"]]
     assert os.access(path, os.X_OK) and not os.path.exists(f"{path}.build-{os.getpid()}")
-    assert open(path + ".sha256").read().strip() == scrollhelper.source_digest(src)
+    stamp = open(path + ".sha256").read().strip().split(" ")
+    assert stamp[0] == scrollhelper.source_digest(src) and stamp[1] == scrollhelper.file_digest(path)
     assert "系统设置 → 隐私与安全性 → 辅助功能" in text and path in text and "mk20deck-scroll" in text
     assert "不需要给 Python 或终端授权" in text
     # second run: up to date (the grant belongs to the binary: never rebuilt needlessly), now allowed
@@ -568,6 +616,17 @@ def test_scroll_setup_sdk_fallback_rebuild_and_settings(tmp_path):
     args.rebuild = True
     t = FakeTools(trust=["yes"])
     assert run_setup(args, t)[0] == 0 and any(c[0] == "clang" for c in t.calls)
+
+
+def test_scroll_setup_rebuilds_a_corrupted_binary(tmp_path):
+    """Review fix: the stamp alone must not count as up to date — the installed binary is hashed too."""
+    args = setup_args(tmp_path)
+    assert run_setup(args, FakeTools(trust=["no", "no"]))[0] == 1
+    with open(args.helper, "ab") as f:
+        f.write(b"corrupted")
+    t = FakeTools(trust=["yes"])
+    rc, _ = run_setup(args, t)
+    assert rc == 0 and any(c[0] == "clang" for c in t.calls)  # rebuilt: the grant's binary was gone
 
 
 def test_scroll_setup_failures(tmp_path):
@@ -636,6 +695,23 @@ def test_daemon_sends_one_scroll_per_step_and_wakes_for_the_settle():
     clk.advance(SCROLL_FOCUS_SETTLE_S)
     d.step()
     assert scrolls(ads, Mode.DESKTOP) == [3]
+
+
+def test_daemon_judges_queued_detents_by_event_time():
+    """Review fix: the link thread queues knob events with their receive time; a slow loop step (background polls)
+    must not make 0.3 s-apart detents look fast when they are finally processed together."""
+    clk = FakeClock()
+    ads = demo_adapters()
+    c = Controller(DeckConfig(default_mode=Mode.TMUX), ads, clock=clk, wall=lambda: 1.0, sim=True)
+    d = Daemon(c, Renderer(DeviceLayout.default(), animations=False), None, clock=clk, bg_poll_s=0)
+    d.step()
+    tap(c, clk, 1, 1)
+    t0 = clk.t
+    for dt in (0.0, 0.3, 0.6):  # queued 0.3 s apart while the loop is busy
+        d.events.put(InputEvent("knob", 1, "ccw", t=t0 + dt))
+    clk.advance(5.0)  # the loop step finally runs
+    d.step()
+    assert scrolls(ads) == [3 + 3 + 3]
 
 
 def _band(img, color, y=96):  # top of the banner, above its text
