@@ -9,8 +9,9 @@ physical replug of the MK20 USB cable fixes it (the T113 has no path to the GD32
 This module only *reads* the macOS USB registry (``ioreg -p IOUSB -l -w0 -a``, plist, bounded by a timeout).  It
 never opens, claims or sends anything to the GD32 or its bootloader (no DFU requests, no control transfers).
 
-A Maple device counts only when it sits on the same hub as an MK20 T113 (now, or earlier in this process: the T113
-drops off the bus for a few seconds during an ECM re-arm), and only after two consecutive sightings: the bootloader
+A Maple device counts only when it sits on the same hub as an MK20 T113: now, or within the last ``HUB_MEMORY_S`` on
+the same hub (same locationID *and* hub VID/PID: the T113 drops off the bus for a few seconds during an ECM re-arm;
+another hub later plugged into that port is not the MK20's), and only after two consecutive sightings: the bootloader
 is also visible for about a second at every normal power-on, never for a whole check interval.
 """
 from __future__ import annotations
@@ -36,6 +37,9 @@ INTERVAL_S = 30.0   # at most one ioreg run per interval
 FIRST_S = 5.0       # first check this long after the daemon starts
 TIMEOUT_S = 5.0     # ioreg normally takes ~30 ms
 CONFIRM = 2         # consecutive sightings before the notice (a normal power-on shows the bootloader ~1 s)
+HUB_MEMORY_S = 600.0  # a hub counts as the MK20's this long (wall time: Mac sleep counts) after its T113 was seen
+
+HubKey = tuple  # (locationID, idVendor, idProduct) of a hub: the port and the hub model
 
 
 @dataclass(frozen=True)
@@ -105,15 +109,19 @@ def _children(node) -> list:
     return kids if isinstance(kids, list) else []
 
 
-def find_stuck(nodes: list[UsbNode], known_hubs: set[int] | frozenset = frozenset()) -> tuple[
-        list[Sighting], list[UsbNode], set[int]]:
-    """``(sightings, unrelated Maple devices, hubs with a T113 now)``.  A Maple DFU device is a sighting when its
-    parent hub has a T113 child now, or had one earlier (``known_hubs``, by hub locationID)."""
+def hub_key(n: UsbNode) -> HubKey:
+    return (n.location, n.vid, n.pid)
+
+
+def find_stuck(nodes: list[UsbNode], known_hubs: set | frozenset = frozenset()) -> tuple[
+        list[Sighting], list[UsbNode], set]:
+    """``(sightings, unrelated Maple devices, keys of the hubs with a T113 now)``.  A Maple DFU device is a sighting
+    when its parent hub has a T113 child now, or is a hub in ``known_hubs`` (``hub_key``: locationID + VID/PID)."""
     t113_by_parent: dict[int, UsbNode] = {}
     for n in nodes:
-        if (n.vid, n.pid) in T113_IDS:
+        if (n.vid, n.pid) in T113_IDS and n.parent >= 0:  # a T113 always hangs off a hub / root port, never top level
             t113_by_parent.setdefault(n.parent, n)
-    hubs_now = {nodes[p].location for p in t113_by_parent if p >= 0 and nodes[p].location is not None}
+    hubs_now = {hub_key(nodes[p]) for p in t113_by_parent if nodes[p].location is not None}
     hits: list[Sighting] = []
     other: list[UsbNode] = []
     for n in nodes:
@@ -121,7 +129,7 @@ def find_stuck(nodes: list[UsbNode], known_hubs: set[int] | frozenset = frozense
             continue
         hub = nodes[n.parent].location if n.parent >= 0 else None
         t113 = t113_by_parent.get(n.parent) if n.parent >= 0 else None
-        if t113 is not None or (hub is not None and hub in known_hubs):
+        if t113 is not None or (hub is not None and hub_key(nodes[n.parent]) in known_hubs):
             hits.append(Sighting(n.name, n.location, hub, t113.location if t113 else None, n.session, n.serial,
                                  n.vendor))
         else:
@@ -157,7 +165,8 @@ class Gd32DfuWatch:
         self.sighting: Sighting | None = None  # confirmed (what the notice is about); None = not stuck
         self.since: float | None = None  # wall time it was confirmed
         self.seen = 0  # consecutive checks that saw it
-        self.known_hubs: set[int] = set()  # hub locationIDs a T113 was seen on (this process)
+        self.known_hubs: dict[HubKey, float] = {}  # hub -> wall time a T113 was last seen on it (this process)
+        self.hub_memory_s = HUB_MEMORY_S
         self.checks = 0
         self.failures = 0
         self._failing = False  # a failure was logged and no probe succeeded since
@@ -184,7 +193,11 @@ class Gd32DfuWatch:
     def _check(self) -> bool | None:
         self.checks += 1
         try:
-            hits, other, hubs = find_stuck(parse_ioreg_plist(self.probe()), self.known_hubs)
+            nodes = parse_ioreg_plist(self.probe())
+            now = self.wall()
+            fresh = {k for k, t in self.known_hubs.items() if 0.0 <= now - t <= self.hub_memory_s}
+            self.known_hubs = {k: self.known_hubs[k] for k in fresh}  # expired (or clock went back): forgotten
+            hits, other, hubs = find_stuck(nodes, fresh)
         except Exception as e:  # noqa: BLE001 — never reaches the deck; no information this round
             self.failures += 1
             if not self._failing:
@@ -193,7 +206,7 @@ class Gd32DfuWatch:
                           type(e).__name__, str(e)[:120], self.interval_s)
             return None
         self._failing = False
-        self.known_hubs |= hubs
+        self.known_hubs.update((k, now) for k in hubs)
         locs = frozenset(n.location for n in other)
         if locs != self._other:
             self._other = locs
@@ -203,14 +216,19 @@ class Gd32DfuWatch:
         if not hits:
             self.seen = 0
             if self.sighting is not None:
-                mins = (self.wall() - self.since) / 60 if self.since is not None else 0.0
-                log.info("GD32 key MCU left its DFU bootloader (Maple at %s gone after %.0f min): keys and knobs "
-                         "should work again", _loc(self.sighting.location), mins)
+                mins = (now - self.since) / 60 if self.since is not None else 0.0
+                if self.sighting.location in locs:  # still there, but its hub is no longer known as the MK20's
+                    log.info("Maple DFU device at %s no longer attributed to the MK20 (no T113 on its hub for "
+                             "%.0f min): GD32 notice cleared after %.0f min", _loc(self.sighting.location),
+                             self.hub_memory_s / 60, mins)
+                else:
+                    log.info("GD32 key MCU left its DFU bootloader (Maple at %s gone after %.0f min): keys and knobs "
+                             "should work again", _loc(self.sighting.location), mins)
                 self.sighting, self.since = None, None
             return False
         self.seen += 1
         if self.sighting is None and self.seen >= self.confirm:
-            self.sighting, self.since = hits[0], self.wall()
+            self.sighting, self.since = hits[0], now
             log.warning("GD32 key MCU stuck in its Maple DFU bootloader (%s, seen in %d checks %.0f s apart): the "
                         "MK20 keys and knobs (incl. the K2 e-stop) do not work. Replug the MK20 USB cable. "
                         "mk20deck never talks to the bootloader.", hits[0].describe(), self.seen, self.interval_s)

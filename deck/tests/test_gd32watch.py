@@ -32,6 +32,7 @@ FIX = Path(__file__).parent / "fixtures"
 PLIST = (FIX / "ioreg-usb-20261025-maple.plist").read_bytes()
 TEXT = (FIX / "ioreg-usb-20261025-maple.txt").read_text()
 MAPLE_LOC, T113_LOC, HUB_LOC = 0x00142000, 0x00141000, 0x00140000  # "Maple 003@00142000", "Serial@00141000"
+HUB_KEY = (HUB_LOC, 0x05E3, 0x0610)  # the MK20's own GL852G hub at that port
 
 
 def _tree() -> dict:
@@ -89,7 +90,7 @@ def test_incident_plist_parses_and_finds_the_stuck_gd32():
     assert nodes[maple.parent] is nodes[t113.parent] and nodes[maple.parent].location == HUB_LOC
     assert (nodes[maple.parent].vid, nodes[maple.parent].pid) == (0x05E3, 0x0610)  # the MK20's own GL852G hub
     hits, other, hubs = find_stuck(nodes)
-    assert other == [] and hubs == {HUB_LOC} and len(hits) == 1
+    assert other == [] and hubs == {HUB_KEY} and len(hits) == 1
     h = hits[0]
     assert (h.location, h.hub, h.t113, h.session, h.serial) == (MAPLE_LOC, HUB_LOC, T113_LOC, 16810792315712, "LLM 003")
     assert "1eaf:0003" in h.describe() and "0x00142000" in h.describe() and "0x00141000" in h.describe()
@@ -113,16 +114,40 @@ def test_incident_text_dump_is_the_same_registry():
 def test_healthy_keyboard_and_foreign_maple_are_not_stuck():
     assert find_stuck(parse_ioreg_plist(variant(normal)))[0] == []
     hits, other, hubs = find_stuck(parse_ioreg_plist(variant(maple_elsewhere)))
-    assert hits == [] and [n.location for n in other] == [0x00111000] and hubs == {HUB_LOC}
+    assert hits == [] and [n.location for n in other] == [0x00111000] and hubs == {HUB_KEY}
 
 
 def test_maple_on_a_hub_where_the_t113_was_counts_while_the_t113_is_away():
     nodes = parse_ioreg_plist(variant(no_t113))
     hits, other, hubs = find_stuck(nodes)
     assert hits == [] and len(other) == 1 and hubs == set()  # never seen a T113 there: not ours (yet)
-    hits, other, _ = find_stuck(nodes, known_hubs={HUB_LOC})
+    hits, other, _ = find_stuck(nodes, known_hubs={HUB_KEY})
     assert len(hits) == 1 and hits[0].t113 is None and other == []
     assert "where the MK20 T113 was" in hits[0].describe()
+
+
+def other_hub_model(root):  # MK20 gone; another hub model on the same port with a Maple board on its port 2
+    no_t113(root)
+    _find(root, HUB_LOC).update({"idVendor": 0x2109, "idProduct": 0x2817, "USB Product Name": "USB2.0 Hub"})
+
+
+def test_same_port_with_another_hub_model_is_not_the_mk20():
+    nodes = parse_ioreg_plist(variant(other_hub_model))
+    hits, other, _ = find_stuck(nodes, known_hubs={HUB_KEY})
+    assert hits == [] and [n.location for n in other] == [MAPLE_LOC]
+
+
+def test_top_level_t113_is_never_a_hub_sibling():
+    """A T113 node without a parent (not a real IOUSB tree) must not be filed under parent -1: ``nodes[-1]`` would be
+    the *last* node, which would then pass for an MK20 hub."""
+    data = plistlib.dumps({"IORegistryEntryChildren": [
+        {"IORegistryEntryName": "Serial", "idVendor": 0x1D6B, "idProduct": 0x0104, "locationID": 0x00141000},
+        {"IORegistryEntryName": "Maple 003", "idVendor": 0x1EAF, "idProduct": 0x0003, "locationID": 0x00142000},
+        {"IORegistryEntryName": "USB2.0 Hub", "idVendor": 0x05E3, "idProduct": 0x0610, "locationID": HUB_LOC}]})
+    nodes = parse_ioreg_plist(data)
+    assert [n.parent for n in nodes] == [-1, -1, -1]
+    hits, other, hubs = find_stuck(nodes, known_hubs={HUB_KEY})
+    assert hits == [] and hubs == set() and [n.location for n in other] == [MAPLE_LOC]
 
 
 def test_parser_tolerates_odd_nodes_and_rejects_garbage():
@@ -224,6 +249,37 @@ def test_t113_away_for_a_moment_keeps_the_alert():
     w.poll(), _due(w, clk)
     p.data = variant(no_t113)  # ECM re-arm: the T113 re-enumerates, the GD32 stays in its bootloader
     assert _due(w, clk) is True and w.stuck and w.sighting.t113 is None
+
+
+def test_remembered_mk20_hub_expires_after_hub_memory(caplog):
+    caplog.set_level(logging.DEBUG, logger=gw.__name__)
+    p = Probe()
+    w, clk = _watch(p, first_s=0.0)
+    assert w.hub_memory_s == gw.HUB_MEMORY_S == 600.0
+    w.poll()  # T113 + Maple on the MK20 hub
+    assert w.known_hubs == {HUB_KEY: 1792244000.0 + clk.t}
+    p.data = variant(no_t113)
+    assert _due(w, clk) is True  # confirmed on the remembered hub (T113 away 30 s)
+    while clk.t - 1000.0 + w.interval_s <= gw.HUB_MEMORY_S:
+        assert _due(w, clk) is True  # still within 10 min of the last T113 sighting
+    assert _due(w, clk) is False and not w.stuck and w.known_hubs == {}  # > 10 min: no longer the MK20's
+    msgs = [r.getMessage() for r in _records(caplog, logging.INFO)]
+    assert any("no longer attributed to the MK20" in m for m in msgs)
+    assert not any("left its DFU bootloader" in m for m in msgs)  # it did not: only our attribution expired
+    p.data = PLIST  # the T113 back next to it: ours again (two sightings)
+    assert _due(w, clk) is False and _due(w, clk) is True
+
+
+def test_remembered_hub_forgotten_when_the_wall_clock_goes_back():
+    wall = {"t": 1792244000.0}
+    p = Probe()
+    w = Gd32DfuWatch(p, clock=FakeClock(), wall=lambda: wall["t"], first_s=0.0)
+    w.poll()
+    assert HUB_KEY in w.known_hubs
+    wall["t"] -= 3600  # clock set back an hour: the memory is not trusted
+    p.data = variant(no_t113)
+    w.clock.advance(w.interval_s)
+    assert w.poll() is False and w.known_hubs == {}
 
 
 def test_rate_limit_at_most_one_probe_per_interval():
@@ -371,6 +427,80 @@ def test_real_watch_through_the_daemon_end_to_end():
     clk.advance(w.interval_s)
     w.poll(), d.step()
     assert not c.gd32_dfu and c.view().sub.alert == ""
+
+
+def test_paused_daemon_keeps_the_gd32_state_current():
+    """Display asleep: no step(), no live frames, but the arrange page must not show a stale GD32 state."""
+    class Power:
+        display_asleep = True
+        last_sleep_s = 0.0
+
+        def poll(self):
+            return []
+
+    clk = FakeClock()
+    c = _ctl(clk)
+    fw = FakeWatch()
+    fw.stuck = True
+    frames = []
+    d = Daemon(c, Renderer(DeviceLayout.default()), None, clock=clk, sink=frames.append, power=Power(), gd32=fw)
+    d.paused = True
+    ticks = iter(range(100))
+
+    class Stop:
+        def is_set(self):
+            return next(ticks) >= 6
+
+        def wait(self, t):
+            clk.advance(1.0)
+
+    d._run(Stop())
+    assert c.gd32_dfu and d.frames_sent == 0  # synced while paused; only "Mac 已休眠" frames (no live frame)
+    fw.stuck = False
+    ticks = iter(range(100))
+    d._run(Stop())
+    assert not c.gd32_dfu
+
+
+def test_cmd_run_joins_the_watch_thread_even_when_the_supervisor_raises(monkeypatch):
+    from argparse import Namespace
+
+    from mk20deck import cli, supervisor, webui
+    from mk20deck.sim import demo_adapters
+    joins = []
+
+    class Th(threading.Thread):
+        def join(self, timeout=None):
+            joins.append(timeout)
+            super().join(timeout)
+
+    class Watch(FakeWatch):
+        def start(self, stop):
+            self.th = Th(target=stop.wait, daemon=True)
+            self.th.start()
+            return self.th
+
+    watch = Watch()
+    got = {}
+
+    class Sup:
+        def __init__(self, *a, **kw):
+            got.update(kw)
+
+        def run(self, stop):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(gw, "default_watch", lambda: watch)
+    monkeypatch.setattr(supervisor, "Supervisor", Sup)
+    monkeypatch.setattr(cli, "load_config", lambda path: DeckConfig())
+    monkeypatch.setattr(cli, "build_adapters", lambda cfg: demo_adapters())
+    monkeypatch.setattr(cli, "build_controller", lambda cfg, ads: _ctl(FakeClock(), ads))
+    monkeypatch.setattr(cli, "build_arrange", lambda *a, **kw: (None, None))
+    monkeypatch.setattr(webui, "start_arrange_server", lambda *a, **kw: None)
+    monkeypatch.setattr(cli.signal, "signal", lambda *a: None)
+    with pytest.raises(RuntimeError, match="boom"):
+        cli.cmd_run(Namespace(config=None, port=None))
+    assert got["gd32"] is watch and joins == [gw.TIMEOUT_S + 1.0] and not watch.th.is_alive()
 
 
 def test_banner_keeps_the_header_and_lets_a_toast_show():
