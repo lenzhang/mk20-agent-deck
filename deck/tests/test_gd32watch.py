@@ -20,6 +20,7 @@ from mk20deck.hw.gd32watch import Gd32DfuWatch, find_stuck, parse_ioreg_plist
 from mk20deck.hw.usbenum import KNOWN, mk20_summary, parse_ioreg
 from mk20deck.layout import DeviceLayout
 from mk20deck.render.canvas import Renderer
+from mk20deck.render import fonts
 from mk20deck.render.fonts import fit, font
 from mk20deck.render.subscreen import ALERT_RED, W, render_sub
 from mk20deck.rules import RulesStore
@@ -394,9 +395,10 @@ def _missing(f: ImageFont.FreeTypeFont, ch: str) -> bool:
 
 @pytest.mark.parametrize("text,size,bold", [(GD32_DFU_ALERT, 14, True), (GD32_DFU_DETAIL, 12, False)])
 def test_banner_text_has_glyphs_and_fits_the_sub_screen(text, size, bold):
+    if fonts._first(fonts.CJK_REGULAR) is None:  # e.g. the Linux build container: Pillow's built-in font, no CJK
+        pytest.skip("no CJK font on this host (the deck renders on the Mac: PingFang / STHeiti)")
     f = font(size, bold=bold)
-    if not isinstance(f, ImageFont.FreeTypeFont):
-        pytest.skip("no CJK font on this host")
+    assert isinstance(f, ImageFont.FreeTypeFont)
     assert [ch for ch in text if not ch.isspace() and _missing(f, ch)] == []
     assert _missing(f, "✗")  # the check itself: ✗ is known to be missing (controller.py note)
     d = ImageDraw.Draw(render_sub(_ctl(FakeClock()).view().sub, 0.0))
