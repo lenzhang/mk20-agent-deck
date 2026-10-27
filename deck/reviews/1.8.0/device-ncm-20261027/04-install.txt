@@ -1,0 +1,53 @@
+# install 1.8.0-rc1 (iMac, 2026-10-27 14:21 SGT): MK20_ADB=mkadb.sh sh tools/mk20-install.sh mk20-fw-1.8.0.tar --reboot --wait
+release 1.8.0 sha256 294e15445d225e3eddc28758b60025a32b986f427d354c24ce2f3f2957b3ecc5
+/Users/dev/mk20-build/ncm/rel-1.8.0-rc1/mk20-fw-1.8.0.tar: 1 file pushed, 0 skipped. 8.2 MB/s (3020800 bytes in 0.352s)
+ok: 1.8.0 installed; ok: 1.8.0 pending; reboot to start probation
+rc=0
+reboot requested (watcher -> hardreset, WDT reset in ~30 s)
+current=A 29 1.8.0 good=1.8.0 pending= attempts= active=1.8.0 last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)
+OK: 1.8.0 confirmed good
+# device after reboot
+14470 58.62 INFO mk20d web v=1.8.0 mode=web url=http://172.30.250.2:8780
+14503 92.30 INFO mk20d selftest v=1.8.0 rc=0 try=1 mode=composite PASS kd=0 (mk20-kbd mode)
+PASS udc bound
+PASS ttyGS0
+PASS watchdog armed
+PASS bridge 172.30.250.2:17890
+PASS bridge link-local
+PASS hid
+INFO ecm usb0 rx 42 tx 0 (udc configured)
+INFO /run/mk20 on tmpfs
+INFO router not running
+INFO web running (http://172.30.250.2:8780)
+INFO agent disabled
+PASS ecm host traffic (usb0 rx 42 -> 43)
+
+14503 92.51 INFO mk20d confirm v=1.8.0 ok
+14506 94.69 INFO mk20d maint v=1.8.0 start pid=5528
+usb_f_ncm              20480  2 
+MaxPower      ffs.adb       ncm.usb0
+bmAttributes  hid.usb0      strings
+462
+[   56.008579] usb_f_ncm: loading out-of-tree module taints kernel.
+[   56.158171] usb0: HOST MAC 02:11:22:33:44:56
+[   56.158491] usb0: MAC 02:11:22:33:44:55
+# iMac
+en2: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	ether 02:11:22:33:44:56
+	inet 172.30.250.1 netmask 0xffffff00 broadcast 172.30.250.255
+	status: active
+2026-10-27 14:22:31.130300+0800 0x7b2fb0   Default     0x0                  0      0    kernel: (com.apple.DriverKit.AppleUserECM.dext) OnQueue SDK version 0x180600
+2026-10-27 14:22:31.131159+0800 0x7b2fbb   Default     0x0                  0      0    kernel: (com.apple.DriverKit.AppleUserECM.dext) no services left, exiting
+2026-10-27 14:22:31.131409+0800 0x6f       Default     0x0                  0      0    kernel: DK: IOUserServer(com.apple.DriverKit.AppleUserECM.data-0x100004bae)-0x100004bb1::terminate(AppleUserECMD
+2026-10-27 14:22:31.131454+0800 0x7b2fad   Default     0x0                  0      0    kernel: DK: AppleUserECMData-0x100004bae::start(CDC ACM Data-0x100004ba9) fail
+2026-10-27 14:22:56.295480+0800 0x7b3054   Default     0x0                  0      0    kernel: (AppleUSBNCM) 1270300.044898 AppleUSBNCMData::start: result 1
+2026-10-27 14:22:57.149205+0800 0x791496   Default     0x0                  0      0    kernel: (AppleUSBNCM) 1270300.898621 AppleUSBNCMData::updateLinkStatus: linkStatus 1
+service='Serial' device=en2 enabled=True mode=manual ip=172.30.250.1 mask=255.255.255.0
+link-local service 'MK20 link-local': absent
+route 172.30.250.2 -> en2   route 169.254.7.2 -> en0
+device MK20_ECM_IP=172.30.250.2
+ping 172.30.250.2 ok
+5 packets transmitted, 5 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 0.841/0.863/0.910/0.026 ms
+Connection to 172.30.250.2 port 17890 [tcp/*] succeeded!
+Connection to 172.30.250.2 port 8780 [tcp/*] succeeded!
