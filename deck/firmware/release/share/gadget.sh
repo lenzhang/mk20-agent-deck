@@ -1,13 +1,19 @@
 #!/bin/sh
-# v3.9 Composite: ECM (macOS-native) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
+# v4.0 Composite: NCM (macOS-native, 1.8.0; ECM fallback) + combined HID (kbd+abs pointer) + ADB (FFS), built IN g1
 # (stock adbd binds g1/UDC itself, so we reuse g1 rather than a separate gadget).
 # Requires the binary-patched STOCK kernel (ep3 ISO->INT + ep5out INT-capable, see
-# NOTES-stock-kernel-patch.md) + /data/mk20/usb_f_ecm.ko. HID/FFS are built in.
+# NOTES-stock-kernel-patch.md) + lib/usb_f_ncm.ko (and lib/usb_f_ecm.ko as the fallback). HID/FFS are built in.
+# 1.8.0 network function: CDC-NCM by default (MK20_NCM=1, FEATURE_NCM). macOS 15 on Intel Macs no longer brings up a
+#   CDC-ECM link (the AppleUserECM DriverKit dext asserts in init, the AppleUSBECM kext then holds only the control
+#   interface: no enX); AppleUSBNCM handles NCM. usb_f_ncm.ko is built with f_ncm-mk20.patch (every NTB <= 512 bytes,
+#   the sunxi_udc PIO-only limit) and usb0 runs at MTU 462 (ECM keeps 478). If the NCM module or function cannot be
+#   created, setup WARNs and builds the proven ECM composite instead; MK20_NCM=0 or /mnt/SDCARD/mk20-no-ncm forces ECM.
+#   Exactly one network function (ncm.usb0 or ecm.usb0) is linked, first, so usb0/MACs/addressing are unchanged.
 #
-# EP budget: f_hid (5.4) ALWAYS takes INT IN + INT OUT. ECM notify INT IN + HID IN/OUT = 3 INT:
-#   ep3 (INT, patched), ep4 (INT), ep5out (bulk+INT, patched). Bulk: ep1 pair (ECM), ep2 pair (ADB).
+# EP budget: f_hid (5.4) ALWAYS takes INT IN + INT OUT. NCM/ECM notify INT IN + HID IN/OUT = 3 INT:
+#   ep3 (INT, patched), ep4 (INT), ep5out (bulk+INT, patched). Bulk: ep1 pair (NCM/ECM), ep2 pair (ADB).
 #   ACM cannot also fit, so KD's ttyGS0 is replaced by a PTY<->TCP bridge (/data/ttygs_tcp_bridge).
-#   Link order matters (configfs binds in link order): ECM, then HID, then ffs.adb.
+#   Link order matters (configfs binds in link order): NCM (or ECM), then HID, then ffs.adb.
 #
 # Safety (v3, per GPT-5.6 review 2026-10-18):
 #  - adbd is started BEFORE the UDC is bound (FunctionFS needs descriptors first, else -ENODEV).
@@ -38,6 +44,7 @@ if [ -n "${MK20_REL:-}" ] && [ -z "${MK20_ECM_IP:-}" ]; then
       MK20_BRIDGE_PORT) MK20_BRIDGE_PORT=$v;; MK20_FLAP_DROPS) MK20_FLAP_DROPS=$v;; MK20_FLAP_WINDOW) MK20_FLAP_WINDOW=$v;;
       MK20_NOHID) MK20_NOHID=$v;; MK20_NOADB) MK20_NOADB=$v;; MK20_HID_SCROLL) MK20_HID_SCROLL=$v;; MK20_KBD) MK20_KBD=$v;;
       MK20_LL_IP) MK20_LL_IP=$v;;   # 1.7.0: --rearm-now restores the alias it set up
+      MK20_NCM) MK20_NCM=$v;;   # 1.8.0: NCM (1) or ECM (0)
     esac; done < "$GENV"
   else case "${1:-}" in --rollback|--rollback-queued|--rollback-now) ;; *) m="release mode: no $GENV (gates not passed at boot) -> refused"; echo "$m"
     echo "gadget $(cut -d' ' -f1 /proc/uptime): $m" >> "$LOG" 2>/dev/null; exit 1;; esac; fi   # r8 #1: detached jobs have no stdout
@@ -47,11 +54,12 @@ DEV_MAC=${MK20_DEV_MAC:-02:11:22:33:44:55}; HOST_MAC=${MK20_HOST_MAC:-02:11:22:3
 BRIDGE_PORT=${MK20_BRIDGE_PORT:-17890}   # v3.9: the bridge binds the usb0 addresses only (ECM IP + link-local alias, SO_BINDTODEVICE usb0)
 FLAP_DROPS=${MK20_FLAP_DROPS:-5}; FLAP_WINDOW=${MK20_FLAP_WINDOW:-60}
 NOADB=${MK20_NOADB:-0}; [ -f /mnt/SDCARD/mk20-no-adb ] && NOADB=1
+USE_NCM=${MK20_NCM:-1}; [ -f /mnt/SDCARD/mk20-no-ncm ] && USE_NCM=0   # 1.8.0: network function NCM (1) / ECM (0)
 G=/sys/kernel/config/usb_gadget/g1
 C=$G/configs/c.1
 # release mode (firmware >= 1.0.0): the loader exports MK20_REL (verified tmpfs copy of the release)
-if [ -n "${MK20_REL:-}" ]; then export MK20_REL; BR=$MK20_REL/bin/ttygs_tcp_bridge; ECMKO=$MK20_REL/lib/usb_f_ecm.ko; ADDADB=$MK20_REL/share/mk20-add-adb.sh
-else BR=/data/ttygs_tcp_bridge; ECMKO=/data/mk20/usb_f_ecm.ko; ADDADB=/mnt/SDCARD/mk20/mk20-add-adb.sh; fi
+if [ -n "${MK20_REL:-}" ]; then export MK20_REL; BR=$MK20_REL/bin/ttygs_tcp_bridge; ECMKO=$MK20_REL/lib/usb_f_ecm.ko; NCMKO=$MK20_REL/lib/usb_f_ncm.ko; ADDADB=$MK20_REL/share/mk20-add-adb.sh
+else BR=/data/ttygs_tcp_bridge; ECMKO=/data/mk20/usb_f_ecm.ko; NCMKO=/data/mk20/usb_f_ncm.ko; ADDADB=/mnt/SDCARD/mk20/mk20-add-adb.sh; fi
 mkdir -p "$(dirname "$LOG")" /mnt/SDCARD/mk20/logs
 log() { echo "gadget $(cut -d' ' -f1 /proc/uptime): $*" >> "$LOG"; }
 
@@ -191,7 +199,7 @@ cleanup() {
   killall adbd 2>/dev/null
   echo "" > $G/UDC 2>/dev/null
   for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
-  rmdir $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
+  rmdir $G/functions/ncm.usb0 $G/functions/ecm.usb0 $G/functions/hid.usb0 2>/dev/null
   # stop the bridge loop + bridge, restore the real ttyGS0 (validated pid: BusyBox `kill ""` = own process group)
   touch /tmp/mk20-bridge-stop; bp=$(cat /tmp/mk20-bridge-loop.pid 2>/dev/null); case "$bp" in ''|*[!0-9]*|0|1) ;; *) kill "$bp" 2>/dev/null;; esac
   killall ttygs_tcp_bridge 2>/dev/null; sleep 0.5; [ -L /dev/ttyGS0 ] && rm -f /dev/ttyGS0; [ -e /dev/ttyGS0.real ] && [ ! -e /dev/ttyGS0 ] && mv /dev/ttyGS0.real /dev/ttyGS0
@@ -216,7 +224,11 @@ cleanup() {
 # kills another owner; a waiter that cannot get the mutex in MK20_RB_LOCK_TRIES*0.25 s (default 900 s) gives up (rc 4).
 # >>> rollback-block (tests extract from here to the matching end marker)
 TL=/tmp/mk20/transition.lock
-stock_ok() { [ -e $C/acm.usb0 ] && [ ! -e $C/ecm.usb0 ] && [ ! -e $C/hid.usb0 ] && [ -n "$(udc_now)" ] &&
+# 1.8.0: the network function linked in the composite (ncm/ecm, empty if none) and the usb0 MTU it runs at - the
+# sunxi_udc PIO limit, every bulk request <= 512 B: ECM 14+478+20 RX_EXTRA; NCM 462 = 512-byte NTBs (f_ncm-mk20.patch)
+net_fn() { if [ -e $C/ncm.usb0 ]; then echo ncm; elif [ -e $C/ecm.usb0 ]; then echo ecm; fi; }
+fn_mtu() { if [ "$1" = ncm ]; then echo 462; else echo 478; fi; }
+stock_ok() { [ -e $C/acm.usb0 ] && [ ! -e $C/ncm.usb0 ] && [ ! -e $C/ecm.usb0 ] && [ ! -e $C/hid.usb0 ] && [ -n "$(udc_now)" ] &&
   [ -c /dev/ttyGS0 ] && [ ! -L /dev/ttyGS0 ] && ! grep -qE ' /data/(setusbconfig|appLunch\.sh) ' /proc/mounts &&
   ! pgrep -f '^/data/KeyboardDevice' >/dev/null; }
 rb_status() { echo "$1" > /mnt/SDCARD/gadget-ecm-hid.status 2>/dev/null; }
@@ -332,7 +344,7 @@ fi
 # file + SIGUSR1: mk20-kbd closes every hidg0 fd and keeps running; never an fd across a UDC change), stop adbd
 # (FunctionFS closed), unbind, start adbd (descriptors before bind), let adbd bind the UDC or bind it once ep1 exists,
 # then the ECM netdev: if the re-bind left usb0 bare (re-created: no address, MTU 1500, new ifindex) setup_main's
-# ifconfig lines again (MTU 478 = the sunxi_udc PIO workaround, the ECM address, and the usb0:1 link-local alias if
+# ifconfig lines again (MTU 462 NCM / 478 ECM = the sunxi_udc PIO workaround, the ECM address, and the usb0:1 link-local alias if
 # setup_main had it: /tmp/mk20/usb0.setup ll=1; setup only WARNs when it fails, so a re-arm requires no more);
 # a re-created usb0 (or a missing listener) also restarts the bridge through its own loop and asks mk20d web to
 # re-bind (both use SO_BINDTODEVICE usb0); wait for hidg0, remove the stop file (mk20-kbd reopens hidg0). mk20-kbd is
@@ -371,16 +383,16 @@ ra_install_active() { # an install in progress that holds no lock (yet): the loa
   return 1; }
 ra_last() { echo "rc=$1 up=$(cut -d' ' -f1 /proc/uptime) $2" > /tmp/mk20/rearm.last 2>/dev/null; }   # the operator reads it
 ra_ifc() { ifconfig "$1" 2>/dev/null; }
-ra_has_cfg() { # usb0 carries what setup_main achieved: address, MTU 478, and the link-local alias if setup had it (RLL)
-  ra_ifc usb0 | grep -qF "inet addr:$ECM_IP " && ra_ifc usb0 | grep -q "MTU:478 " &&
+ra_has_cfg() { # usb0 carries what setup_main achieved: address, MTU (RMTU: 462 NCM / 478 ECM), and the link-local alias if setup had it (RLL)
+  ra_ifc usb0 | grep -qF "inet addr:$ECM_IP " && ra_ifc usb0 | grep -q "MTU:$RMTU " &&
     { [ "$RLL" != 1 ] || ra_ifc usb0:1 | grep -qF "inet addr:$LL_IP "; }; }
 ra_listen() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }
 ra_listeners() { ra_listen "$ECM_IP:$BRIDGE_PORT" && { [ "$RLL" != 1 ] || ra_listen "$LL_IP:$BRIDGE_PORT"; }; }
 ra_netcfg() { # 0 = usb0 configured as setup_main left it (redone if the re-bind re-created it bare); RNET=1 = re-created
   RNET=0; ra_ix=$(cat /sys/class/net/usb0/ifindex 2>/dev/null)
   [ "$ra_ix" = "$RIFX" ] && ra_has_cfg && return 0
-  RNET=1; log "REARM: usb0 re-created/bare (ifindex ${RIFX:-?} -> ${ra_ix:-?}) -> mtu 478, $ECM_IP$([ "$RLL" = 1 ] && echo ", usb0:1 $LL_IP") again"
-  ifconfig usb0 mtu 478 2>>"$LOG"; ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG"
+  RNET=1; log "REARM: usb0 re-created/bare (ifindex ${RIFX:-?} -> ${ra_ix:-?}) -> mtu $RMTU, $ECM_IP$([ "$RLL" = 1 ] && echo ", usb0:1 $LL_IP") again"
+  ifconfig usb0 mtu "$RMTU" 2>>"$LOG"; ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG"
   [ "$RLL" = 1 ] && ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"   # only what setup had (it WARNs otherwise)
   ra_has_cfg || { log "REARM FAIL: usb0 not configured again ($(ra_ifc usb0 | tr -s ' \n' ' ' | cut -c1-160))"; return 1; }
   touch /tmp/mk20/web.rebind 2>/dev/null   # mk20d web re-binds mk20-agent (SO_BINDTODEVICE usb0), not counted as a crash
@@ -407,7 +419,7 @@ rearm_main() {
   # the alias as setup_main left it (its record), else as it is right now (a setup without a record)
   RLL=$(sed -n 's/^ll=\([01]\)$/\1/p' /tmp/mk20/usb0.setup 2>/dev/null | head -n 1)
   [ -n "$RLL" ] || { RLL=0; ra_ifc usb0:1 | grep -qF "inet addr:$LL_IP " && RLL=1; }
-  log "REARM begin udc=$RUDC gen=${MK20_GEN:-?} hid=$rhid adb=$radb ll=$RLL usb0 rx/tx=$(sed -n 's/^ *usb0://p' /proc/net/dev 2>/dev/null | awk '{print $2"/"$10}')"
+  log "REARM begin udc=$RUDC gen=${MK20_GEN:-?} hid=$rhid adb=$radb ll=$RLL usb0 rx/tx=$(sed -n 's/^ *usb0://p' /proc/net/dev 2>/dev/null | awk '{print $2"/"$10}') fn=$RFN"
   if [ $rhid = 1 ]; then
     touch /tmp/mk20-router-stop || { log "REARM ABORT: cannot write the HID stop file"; exit 1; }
     kh=$(kbd_hid_holders); for kp in $kh; do kill -USR1 "$kp" 2>/dev/null; done
@@ -445,7 +457,8 @@ if [ "${1:-}" = --rearm-now ]; then
   ra_no() { log "rearm refused (rc $1): $2"; ra_last "$1" "refused: $2"; exit "$1"; }
   [ -n "${MK20_REL:-}" ] && [ -f "$GENV" ] || ra_no 6 "not a release composite (no $GENV)"
   gen_stale && { log "rearm: stale generation ${MK20_GEN:-} (current $(cat "$GENF" 2>/dev/null)) -> ignored"; ra_last 5 stale; exit 5; }
-  [ -e $C/ecm.usb0 ] || ra_no 6 "no ecm.usb0 in the composite"
+  RFN=$(net_fn); [ -n "$RFN" ] || ra_no 6 "no ncm.usb0/ecm.usb0 in the composite"
+  RMTU=$(fn_mtu "$RFN")   # 1.8.0: the MTU setup_main gave this function
   { [ "$FLAP_DROPS" -ge 4 ] && [ "$FLAP_WINDOW" -ge 1 ]; } 2>/dev/null || ra_no 6 "FLAP_DROPS=$FLAP_DROPS < 4 (one re-enumeration counts 1-2 flapmon drops)"
   [ -z "$(router_pids)" ] || ra_no 6 "mk20-router owns the HID (developer router mode)"
   [ -e $C/ffs.adb ] && [ ! -x /bin/adbd ] && ra_no 6 "no /bin/adbd for ffs.adb"
@@ -539,11 +552,25 @@ i=0; while [ -n "$(udc_now)" ] && [ $i -lt 10 ]; do echo "" > $G/UDC 2>/dev/null
 [ -z "$(udc_now)" ] || die "cannot unbind"
 for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
 # ---- functions ----
+# 1.8.0: NCM first; any NCM failure here (module missing/refused, function not created) -> the proven ECM function
+# A function instance owns a registered netdev from mkdir until rmdir: the other function's stale instance is removed
+# BEFORE the chosen one is created, else the new netdev registers as usb1 (and usb0 vanishes with the rmdir).
+rm_fn() { [ ! -d $G/functions/$1.usb0 ] || rmdir $G/functions/$1.usb0 2>>"$LOG" || die "stale $1.usb0"; }
+NETFN=ecm
+if [ "$USE_NCM" = 1 ]; then
+  rm_fn ecm
+  if { grep -q '^usb_f_ncm ' /proc/modules || { [ -f "$NCMKO" ] && insmod "$NCMKO" 2>>"$LOG"; }; } && mkdir -p $G/functions/ncm.usb0 2>>"$LOG"
+  then NETFN=ncm; else log "WARN NCM unavailable (insmod $NCMKO / mkdir ncm.usb0 failed) -> ECM fallback"; fi
+fi
+if [ $NETFN = ecm ]; then
+rm_fn ncm
 grep -q '^usb_f_ecm ' /proc/modules || insmod $ECMKO 2>>"$LOG" || die "insmod ecm"
 mkdir -p $G/functions/ecm.usb0 || die "mkdir ecm"
-echo "$DEV_MAC" > $G/functions/ecm.usb0/dev_addr 2>/dev/null
-echo "$HOST_MAC" > $G/functions/ecm.usb0/host_addr 2>/dev/null
-NOHID=${MK20_NOHID:-0}; [ -f /mnt/SDCARD/mk20-gadget-nohid ] && NOHID=1   # ECM+ADB+bridge only (works on the ep3-only kernel)
+fi
+NETMTU=$(fn_mtu $NETFN)
+echo "$DEV_MAC" > $G/functions/$NETFN.usb0/dev_addr 2>/dev/null
+echo "$HOST_MAC" > $G/functions/$NETFN.usb0/host_addr 2>/dev/null
+NOHID=${MK20_NOHID:-0}; [ -f /mnt/SDCARD/mk20-gadget-nohid ] && NOHID=1   # NCM/ECM+ADB+bridge only (works on the ep3-only kernel)
 if [ $NOHID = 0 ]; then
 mkdir -p $G/functions/hid.usb0 || die "mkdir hid"
 echo 1 > $G/functions/hid.usb0/protocol; echo 1 > $G/functions/hid.usb0/subclass
@@ -561,11 +588,11 @@ fi
 cat /tmp/hid.desc > $G/functions/hid.usb0/report_desc || die "report_desc"
 fi
 [ "$NOADB" = 1 ] || mkdir -p $G/functions/ffs.adb || die "mkdir ffs.adb"
-# link order: ECM, HID, ADB
-ln -s $G/functions/ecm.usb0 $C/ecm.usb0 || die "link ecm"
+# link order: NCM (or ECM), HID, ADB
+ln -s $G/functions/$NETFN.usb0 $C/$NETFN.usb0 || die "link $NETFN"
 [ $NOHID = 1 ] || ln -s $G/functions/hid.usb0 $C/hid.usb0 || die "link hid"
 [ "$NOADB" = 1 ] || ln -s $G/functions/ffs.adb $C/ffs.adb || die "link adb"
-echo "ECM+HID+ADB" > $C/strings/0x409/configuration 2>/dev/null
+echo "$(echo $NETFN | tr a-z A-Z)+HID+ADB" > $C/strings/0x409/configuration 2>/dev/null
 # ---- adbd BEFORE bind (writes FFS descriptors; stock adbd then binds g1/UDC itself) ----
 if [ "$NOADB" = 0 ]; then
 mkdir -p /dev/usb-ffs/adb
@@ -580,13 +607,14 @@ if [ -z "$(udc_now)" ]; then echo "$UDC" > $G/UDC 2>>"$LOG" || die "bind"; fi
 sleep 1
 [ $NOHID = 1 ] || [ -e /dev/hidg0 ] || die "no /dev/hidg0"
 [ -d /sys/class/net/usb0 ] || die "no usb0 netdev"
-ifconfig usb0 mtu 478 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
+ifconfig usb0 mtu "$NETMTU" 2>>"$LOG" || die "mtu"   # <=512B OUT requests -> PIO only (sunxi_udc DMA/bounce bug, proven 14:4x)
 ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up 2>>"$LOG" || die "usb0 ip"
 BRIDGE_LISTEN="--dev usb0 --listen $ECM_IP:$BRIDGE_PORT"
 LLOK=0
 if ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up 2>>"$LOG"; then BRIDGE_LISTEN="$BRIDGE_LISTEN --listen $LL_IP:$BRIDGE_PORT"; LLOK=1
 else log "WARN link-local alias $LL_IP failed (bridge on $ECM_IP only)"; fi
 echo "ll=$LLOK" > /tmp/mk20/usb0.setup   # 1.7.0: what --rearm-now must restore (the alias is optional, as here)
+echo "fn=$NETFN" >> /tmp/mk20/usb0.setup   # 1.8.0: informational (re-arm derives the function from the composite)
 # 1.2.0: KD->host copy for the on-board router (release bridge only; a legacy /data bridge has no --tap)
 # mk20-kbd mode (MK20_KBD=1 from mk20d): no KD output to tap, mk20-kbd owns ttyGS0 and hidg0 itself
 [ -n "${MK20_REL:-}" ] && [ "${MK20_KBD:-0}" != 1 ] && BRIDGE_LISTEN="$BRIDGE_LISTEN --tap /tmp/mk20/kd-tap.sock"
@@ -603,7 +631,7 @@ i=0; while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 if [ -f /mnt/SDCARD/mk20-composite-failtest ]; then rm -f /mnt/SDCARD/mk20-composite-failtest; sync; die "FAILTEST: forced failure (test hook)"; fi
 rm -f /mnt/SDCARD/mk20-composite-ok
 OK=1
-log "OK mode=$MODE UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_IP bridge=[$BRIDGE_LISTEN] kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
+log "OK mode=$MODE fn=$NETFN mtu=$NETMTU UDC=$(udc_now) links=$(ls $C | tr '\n' ' ') hidg0 usb0=$ECM_IP bridge=[$BRIDGE_LISTEN] kd=$(pgrep -f KeyboardDevice | head -1) adbd=$(pidof adbd)"
 # host must confirm (touch /mnt/SDCARD/mk20-composite-ok via adb or mk20ctl over socket://169.254.7.2:17890)
 # within 180 s, otherwise request loader A/B rollback. Detached waiter (no setsid here).
 ME=$(readlink -f "$0"); cp -f "$ME" /tmp/mk20-gadget.sh.new && [ "$(sha256sum < "$ME")" = "$(sha256sum < /tmp/mk20-gadget.sh.new)" ] &&

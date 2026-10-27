@@ -1051,7 +1051,7 @@ def test_rearm_queued_by_the_operator_runs_beside_its_adb_command(ra):
 
 
 @pytest.mark.parametrize("why,msg", [("nogenv", "not a release composite"), ("drops", "FLAP_DROPS=3 < 4"),
-                                     ("router", "mk20-router owns the HID"), ("noecm", "no ecm.usb0"),
+                                     ("router", "mk20-router owns the HID"), ("noecm", "no ncm.usb0/ecm.usb0"),
                                      ("noadbd", "adbd for ffs.adb")])
 def test_rearm_not_applicable(ra, why, msg):
     env = {}
@@ -1119,9 +1119,11 @@ def test_rearm_block_restores_usb0_like_setup_main_and_never_reboots():
     assert not re.search(r"(^|[;&|(]|\bthen|\bdo)\s*(/sbin/)?reboot\b", body, re.M)
     # the usb0 configuration is setup_main's, line for line
     setup = GS[GS.index("setup_main() {"):]
-    for cmd in ('ifconfig usb0 mtu 478', 'ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up',
-                'ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up'):
+    for cmd in ('ifconfig usb0 "$ECM_IP" netmask "$ECM_MASK" up', 'ifconfig usb0:1 "$LL_IP" netmask 255.255.0.0 up'):
         assert cmd in setup and cmd in body, cmd
+    # 1.8.0: the MTU is the linked function's (fn_mtu: NCM 462 / ECM 478), the same helper in setup and re-arm
+    assert 'ifconfig usb0 mtu "$NETMTU"' in setup and "NETMTU=$(fn_mtu $NETFN)" in setup
+    assert 'ifconfig usb0 mtu "$RMTU"' in body and 'RMTU=$(fn_mtu "$RFN")' in GS and "RFN=$(net_fn)" in GS
     i = REARM.index("rearm_main() {")
     m = REARM[i:REARM.index("\n}\n", i)]
     assert m.index("touch /tmp/mk20-router-stop") < m.index("killall adbd") < m.index('echo "" > $G/UDC') \

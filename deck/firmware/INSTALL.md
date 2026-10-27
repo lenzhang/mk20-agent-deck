@@ -135,7 +135,7 @@ ignored with a warning (`mk20d config` shows the effective values).
 | `LOG_MAX_KB` / `LOG_KEEP` | 256 / 3 | 16–4096 / 1–9 |
 
 Flag files on the FAT (`/mnt/SDCARD/…`) override the config: `mk20-no-composite`, `mk20-no-adb`,
-`mk20-gadget-nohid`, `mk20-no-web`, `mk20-no-agent`. See RECOVERY.md for the rescue flags.
+`mk20-gadget-nohid`, `mk20-no-web`, `mk20-no-agent`, `mk20-no-ncm` (1.8.0+: ECM instead of NCM). See RECOVERY.md for the rescue flags.
 
 ## 5. Mac setup (M4, firmware 1.1.0+)
 

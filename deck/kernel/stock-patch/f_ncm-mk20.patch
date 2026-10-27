@@ -1,0 +1,85 @@
+--- a/drivers/usb/gadget/function/f_ncm.c
++++ b/drivers/usb/gadget/function/f_ncm.c
+@@ -26,6 +26,22 @@
+ #include "configfs.h"
+ 
+ /*
++ * MK20 (sunxi_udc, stock 5.4.61 #221): every bulk request must stay <= 512 bytes (one HS max packet) - longer
++ * requests take the sunxi_udc DMA/bounce path, which loses/corrupts host->device data (the ECM build runs usb0
++ * at MTU 478 for the same reason). NCM therefore advertises a 512-byte OUT NTB (u_ether sizes each OUT request
++ * to max(MTU frame, dwNtbOutMaxSize) = 512 at the device MTU used by gadget.sh), never builds an IN NTB longer
++ * than MK20_NTB_IN_CAP (508: never a multiple of 512, so u_ether never pads a ZLP byte onto it), advertises
++ * wMaxSegmentSize = MK20_MAX_SEG and drops (counted) a datagram that cannot fit an NTB on its own instead of
++ * overrunning the NTB skb. NTB parse errors are rate-limited (an oversize host NTB arrives as 512-byte pieces).
++ */
++#define MK20_NTB_OUT_MAX	512
++#define MK20_NTB_IN_CAP		508
++#define MK20_MAX_SEG		476	/* 14 + device MTU 462 */
++#undef INFO
++#define INFO(d, fmt, args...) do { if (net_ratelimit()) \
++	dev_info(&(d)->gadget->dev, fmt, ## args); } while (0)
++
++/*
+  * This function is a "CDC Network Control Model" (CDC NCM) Ethernet link.
+  * NCM is intended to be used with high-speed network attachments.
+  *
+@@ -101,8 +117,8 @@
+  * If the host can group frames, allow it to do that, 16K is selected,
+  * because it's used by default by the current linux host driver
+  */
+-#define NTB_DEFAULT_IN_SIZE	16384
+-#define NTB_OUT_SIZE		16384
++#define NTB_DEFAULT_IN_SIZE	16384	/* mk20: still advertised; the NTBs built are capped at MK20_NTB_IN_CAP */
++#define NTB_OUT_SIZE		MK20_NTB_OUT_MAX
+ 
+ /* Allocation for storing the NDP, 32 should suffice for a
+  * 16k packet. This allows a maximum of 32 * 507 Byte packets to
+@@ -192,7 +208,7 @@
+ 	/* this descriptor actually adds value, surprise! */
+ 	/* .iMACAddress = DYNAMIC */
+ 	.bmEthernetStatistics =	cpu_to_le32(0), /* no statistics */
+-	.wMaxSegmentSize =	cpu_to_le16(ETH_FRAME_LEN),
++	.wMaxSegmentSize =	cpu_to_le16(MK20_MAX_SEG),
+ 	.wNumberMCFilters =	cpu_to_le16(0),
+ 	.bNumberPowerFilters =	0,
+ };
+@@ -1020,7 +1036,7 @@
+ 	__le16		*ntb_ndp;
+ 	int		dgram_pad;
+ 
+-	unsigned	max_size = ncm->port.fixed_in_len;
++	unsigned	max_size = min_t(unsigned, ncm->port.fixed_in_len, MK20_NTB_IN_CAP);
+ 	const struct ndp_parser_opts *opts = ncm->parser_opts;
+ 	const int ndp_align = le16_to_cpu(ntb_parameters.wNdpInAlignment);
+ 	const int div = le16_to_cpu(ntb_parameters.wNdpInDivisor);
+@@ -1041,6 +1057,18 @@
+ 					skb->len);
+ 			crc_pos = skb_put(skb, sizeof(uint32_t));
+ 			put_unaligned_le32(crc, crc_pos);
++		}
++
++		/* mk20: a datagram that cannot fit a fresh NTB on its own (NTH, datagram pad, datagram, worst-case NDP pad,
++		 * NDP header, its entry and the zero terminator) would overrun the max_size NTB skb: drop it (counted), keep
++		 * any pending NTB. Exact for a fresh NTB, so full-MTU frames are not dropped: NTB16 = len + 12 + 0 + 3 + 8 +
++		 * 4 + 4 = len + 31 -> a 476-byte frame (MTU 462) gives <= 507 <= 508. (NTB32 = len + 51: frames >= 458 B are
++		 * dropped; macOS/Linux hosts use NTB16. CRC mode adds 4 to len.) */
++		if (ALIGN(opts->nth_size, div) + rem + skb->len + (ndp_align - 1) + opts->ndp_size +
++		    2 * dgram_idx_len > max_size) {
++			ncm->netdev->stats.tx_dropped++;
++			dev_kfree_skb_any(skb);
++			return NULL;
+ 		}
+ 
+ 		/* If the new skb is too big for the current NCM NTB then
+@@ -1192,8 +1220,9 @@
+ 	if (get_unaligned_le32(tmp) != opts->nth_sign) {
+ 		INFO(port->func.config->cdev, "Wrong NTH SIGN, skblen %d\n",
+ 			skb->len);
+-		print_hex_dump(KERN_INFO, "HEAD:", DUMP_PREFIX_ADDRESS, 32, 1,
+-			       skb->data, 32, false);
++		if (net_ratelimit())
++			print_hex_dump(KERN_INFO, "HEAD:", DUMP_PREFIX_ADDRESS, 32, 1,
++				       skb->data, 32, false);
+ 
+ 		goto err;
+ 	}

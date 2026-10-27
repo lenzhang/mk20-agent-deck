@@ -74,7 +74,8 @@ num() { case "$1" in ''|*[!0-9]*) echo 0;; *) echo "$1";; esac; }
 mtime() { date -r "$1" +%s 2>/dev/null; }   # device BusyBox has no stat applet (K4 rc2 install: every age = now)
 nlinks() { ls -ld "$1" 2>/dev/null | awk '{print $2}'; }
 kd_count() { pgrep -f '^/data/KeyboardDevice' | wc -l | tr -d ' '; }   # not -x: BusyBox 1.27 -x never matches KD (1.0.3 field failure)
-composite_up() { [ -e "$C/ecm.usb0" ]; }
+composite_up() { [ -e "$C/ncm.usb0" ] || [ -e "$C/ecm.usb0" ]; }   # 1.8.0: NCM, or the ECM fallback
+net_fn() { if [ -e "$C/ncm.usb0" ]; then echo ncm; elif [ -e "$C/ecm.usb0" ]; then echo ecm; fi; }
 listening() { netstat -ltn 2>/dev/null | awk -v a="$1" '$4==a {ok=1} END{exit !ok}'; }   # exact local address
 lock_held() { ( exec 5>"$1"; ! flock -n 5 ) 2>/dev/null; }   # a live instance holds the lock
 router_running() { pgrep -f 'bin/mk20-router --src' >/dev/null; }
@@ -539,7 +540,7 @@ health() {
     printf '"ecm_state":%s,"ecm_rx_packets":%s,"ecm_tx_packets":%s,"ecm_rx_stalls":%s,"ecm_rearms":%s,"ecm_recoveries":%s,"ecm_probes":%s,"ecm_gave_up":%s,"ecm_reboots":%s},' \
       "$(jstr "$ES_STATE")" "$(num "${ec%% *}")" "$(num "${ec##* }")" "$ES_STALLS" "$ES_REARMS" "$ES_RECOV" "$ES_PROBES" \
       "$([ "$ES_GAVEUP" = 1 ] && echo true || echo false)" "$(ecm_rb_get)"
-    printf '"net":{"usb0":%s,"mtu":%s,"subnet":%s,"bridge":%s,"hidg0_writable":%s},' "$(jstr "$(ifconfig usb0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')")" \
+    printf '"net":{"fn":%s,"usb0":%s,"mtu":%s,"subnet":%s,"bridge":%s,"hidg0_writable":%s},' "$(jstr "$(net_fn)")" "$(jstr "$(ifconfig usb0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')")" \
       "$(num "$(cat "$R/sys/class/net/usb0/mtu" 2>/dev/null)")" "$(jstr "$ECM_SUBNET")" "$(jbool listening "$ECM_IP:$BRIDGE_PORT")" "$(jbool test -w "$R/dev/hidg0")"
     printf '"kd":%s,"adbd":%s,"flapmon":%s,"maint":%s,"shim_mounts":%s,"run_tmpfs":%s,' "$(num "$(kd_count)")" "$(jbool pidof adbd)" \
       "$(jbool pgrep -f mk20-flapmon.sh)" "$(jbool lock_held "$TM/mk20d-maint.lock")" "$mounts" "$(jbool run_tmpfs)"
@@ -603,16 +604,16 @@ boot)
   [ $KBDM = 1 ] && [ ! -x "$REL/bin/mk20-kbd" ] && log ERROR kbd "missing binary; supervisor will retry, never KD"
   if [ $MODE = composite ]; then
     LLIP=${MK20_LL_IP:-169.254.7.2}; v_ip4 "$LLIP" || LLIP=169.254.7.2   # 1.7.0: gadget.sh --rearm-now restores the alias
-    ( umask 077; printf 'MK20_ECM_IP=%s\nMK20_ECM_MASK=%s\nMK20_DEV_MAC=%s\nMK20_HOST_MAC=%s\nMK20_BRIDGE_PORT=%s\nMK20_FLAP_DROPS=%s\nMK20_FLAP_WINDOW=%s\nMK20_NOHID=%s\nMK20_NOADB=%s\nMK20_HID_SCROLL=%s\nMK20_KBD=%s\nMK20_LL_IP=%s\n' \
-      "$ECM_IP" "$ECM_MASK" "$ECM_DEV_MAC" "$ECM_HOST_MAC" "$BRIDGE_PORT" "$FLAP_DROPS" "$FLAP_WINDOW_S" "$NOHID" "$NOADB" "$FEATURE_HID_SCROLL" "$KBDM" "$LLIP" > "$TM/gadget.env.tmp" ) \
+    ( umask 077; printf 'MK20_ECM_IP=%s\nMK20_ECM_MASK=%s\nMK20_DEV_MAC=%s\nMK20_HOST_MAC=%s\nMK20_BRIDGE_PORT=%s\nMK20_FLAP_DROPS=%s\nMK20_FLAP_WINDOW=%s\nMK20_NOHID=%s\nMK20_NOADB=%s\nMK20_HID_SCROLL=%s\nMK20_KBD=%s\nMK20_LL_IP=%s\nMK20_NCM=%s\n' \
+      "$ECM_IP" "$ECM_MASK" "$ECM_DEV_MAC" "$ECM_HOST_MAC" "$BRIDGE_PORT" "$FLAP_DROPS" "$FLAP_WINDOW_S" "$NOHID" "$NOADB" "$FEATURE_HID_SCROLL" "$KBDM" "$LLIP" "$FEATURE_NCM" > "$TM/gadget.env.tmp" ) \
       && mv -f "$TM/gadget.env.tmp" "$TM/gadget.env"
     cp -f "$REL/share/gadget.sh" "$TM/gadget-boot.sh"
     MK20_REL=$REL MK20_GADGET_LOG=$LOGDIR/gadget.log MK20_ECM_IP=$ECM_IP MK20_ECM_MASK=$ECM_MASK \
       MK20_DEV_MAC=$ECM_DEV_MAC MK20_HOST_MAC=$ECM_HOST_MAC MK20_BRIDGE_PORT=$BRIDGE_PORT \
-      MK20_FLAP_DROPS=$FLAP_DROPS MK20_FLAP_WINDOW=$FLAP_WINDOW_S MK20_NOHID=$NOHID MK20_NOADB=$NOADB MK20_KBD=$KBDM MK20_LL_IP=$LLIP \
+      MK20_FLAP_DROPS=$FLAP_DROPS MK20_FLAP_WINDOW=$FLAP_WINDOW_S MK20_NOHID=$NOHID MK20_NOADB=$NOADB MK20_KBD=$KBDM MK20_LL_IP=$LLIP MK20_NCM=$FEATURE_NCM \
       sh "$TM/gadget-boot.sh" --boot >> "$LOGDIR/gadget.log" 2>&1
     grc=$?
-    log INFO gadget "rc=$grc status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null) nohid=$NOHID noadb=$NOADB ip=$ECM_IP"
+    log INFO gadget "rc=$grc status=$(cat "$S/gadget-ecm-hid.status" 2>/dev/null) nohid=$NOHID noadb=$NOADB ncm=$FEATURE_NCM ip=$ECM_IP"
   elif [ $MODE = stock ]; then
     SADB=1; [ -f "$S/mk20-no-adb" ] && SADB=0; kernel_has adb || SADB=0
     log WARN boot "composite skipped: $why -> ACM (KD stopped)$([ $SADB = 1 ] && echo +adb)"
