@@ -1,41 +1,41 @@
 {
  "start": "20261027-144438",
- "samples": 109,
+ "samples": 145,
  "failed": 0,
  "first_fail": null,
  "reboots": 0,
  "kd_restarts": 0,
  "rollbacks": [],
  "composite_losses": 0,
- "min_mem_kb": 77048,
+ "min_mem_kb": 76840,
  "min_fat_free_kb": 1210,
- "last": "2026-10-27T23:45:16+0800",
+ "last": "2026-10-28T02:45:27+0800",
  "running": true,
  "pid": 28616,
  "selftest_warn": {},
  "kernel_mem": {
   "Slab": {
    "first": 15680,
-   "last": 15680,
+   "last": 15716,
    "min": 15620,
    "max": 15740
   },
   "SUnreclaim": {
    "first": 11872,
-   "last": 11856,
+   "last": 11900,
    "min": 11800,
    "max": 11912
   },
   "slope_since": "2026-10-27T14:44:38+0800",
-  "slope_samples": 109,
-  "slope_hours": 9.01,
-  "sunreclaim_kb_h": -0.5,
+  "slope_samples": 145,
+  "slope_hours": 12.01,
+  "sunreclaim_kb_h": 1.5,
   "sunreclaim_half_kb_h": [
-   -5.7,
-   -3.0
+   -1.2,
+   5.0
   ],
-  "sunreclaim_last6h_kb_h": 2.7,
-  "mem_avail_kb_h": 1.0
+  "sunreclaim_last6h_kb_h": 4.9,
+  "mem_avail_kb_h": -0.2
  },
  "kernel_mem_trend": "flat",
  "host_link_stalls": 0,
