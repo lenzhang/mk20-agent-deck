@@ -1,7 +1,25 @@
-# MK20 "Agent 增强固件" — handoff (2026-10-25 01:30 SGT)
+# MK20 "Agent 增强固件" — handoff (2026-10-27 10:10 SGT)
 
 Goal: production-grade replacement firmware for the Waveshare MK20 keyboard (Allwinner T113, Tina 5.4.61,
 BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page. Live status: PROGRESS.md (main).
+
+## Update 2026-10-27 10:10 SGT — device moved to the iMac
+- **Host is now the iMac** (dev-imac, macOS 15.8 x86_64); dev-mbp.lan is offline (its `~/mk20-full` mirror, soak data,
+  `~/mk20-deploy`, `~/worktrees` install chain and the original mkadb.sh are there, not on the iMac).
+- **Device (read-only, 10-27):** fw 1.7.1 good, slot B gen 28 (A = 1.7.0), health ok, selftest all PASS, mk20-kbd normal,
+  21/21 panels, knob 6/6; `ecm_state=inactive`; **FAT free ~1.2 MB**. 5 more boots of 1.7.1 after its confirm (no RTC).
+- **1.7.1-rc1 soak verdict unknown**: host-side data on dev-mbp (`soak-20261025-012324.*`), no verdict commit, no v1.7.1 tag.
+- **iMac tooling** (chore/imac-tooling 8867fb9, `tools/imac/`): adb **r35.0.2** required (37.0.1 is EXC_GUARD-killed on the
+  empty-serial MK20; libusb backend skips it); `~/mk20-backup/mkadb.sh` (MK20 only, transport id) and
+  `~/worktrees/route-check.sh` (mihomo API + chatgpt trace, read-only).
+- **ECM does not come up on the iMac**: control iface matched by kext AppleUSBECMControl, data iface by DriverKit
+  AppleUserECMData which stays !registered → no enX → mk20deck / bridge / web / soak blocked. Next: user replug; else driver-level fix (user decision).
+- **route-check**: iMac mihomo AI group has only `US-Exit-SS` (Shadowsocks), no `-Hy2`; exit 203.0.113.10 US. Strict rule
+  → ROUTE_FAIL; awaiting the user (`WANT_NODE=US-Exit-SS`). No codex/kimi until decided.
+- **After 10-25 (other thread):** feature/gd32-dfu-notice cef750b + mac/1.7.1-gd32-notice 59a8334 (GD32 DFU warning),
+  feature/k1-scroll c702ff7 + mac/1.7.1-k1-scroll b21fbda (K1 scrolls session history) — Kimi K3 GO, not deployed;
+  feature/gd32-default-keymap a581757 (GD32 KC_NO keymap patch, analysis only, **not flashed**; flashing stays forbidden).
+- **PRD v1.5 approved** (2026-10-25, user; main c582581): production keeps ADB; integrator decisions V8/V11–V18 approved.
 
 ## Current state (2026-10-23 ~05:40) — user away for several days since 10-22 10:30 (autonomous mode)
 - **Production: tag `v1.6.1`** on release/1.6.1 8d08ca9 = fw 1.6.1 build rc2 (tar sha256
@@ -34,7 +52,7 @@ BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page
   middle three are device USB-HID. L4 row1 = DESK HERD TMUX ＋新会话 回L1. **Option mode (1.5.1)**: tap a session that
   waits for input → options on row 1, digits as momentary HID. Only "needs me" states animate.
 - **Tests:** Docker `make test` (Linux box) AND `make mac-test` (native macOS; mk20deck runs there) must both be green.
-- **PRD v1.5 draft** on branch docs/prd-1.5 (027c443) — awaiting the user's approval.
+- **PRD v1.5 approved** (2026-10-25, user) — merged to main c582581 (draft was docs/prd-1.5 027c443).
 - **Claude hooks** ("which agent needs me") installed in `~/.claude/settings-glm.json` (source of all ccai modes) and
   `settings.json`; backups `*.bak-mk20-20261021-095159`; script `~/.config/mk20-agent-deck/hooks/`; uninstall:
   `deck/tools/hooks/claude-hooks-uninstall.sh ~/.claude/settings-glm.json ~/.claude/settings.json`.
@@ -84,15 +102,17 @@ states, other-mode counts, reconnect while the Mac display sleeps. Root causes f
 
 ## Open items
 **Waiting for the user (collected while away):**
-1. Approve PRD v1.5 (「批准 PRD v1.5」, covers v1.4 §15). Integrator decisions needing an explicit OK: momentary option
-   digits, digits ignored while PTT held, option mode only for hook prompts, ⌫/⏎/Esc 10 s auto-release, **PTT 120 s cap
-   (10 min absolute)**, "after a lost-up cut the key ignores downs until its up".
+1. ~~Approve PRD v1.5~~ — DONE 2026-10-25 (user: 「批准 PRD v1.5 生产版也保留 ADB」; integrator decisions approved in §17).
 2. Hands-on checks: option-mode digits in a NEW Claude/codex session, long-press pick-up/place, ⌫/⏎/Esc, MODE long press →
    L4 and back (pages stay in sync), `mk20deck arrange` + the LS 会话安排 key (1.6.0), PTT hold across a reconnect.
-3. codex hooks reinstall (changes ~/.codex). 4. Decide: production build with adb OFF by default (adb = unauthenticated root
-   over USB; maintenance toggle instead).
+3. codex hooks reinstall (changes ~/.codex). 4. ~~adb OFF by default?~~ — DECIDED 2026-10-25: production keeps ADB (PRD §8).
+**New (2026-10-27, iMac):**
+10. User: replug test / decision for the iMac ECM driver-match problem. 11. User: accept `US-Exit-SS` (SS) as the AI route?
+12. Deploy mk20deck + build/test env (colima mk20, bb127, install chain) on the iMac. 13. Merge/deploy gd32-dfu-notice and
+    k1-scroll; GD32 keymap patch only on an explicit user decision. 14. Device FAT free ~1.2 MB (investigate read-only first).
+15. Sync dev-mbp `~/mk20-full` when it is back online.
 **Autonomous:**
-5. 1.7.1-rc1 24 h soak → tag v1.7.1 (verdict job 10-26 01:43).
+5. 1.7.1-rc1 24 h soak → tag v1.7.1 — verdict UNKNOWN (data on offline dev-mbp); read it when dev-mbp is back, else rerun on the iMac once ECM works.
 7. 1.6.1 candidates: 60 s cap for an owner-1 host key with a lost up (UI.md residual), device settings-web link to 会话安排.
 8. Measure e-stop visual-feedback latency on device (needs a physical press).
 9. Not in this delivery: agent A8c merge, USB mic / UVC capture / charger-only / Mac reboot / TF restore rehearsal tests,
