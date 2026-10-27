@@ -18,15 +18,43 @@ The MK20 moved from dev-mbp.lan to the iMac on 2026-10-27. Install locations on 
   ambiguity, network transports, `-s/-t/connect/reboot/root/...`. Keep shell payloads < 400 bytes.
 
 ## route-check.sh
-Read-only: mihomo API `127.0.0.1:9090` group `AI` + `chatgpt.com/cdn-cgi/trace` via TUN and the mixed port.
-Pass = AI == `$WANT_NODE` (default `US-Exit-Hy2`) and exit `203.0.113.10` both ways.
-Note: the iMac's mihomo has no `US-Exit-Hy2`; its AI group has only `US-Exit-SS` (Shadowsocks), exit
-203.0.113.10 US. With the default it reports ROUTE_FAIL on node name; whether `WANT_NODE=US-Exit-SS` is
-acceptable is the user's decision.
+Read-only: follows mihomo API `127.0.0.1:9090` group chain `AI > ... > leaf` and checks
+`chatgpt.com/cdn-cgi/trace` via TUN and the mixed port :7890.
+PASS = exit `203.0.113.10` both ways AND the AI leaf in `$OK_NODES` (default `US-Exit-Hy2 US-Exit-SS`);
+prints the active node and WARNs if the leaf is not `$PREF_NODE` (default `US-Exit-Hy2`).
+Exit 0 / `ROUTE_OK`, else `ROUTE_FAIL`. Env overrides: `MIHOMO_API MIHOMO_SECRET WANT_IP PREF_NODE OK_NODES`.
 
-## ECM (usb0) on this iMac — not up
-The composite enumerates (ECM@0, data@1, HID@2, ADB@3) but no `enX` appears: the control interface is
-matched by the kext `AppleUSBECMControl` (com.apple.driver.usb.cdc.ecm) while the data interface goes to the
-DriverKit `AppleUserECMData` (com.apple.DriverKit.AppleUserECM), which stays `!registered` — no network
-interface, so `deck/tools/mk20_host_net.py` (keyed on host MAC 02:11:22:33:44:56) has nothing to configure.
-Device side is fine (`usb.ecm_state=inactive`, usb0 172.30.250.2, bridge + web listening).
+### mihomo routing (user decision 2026-10-27: Hy2 preferred, SS backup, exit IP is what matters)
+The iMac config (`/Library/Application Support/mihomo`, root-only) already has `US-Exit-Hy2`, but only
+inside the Fallback group `AI-Auto` = [US-Exit-SS, US-Exit-Hy2, US-Alt-SS]; Selector `AI` cannot pick
+Hy2 directly. Runtime change via API (no config edit, no sudo), 2026-10-27 10:23 SGT:
+```
+PUT /proxies/AI-Auto {"name":"US-Exit-Hy2"}   # fixed preference; mihomo falls back if Hy2 dies
+PUT /proxies/AI      {"name":"AI-Auto"}
+```
+Verified: route-check `AI=US-Exit-Hy2 (AI > AI-Auto > US-Exit-Hy2)` exit 203.0.113.10 both ways,
+general connectivity OK. Backup of prior state: `~/mk20-backup/mihomo/proxies-before-20261027-1023.json`.
+Revert: `PUT /proxies/AI {"name":"US-Exit-SS"}` and `DELETE /proxies/AI-Auto` (unfix).
+Caveats: not written to config (survives only if mihomo store-selected persists it); if both US-Exit nodes die
+AI-Auto falls to US-Alt-SS (different exit IP) -> route-check FAILs (intended guard).
+Persisting needs a sudo config edit (user's call).
+
+## Reboot
+Sanctioned path only: `touch /mnt/SDCARD/cmd-reboot && sync` (watcher -> WDT hardreset ~30 s). Tested
+2026-10-27 10:22:53 SGT: USB drop 10:23:18, re-enum 10:23:55, adb back 10:24:22; loader current=B good=1.7.1,
+health ok, selftest pass. Never plain `reboot`.
+
+## ECM (usb0) on this iMac — not up (root cause: macOS dext crash)
+After every enumeration Apple's own DriverKit ECM driver crashes:
+`/Library/Logs/DiagnosticReports/com.apple.DriverKit.AppleUserECM-2026-10-27-{094943,102417}.ips` =
+SIGABRT, `__assert_rtn` in `IOService::init()` <- `IOUserNetworkEthernet::init()` <- `AppleUserECM::init()`
+(assert inside the OS driver before any device I/O, i.e. not a descriptor problem). The kext
+`AppleUSBECMControl` (score 59000) then takes the control interface while the data interface goes to
+`AppleUserECMData` (dext score 100000) which never pairs -> no `enX`. Unified log (`/usr/bin/log`, zsh has a
+`log` builtin!) shows the data server `exit before start()`.
+Device side fine: usb0 172.30.250.2, bridge on 172.30.250.2/169.254.7.2:17890. Device kernel 5.4.61:
+`CONFIG_USB_CONFIGFS_RNDIS=y`, NCM/ECM not built in; ECM comes from out-of-tree `usb_f_ecm.ko` in releases.
+Fix options: (1) gadget CDC-NCM: build `usb_f_ncm.ko` for 5.4.61 like usb_f_ecm.ko; macOS matches it with the
+kext `AppleUSBNCM` (data protocol 1, no competing dext); (2) host-side workaround without network iface:
+`adb forward` to the bridge (needs bridge to also listen on 127.0.0.1); (3) macOS update / Feedback report;
+no sudo/kext changes applied.
