@@ -3,6 +3,31 @@
 Goal: production-grade replacement firmware for the Waveshare MK20 keyboard (Allwinner T113, Tina 5.4.61,
 BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page. Live status: PROGRESS.md (main).
 
+## Update 2026-10-27 14:47 SGT — mk20deck on the iMac + fw 1.8.0-rc1 24 h soak running
+- **Device**: fw 1.8.0-rc1 (CDC-NCM) good on slot A (gen 29); iMac en2 (AppleUSBNCM) 172.30.250.1/24 via
+  `mk20_host_net.py` (no sudo). Known: Mac en2 MTU 1500 vs device 462 (ICMP >462 B lost; TCP fine) — fixing needs sudo, left alone.
+- **mk20deck deploy**: `~/mk20-deploy` = git worktree of `~/mk20-build/mk20-agent-deck`, detached at feature/ncm-gadget
+  4eb998f (Mac side == release/1.7.1). NOT merged (do after the soak): `mac/1.7.1-gd32-notice` 59a8334, `mac/1.7.1-k1-scroll` b21fbda.
+  venv `~/mk20-deploy/.venv` (uv python3.13.15). Config `~/.config/mk20-agent-deck/config.toml` (dev-mbp archive copy;
+  terminal_app=Terminal, tmux binary /usr/local/bin/tmux; no VNC password needed). LaunchAgent
+  `~/Library/LaunchAgents/com.leo.mk20-agent-deck.plist` (logs `~/.config/mk20-agent-deck/logs/deck.{out,err}.log`).
+  Hooks: Claude settings.json / settings-clean.json / settings-glm.json merged additively; `~/.codex/hooks.json` new
+  (trust it in Codex App → Settings → Hooks). Backups: `~/mk20-backup/pre-deploy-20261027/` (+ installer `*.bak-mk20-20261027-143901`).
+- **BLOCKER (user)**: mk20deck cannot reach 172.30.250.2:17890 — macOS 15 Local Network privacy blocks the non-Apple
+  binary `~/.local/bin/python3.13` (EHOSTUNREACH 65; nc / /usr/bin/python3 connect fine). Allow it in System Settings →
+  Privacy & Security → Local Network (or the prompt). Not worked around. Then `tail ~/.config/mk20-agent-deck/logs/deck.err.log` should show the connect.
+- **Soak** `soak-20261027-144438`: start **2026-10-27 14:44:38 SGT (01:44:38 CDT)**, expected end **2026-10-28 14:44 SGT
+  (10-28 01:44 CDT)**; 288 samples @ 5 min. Tool: frozen `~/mk20-deploy/deck/tools/mk20_soak.py --hours 24 --interval 300`
+  → `~/mk20-backup/soak/`. launchd `com.leo.mk20-soak-180` (`caffeinate -i -s`), push job `com.leo.mk20-soak-180-push`
+  every 3 h → feature/ncm-gadget `deck/reviews/1.8.0/soak-20261027-144438/`. At the end: `verdict.py` → VERDICT.md,
+  push, one PROGRESS.md line on main (automatic). Scripts `~/mk20-backup/soak/launchd/` (copies: feature/ncm-gadget
+  `deck/reviews/1.8.0/soak-tooling/`). Jobs were bootstrapped from that dir → they do NOT survive logout/reboot.
+  While the deck is blocked, host_link reads idle/unknown (no bridge client) — the verdict lists it.
+- **Check**: `tail -1 ~/mk20-backup/soak/soak-20261027-144438.jsonl`; `cat ~/mk20-backup/soak/soak-20261027-144438.summary.json`;
+  `launchctl print gui/501/com.leo.mk20-soak-180 | grep state`; `cat ~/mk20-backup/soak/launchd/{soak-run,push}.log`;
+  manual push now: `launchctl kickstart gui/501/com.leo.mk20-soak-180-push`. Stop: `kill $(cat ~/mk20-backup/soak/soak.pid)`
+  (summary still written; then `sh ~/mk20-backup/soak/launchd/soak-push.sh final`), then `launchctl bootout gui/501/com.leo.mk20-soak-180{,-push}`.
+
 ## Update 2026-10-27 10:10 SGT — device moved to the iMac
 - **Host is now the iMac** (dev-imac, macOS 15.8 x86_64); dev-mbp.lan is offline (its `~/mk20-full` mirror, soak data,
   `~/mk20-deploy`, `~/worktrees` install chain and the original mkadb.sh are there, not on the iMac).
