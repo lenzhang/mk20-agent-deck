@@ -1,6 +1,6 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-27 14:27 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-27 14:31 SGT
 
 ## 1. 当前状态
 
@@ -20,7 +20,8 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
-- **10-27 14:27** **NCM 1.8.0-rc1 安装成功并自动 confirm**：slot A 1.8.0 good（selftest PASS + 'PASS ecm host traffic (usb0 rx 42 -> 43)'，真实 Mac 流量，uptime 92 s）；iMac en2 = AppleUSBNCM（MAC 02:11:22:33:44:56），AppleUserECM 未再接管；host_net sync 无需 sudo → 172.30.250.1/24，ping .2 0% loss，:17890/:8780 通；证据 feature/ncm-gadget 8233b9d。双向大流量测试进行中
+- **10-27 14:31** **NCM 1.8.0-rc1 设备验证 PASS**：双向同时 20 MiB TCP（设备→Mac 7.0 s ≈ 24 Mbit/s；Mac→设备 20971520 B 全收），usb0 tx_dropped/rx_errors 0，dmesg 无新行，UDC 一直 configured；Mac en2 MTU 仍 1500（改需 sudo，未做）：TCP 不受影响，Mac→设备 ICMP > 462 B 丢（待用户 sudo networksetup -setMTU en2 462）；1.8.0 由 probation gate 自动 confirm（未手动）；证据 4eb998f；相机 after 图 14:29
+- **10-27 14:27** **NCM 1.8.0-rc1 安装成功并自动 confirm**：slot A 1.8.0 good（selftest PASS + 'PASS ecm host traffic (usb0 rx 42 -> 43)'，真实 Mac 流量，uptime 92 s）；iMac en2 = AppleUSBNCM（MAC 02:11:22:33:44:56），AppleUserECM 未再接管；host_net sync 无需 sudo → 172.30.250.1/24，ping .2 0% loss，:17890/:8780 通；证据 feature/ncm-gadget 666e69c。双向大流量测试进行中
 - **10-27 14:21** **NCM 1.8.0-rc1 安装开始**（feature/ncm-gadget f957d74）：全量 deck 测试 1431 passed/2 skipped（2aa7668，新 docker 镜像含 procps；imac-tooling 47dde2c）；tar sha 294e1544…ecc5；设备 1.7.1 good slot B → mk20-install.sh --reboot --wait（watcher cmd-reboot，probation 600 s 自动回滚）
 - **10-27 13:27** **NCM 上机 · 加载测试 PASS**：基线 fw 1.7.1 good（B 槽 gen 28），iMac 侧 usb0 仍无链路（ECM dext）。`usb_f_ncm.ko`（6699be5f…）推到 /data/mk20/incoming，insmod rc 0 / rmmod rc 0，dmesg 无新错误，UDC 保持 configured。证据 feature/ncm-gadget 3a09aff `deck/reviews/1.8.0/device-ncm-20261027/`。下一步：打 1.8.0-rc1 包装到待定槽。
 - **10-27 13:20** **iMac ECM → CDC-NCM（1.8.0 候选，未上机）**：分支 `feature/ncm-gadget`（基于 release/1.7.1，提交 012bd19 WIP + a06c081）。`usb_f_ncm.ko` 按 5.4.61 #221 构建（vermagic `5.4.61 SMP preempt mod_unload ARMv7 p2v8`，256388 B，sha256 6699be5f…c436，未定义符号全在设备 ksyms 内）；f_ncm 补丁让每个 NTB ≤512 B（OUT 512 / IN 上限 508 / wMaxSegmentSize 476 → NCM MTU 462，TX 守卫精确、含 CRC 模式）。gadget.sh 优先 NCM，ko 缺失/被拒/建函数失败自动回退 ECM；`/mnt/SDCARD/mk20-no-ncm`、`FEATURE_NCM=0`、`MK20_NCM=0` 强制 ECM；re-arm/看门狗兼容两种函数。离线：deck tests 1430 passed / 2 skipped（BusyBox 1.27，含 procps）+ shellcheck + tools 83 passed；GLM 评审 2 个阻断（守卫多算 5 B 丢满 MTU 帧；切换时旧实例占 usb0）已修，复审 APPROVE×2。**未上机**，上机测试计划见报告。
