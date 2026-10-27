@@ -1,0 +1,9 @@
+# full deck suite on 2aa7668 (a06c081 code + 1.8.0 bump), image mk20-build:trixie built from deck/tools/build-image/Dockerfile (procps)
+# shellcheck + tools + pytest, MK20_TEST_BUSYBOX=bb127
+83 passed, 1 skipped in 3.30s
+1431 passed, 2 skipped in 2625.62s (0:43:45)
+# release build (docker): sh tools/mk20-release-build.sh firmware out rc1
+294e15445d225e3eddc28758b60025a32b986f427d354c24ce2f3f2957b3ecc5  mk20-fw-1.8.0.tar
+kernels=7326d9e5ab9fd9f140b6cc7597b4eb0539b019139d12b52b4c133771e35843cc
+6699be5f957255f73a09a9262e3bbf082c992b69c8bdbdc4b20fabd7fc30c436 644 lib/usb_f_ncm.ko
+12f668bf5ed74efd66fc06c6e8244c6972f307fb985cf4b2c8a5c11fb4b91584 755 share/gadget.sh
