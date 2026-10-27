@@ -1,6 +1,6 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-27 13:20 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-27 13:27 SGT
 
 ## 1. 当前状态
 
@@ -20,6 +20,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-27 13:27** **NCM 上机 · 加载测试 PASS**：基线 fw 1.7.1 good（B 槽 gen 28），iMac 侧 usb0 仍无链路（ECM dext）。`usb_f_ncm.ko`（6699be5f…）推到 /data/mk20/incoming，insmod rc 0 / rmmod rc 0，dmesg 无新错误，UDC 保持 configured。证据 feature/ncm-gadget 3a09aff `deck/reviews/1.8.0/device-ncm-20261027/`。下一步：打 1.8.0-rc1 包装到待定槽。
 - **10-27 13:20** **iMac ECM → CDC-NCM（1.8.0 候选，未上机）**：分支 `feature/ncm-gadget`（基于 release/1.7.1，提交 012bd19 WIP + a06c081）。`usb_f_ncm.ko` 按 5.4.61 #221 构建（vermagic `5.4.61 SMP preempt mod_unload ARMv7 p2v8`，256388 B，sha256 6699be5f…c436，未定义符号全在设备 ksyms 内）；f_ncm 补丁让每个 NTB ≤512 B（OUT 512 / IN 上限 508 / wMaxSegmentSize 476 → NCM MTU 462，TX 守卫精确、含 CRC 模式）。gadget.sh 优先 NCM，ko 缺失/被拒/建函数失败自动回退 ECM；`/mnt/SDCARD/mk20-no-ncm`、`FEATURE_NCM=0`、`MK20_NCM=0` 强制 ECM；re-arm/看门狗兼容两种函数。离线：deck tests 1430 passed / 2 skipped（BusyBox 1.27，含 procps）+ shellcheck + tools 83 passed；GLM 评审 2 个阻断（守卫多算 5 B 丢满 MTU 帧；切换时旧实例占 usb0）已修，复审 APPROVE×2。**未上机**，上机测试计划见报告。
 - **10-27 10:40** **dev-mbp 资料归档到 Gitea**（用户将关机；dev-mbp 不在家里局域网，经 home-dev-vm 跳板推送）。**1.7.1-rc1 soak 未完成/无结论**：3 次运行均被外部事件打断——012324（12.7 h 干净后 14:08 外部断电+GD32 DFU）、164758（键盘被拔 17:05–22:31）、224813（干净 10.0 h：121 样本全 ok、重启/回滚/链路卡死 0、SUnreclaim 9.7 kB/h 趋势 flat，08:53 键盘移走）；未见固件故障，需在 iMac 重跑 24 h。归档分支 `archive/dev-mbp-20261027`（孤儿分支：mk20-backup 脚本/证据/验收/soak、mk20-deploy 文档、mk20-build-local docker/日志、~/.config/mk20-agent-deck、LaunchAgent、worktrees 评审输出；固件 release tar、live-221 原厂 dump、tf 启动镜像、tina54 内核源码 tar；超大文件见 MANIFEST-large.txt；已扫描无密钥）。新推分支：docs/prd-1.5-approved、integ/1.5.1-b/c/d、k4-install-wt、release/1.3.2、mac/1.7.1-gd32-notice(快进)、agent-a1-codex、hidfix-dev、hidfix-r10、hidfix-r11、hidfix-r11b、k4、onboard-ui、onboard-ui-k4doc、onboard-ui-u2、uacmic-dev、uacmic-mod、uacmic-review；未提交改动 → wip/dev-mbp-20261027/*（10 个）。~/mk20-full 已同步 origin/main。
 - **10-27 10:28** iMac 跟进：① 代理（用户决定：看出口 IP，Hy2 优先、SS 备份）：iMac mihomo 其实有 US-Exit-Hy2（在 Fallback 组 AI-Auto 里，Selector AI 不能直选）→ 经 API 运行时改 `AI-Auto` 固定 Hy2、`AI`→AI-Auto（未改配置文件、无 sudo；备份 ~/mk20-backup/mihomo/proxies-before-20261027-1023.json；回退 `PUT AI US-Exit-SS` + `DELETE AI-Auto`）；route-check 新规则 PASS：`AI > AI-Auto > US-Exit-Hy2`，TUN 与 :7890 出口均 203.0.113.10，常规连通正常。② 安全重启：10:22:53 `cmd-reboot` → 10:23:18 USB 断开 → 10:24:22 adb 回来；loader current=B good=1.7.1，health ok、自检 PASS。③ **ECM 仍不通，根因在 macOS**：每次枚举 Apple 自带 DriverKit 驱动 com.apple.DriverKit.AppleUserECM 在 `AppleUserECM::init()`→`IOUserNetworkEthernet::init()`→`IOService::init()` 断言 SIGABRT（崩溃报告 09:49、10:24 两份），尚未接触设备即崩 → 控制接口退回内核 AppleUSBECMControl、数据接口被 AppleUserECMData 占住但无配对 → 无 enX。设备内核 5.4.61 只内建 RNDIS，ECM 来自自编 usb_f_ecm.ko。建议：gadget 改 CDC-NCM（自编 usb_f_ncm.ko，macOS 由内核 AppleUSBNCM 认领、无 dext 竞争）或临时用 adb forward（需桥接加听 127.0.0.1）；未做任何 sudo/kext 改动。工具提交 chore/imac-tooling deecd26。
