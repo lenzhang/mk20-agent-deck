@@ -58,3 +58,10 @@ Fix options: (1) gadget CDC-NCM: build `usb_f_ncm.ko` for 5.4.61 like usb_f_ecm.
 kext `AppleUSBNCM` (data protocol 1, no competing dext); (2) host-side workaround without network iface:
 `adb forward` to the bridge (needs bridge to also listen on 127.0.0.1); (3) macOS update / Feedback report;
 no sudo/kext changes applied.
+
+## Docker build/test image
+
+`sh tools/imac/build-image.sh ~/worktrees/<any deck worktree>` builds `mk20-build:trixie` from the repo's
+`deck/tools/build-image/Dockerfile` (procps → `pkill`, netcat). Do not keep a separate Dockerfile copy on the iMac:
+the hand-kept `~/mk20-build/docker/Dockerfile` (no procps) cost 46 spurious test failures on 2026-10-27; it is now a
+copy of the repo file (`Dockerfile.pre-procps` = the old one). Run the tests with `~/mk20-build/docker/run.sh`.
