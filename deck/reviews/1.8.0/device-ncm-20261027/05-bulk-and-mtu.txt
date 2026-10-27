@@ -1,0 +1,15 @@
+# 1.8.0-rc1 on the iMac (macOS 15.8 Intel), 2026-10-27 ~14:28 SGT, after the auto-confirm
+## bidirectional TCP bulk, simultaneous (device script ncmbulk.sh via start-stop-daemon -b, detached from adb)
+Mac: `sleep 900 | nc -l 5001 | wc -c` (held stdin: tiny BusyBox nc quits on peer half-close) and `nc -l 5002 < 20 MiB urandom`
+device->host 20 MiB: Mac received 20971520 B; device uptime t0=405.77 t1=412.80 -> 7.03 s ≈ 2.98 MB/s (≈ 24 Mbit/s) while the other direction ran
+host->device 20 MiB: device received 20971520 B (wc -c); Mac sender done 14:28:48 (started 14:28:44)
+usb0 after: rx_bytes=25533549 tx_bytes=29601192 rx_packets=84799 tx_packets=60550 tx_dropped=0 rx_errors=0 rx_dropped=0 tx_errors=0
+dmesg: no new lines after boot (no "OUT size exceeded", no ncm errors); UDC configured throughout; ping .2 0% loss afterwards
+earlier probe (2000 KiB device->host, foreground): 2048000 B received
+## MTU
+device usb0 MTU 462 (NCM); Mac en2 MTU 1500 (not changed: needs sudo, not done)
+TCP unaffected (MSS from the device's SYN). ICMP from the Mac: ping -s 400 / -s 434 OK; -s 600 / -s 1400: 100 % loss
+(the Mac frame > 476 B segment / 512 B NTB); device counters unchanged (rx_errors 0), link stays up.
+Open: large non-TCP host->device frames need en2 MTU 462 (sudo networksetup -setMTU en2 462 / ifconfig) -> left for the user.
+## loader
+current=A 29 1.8.0 good=1.8.0 pending= attempts= active=1.8.0 (auto-confirmed by the probation gate, not manually)
