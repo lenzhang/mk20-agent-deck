@@ -2,8 +2,9 @@
 # Grab a JPEG from the TP-Link TL-IPC44AW camera that watches the MK20.
 # Usage: tools/cam/snap.sh [stream1|stream2] [outdir]
 #   MK20_CAM_STACK=N   average N frames (sampled every 5th frame) to cut H.265 noise; default 8 (1 = single frame)
-#   MK20_CAM_CROP=w:h:x:y  also write a cropped, mildly sharpened copy (default: MK20 area 600:580:1080:450;
+#   MK20_CAM_CROP=w:h:x:y  also write a cropped, mildly sharpened copy (default: MK20 area 600:580:955:450 at preset mk20;
 #                      set to "none" to skip). Coordinates are for stream1 2560x1440 and the current camera aim.
+#   MK20_CAM_GOTO=1    first GotoPreset "mk20" (token 2) so the crop box matches.
 # Password: $MK20_CAM_PASS, else ~/.config/mk20-cam/cred (chmod 600). See tools/cam/README.md.
 # macOS Local Network privacy blocks an unsigned downloaded ffmpeg from the LAN
 # ("No route to host"), so RTSP goes through a local python relay (system python is allowed).
@@ -13,11 +14,12 @@ STREAM="${1:-stream1}"; OUT="${2:-$HOME/mk20-backup/cam}"
 CAM_IP="${MK20_CAM_IP:-192.168.88.125}"; CAM_USER="${MK20_CAM_USER:-admin}"
 FF="${FFMPEG:-$(command -v ffmpeg || echo "$HOME/mk20-build/tools/ffmpeg/ffmpeg")}"
 PORT="${MK20_CAM_RELAY_PORT:-8554}"
-N="${MK20_CAM_STACK:-8}"; CROP="${MK20_CAM_CROP:-600:580:1080:450}"
+N="${MK20_CAM_STACK:-8}"; CROP="${MK20_CAM_CROP:-600:580:955:450}"
 [ "$STREAM" = stream1 ] || CROP=none
 if [ -z "${MK20_CAM_PASS:-}" ]; then MK20_CAM_PASS="$(cat "$HOME/.config/mk20-cam/cred")"; fi
 export MK20_CAM_PASS
 ENC="$(python3 -c 'import os,urllib.parse;print(urllib.parse.quote(os.environ["MK20_CAM_PASS"],safe=""))')"
+if [ "${MK20_CAM_GOTO:-0}" = 1 ]; then python3 "$HERE/ptz.py" goto 2 >/dev/null; fi
 mkdir -p "$OUT"; TS="$(date +%Y%m%d-%H%M%S)"; F="$OUT/cam-$STREAM-$TS.jpg"
 python3 "$HERE/rtsp_relay.py" "$PORT" "$CAM_IP" 554 & RP=$!; trap 'kill $RP 2>/dev/null || true' EXIT
 sleep 1

@@ -45,3 +45,13 @@ At stream1 resolution the key icons and sub-screen layout are visible but small 
 - Averaging 8 frames (tmix) removes most compression noise; that is the default in snap.sh.
 - To read screen text use the device itself (adb screencap / app screenshot), or put the camera
   closer so the keyboard fills more of the frame (keep >= ~30-50 cm for the fixed-focus lens).
+
+## PTZ presets (set 2026-10-27, user-authorized)
+
+| Token | Name | Pan x | Tilt y | Note |
+|---|---|---|---|---|
+| 1 | orig-20261027 | -0.074788 | -0.638494 | aim before we touched PTZ; restore with `tools/cam/ptz.py goto 1` (or `abs -0.074788 -0.638494`) |
+| 2 | mk20 | -0.054742 | -0.638494 | MK20 centred; snap.sh default crop 600:580:955:450 matches this |
+
+`MK20_CAM_GOTO=1 tools/cam/snap.sh` goes to preset mk20 before snapping.
+Pan 0.02 in the generic space moves the image about 125 px (of 2560). Steps smaller than ~0.005 are rejected.
