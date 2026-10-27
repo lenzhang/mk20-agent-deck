@@ -1,0 +1,30 @@
+current=B 28 1.7.1 good=1.7.1 pending= attempts= active=1.7.1 last_rollback=1.3.0->1.2.1 not confirmed after 1 attempt(s)
+fuse                   86016  0 
+ipt_REJECT             16384  0 
+iptable_filter         16384  0 
+usb_f_ecm              16384  2 
+xt_LOG                 16384  0 
+xt_TCPMSS              16384  0 
+xt_comment             16384  0 
+xt_limit               16384  0 
+xt_mac                 16384  0 
+xt_mark                16384  0 
+xt_multiport           16384  0 
+xt_time                16384  0 
+configured
+MaxPower      ecm.usb0      hid.usb0
+bmAttributes  ffs.adb       strings
+usb0      Link encap:Ethernet  HWaddr 02:11:22:33:44:55  
+          inet addr:172.30.250.2  Bcast:172.30.250.255  Mask:255.255.255.0
+          UP BROADCAST MULTICAST  MTU:478  Metric:1
+Command failed: Not found
+gadget 57.52: OK mode=--boot UDC=4100000.udc-controller links=MaxPower bmAttributes ecm.usb0 ffs.adb hid.usb0 strings  hidg0 usb0=172.30.250.2 bridge=[--dev usb0 --listen 172.30.250.2:17890 --listen 169.254.7.2:17890 --stall-file /tmp/mk20/bridge.stalls] kd= adbd=2639
+gadget 57.85: flap monitor started (pid 2714)
+mk20-adb-keep
+mk20-add-adb.sh
+mk20-composite-ok
+mk20-hidtest-hold
+mk20-hidtest-variant
+mk20-plus.bin
+mk20-probe-dir
+mk20-swap-ok

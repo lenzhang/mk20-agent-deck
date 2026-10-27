@@ -1,0 +1,13 @@
+# 13:25 SGT load-only test: push ko (sha256 6699be5f...c436) to /data/mk20/incoming, insmod, rmmod; no UDC/configfs change
+insmod_rc=0
+usb_f_ncm 20480 0 - Live 0xbf06b000 (O)
+usb_f_ecm 16384 2 - Live 0xbf016000 (O)
+[   56.212863] ERR: Operation not supported
+[   56.212896] handle_ep0: ep0 setup end
+[   56.457789] ERR: Operation not supported
+[   56.462777] ERR: Operation not supported
+[ 2035.944320] ERR: Operation not supported
+rmmod_rc=0
+0
+configured
+RESULT: PASS (insmod rc 0, module listed, no new dmesg lines, rmmod rc 0, UDC stayed configured)
