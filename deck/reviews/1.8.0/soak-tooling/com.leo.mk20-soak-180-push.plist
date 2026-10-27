@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.leo.mk20-soak-180-push</string>
+  <key>ProgramArguments</key><array><string>/bin/sh</string><string>/Users/dev/mk20-backup/soak/launchd/soak-push.sh</string></array>
+  <key>RunAtLoad</key><false/><key>StartInterval</key><integer>10800</integer>
+  <key>StandardOutPath</key><string>/Users/dev/mk20-backup/soak/launchd/push.log</string>
+  <key>StandardErrorPath</key><string>/Users/dev/mk20-backup/soak/launchd/push.log</string>
+</dict></plist>
