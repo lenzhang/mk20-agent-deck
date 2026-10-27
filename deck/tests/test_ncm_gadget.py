@@ -277,19 +277,20 @@ def test_patch_keeps_every_ntb_within_one_pio_request():
     assert 12 + 3 + seg + 8 + 4 + 4 <= in_cap
     # the shipped TX guard (transcribed from the patch, evaluated for NTB16) never drops a frame that fits and
     # never lets through one that would overrun the in_cap-sized NTB skb
-    g = re.search(r"if \((ALIGN\(opts->nth_size.*?)> max_size\)", PATCH, re.S).group(1)
+    g = re.search(r"if \(((?:ALIGN\()+opts->nth_size.*?)> max_size\)", PATCH, re.S).group(1)
     g = re.sub(r"\n\+\s*", " ", g)
     for k, v in {"opts->nth_size": "12", "opts->ndp_size": "8", "dgram_idx_len": "4", "ndp_align": "4",
                  "div": "4", "rem": "0", "skb->len": "L"}.items():
         g = g.replace(k, v)
     assert re.fullmatch(r"[ALIGN()0-9L+\-*, ]+", g), g
 
-    def need(L):    # worst-case fresh NTB16: NTH 12, dgram pad 0, frame, NDP pad <= 3, NDP 8, entry 4, terminator 4
-        return 12 + L + 3 + 8 + 4 + 4
+    def need(L):    # fresh NTB16 as built: NTH 12, dgram pad 0, frame, NDP pad to 4, NDP 8, entry 4, terminator 4
+        return (12 + L + 3) // 4 * 4 + 8 + 4 + 4
     for L in range(14, 600):
         dropped = eval(g, {"ALIGN": lambda x, a: (x + a - 1) // a * a, "L": L}) > in_cap
         assert dropped == (need(L) > in_cap), (L, g)
     assert eval(g, {"ALIGN": lambda x, a: (x + a - 1) // a * a, "L": seg}) <= in_cap   # full-MTU frames are sent
+    assert eval(g, {"ALIGN": lambda x, a: (x + a - 1) // a * a, "L": seg + 4}) <= in_cap   # also in CRC mode
     # host->device: the same single-datagram NTB fits the advertised OUT size, and u_ether's OUT request
     # (max(14+mtu+20, dwNtbOutMaxSize)) stays <= 512
     assert 12 + 3 + seg + 8 + 4 + 4 <= out_max and max(14 + mtu + 20, out_max) <= 512
@@ -298,6 +299,15 @@ def test_patch_keeps_every_ntb_within_one_pio_request():
     assert ".wMaxSegmentSize =\tcpu_to_le16(MK20_MAX_SEG)" in PATCH
     assert "ncm->netdev->stats.tx_dropped++;\n+\t\t\tdev_kfree_skb_any(skb);\n+\t\t\treturn NULL;" in PATCH
     assert "if (net_ratelimit())" in PATCH
+
+
+def test_shipped_module_is_the_build_of_the_current_patch():
+    """build-usb_f_ncm.sh output is pinned with the patch it was built from: editing the patch without rebuilding
+    (or shipping a stale .ko) fails here."""
+    import hashlib
+    rec = dict(reversed(l.split()) for l in (DECK / "kernel/stock-patch/usb_f_ncm.ko.sha256").read_text().splitlines())
+    assert hashlib.sha256(KO.read_bytes()).hexdigest() == rec["usb_f_ncm.ko"]
+    assert hashlib.sha256(PATCH.encode()).hexdigest() == rec["f_ncm-mk20.patch"]
 
 
 def test_shipped_module_matches_the_stock_kernel():

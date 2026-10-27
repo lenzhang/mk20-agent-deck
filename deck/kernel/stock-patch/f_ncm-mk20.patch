@@ -58,12 +58,12 @@
  			put_unaligned_le32(crc, crc_pos);
 +		}
 +
-+		/* mk20: a datagram that cannot fit a fresh NTB on its own (NTH, datagram pad, datagram, worst-case NDP pad,
-+		 * NDP header, its entry and the zero terminator) would overrun the max_size NTB skb: drop it (counted), keep
-+		 * any pending NTB. Exact for a fresh NTB, so full-MTU frames are not dropped: NTB16 = len + 12 + 0 + 3 + 8 +
-+		 * 4 + 4 = len + 31 -> a 476-byte frame (MTU 462) gives <= 507 <= 508. (NTB32 = len + 51: frames >= 458 B are
-+		 * dropped; macOS/Linux hosts use NTB16. CRC mode adds 4 to len.) */
-+		if (ALIGN(opts->nth_size, div) + rem + skb->len + (ndp_align - 1) + opts->ndp_size +
++		/* mk20: a datagram that cannot fit a fresh NTB on its own (NTH, datagram pad, datagram, NDP pad, NDP header,
++		 * its entry and the zero terminator; the same layout ncm_wrap_ntb/package_for_tx build) would overrun the
++		 * max_size NTB skb: drop it (counted), keep any pending NTB. Exact, so full-MTU frames are never dropped:
++		 * NTB16 = ALIGN(12 + len, 4) + 16 -> a 476-byte frame (MTU 462) gives 504, with CRC (len 480) 508 <= 508.
++		 * (NTB32 = ALIGN(16 + len, 4) + 32: frames > 460 B are dropped; macOS/Linux hosts use NTB16.) */
++		if (ALIGN(ALIGN(opts->nth_size, div) + rem + skb->len, ndp_align) + opts->ndp_size +
 +		    2 * dgram_idx_len > max_size) {
 +			ncm->netdev->stats.tx_dropped++;
 +			dev_kfree_skb_any(skb);

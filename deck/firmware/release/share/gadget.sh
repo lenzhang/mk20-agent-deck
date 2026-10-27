@@ -555,6 +555,7 @@ for l in $C/*; do [ -L "$l" ] && rm -f "$l"; done
 # 1.8.0: NCM first; any NCM failure here (module missing/refused, function not created) -> the proven ECM function
 # A function instance owns a registered netdev from mkdir until rmdir: the other function's stale instance is removed
 # BEFORE the chosen one is created, else the new netdev registers as usb1 (and usb0 vanishes with the rmdir).
+# rmdir unregisters the netdev (cleanup() does the same on hardware-tested paths); a hang is bounded by the setup supervisor.
 rm_fn() { [ ! -d $G/functions/$1.usb0 ] || rmdir $G/functions/$1.usb0 2>>"$LOG" || die "stale $1.usb0"; }
 NETFN=ecm
 if [ "$USE_NCM" = 1 ]; then
