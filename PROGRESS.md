@@ -1,6 +1,6 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-27 10:10 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-27 10:28 SGT
 
 ## 1. 当前状态
 
@@ -11,8 +11,8 @@
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
 | UVC 采集卡 | feature/uvc | 02f1d41 | UHC07P = MS2130，USB 2.0 下仅 MJPEG；待上机 |
-| 设备 | — | — | **10-27 起接在 iMac（dev-imac）**；fw 1.7.1 good，B 槽（gen 28），1.7.0 在 A 槽；health ok、自检全 PASS；mk20-kbd normal、21/21 屏、旋钮 6/6；**FAT 剩余仅约 1.2 MB**；`ecm_state=inactive`（iMac 侧 ECM 网卡未起，见下） |
-| iMac 主机 | chore/imac-tooling | 8867fb9 | adb 需 platform-tools **r35.0.2**（37.0.1 遇空序列号设备崩溃）；`~/mk20-backup/mkadb.sh`（仅 MK20）、`~/worktrees/route-check.sh`；**ECM 网卡未起**（驱动匹配问题）→ mk20deck / 桥接 / 网页 / soak 暂不可用；route-check：iMac mihomo 只有 US-Exit-SS（SS）无 Hy2，出口 203.0.113.10 正确，待用户决定 |
+| 设备 | — | — | **10-27 起接在 iMac（dev-imac）**；fw 1.7.1 good，B 槽（gen 28），1.7.0 在 A 槽；health ok、自检全 PASS；mk20-kbd normal、21/21 屏、旋钮 6/6；**FAT 剩余仅约 1.2 MB**；10:23 经 cmd-reboot 安全重启验证 OK；iMac 侧 ECM 网卡仍未起（macOS AppleUserECM 驱动自身崩溃，见日志） |
+| iMac 主机 | chore/imac-tooling | deecd26 | adb 需 platform-tools **r35.0.2**（37.0.1 遇空序列号设备崩溃）；`~/mk20-backup/mkadb.sh`（仅 MK20）、`~/worktrees/route-check.sh`；**ECM 网卡未起**（macOS 15.8 Intel 的 AppleUserECM dext 在 init() 断言崩溃）→ mk20deck / 桥接 / 网页 / soak 暂不可用；route-check 改为按出口 203.0.113.10 判定（Hy2 或 SS 均可，非 Hy2 告警）；mihomo 运行时 AI→AI-Auto 固定 Hy2（未写配置） |
 | 10-25 后新分支 | feature/gd32-dfu-notice、feature/k1-scroll、mac/1.7.1-gd32-notice、mac/1.7.1-k1-scroll、feature/gd32-default-keymap | cef750b / c702ff7 / 59a8334 / b21fbda / a581757 | GD32 DFU 提示、K1 滚动会话历史（均 Kimi K3 GO，未部署）；GD32 默认键位 KC_NO 补丁仅分析，**未刷写**（刷 GD32 仍禁止，需用户明确决定） |
 | PRD | main | c582581 | **PRD v1.5 已批准**（10-25，用户）：生产版保留 ADB；§17 补到 1.7.1 |
 
@@ -20,6 +20,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-27 10:28** iMac 跟进：① 代理（用户决定：看出口 IP，Hy2 优先、SS 备份）：iMac mihomo 其实有 US-Exit-Hy2（在 Fallback 组 AI-Auto 里，Selector AI 不能直选）→ 经 API 运行时改 `AI-Auto` 固定 Hy2、`AI`→AI-Auto（未改配置文件、无 sudo；备份 ~/mk20-backup/mihomo/proxies-before-20261027-1023.json；回退 `PUT AI US-Exit-SS` + `DELETE AI-Auto`）；route-check 新规则 PASS：`AI > AI-Auto > US-Exit-Hy2`，TUN 与 :7890 出口均 203.0.113.10，常规连通正常。② 安全重启：10:22:53 `cmd-reboot` → 10:23:18 USB 断开 → 10:24:22 adb 回来；loader current=B good=1.7.1，health ok、自检 PASS。③ **ECM 仍不通，根因在 macOS**：每次枚举 Apple 自带 DriverKit 驱动 com.apple.DriverKit.AppleUserECM 在 `AppleUserECM::init()`→`IOUserNetworkEthernet::init()`→`IOService::init()` 断言 SIGABRT（崩溃报告 09:49、10:24 两份），尚未接触设备即崩 → 控制接口退回内核 AppleUSBECMControl、数据接口被 AppleUserECMData 占住但无配对 → 无 enX。设备内核 5.4.61 只内建 RNDIS，ECM 来自自编 usb_f_ecm.ko。建议：gadget 改 CDC-NCM（自编 usb_f_ncm.ko，macOS 由内核 AppleUSBNCM 认领、无 dext 竞争）或临时用 adb forward（需桥接加听 127.0.0.1）；未做任何 sudo/kext 改动。工具提交 chore/imac-tooling deecd26。
 - **10-27 10:10** **设备迁到 iMac**（dev-mbp.lan 离线；用户 10-27 把键盘插到 iMac）。只读核实：fw 1.7.1 good（B 槽，A=1.7.0），loader `current=B gen 28 good=1.7.1 pending=`，health ok、自检全 PASS，运行 12 min（迁移时断电重启）；loader.log 显示 1.7.1 确认后又启动 5 次（无 RTC，无法判断是否在 soak 窗口内）。**1.7.1-rc1 soak 结论未知**：soak 在 dev-mbp 主机侧运行，数据在 dev-mbp，Gitea 无结论/无 v1.7.1 tag。iMac 工具（chore/imac-tooling 8867fb9）：adb 37.0.1 遇空 USB 序列号的 MK20 被系统 EXC_GUARD 杀掉、libusb 后端跳过该设备 → 用 r35.0.2（transport_id 选设备）；新写 `~/mk20-backup/mkadb.sh`（原版只在 dev-mbp）与 `~/worktrees/route-check.sh`。**iMac 上 ECM 网卡不出现**：控制接口被内核 AppleUSBECMControl 认领、数据接口被 DriverKit AppleUserECMData 认领且未注册 → 无 enX，mk20deck/桥接/网页/soak 受阻（需用户拔插重试或驱动层处理）。route-check：iMac mihomo 的 AI 组只有 US-Exit-SS（Shadowsocks），出口 203.0.113.10 US，按 Hy2 规则判 FAIL，待用户决定；决定前不跑 codex/kimi。10-25 后另一线程的工作：GD32 DFU 提示、K1 滚动（Kimi GO，未部署）、GD32 默认键位补丁（仅分析未刷写）；PRD v1.5 已批准（生产版保留 ADB）。设备 FAT 剩余约 1.2 MB 需留意。dev-mbp `~/mk20-full` 未同步（离线）。
 - **10-25 01:30** **v1.6.1 生产版**（24 h soak PASS：288 样本全为 0，链路卡死/自愈 0，内存持平）；**1.7.1-rc1 已装机 good**。1.7.x：USB 网络接收看门狗（Mac 在、网卡通、收包 60 s 不涨且探测证实 → 软重连并恢复 MTU/IP/别名与桥接/网页，Mac 真回应才算恢复，每小时 ≤3 次后最多一次硬复位）+ 试用期必须看到 Mac 真实流量才确认。Kimi K3：1.6.2-rc1 NO-GO（软重连后网卡没 IP 还会被误判恢复）→ 1.7.0-rc1/rc2/rc3 GO。真机：1.7.0-rc2 的软重连被拒（读到上次开机的断线记录，重启后约 20 小时内看门狗失效）→ rc3 修复，因设备已装 1.7.0、以 1.7.1-rc1 发布；1.7.1 上真机软重连测试 PASS（rc=0，网卡保留，Mac 约 7 秒重新握手）。make test 1407 全绿。
 - **10-23 23:20** **1.6.0 soak FAIL → 1.6.1-rc2 已装机**。20:01 主机链路卡死 51 分钟：设备内核（5.4.61）的虚拟串口输入通路停滞，桥接程序阻塞在写入上、不再接新连接，Mac 重连全部超时；soak 工具没察觉（不查链路）。手动 tcflush 恢复后定位根因。1.6.1：桥接不再阻塞（停滞 2 s 自动清空并断开让 Mac 重连）、mk20-kbd 静默 5 s 兜底清空、soak 增加链路存活与自愈统计、Mac 端断连期间每 10 分钟记日志；Kimi K3 rc1 GO、rc2 增量 GO；make test 1283 / mac-test 817 全绿。装机时第二个事故：重启后 USB 网络 host→device 方向不通（loader 照样确认 good），watcher 硬复位后恢复，重新验收全 PASS；列入 1.6.2（ECM 接收看门狗、确认前要求真实网络流量）。另：10-23 00:48 巡检的 661 字节 adb 请求触发 adbd EOVERFLOW 导致 USB 重新枚举 → 规则 adb 请求 <512 字节，soak/验收工具加 480 字节保护。
