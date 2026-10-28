@@ -6,7 +6,11 @@ import json
 import logging
 import os
 import tempfile
-import tomllib
+
+try:  # 3.11+
+    import tomllib
+except ModuleNotFoundError:  # macOS system python 3.9 (LAN-permitted, see docs/deploy-system-python.md)
+    import tomli as tomllib
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
