@@ -15,6 +15,10 @@ allowed and connects fine, so the agent runs on system python instead.
 - `pyproject.toml`: `requires-python = ">=3.9"`, dep `tomli>=1.1; python_version < '3.11'`; `uv.lock` re-resolved.
 - `tools/hooks/mk20_hooks_merge.py`: `parse_intermixed_args` (argparse <3.12 rejects
   positional `paths` after `--command X`).
+- `adapters/codex_desktop.py`: if `?mode=ro` cannot open `~/.codex/state_5.sqlite`
+  (macOS system SQLite 3.43 + WAL db with no `-shm`, i.e. Codex closed →
+  `unable to open database file` every poll), reopen with `&immutable=1`.
+  Seen right after the switch (16:46:11–16:46:43); verified on a copied db without -shm.
 - All modules already use `from __future__ import annotations`; `compileall` clean on 3.9.
 
 Test run on 3.9.6 (`tests tests_sim`): 861 passed / 603 skipped / 7 failed before the

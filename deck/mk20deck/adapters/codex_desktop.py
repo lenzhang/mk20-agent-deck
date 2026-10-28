@@ -162,6 +162,15 @@ class CodexDesktopAdapter(ModeAdapter):
             raise BackendUnavailable("未找到 Codex 存储（state_5.sqlite）")
         uri = "file:" + urllib.parse.quote(path) + "?mode=ro"
         con = sqlite3.connect(uri, uri=True, timeout=1.0)
+        try:
+            con.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+        except sqlite3.OperationalError:
+            # macOS system SQLite (python 3.9) cannot open a WAL db read-only when
+            # Codex is closed and no -shm exists ("unable to open database file").
+            # Nobody is writing then, so an immutable snapshot is safe; the next
+            # poll reopens normally once Codex recreates -wal/-shm.
+            con.close()
+            con = sqlite3.connect(uri + "&immutable=1", uri=True, timeout=1.0)
         con.row_factory = sqlite3.Row
         return con
 
