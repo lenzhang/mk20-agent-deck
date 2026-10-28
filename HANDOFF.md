@@ -3,6 +3,15 @@
 Goal: production-grade replacement firmware for the Waveshare MK20 keyboard (Allwinner T113, Tina 5.4.61,
 BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page. Live status: PROGRESS.md (main).
 
+## Update 2026-10-28 16:53 SGT — mk20deck runs on macOS system python (bridge connected)
+- Local Network privacy silently blocks uv python3.13 (no prompt ever shown) → LaunchAgent `com.leo.mk20-agent-deck` now runs
+  `/Users/dev/mk20-deploy/.venv-sys/bin/python` (= /usr/bin/python3 3.9.6; Pillow 11.3.0, pyserial 3.5, tomli 2.5.0; package via PYTHONPATH).
+- `~/mk20-deploy` detached at fix/deck-py39 **4d12625** (8fb7041 + 450269a tomli fallback / requires-python >=3.9 / hooks argparse,
+  + 4d12625 codex adapter `immutable=1` fallback for system SQLite on a WAL db without -shm). Notes + rollback: `deck/docs/deploy-system-python.md`.
+  Backup of old plist/venv info/config: `~/mk20-backup/pre-syspython-20261028/`. Old `.venv` kept (still LAN-blocked).
+- Verified 16:47:49 SGT: `已连接 tcp://172.30.250.2:17890 画布 640x656`, heartbeats accepted, host_link ok, json_in growing, host_flushes flat.
+- Still to do: merge fix/deck-py39 into the release line; py3.9 test notes (3 non-3.9 failures) in the deploy doc.
+
 ## Update 2026-10-27 14:47 SGT — mk20deck on the iMac + fw 1.8.0-rc1 24 h soak running
 - **Device**: fw 1.8.0-rc1 (CDC-NCM) good on slot A (gen 29); iMac en2 (AppleUSBNCM) 172.30.250.1/24 via
   `mk20_host_net.py` (no sudo). Known: Mac en2 MTU 1500 vs device 462 (ICMP >462 B lost; TCP fine) — fixing needs sudo, left alone.
@@ -13,7 +22,7 @@ BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page
   `~/Library/LaunchAgents/com.leo.mk20-agent-deck.plist` (logs `~/.config/mk20-agent-deck/logs/deck.{out,err}.log`).
   Hooks: Claude settings.json / settings-clean.json / settings-glm.json merged additively; `~/.codex/hooks.json` new
   (trust it in Codex App → Settings → Hooks). Backups: `~/mk20-backup/pre-deploy-20261027/` (+ installer `*.bak-mk20-20261027-143901`).
-- **BLOCKER (user)**: mk20deck cannot reach 172.30.250.2:17890 — macOS 15 Local Network privacy blocks the non-Apple
+- **BLOCKER (RESOLVED 10-28 16:47, system python — see update above)**: mk20deck cannot reach 172.30.250.2:17890 — macOS 15 Local Network privacy blocks the non-Apple
   binary `~/.local/bin/python3.13` (EHOSTUNREACH 65; nc / /usr/bin/python3 connect fine). Allow it in System Settings →
   Privacy & Security → Local Network (or the prompt). Not worked around. Then `tail ~/.config/mk20-agent-deck/logs/deck.err.log` should show the connect.
 - **Soak** `soak-20261027-144438`: start **2026-10-27 14:44:38 SGT (01:44:38 CDT)**, expected end **2026-10-28 14:44 SGT
