@@ -3,6 +3,13 @@
 Goal: production-grade replacement firmware for the Waveshare MK20 keyboard (Allwinner T113, Tina 5.4.61,
 BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page. Live status: PROGRESS.md (main).
 
+## Update 2026-10-28 18:41 SGT — v1.8.0 production tagged
+- `v1.8.0` (annotated, tag object 8acd8ba) → release/1.8.0 **5f3dccb** = feature/ncm-gadget 52ae248 (no-ff merge of fix/deck-py39) +
+  RELEASE.md production section. Firmware = installed `mk20-fw-1.8.0.tar` build rc1, sha256 294e1544…ecc5 (not rebuilt; payload
+  unchanged since f957d74). 24 h soak PASS soak-20261027-144438. Docker make test green (tests 1432/1 skipped). Not merged to main
+  (same as v1.6.1). `~/mk20-deploy` detached at v1.8.0 (code identical to 4d12625; LaunchAgent not restarted).
+- Next: merge mac/1.7.1-gd32-notice + mac/1.7.1-k1-scroll onto the 1.8 line (were held back for the soak).
+
 ## Update 2026-10-28 16:53 SGT — mk20deck runs on macOS system python (bridge connected)
 - Local Network privacy silently blocks uv python3.13 (no prompt ever shown) → LaunchAgent `com.leo.mk20-agent-deck` now runs
   `/Users/dev/mk20-deploy/.venv-sys/bin/python` (= /usr/bin/python3 3.9.6; Pillow 11.3.0, pyserial 3.5, tomli 2.5.0; package via PYTHONPATH).
@@ -10,7 +17,7 @@ BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page
   + 4d12625 codex adapter `immutable=1` fallback for system SQLite on a WAL db without -shm). Notes + rollback: `deck/docs/deploy-system-python.md`.
   Backup of old plist/venv info/config: `~/mk20-backup/pre-syspython-20261028/`. Old `.venv` kept (still LAN-blocked).
 - Verified 16:47:49 SGT: `已连接 tcp://172.30.250.2:17890 画布 640x656`, heartbeats accepted, host_link ok, json_in growing, host_flushes flat.
-- Still to do: merge fix/deck-py39 into the release line; py3.9 test notes (3 non-3.9 failures) in the deploy doc.
+- Done 18:40: fix/deck-py39 merged (52ae248) and released as v1.8.0; py3.9 test notes (3 non-3.9 failures) in the deploy doc.
 
 ## Update 2026-10-27 14:47 SGT — mk20deck on the iMac + fw 1.8.0-rc1 24 h soak running
 - **Device**: fw 1.8.0-rc1 (CDC-NCM) good on slot A (gen 29); iMac en2 (AppleUSBNCM) 172.30.250.1/24 via
