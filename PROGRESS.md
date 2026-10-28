@@ -1,6 +1,6 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-28 14:44 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-28 15:25 SGT
 
 ## 1. 当前状态
 
@@ -11,7 +11,7 @@
 | agent（A8c） | feature/agent | 4d07ddd | 已过评审；不在 rc2，进下一个 RC；默认 FEATURE_AGENT=0 |
 | 板载 UI | feature/onboard-ui | 7bc959f | U1–U2 完成（待核实，推断），U3–U7 待做 |
 | UVC 采集卡 | feature/uvc | 02f1d41 | UHC07P = MS2130，USB 2.0 下仅 MJPEG；待上机 |
-| 设备 | — | — | **10-27 起接在 iMac（dev-imac）**；fw 1.7.1 good，B 槽（gen 28），1.7.0 在 A 槽；health ok、自检全 PASS；mk20-kbd normal、21/21 屏、旋钮 6/6；**FAT 剩余仅约 1.2 MB**；10:23 经 cmd-reboot 安全重启验证 OK；iMac 侧 ECM 网卡仍未起（macOS AppleUserECM 驱动自身崩溃，见日志） |
+| 设备 | — | — | **10-27 起接在 iMac（dev-imac）**；**fw 1.8.0-rc1（CDC-NCM）good，A 槽，24 h soak PASS（10-28 14:44，288/288，0 重启/回滚，内存平稳）**，1.7.1 在 B 槽；health ok、自检全 PASS；mk20-kbd normal、21/21 屏、旋钮 6/6；**FAT 剩余仅约 1.2 MB**；10:23 经 cmd-reboot 安全重启验证 OK；iMac 侧 ECM 网卡仍未起（macOS AppleUserECM 驱动自身崩溃，见日志） |
 | iMac 主机 | chore/imac-tooling | deecd26 | adb 需 platform-tools **r35.0.2**（37.0.1 遇空序列号设备崩溃）；`~/mk20-backup/mkadb.sh`（仅 MK20）、`~/worktrees/route-check.sh`；**ECM 网卡未起**（macOS 15.8 Intel 的 AppleUserECM dext 在 init() 断言崩溃）→ mk20deck / 桥接 / 网页 / soak 暂不可用；route-check 改为按出口 203.0.113.10 判定（Hy2 或 SS 均可，非 Hy2 告警）；mihomo 运行时 AI→AI-Auto 固定 Hy2（未写配置） |
 | 10-25 后新分支 | feature/gd32-dfu-notice、feature/k1-scroll、mac/1.7.1-gd32-notice、mac/1.7.1-k1-scroll、feature/gd32-default-keymap | cef750b / c702ff7 / 59a8334 / b21fbda / a581757 | GD32 DFU 提示、K1 滚动会话历史（均 Kimi K3 GO，未部署）；GD32 默认键位 KC_NO 补丁仅分析，**未刷写**（刷 GD32 仍禁止，需用户明确决定） |
 | PRD | main | c582581 | **PRD v1.5 已批准**（10-25，用户）：生产版保留 ADB；§17 补到 1.7.1 |
@@ -75,7 +75,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 - [ ] **iMac ECM**：网卡不出现（驱动匹配问题）；先请用户拔插一次 MK20，仍不行再评估驱动层方案（需 sudo/用户决定）；通后 `mk20_host_net.py sync`
 - [ ] **route-check 节点**：用户决定 iMac 上 US-Exit-SS（SS）是否可代替 US-Exit-Hy2（`WANT_NODE=US-Exit-SS`）
-- [ ] **1.8.0-rc1 24 h soak 进行中**（10-27 14:44 → 10-28 14:44 SGT，自动判定）
+- [x] **1.8.0-rc1 24 h soak PASS**（10-27 14:44 → 10-28 14:44 SGT，288 样本 0 失败；feature/ncm-gadget 8fb7041 VERDICT.md）— [ ] 下一步：mk20deck 实连桥接后的 host_link 验证（soak 期间桥接未连，host_link 全 idle）；是否打 tag v1.8.0 待用户决定
 - [ ] **1.7.1 soak 结论**：dev-mbp 上线后读 `soak-20261025-012324.summary.json`；否则 ECM 通后在 iMac 重跑 24 h → tag v1.7.1
 - [x] iMac 部署 mk20deck（10-27 14:47，feature/ncm-gadget 4eb998f）— [ ] **用户：本地网络权限允许 ~/.local/bin/python3.13（uv cpython-3.13.15）**；[ ] 用户：Codex App 信任 hooks
 - [ ] iMac 构建/测试环境：colima mk20、bb127、make test / make mac-test、安装链脚本（目前只在 dev-mbp）
