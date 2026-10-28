@@ -1,6 +1,6 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-27 14:47 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-28 14:44 SGT
 
 ## 1. 当前状态
 
@@ -20,6 +20,7 @@ rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191af
 
 ## 2. 关键进展日志（新的在上）
 
+- **10-28 14:44** **fw 1.8.0-rc1 24 h soak soak-20261027-144438 结束：PASS**（288 样本；判定与数据 feature/ncm-gadget 8fb7041 deck/reviews/1.8.0/soak-20261027-144438/VERDICT.md，自动生成，未打 tag）
 - **10-27 14:47** **iMac 部署 mk20deck + 启动 fw 1.8.0-rc1 24 h soak**。① 部署：`~/mk20-deploy` = feature/ncm-gadget 4eb998f（Mac 侧同 release/1.7.1；**未并入** mac/1.7.1-gd32-notice、mac/1.7.1-k1-scroll，留待 soak 后），venv uv python3.13；config `~/.config/mk20-agent-deck/config.toml`（来自 dev-mbp 归档，Ghostty→Terminal、tmux=/usr/local/bin/tmux；mk20deck 无需 VNC 密码）；LaunchAgent com.leo.mk20-agent-deck running；Claude hooks 三个 settings*.json 追加合并、Codex `~/.codex/hooks.json` 新建（需在 Codex App 设置→Hooks 信任）；备份 `~/mk20-backup/pre-deploy-20261027/`。**阻塞：mk20deck 连不上桥接**——macOS 15 本地网络隐私拦截 uv 的 python3.13（connect 172.30.250.2:17890 → EHOSTUNREACH 65；nc、系统 python3 均通），需用户在 系统设置→隐私与安全性→本地网络 允许该 python，supervisor 会自动重连。② soak：**开始 10-27 14:44:38 SGT（01:44:38 CDT），预计结束 10-28 14:44 SGT（10-28 01:44 CDT）**，`soak-20261027-144438`，launchd com.leo.mk20-soak-180（caffeinate -i -s），每 3 h 推部分数据（com.leo.mk20-soak-180-push），结束自动 VERDICT.md + 本文件一行；首个样本 ok；部分数据已推 feature/ncm-gadget 798c317，工具副本 bfdbfb6。桥接未连期间 host_link=idle/unknown。查看方法见 HANDOFF。
 - **10-27 14:31** **NCM 1.8.0-rc1 设备验证 PASS**：双向同时 20 MiB TCP（设备→Mac 7.0 s ≈ 24 Mbit/s；Mac→设备 20971520 B 全收），usb0 tx_dropped/rx_errors 0，dmesg 无新行，UDC 一直 configured；Mac en2 MTU 仍 1500（改需 sudo，未做）：TCP 不受影响，Mac→设备 ICMP > 462 B 丢（待用户 sudo networksetup -setMTU en2 462）；1.8.0 由 probation gate 自动 confirm（未手动）；证据 4eb998f；相机 after 图 14:29
 - **10-27 14:27** **NCM 1.8.0-rc1 安装成功并自动 confirm**：slot A 1.8.0 good（selftest PASS + 'PASS ecm host traffic (usb0 rx 42 -> 43)'，真实 Mac 流量，uptime 92 s）；iMac en2 = AppleUSBNCM（MAC 02:11:22:33:44:56），AppleUserECM 未再接管；host_net sync 无需 sudo → 172.30.250.1/24，ping .2 0% loss，:17890/:8780 通；证据 feature/ncm-gadget 666e69c。双向大流量测试进行中
