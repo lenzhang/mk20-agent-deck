@@ -2,8 +2,8 @@
 name = "mk20deck"
 version = "0.1.0"
 description = "MK20 Agent Deck P0: Codex Desktop / herdr / tmux status deck for Waveshare MK20 B"
-requires-python = ">=3.11"
-dependencies = ["Pillow>=10.1", "pyserial>=3.5"]
+requires-python = ">=3.9"
+dependencies = ["Pillow>=10.1", "pyserial>=3.5", "tomli>=1.1; python_version < '3.11'"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

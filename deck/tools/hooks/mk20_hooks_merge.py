@@ -184,7 +184,7 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--command", default=None, help="hook command (install)")
     ap.add_argument("paths", nargs="*")
-    a = ap.parse_args(argv)
+    a = ap.parse_intermixed_args(argv)  # <3.12 argparse: nargs="*" after options (system python 3.9)
     if a.action == "install" and not a.command:
         ap.error("install needs --command")
     return run(a.action, a.paths, a.command, a.dry_run)
