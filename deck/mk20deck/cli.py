@@ -130,9 +130,9 @@ def cmd_arrange(args, opener=None) -> int:
 
 
 def cmd_shots(args) -> int:
-    from .sim import attention_shots, layout_shots, move_shots, option_shots, scroll_shots, shots
+    from .sim import approval_shots, attention_shots, layout_shots, move_shots, option_shots, scroll_shots, shots
     fn = {"attention": attention_shots, "layout": layout_shots, "move": move_shots, "option": option_shots,
-          "scroll": scroll_shots}.get(getattr(args, "scenario", "default"), shots)
+          "scroll": scroll_shots, "approve": approval_shots}.get(getattr(args, "scenario", "default"), shots)
     made = fn(args.out, animations=not args.static)
     for n, cap in made:
         print(f"{os.path.join(args.out, n)}  {cap}")
@@ -387,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("sim-shots", help="render simulator screenshots")
     s.add_argument("--out", default="artifacts")
     s.add_argument("--static", action="store_true")
-    s.add_argument("--scenario", choices=("default", "attention", "layout", "move", "option", "scroll"),
+    s.add_argument("--scenario", choices=("default", "attention", "layout", "move", "option", "scroll", "approve"),
                    default="default")
     s.set_defaults(fn=cmd_shots)
     pt = sub.add_parser("probe-tmux", help="read-only tmux discovery: pane ids, commands, hook-derived states")

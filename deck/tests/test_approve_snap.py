@@ -13,15 +13,16 @@ from PIL import Image
 from mk20deck.adapters.base import RecordingRunner, RunResult
 from mk20deck.adapters.tmux import TmuxAdapter, TmuxConfig
 from mk20deck.config import DeckConfig, load_config, parse_sound
-from mk20deck.controller import (APPROVE_FLASH_S, APPROVE_PTT, APPROVE_READY, APPROVE_STALE, BOTTOM_ROW, LONG_PRESS,
-                                 PERMISSION_LABELS, SNAP_BUSY, Controller, KeyView, Role, slot_pos)
+from mk20deck.controller import (APPROVE_EDGE, APPROVE_FLASH_S, APPROVE_NO_LINK, APPROVE_PTT, APPROVE_READY,
+                                 APPROVE_STALE, BOTTOM_ROW, LONG_PRESS, PERMISSION_LABELS, SNAP_BUSY, Controller,
+                                 KeyView, Role, slot_pos)
 from mk20deck.daemon import Daemon
 from mk20deck import effects as E
 from mk20deck.layout import DeviceLayout
 from mk20deck.model import Mode, Session, SessionId, State, Tool
 from mk20deck.render.canvas import Renderer
 from mk20deck.render.keys import OPTION_AMBER, key_fps, render_key
-from mk20deck.sim import FakeClock, option_adapters
+from mk20deck.sim import FakeClock, approval_shots, option_adapters
 from mk20deck.slots import N_SLOTS
 
 PERM, Q = "推送发布", "数据库选型"
@@ -34,10 +35,10 @@ def approve_adapters():
     return ads
 
 
-def make(hold=1.0, ads=None):
+def make(hold=1.0, ads=None, *, sim=True):
     clk = FakeClock()
     ads = ads or approve_adapters()
-    c = Controller(DeckConfig(approve_hold_s=hold), ads, {"mode": "tmux"}, clock=clk, wall=lambda: 1.0, sim=True)
+    c = Controller(DeckConfig(approve_hold_s=hold), ads, {"mode": "tmux"}, clock=clk, wall=lambda: 1.0, sim=sim)
     c.refresh()
     return c, clk, ads
 
@@ -172,6 +173,26 @@ def test_missing_key_up_fails_closed_until_it_arrives():
     assert len(answers(ads)) == 1
 
 
+def test_repress_after_a_lost_key_up_cannot_answer():
+    c, clk, ads = make()
+    enter_perm(c, clk)
+    c.on_key(1, 1, True)
+    for _ in range(11):
+        clk.advance(0.1)
+        c.tick()
+    c.on_key(1, 1, True)  # a new down is indistinguishable from bounce after the old up was lost
+    c.on_key(1, 1, False)
+    assert answers(ads) == [] and APPROVE_EDGE in c.view().sub.toast
+
+
+def test_no_frame_ack_never_enters_approval_state():
+    c, clk, ads = make(sim=False)
+    enter_perm(c, clk)
+    hold_key(c, clk, 1, 1, 1.1)
+    c.on_key(1, 1, False)
+    assert answers(ads) == [] and APPROVE_NO_LINK in c.view().sub.toast
+
+
 def test_reconnect_and_timeout_never_approve():
     c, clk, ads = make()
     enter_perm(c, clk)
@@ -247,6 +268,14 @@ def test_long_press_pending_while_holding():
     assert c.long_press_pending()
     c.on_key(1, 1, False)
     assert not c.long_press_pending()
+
+
+def test_approval_sim_shots(tmp_path):
+    made = approval_shots(str(tmp_path))
+    assert [name for name, _ in made] == [
+        "approve-01-permission.png", "approve-02-holding.png", "approve-03-ready.png", "approve-04-approved.png"
+    ]
+    assert all((tmp_path / name).is_file() for name, _ in made)
 
 
 # ------------------------------------------------------------------ render
@@ -545,12 +574,12 @@ def test_stall_without_key_up_never_approves():
 
 
 def test_stale_link_never_approves():
-    c, clk, ads = make()
+    c, clk, ads = make(sim=False)
     enter_perm(c, clk)
     c.note_link_ack()
     hold_key(c, clk, 1, 1, 1.1)  # no frame acked during the hold
     assert answers(ads) == [] and "未批准：键盘连接无响应" in c.view().sub.toast
-    c, clk, ads = make()
+    c, clk, ads = make(sim=False)
     enter_perm(c, clk)
     c.on_key(1, 1, True)
     for _ in range(11):

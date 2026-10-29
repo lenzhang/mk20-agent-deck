@@ -120,6 +120,7 @@ APPROVE_LINK_S = 0.6
 APPROVE_LATE = "未批准：响应延迟，请重新按住"
 APPROVE_NO_LINK = "未批准：键盘连接无响应"
 APPROVE_OTHER = "未批准：按住期间有其他输入"
+APPROVE_EDGE = "未批准：按键状态不确定，请重新按住"
 # SNAP (2026-10-29): long press of the MODE key (fb20) while L4 is shown = screenshot of the Mac screen to the
 # clipboard (macOS screencapture; the daemon runs it, see effects.py).  On L1 the long press still opens L4.
 SNAP_FLASH_S = 0.6
@@ -548,6 +549,10 @@ class Controller:
             self._say(msg)
             self._touch()
 
+    def _approve_link_ok(self, t: float) -> bool:
+        """Only a live device link may complete an approval; the simulator has no frame ACKs."""
+        return self.sim or (self.link_ack is not None and t - self.link_ack <= APPROVE_LINK_S)
+
     def _approve_tick(self, t: float) -> None:
         prev, self._approve_seen = self._approve_seen, t
         hold = self.approve_hold()
@@ -559,7 +564,7 @@ class Controller:
                 self._say(APPROVE_LATE)
                 self._touch()
                 continue
-            if self.link_ack is not None and t - self.link_ack > APPROVE_LINK_S:
+            if not self._approve_link_ok(t):
                 p.approve_done = True
                 self._say(APPROVE_NO_LINK)
                 self._touch()
@@ -571,7 +576,7 @@ class Controller:
 
     def _fire_approve(self, pk: tuple, p: _Press, t: float) -> None:
         """The approve key was held and released: type its digit only if nothing changed."""
-        if self.link_ack is not None and t - self.link_ack > APPROVE_LINK_S:
+        if not self._approve_link_ok(t):
             p.approve_done = True
             self._say(APPROVE_NO_LINK)
             self._touch()
@@ -797,7 +802,13 @@ class Controller:
             self.moving.last = t  # any Mac key event restarts the pick-up timeout (PTT is device-side)
         pk = ("key", col, row)
         if pressed:
-            if pk in self.presses:  # duplicate down (bounce) — ignore
+            if pk in self.presses:  # duplicate down (bounce or a new press after a lost up)
+                duplicate = self.presses[pk]
+                if duplicate.approve and not duplicate.approve_done:
+                    # Edge-only device reports cannot tell bounce from a new physical press.  Keeping the old
+                    # press would let a later up answer a prompt that was no longer continuously held.
+                    duplicate.approve_done = True
+                    self._say(APPROVE_EDGE)
                 return
             self.presses[pk] = p = _Press(kr, t, self.mode)
             if self.option is not None and kr.role == Role.AGENT and self.page == "L1":

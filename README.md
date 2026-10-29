@@ -25,6 +25,8 @@ some engineering notes are in English.
 | 会话安排网页 | `127.0.0.1:8781`，一次性链接授权，固定规则 / 钉扎 |
 | 设备端 | 自研 `mk20-kbd` 取代原厂 KeyboardDevice 渲染 21 块屏；A/B 槽固件 + 看门狗自动回滚；设备上的网页设置页 |
 
+键盘的实际键面、页面切换、选项选择、长按批准、移动钉扎和 K1 回看流程见[键盘交互图解](docs/keyboard-interaction.md)。图像由仓库里的模拟器按当前控制器逻辑生成，便于在没有设备时理解每个按键的作用。
+
 ## 架构
 
 ```mermaid

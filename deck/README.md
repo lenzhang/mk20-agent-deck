@@ -66,7 +66,7 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
 - Slots: 15 per mode, sticky, strict-higher overflow replacement, pins/selection protected, `+N` overflow on the
   sub-screen. State files from the 8-slot layout (no `n_slots` field) migrate by physical key: A1..A4 → S1..S4,
   A5..A8 → S6..S9.
-- Screenshots: `python -m mk20deck sim-shots --scenario layout --out <dir>` (pick up / place: `--scenario move`).
+- Screenshots: `python -m mk20deck sim-shots --scenario layout --out <dir>` (pick up / place: `--scenario move`; option mode: `--scenario option`; approval hold: `--scenario approve`). See the rendered [keyboard interaction guide](../docs/keyboard-interaction.md).
 
 ## 会话安排网页
 哪个会话在哪个键，用网页安排（不用写配置文件）。mk20deck 守护进程自己提供这个页面：

@@ -471,6 +471,58 @@ def option_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]
     return made
 
 
+def approval_shots(out_dir: str, animations: bool = False) -> list[tuple[str, str]]:
+    """Permission approval flow: idle, observed hold, ready-to-release, and approved flash."""
+    from .slots import N_SLOTS
+
+    os.makedirs(out_dir, exist_ok=True)
+    lay = DeviceLayout.default()
+    made: list[tuple[str, str]] = []
+
+    def save(c: Controller, clock: FakeClock, name: str, caption: str) -> None:
+        r = Renderer(lay, animations=animations)
+        view = c.view()
+        r.compose(view, clock.t - 0.25)
+        device_mockup(r.compose(view, clock.t), lay, title=f"MK20 Agent Deck · SIM · {caption}").save(
+            os.path.join(out_dir, name))
+        made.append((name, caption))
+
+    def slot_of(c: Controller, title: str) -> tuple[int, int]:
+        for i in range(N_SLOTS):
+            s = c.mgr.session_at(i)
+            if s is not None and s.title == title:
+                return slot_pos(i)
+        raise LookupError(title)
+
+    ads = option_adapters()
+    # This is the real tmux approval path: the host adapter answers the prompt, so S1/S2
+    # arrive as ordinary key edges and the controller applies the hold-and-release gate.
+    ads[Mode.TMUX].caps = replace(ads[Mode.TMUX].caps, approve=None)
+    clk = FakeClock()
+    c = Controller(DeckConfig(approve_hold_s=1.0), ads, {"mode": "tmux"}, clock=clk,
+                   wall=lambda: 1792244000.0, sim=True)
+    c.refresh()
+    c.option_hid = "ok"  # the simulated keyboard accepted ui.hidKeys for the non-approval choices
+    tap(c, clk, *slot_of(c, "推送发布"))
+    clk.advance(0.3)
+    save(c, clk, "approve-01-permission.png", "权限提示：S1/S2 长按批准，S3 否立即拒绝")
+
+    c.on_key(1, 1, True)
+    clk.advance(0.5)
+    c.tick()
+    save(c, clk, "approve-02-holding.png", "按住 S1 观察进度环（未满，不会批准）")
+
+    for _ in range(6):
+        clk.advance(0.1)
+        c.tick()
+    save(c, clk, "approve-03-ready.png", "满 1 秒：提示松开批准，仍等待同键抬起")
+
+    c.on_key(1, 1, False)
+    save(c, clk, "approve-04-approved.png", "松开 S1：批准成功、绿闪和提示音")
+    write_index(out_dir, made)
+    return made
+
+
 def gallery(path: str) -> None:
     """All 10 base states × {codex, ccai} × {normal, selected} + overlays, animations off."""
     states = list(State)
