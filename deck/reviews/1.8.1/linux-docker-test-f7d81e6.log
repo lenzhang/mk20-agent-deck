@@ -1,0 +1,279 @@
+make -C kbd tests/onboard_headless
+make[1]: Entering directory '/work/wt-181/deck/kbd'
+cc -Wall -Wextra -Werror -O2 -std=c99 -D_DEFAULT_SOURCE -fsanitize=address,undefined -fno-sanitize-recover=undefined -g -I. -o tests/onboard_headless tests/onboard_headless.c gd32.c gd32io.c host.c panels.c screen.c jpeg.c kbd.c hid.c ctl.c ctlscr.c k2estop.c onboard.c devstat.c ui.c ui_font.c ui_font_render.c uicfg.c -pthread
+make[1]: Leaving directory '/work/wt-181/deck/kbd'
+uv run --with pytest python -m pytest -q tests_sim
+Using CPython 3.13.5 interpreter at: /usr/bin/python3
+Creating virtual environment at: .venv
+   Building mk20deck @ file:///work/wt-181/deck
+Downloading pillow (6.8MiB)
+ Downloaded pillow
+      Built mk20deck @ file:///work/wt-181/deck
+warning: Failed to hardlink files; falling back to full copy. This may lead to degraded performance.
+         If the cache and target directories are on different filesystems, hardlinking may not be supported.
+         If this is intentional, set `export UV_LINK_MODE=copy` or use `--link-mode=copy` to suppress this warning.
+Installed 3 packages in 1.74s
+Downloading pygments (1.2MiB)
+ Downloaded pygments
+Installed 5 packages in 20ms
+......................................                                   [100%]
+38 passed in 11.19s
+make -C kbd test
+make[1]: Entering directory '/work/wt-181/deck/kbd'
+cc -Wall -Wextra -Werror -O2 -std=c99 -D_DEFAULT_SOURCE -fsanitize=address,undefined -fno-sanitize-recover=undefined -g -I. -o tests/test_kbd tests/test_kbd.c gd32.c gd32io.c host.c panels.c screen.c jpeg.c kbd.c hid.c ctl.c ctlscr.c k2estop.c onboard.c devstat.c ui.c ui_font.c ui_font_render.c uicfg.c -pthread
+cc -Wall -Wextra -Werror -O2 -std=c99 -D_DEFAULT_SOURCE -fsanitize=thread -g -I. -o tests/test_kbd_tsan tests/test_kbd.c gd32.c gd32io.c host.c panels.c screen.c jpeg.c kbd.c hid.c ctl.c ctlscr.c k2estop.c onboard.c devstat.c ui.c ui_font.c ui_font_render.c uicfg.c -pthread
+cc -Wall -Wextra -Werror -O2 -std=c99 -D_DEFAULT_SOURCE -o mk20-kbd mk20_kbd.c gd32.c gd32io.c host.c panels.c screen.c jpeg.c kbd.c hid.c ctl.c ctlscr.c k2estop.c onboard.c devstat.c ui.c ui_font.c ui_font_render.c uicfg.c -pthread
+cc -Wall -Wextra -Werror -O2 -std=c99 -D_DEFAULT_SOURCE -fsanitize=address,undefined -fno-sanitize-recover=undefined -g -I. -o tests/onboard_test tests/onboard_test.c gd32.c gd32io.c host.c panels.c screen.c jpeg.c kbd.c hid.c ctl.c ctlscr.c k2estop.c onboard.c devstat.c ui.c ui_font.c ui_font_render.c uicfg.c -pthread
+./tests/onboard_test
+mk20-kbd: /tmp/mk20-r1-hid-LZlPwZ/hid replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: /tmp/mk20-l1hid-yUm3Ax/hid replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20-l1hid-yUm3Ax/hid replaced/gone: parking stale fd (#2), reopening
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: Mac PTT held 120 s: released (lost key-up guard)
+mk20-kbd: Mac PTT held 120 s: released (lost key-up guard)
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: Mac PTT held 600 s: released (lost key-up guard)
+mk20-kbd: Mac PTT held 600 s: released (lost key-up guard)
+mk20-kbd: key held 60 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: host key held 60 s: released (lost key-up guard)
+U2 onboard: 16683 checks, 0 failures
+./tests/test_kbd
+mk20-kbd: host link silent 5 s: input flushed (#1)
+mk20-kbd: host link silent 5 s: input flushed (#3)
+mk20-kbd: host link silent 5 s: input flushed (#4)
+mk20-kbd: /nonexistent/hidg0 replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20hr8tQI8G/hidg0 replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20hr8tQI8G/hidg0 replaced/gone: parking stale fd (#2), reopening
+mk20-kbd: /tmp/mk20hr8tQI8G/hidg0 replaced/gone: parking stale fd (#3), reopening
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+4219 checks, 0 failures
+./tests/test_kbd_tsan
+mk20-kbd: host link silent 5 s: input flushed (#1)
+mk20-kbd: host link silent 5 s: input flushed (#3)
+mk20-kbd: host link silent 5 s: input flushed (#4)
+mk20-kbd: /nonexistent/hidg0 replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20hrTMVTXu/hidg0 replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20hrTMVTXu/hidg0 replaced/gone: parking stale fd (#2), reopening
+mk20-kbd: /tmp/mk20hrTMVTXu/hidg0 replaced/gone: parking stale fd (#3), reopening
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+mk20-kbd: all-keys-up not delivered: Resource temporarily unavailable
+4219 checks, 0 failures
+python3 tests/safe_mode.py
+K4 safe mode: 2 executable scenarios passed (21 panels, HID, K2, GD32 allow-list)
+python3 tests/e2e_run.py
+e2e: L1 HID keys Backspace/Return/Escape (+RAlt) reports OK
+e2e: L1 option mode ui.hidKeys: momentary digits, held = one digit, PTT ignore, forwarding, stale generation, clear OK
+e2e: same-page ui.page keeps held PTT + DELETE (no HID report), released on the physical up OK
+e2e: estop -> all-up in 1.7 ms
+e2e: initially stalled host socket -> all-up in 0.7 ms
+e2e: initially stalled host reserved_key -> all-up in 0.6 ms
+e2e: initially stalled host human -> all-up in 0.6 ms
+e2e: initially stalled host k2_triple -> all-up in 2.9 ms
+e2e: initially stalled host k2_hold -> all-up in 1001.7 ms
+e2e: status worker blocked 5 s/probe: socket -> all-up in 1.5 ms
+e2e: status worker blocked 5 s/probe: k2_hold -> all-up in 1001.0 ms
+e2e: host silence backstop: no flush with 1 s heartbeats, 1 flush in 7.0 s of silence, link OK
+e2e: OK
+make[1]: Leaving directory '/work/wt-181/deck/kbd'
+uv run --with pytest python -m pytest -q agent/tests
+........................................................................ [ 18%]
+........................................................................ [ 36%]
+........................................................................ [ 54%]
+........................................................................ [ 72%]
+........................................................................ [ 90%]
+......................................                                   [100%]
+398 passed in 555.43s (0:09:15)
+make -C kbd ui-test
+make[1]: Entering directory '/work/wt-181/deck/kbd'
+cc -std=c99 -Wall -Wextra -Werror -O1 -g -I. -fsanitize=address,undefined -fno-sanitize-recover=undefined -o tests/ui_test tests/ui_test.c ui.c ui_font.c ui_font_render.c uicfg.c panels.c
+cc -std=c99 -Wall -Wextra -Werror -O1 -g -I. -fsanitize=address,undefined -fno-sanitize-recover=undefined -o tests/ui_headless tests/ui_headless.c ui.c ui_font.c ui_font_render.c uicfg.c panels.c
+cc -std=c99 -Wall -Wextra -Werror -O1 -g -I. -fsanitize=address,undefined -fno-sanitize-recover=undefined -o tests/uicfg_cli tests/uicfg_cli.c uicfg.c
+cc -std=c99 -Wall -Wextra -Werror -O1 -g -I. -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wno-deprecated-declarations -ffunction-sections -fdata-sections -Wl,--gc-sections -I../agent/src -I../agent/vendor/cjson -I../agent/vendor/mbedtls/include -DMBEDTLS_CONFIG_FILE='"mk20_mbedtls_config.h"' -o tests/ui_load tests/ui_load.c ../agent/src/llm.c ../agent/src/netcfg.c ../agent/src/net.c ../agent/src/json_util.c ../agent/vendor/cjson/cJSON.c -lm
+./tests/onboard_test
+mk20-kbd: /tmp/mk20-r1-hid-oDH7ha/hid replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: /tmp/mk20-l1hid-hEoKg3/hid replaced/gone: parking stale fd (#1), reopening
+mk20-kbd: /tmp/mk20-l1hid-hEoKg3/hid replaced/gone: parking stale fd (#2), reopening
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: Mac PTT held 120 s: released (lost key-up guard)
+mk20-kbd: Mac PTT held 120 s: released (lost key-up guard)
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: Mac PTT held 600 s: released (lost key-up guard)
+mk20-kbd: Mac PTT held 600 s: released (lost key-up guard)
+mk20-kbd: key held 60 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: Mac key held 10 s: released (lost key-up guard)
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: e-stop pause: no input for 5 s, held state resynced
+mk20-kbd: key held 10 s across a same-page ui.page: released (lost key-up guard)
+mk20-kbd: host key held 60 s: released (lost key-up guard)
+U2 onboard: 16683 checks, 0 failures
+python3 ../tools/gen-providers.py --check
+./tests/ui_test
+ui: 41405 checks passed (ASan/UBSan)
+python3 tests/ui_conformance.py
+ui armhf: static C99 compile passed
+ui conformance: 85 provider/model/profile combinations, 170 exact files, actual agent loaders; 4 escaping cases
+python3 tests/ui_golden.py
+ui headless: 17 scenes, 374 P6 PPMs
+ui goldens: 374 byte-exact P6 files (verified)
+make[1]: Leaving directory '/work/wt-181/deck/kbd'
+UV_OFFLINE=1 uv run --with pytest python -m pytest -q tests_sim -k onboard
+..........                                                               [100%]
+10 passed, 28 deselected in 4.65s
+shellcheck -s sh -S warning firmware/rescue/*.sh firmware/release/sbin/mk20d firmware/release/share/*.sh tools/mk20-release-build.sh tools/mk20-install.sh tools/mk20-rescue-update.sh tools/mk20-build-bins.sh
+shellcheck -s bash -S warning tools/tf-identify.sh tools/tf-restore-boot.sh
+python3 -m py_compile tools/mk20_key_latency.py tools/mk20_accept.py tools/mk20_soak.py tools/mk20_host_net.py tools/tcp_transport.py tools/tf_gpt_check.py
+(cd tools && uv run --with pytest python -m pytest -q test_tcp_transport.py test_mk20_host_net.py test_mk20_soak.py test_mk20_accept.py test_tf_gpt.py)
+.............................................................s.......... [ 85%]
+............                                                             [100%]
+83 passed, 1 skipped in 5.13s
+MK20_TEST_BUSYBOX=${MK20_TEST_BUSYBOX:-$( [ -x /workspace/tools/bb127/busybox ] && echo /workspace/tools/bb127/busybox )} uv run --with pytest python -m pytest -q tests
+........................................................................ [  4%]
+........................................................................ [  9%]
+........................................................................ [ 14%]
+........................................................................ [ 18%]
+........................................................................ [ 23%]
+........................................................................ [ 28%]
+........................................................................ [ 33%]
+...........................................ss........................... [ 37%]
+.s...................................................................... [ 42%]
+...................s.........s.......................................... [ 47%]
+........................................................................ [ 51%]
+........................................................................ [ 56%]
+........................................................................ [ 61%]
+........................................................................ [ 66%]
+........................................................................ [ 70%]
+........................................................................ [ 75%]
+........................................................................ [ 80%]
+........................................................................ [ 85%]
+........................................................................ [ 89%]
+........................................................................ [ 94%]
+........................................................................ [ 99%]
+............                                                             [100%]
+1519 passed, 5 skipped in 2950.29s (0:49:10)

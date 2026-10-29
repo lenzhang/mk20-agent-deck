@@ -1,0 +1,16 @@
+Round 2 of a READ-ONLY review of mk20-agent-deck branch feature/deck-1.8.1 (Python Mac host mk20deck). Do not modify files and do not run tests (Mac suite + new tests already pass); you may read files and run git diff/log. Be fast.
+
+Round 1 (deck/reviews/1.8.1/codex-r1.md) found:
+1. BLOCKER controller: approval fired solely from elapsed time while the press stays in self.presses; a dropped key-up or a loop stall resuming past the threshold would still answer.
+2. MAJOR effects: SNAP did CGPreflightScreenCaptureAccess and os.makedirs synchronously on the daemon thread.
+
+Constraint: the keyboard firmware may NOT be changed and its protocol has no held-key heartbeat/query, so a key-state heartbeat is impossible. The fix (inline diff below, `git diff f7d81e6..HEAD`):
+- the hold must be observed continuously: every tick checks the gap since max(press time, previous tick); > APPROVE_MAX_GAP_S (0.5 s; the daemon wakes every 75 ms while an approve is pending) cancels for good (approve_done); so a stalled loop never fires from a stale press, and a queued key-up is processed before tick anyway;
+- at fire time the keyboard must have acked a frame within APPROVE_LINK_S (0.6 s; the daemon sends the progress-ring frames at 8 fps and calls controller.note_link_ack() on each acked frame), else cancel;
+- any other key or knob event during the hold cancels it, and an approve press does not start while any other press is held;
+- reconnect / wake already clear presses (drop_gestures); the TCP link (reliable) carries key-up events;
+- SNAP: all setup (permission probe, makedirs, screencapture, osascript, waiting with a 10 s timeout) runs in a daemon worker thread; the loop only queues and polls a locked result list; sound is one Popen.
+
+Residual (please judge): a key-up lost by the firmware itself on a live, responsive link, with the loop ticking normally, cannot be detected Mac-side without a firmware change. Is that acceptable as documented residual risk, or still a blocker?
+
+Output markdown: "VERDICT: PASS" or "VERDICT: FAIL", then disposition of R1-1 and R1-2 (FIXED/PARTIAL/OPEN) and any new findings (BLOCKER/MAJOR/MINOR/NIT, file:line, fix). Concise.
