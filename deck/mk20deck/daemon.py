@@ -148,6 +148,9 @@ class Daemon:
     # loop thread inside step() (never from the HTTP thread) and force a frame.
     calls: object | None = None
     bg_join_s: float = 6.0  # run() waits this long for its background poll thread to finish (adapter timeouts)
+    # hw/gd32watch.Gd32DfuWatch (process-wide, its own thread; None = off): its confirmed ``stuck`` state becomes the
+    # controller's GD32 DFU banner on every step (an attribute read, never the probe itself).
+    gd32: object | None = None
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -520,6 +523,7 @@ class Daemon:
         if self.calls is not None and self.calls.drain(self):
             force = True  # an arrange-page change: show it on the keyboard now
         self._drain_background()
+        self._sync_gd32()  # a change bumps the version: a frame
         self.controller.tick()
         if self._sync_page(now):  # before the (possibly slow) poll: the keyboard switches at once ...
             force = True          # ... and gets the new page's full frame in this step (it shows a placeholder)
@@ -556,6 +560,11 @@ class Daemon:
         else:
             self.frames_failed += 1
         return True
+
+    def _sync_gd32(self) -> None:
+        """The watch's confirmed GD32 DFU state -> the controller (banner, arrange page); also while paused."""
+        if self.gd32 is not None and hasattr(self.controller, "set_gd32_dfu"):
+            self.controller.set_gd32_dfu(getattr(self.gd32, "stuck", False))
 
     def next_wait(self) -> float:
         now = self.clock()
@@ -647,6 +656,7 @@ class Daemon:
                 # page is sent again (Kimi r2 MINOR).
                 while not self.events.empty():
                     self.events.get_nowait()
+                self._sync_gd32()  # no step() while paused: keep the arrange page's GD32 state current
                 if self.calls is not None:
                     self.calls.drain(self)  # arrange-page changes still apply (shown after wake)
                 continue

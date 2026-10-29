@@ -23,6 +23,7 @@ is **not** implemented (not approved).
 | `hw/via.py` | VIA raw-HID client: read-only backup, diff-only verified restore, mock keyboard |
 | `hw/gd32dfu.py` | GD32 DFU (`1eaf:0003`) re-flash wrapper, dry-run by default |
 | `hw/usbenum.py`, `hw/power.py` | read-only USB enumeration; sleep/wake (clock jump + `CGDisplayIsAsleep`) |
+| `hw/gd32watch.py` | read-only watch (macOS `ioreg`, every 30 s) for the GD32 key MCU stuck in its Maple DFU bootloader → red banner on the sub-screen (see 按键控制器停在升级模式) |
 
 ## Key layout (L1 / L4, PRD 1.5 — [docs/PRD-1.5-L1-LAYOUT.md](docs/PRD-1.5-L1-LAYOUT.md))
 Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key `fb = (row-1)*5 + col`.
@@ -133,6 +134,25 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
   `PUT /api/rules/<id> {enabled?, kind?, value? | session?}`，`POST /api/rules/<id>/delete`。`slot` 是 0–14（S1–S15）。
 - 开发：`python -m mk20deck sim-serve --arrange-port 8782` 对着模拟数据开这个页面（规则写到临时文件；启动时打印
   `mk20deck arrange --socket <临时 socket>` 命令和一个一次性链接）。
+
+## 按键控制器停在升级模式（GD32 DFU 提示）
+2026-10-25 14:08 外部断电后，键盘的按键 MCU（GD32）上电没有启动键盘程序，停在 Maple DFU bootloader：Mac 上原来
+“syk_keyboards”（`4250:426f`）的位置变成 **“Maple 003”**（LeafLabs，`1eaf:0003`，序列号 “LLM 003”），和 T113
+（“Serial”，`1d6b:0104`）挂在键盘内部同一个 hub 下。屏幕和主机连接都正常，所以键盘看起来一切正常，但**所有按键和
+旋钮（包括 K2 急停）都不起作用**。T113 碰不到 GD32 的复位 / BOOT 脚，只有**重新插拔 MK20 的 USB 线**能恢复。
+
+- **检测**（`hw/gd32watch.py`，只在 macOS 上、只在守护进程运行时）：单独的线程每 30 秒最多跑一次
+  `ioreg -p IOUSB -l -w0 -a`（plist，5 秒超时，约 30 ms），用 `plistlib` 解析。只读：从不打开、占用或给 GD32 /
+  bootloader 发任何东西（没有 DFU 请求、没有控制传输）。只认和 MK20 T113 在**同一个 hub** 上的 `1eaf:0003`
+  （T113 现在在那，或 10 分钟内在同一个 hub——同一端口、同一 hub 型号——上出现过：ECM 重新枚举时 T113 会离开总线几秒；
+  之后换插到这个端口的别的 hub 不算）；别的 hub 上的 Maple 板子只记一条 INFO、不提示。**连续两次检查都看到**才算（正常上电时 bootloader 也会出现约 1 秒，撑不过一个检查间隔），所以提示在
+  出现后 30–60 秒内亮；一次检查看不到就撤掉。`ioreg` 失败 / 超时 / 输出损坏：这一轮当作没有信息（提示不变），
+  只记一条 debug，直到下一次成功。
+- **键盘**：L1 / L4 副屏底部一块红色横幅，状态持续多久就显示多久，消失后自动撤掉：
+  「按键控制器停在升级模式：请重新插拔键盘 USB 线」/「按键和旋钮（含 K2 急停）现在都不起作用」。提示（toast）仍显示在它上面。
+- **日志**：确认时一条 WARNING（位置、hub、旁边的 T113），恢复时一条 INFO；状态不变不重复。
+- **会话安排网页**：`/api/state` 多了 `gd32_dfu`（true / false），页面顶部 “注意：” 提示同一件事（键盘没连上时也会更新）。
+- 不发 macOS 通知（代码里本来就没有通知机制）。恢复步骤和其他症状见 `firmware/RECOVERY.md` 的症状表。
 
 ## Dev
 ```bash

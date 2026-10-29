@@ -67,6 +67,11 @@ OPTION_PENDING = "数字键暂未生效（键盘未确认），请在 Mac 上按
 OPTION_PTT = "先松开按住说话"  # the keyboard ignores digits while the Mac PTT (Right Option) is held
 # K1 short reached the deck on L4 although the keyboard handles it there itself: its route is L1 -> re-send L4.
 PAGE_RESYNC = "键盘页面已重新同步到 L4 · 再按 K1 进入键盘设置"
+# GD32 key MCU stuck in its Maple DFU bootloader (hw/gd32watch, incident 2026-10-25 14:08): the screens and the host
+# link work, the keys and knobs do not.  A persistent red banner on the L1/L4 sub-screen while the Mac sees it.
+GD32_DFU_ALERT = "按键控制器停在升级模式：请重新插拔键盘 USB 线"
+GD32_DFU_DETAIL = "按键和旋钮（含 K2 急停）现在都不起作用"
+GD32_DFU_WEB = "键盘的按键控制器（GD32）停在升级模式（Maple DFU）：按键和旋钮（含 K2 急停）都不起作用，请重新插拔键盘 USB 线"
 # K1 rotation order (PRD delta 2026-10-20): who needs me first, then the rest by slot order.
 K1_RANK = {State.NEEDS_APPROVAL: 0, State.NEEDS_INPUT: 1, State.ERROR: 2, State.DONE_UNREAD: 3}
 MODE_SHORT = {Mode.DESKTOP: "桌面", Mode.HERDR: "herdr", Mode.TMUX: "tmux"}
@@ -171,6 +176,8 @@ class SubView:
     moving: str = ""  # instruction line while a slot is picked up
     option: str = ""  # option mode instruction line ("选项：按 1–N 选择 · × 取消 · K1 返回")
     option_note: str = ""  # option mode: why digits may not work (legacy firmware / not accepted yet)
+    alert: str = ""  # persistent hardware banner (GD32 stuck in its DFU bootloader); "" = none
+    alert_detail: str = ""  # its second line
 
 
 @dataclass
@@ -278,6 +285,7 @@ class Controller:
         self.action_count = 0
         self.settings = settings or SettingsPage()
         self.rules_warning = ""  # slot-rules.json problem (set by webui.ArrangeService), shown on the sub-screen
+        self.gd32_dfu = False  # the Mac sees the GD32 in its DFU bootloader (daemon, from hw/gd32watch): red banner
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -329,6 +337,13 @@ class Controller:
         self._drop_option()
         if not self._cancel_move(toast):
             self._say(toast, 0.8)
+
+    def set_gd32_dfu(self, on: bool) -> None:
+        """Daemon (loop thread): the GD32 DFU state confirmed by hw/gd32watch; a new frame only on a change."""
+        on = bool(on)
+        if on != self.gd32_dfu:
+            self.gd32_dfu = on
+            self._touch()
 
     def request_page_sync(self) -> None:
         """The keyboard's route is known to differ from ``page``: the daemon sends ui.page again, even if acked."""
@@ -932,5 +947,6 @@ class Controller:
             option=(f"选项：按 1–{len(op.labels)} 选择 · × 取消 · K1 返回" if len(op.labels) > 1 else
                     "选项：按 1 选择 · × 取消 · K1 返回") if op else "",
             option_note=({"legacy": OPTION_LEGACY, "pending": OPTION_PENDING}.get(self.option_hid, "")) if op else "",
+            alert=GD32_DFU_ALERT if self.gd32_dfu else "", alert_detail=GD32_DFU_DETAIL if self.gd32_dfu else "",
         )
         return DeckView(keys, sub)
