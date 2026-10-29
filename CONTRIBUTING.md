@@ -32,6 +32,8 @@ docker run --rm -v "$PWD":/work/wt -v <busybox 目录>:/bb127:ro -w /work/wt/dec
 make -C deck mac-test
 ```
 
+GitHub Actions 的 `Host tests` 工作流运行主机端 Python 测试、模拟器用例和 `mk20-kbd` 主机编译。依赖设备根文件系统、BusyBox 1.27.2 或特权 USB/网络环境的测试仍只在上面的 `mk20-build:trixie` Docker 全量测试中运行；普通 GitHub runner 不具备这些条件。
+
 已知：macOS 上有 4 个计时敏感用例偶发失败（`test_agent_backoff_and_healthy_reset`、
 `test_agent_selftest_never_fails[crashing]`、`test_hook_interrupts_backoff_and_resets_next_delay[*]`），
 见 `deck/reviews/1.8.0/mac-test-4eb998f-failure.md`。新增失败不算「已知」。

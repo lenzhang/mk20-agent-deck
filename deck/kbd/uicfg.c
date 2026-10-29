@@ -205,7 +205,16 @@ int uicfg_apply(const char *root, const uicfg_t *c, const uicfg_hooks_t *h)
     if (syncfd(dir, 1, h)) {
         /* Re-create a visible gate if final durability cannot be confirmed. */
         int gate = openat(dir, ".apply-in-progress", O_WRONLY | O_CREAT | O_NOFOLLOW, 0600);
-        if (gate >= 0) { (void)write(gate, "1", 1); (void)fsync(gate); close(gate); (void)fsync(dir); }
+        if (gate >= 0) {
+            /* Best effort only: the directory sync already failed, but keep a
+             * visible gate for the next boot.  Use the checked write helper so
+             * GCC's warn_unused_result does not turn this fallback into a
+             * build failure. */
+            (void)write_all(gate, "1", NULL);
+            (void)fsync(gate);
+            close(gate);
+            (void)fsync(dir);
+        }
         goto done;
     }
     rc = 0;

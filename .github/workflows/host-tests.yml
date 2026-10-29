@@ -25,5 +25,22 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
       - name: Compile Python sources
         run: python -m compileall -q mk20deck mk20sim tests tests_sim tools agent/tests
+      - name: Build host keyboard binary
+        run: make -s -C kbd mk20-kbd
       - name: Run host tests
-        run: python -m pytest -q tests
+        # These modules exercise the device rootfs, BusyBox 1.27.2, or
+        # privileged USB/network behavior.  The documented mk20-build:trixie
+        # `make test` job is the source of truth for that device suite.
+        run: >-
+          python -m pytest -q tests
+          --ignore=tests/test_ecm_watchdog.py
+          --ignore=tests/test_faults.py
+          --ignore=tests/test_install.py
+          --ignore=tests/test_mk20d.py
+          --ignore=tests/test_mk20d_agent.py
+          --ignore=tests/test_mk20d_kbd.py
+          --ignore=tests/test_mk20d_router.py
+          --ignore=tests/test_page_sync_e2e.py
+          --ignore=tests/test_rescue.py
+      - name: Run simulator cases
+        run: python -m pytest -q tests_sim/test_sim_gestures.py
