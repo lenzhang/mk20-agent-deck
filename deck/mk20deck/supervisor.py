@@ -46,6 +46,7 @@ class Supervisor:
     calls: object | None = None  # webui.LoopCalls: arrange-page changes, run on this thread (also while unplugged)
     arrange: object | None = None  # webui.ArrangeServer for the keyboard's 会话安排 key (ui.openArrange); None = off
     gd32: object | None = None  # hw/gd32watch.Gd32DfuWatch (started by cmd_run, outlives every connection)
+    effects: object | None = None  # effects.Effects: approve sound / SNAP (process-wide, outlives every connection)
     # While it cannot (re)connect: one line with the elapsed time at least this often (2026-10-23 incident: after the
     # last "未找到 MK20 CDC 端口" the log stayed silent for 50 min while the keyboard's bridge was stuck).
     down_note_s: float = 600.0
@@ -133,7 +134,8 @@ class Supervisor:
                        web_url=getattr(cfg, "web_url", DEFAULT_WEB_URL),
                        bg_poll_s=getattr(cfg, "background_poll_s", 10.0), bg_adapters=self.bg_adapters,
                        calls=self.calls, arrange=self.arrange,
-                       arrange_port=getattr(cfg, "arrange_port", DEFAULT_ARRANGE_PORT), gd32=self.gd32)
+                       arrange_port=getattr(cfg, "arrange_port", DEFAULT_ARRANGE_PORT), gd32=self.gd32,
+                       effects=self.effects)
             link = DeviceLink(tr, on_key=d.on_device_key, ack_timeout=cfg.ack_timeout_s,
                               preamble_flush=cfg.preamble_flush, on_event=d.on_device_event)
             d.link = link

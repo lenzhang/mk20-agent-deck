@@ -104,6 +104,11 @@ class ModeAdapter:
         """K1 press: back to the latest content, out of any scroll-back state."""
         return ActionResult(False, self.capabilities().scroll or "此模式不支持回看")
 
+    def answer(self, s: Session, digit: int) -> ActionResult:
+        """Long-press approve (2026-10-29): type the choice ``digit`` into ``s`` itself (not the frontmost window).
+        Only offered when ``capabilities().approve`` is None."""
+        return ActionResult(False, self.capabilities().approve or "此模式不支持代答")
+
     def scroll_release(self, s: Session) -> bool:
         """The deck stops scrolling ``s`` (another session / mode, idle timeout): leave the scroll-back state if that
         touches nothing else (tmux: only that pane).  True when the view is back at the latest content."""

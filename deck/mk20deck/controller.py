@@ -98,6 +98,19 @@ SCROLL_LATEST = "已是最新"
 SCROLL_PTT = "按住说话中，暂不回看"
 SCROLL_OPTION = "选项中不回看 · 按 K1 返回会话列表"
 K1_NO_SESSION = "未选中会话 · 单击会话键选择"
+# Long-press approve (2026-10-29): in option mode a permission prompt's 「是」/「是，且不再问」 keys answer only after
+# being held ``approve_hold_s`` (DeckConfig, default 1 s; 0 = off: the keyboard types the digit on press as before).
+# The Mac then types the digit into the session's own pane (adapter.answer: tmux send-keys -t <pane>); a shorter press
+# only previews.  「否」, ✗ Esc and Return stay immediate (the keyboard types them).  Never on a timeout, a lost key-up
+# (reconnect / wake drop every press), a changed prompt, another page / mode or with the PTT held.
+APPROVE_HOLD_S = 1.0
+APPROVE_FLASH_S = 0.6  # the key flashes this long after the answer went out (and the Mac plays a short sound)
+APPROVE_STALE = "未批准：提示已变化"
+APPROVE_PTT = "按住说话中，未批准"
+# SNAP (2026-10-29): long press of the MODE key (fb20) while L4 is shown = screenshot of the Mac screen to the
+# clipboard (macOS screencapture; the daemon runs it, see effects.py).  On L1 the long press still opens L4.
+SNAP_FLASH_S = 0.6
+SNAP_BUSY = "截图中…"
 MODE_SHORT = {Mode.DESKTOP: "桌面", Mode.HERDR: "herdr", Mode.TMUX: "tmux"}
 
 
@@ -174,6 +187,8 @@ class KeyView:
     attention: bool = False
     badge_alert: bool = False  # badge is an attention count (other modes)
     moving: bool = False  # this slot is picked up (pick-up-and-place gesture)
+    hold: float = 0.0  # long-press approve in progress: 0..1 of approve_hold_s (progress ring on the key)
+    flash: bool = False  # just answered / screenshot taken: the key flashes for a moment
     option: int = 0  # option mode: this key answers choice N (1-based); label = the option text ("" = digit only)
     blank: bool = False  # option mode: rows 1–3 beyond the choices (dark; a press leaves option mode)
 
@@ -231,6 +246,8 @@ class _Press:
     target: str | None = None
     long_fired: bool = False
     cancelled: bool = False
+    approve: int = 0  # option mode long-press approve: the digit this press answers once held (0 = not one)
+    approve_done: bool = False  # answered, refused or released: never fires (again)
 
 
 @dataclass
@@ -331,6 +348,9 @@ class Controller:
         self.scrolling: _Scroll | None = None  # K1 scroll-back of the selected session
         self.scroll_note: tuple[str, float] | None = None  # (setup hint, until)
         self._scroll_quiet: dict[Mode, float] = {}  # mode -> clock until which K1 scroll does nothing (setup hint)
+        self.flash: dict[tuple[int, int], float] = {}  # (col, row) -> clock until which that key flashes
+        # Side effects the daemon runs off the controller (I/O-free here): ("sound", "approve"), ("snap",).
+        self.effects: list[tuple] = []
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -396,9 +416,10 @@ class Controller:
         self._touch()
 
     def long_press_pending(self) -> bool:
-        """A press that can still reach LONG_PRESS (the daemon wakes up for it); knob presses only on legacy firmware."""
-        return any(not (p.long_fired or p.cancelled) and (pk[0] != "knob" or not self.device_pages)
-                   for pk, p in self.presses.items())
+        """A press that can still reach LONG_PRESS (the daemon wakes up for it); knob presses only on legacy firmware.
+        A long-press approve in progress counts too (its threshold and the progress ring)."""
+        return any((not (p.long_fired or p.cancelled) and (pk[0] != "knob" or not self.device_pages))
+                   or (p.approve and not p.approve_done) for pk, p in self.presses.items())
 
     def drop_gestures(self) -> None:
         """Reconnect / wake: presses in flight, a picked-up slot, option mode and unsent K1 scrolls are never
@@ -450,6 +471,9 @@ class Controller:
         if self.option is None:
             return False
         self.option = None
+        for p in self.presses.values():
+            if p.approve:
+                p.approve_done = True  # leaving option mode never lets a held approve key fire later
         self._touch()
         return True
 
@@ -466,11 +490,60 @@ class Controller:
         return min(d, op.chosen[1] + OPTION_CHOSEN_S) if op.chosen else d
 
     def hid_keys_wanted(self) -> dict[int, int]:
-        """Logical fb -> digit the keyboard should type while option mode is shown ({} = none)."""
+        """Logical fb -> digit the keyboard should type while option mode is shown ({} = none).  The long-press
+        approve keys are left out: the keyboard forwards them as plain key presses and the Mac answers after the hold."""
         op = self.option
         if op is None or self.page != "L1" or op.mode != self.mode:
             return {}
-        return {i + 1: i + 1 for i in range(len(op.labels))}  # row 1: fb1..fbN = S1..SN
+        hold = self._approve_keys(op)
+        return {i + 1: i + 1 for i in range(len(op.labels)) if i not in hold}  # row 1: fb1..fbN = S1..SN
+
+    # ------------------------------------------------------------------ long-press approve (2026-10-29)
+    def approve_hold(self) -> float:
+        try:
+            return max(0.0, float(getattr(self.cfg, "approve_hold_s", APPROVE_HOLD_S)))
+        except (TypeError, ValueError):
+            return APPROVE_HOLD_S
+
+    def _approve_keys(self, op: "_Option") -> frozenset:
+        """Slot indices (row 1) of the option keys that approve only after a hold: 「是」 and 「是，且不再问」 of a
+        permission prompt, when the hold is on and the mode's adapter can type the digit into the session itself."""
+        if op.kind != "permission" or self.approve_hold() <= 0:
+            return frozenset()
+        if self.adapters[op.mode].capabilities().approve is not None:
+            return frozenset()  # e.g. Desktop / herdr (no option mode anyway): the keyboard types as before
+        return frozenset(i for i, lab in enumerate(op.labels[:2]) if lab in PERMISSION_LABELS[:2])
+
+    def _approve_tick(self, t: float) -> None:
+        hold = self.approve_hold()
+        for pk, p in list(self.presses.items()):
+            if p.approve and not p.approve_done and t - p.t0 >= hold:
+                self._fire_approve(pk, p, t)
+
+    def _fire_approve(self, pk: tuple, p: _Press, t: float) -> None:
+        """The approve key was held long enough: type its digit into the session (only if nothing changed)."""
+        p.approve_done = True
+        self._touch()
+        op = self.option
+        s = self.managers[op.mode].sessions.get(op.key) if op is not None else None
+        if (op is None or s is None or op.key != p.target or op.mode != p.mode or op.mode != self.mode
+                or self.page != "L1" or not option_prompt(s) or option_labels(s)[1] != "permission"
+                or (p.approve - 1) not in self._approve_keys(op)):
+            self._say(APPROVE_STALE)
+            return
+        if self.ptt_held:
+            self._say(APPROVE_PTT)
+            return
+        res = self.adapters[op.mode].answer(s, p.approve)
+        self.action_count += 1
+        log.info("approve %s digit %d: ok=%s %s", op.key, p.approve, res.ok, res.message)
+        if not res.ok:
+            self._say(f"未批准：{res.message}", 3.0)
+            return
+        op.chosen, op.last = (str(p.approve), t), t
+        self.flash[(pk[1], pk[2])] = t + APPROVE_FLASH_S
+        self.effects.append(("sound", "approve"))
+        self._say(f"已批准：{p.approve} {op.labels[p.approve - 1]}")
 
     def set_option_hid(self, status: str) -> None:
         if status != self.option_hid:
@@ -523,6 +596,11 @@ class Controller:
             self._exit_option("回到会话列表")
             return
         n = kr.index + 1
+        if kr.index in self._approve_keys(op):
+            p.approve, p.target = n, op.key  # answered by _approve_tick once held; the release only previews
+            hold = self.approve_hold()
+            self._say(f"按住 {hold:g} 秒批准「{op.labels[kr.index]}」· 松开取消", hold + 1.0)
+            return
         self._say(OPTION_LEGACY if self.option_hid == "legacy" else f"数字键未生效，请在 Mac 上按 {n}")
 
     # ------------------------------------------------------------------ backend
@@ -672,6 +750,9 @@ class Controller:
             p = self.presses.pop(pk, None)
             if p is None:
                 return
+            if p.approve and not p.approve_done:
+                p.approve_done = True  # released before the hold: a preview only, nothing is typed
+                self._say(f"未批准：需按住 {self.approve_hold():g} 秒")
             self._on_up(p.role, p, t)  # the press-time role owns the release (page may have changed)
         self._touch()
 
@@ -733,6 +814,7 @@ class Controller:
         if self.moving is not None and t - self.moving.last >= MOVE_TIMEOUT:
             self._cancel_move()  # 8 s without key/knob input: nothing changes
         self._option_tick(t)
+        self._approve_tick(t)
         self._scroll_tick(t)
         for pk, p in list(self.presses.items()):
             if p.long_fired or p.cancelled or t - p.t0 < LONG_PRESS or (pk[0] == "knob" and self.device_pages):
@@ -956,7 +1038,23 @@ class Controller:
             if p.mode == self.mode:
                 self._pick_up(kr.index)
         elif r == Role.MODE:
-            self._goto("L4", "L4 模式页：点选模式")
+            if self.page == "L4":
+                self._snap()  # SNAP: long press of the mode key on L4 (on L1 it opens L4)
+            else:
+                self._goto("L4", "L4 模式页：点选模式")
+
+    # ------------------------------------------------------------------ SNAP (2026-10-29)
+    def _snap(self) -> None:
+        self.effects.append(("snap",))
+        self._say(SNAP_BUSY, 10.0)
+
+    def effect_result(self, kind: str, ok: bool, message: str) -> None:
+        """Daemon: a side effect finished (``kind`` = "snap"); feedback on the keyboard."""
+        if kind == "snap":
+            if ok:
+                col, row = BOTTOM_ROW.index(Role.MODE) + 1, 4  # the MODE key (fb20)
+                self.flash[(col, row)] = self.clock() + SNAP_FLASH_S
+            self._say(message, TOAST_S if ok else 5.0)
 
     def _cancel_target_presses(self, exclude: "_Press | None" = None) -> None:
         for p in self.presses.values():
@@ -1042,6 +1140,11 @@ class Controller:
         mv = self.moving if (self.moving is not None and self.moving.mode == self.mode) else None
         op = self.option if (self.option is not None and self.option.mode == self.mode and self.page == "L1") else None
         attention: tuple[int, int, str] | None = None  # (priority, -updated, key) best
+        approve_keys = self._approve_keys(op) if op is not None else frozenset()
+        hold_s = self.approve_hold()
+        for k in [k for k, until in self.flash.items() if until <= t]:
+            del self.flash[k]
+            self._touch()  # the frame without the flash is due
         for row in range(1, 5):
             for col in range(1, 6):
                 kr = role_at(self.page, col, row)
@@ -1049,6 +1152,11 @@ class Controller:
                 if op is not None and kr.role == Role.AGENT:
                     if kr.index < len(op.labels):  # the choice keys (row 1); the session list is cleared
                         kv.option, kv.label = kr.index + 1, op.labels[kr.index]
+                        if kr.index in approve_keys:
+                            kv.sublabel = f"长按 {hold_s:g} 秒"
+                            p = self.presses.get(("key", col, row))
+                            if p is not None and p.approve and not p.approve_done and hold_s > 0:
+                                kv.hold = max(0.001, min(1.0, (t - p.t0) / hold_s))
                     else:
                         kv.blank = True
                 elif kr.role == Role.AGENT:
@@ -1078,6 +1186,8 @@ class Controller:
                     kv.label, kv.disabled = "新会话", caps.new_session
                 elif kr.role == Role.MODE:
                     kv.label, kv.mode = self.mode.key_label, self.mode
+                    if self.page == "L4":
+                        kv.sublabel = "长按 截图"
                     total = sum(n for _, n in others)
                     if total:
                         kv.badge, kv.badge_alert = str(total), True
@@ -1091,6 +1201,7 @@ class Controller:
                         kv.badge, kv.badge_alert = str(n), True
                 elif kr.role == Role.BACK_L1:
                     kv.label = "回 L1"
+                kv.flash = self.flash.get((col, row), float("-inf")) > t
                 keys.append(kv)
         if attention:
             c, r = map(int, attention[2].split(","))
@@ -1128,7 +1239,9 @@ class Controller:
             other_modes=(" · ".join(f"{MODE_SHORT[m]} {n}" for m, n in others) + " 待处理") if others else "",
             moving=f"移动『{_short(mv.title)}』：点目标键放下 · 点自己=切换钉住 · K1 取消" if mv else "",
             # "×" not "✗": the Mac CJK fonts (PingFang / STHeiti) have no U+2717 glyph
-            option=(f"选项：按 1–{len(op.labels)} 选择 · × 取消 · K1 返回" if len(op.labels) > 1 else
+            option=(f"选项：长按 {'/'.join(str(i + 1) for i in sorted(approve_keys))} 批准 · 按 "
+                    f"{len(op.labels)} 拒绝 · × 取消 · K1 返回" if approve_keys and len(op.labels) > len(approve_keys)
+                    else f"选项：按 1–{len(op.labels)} 选择 · × 取消 · K1 返回" if len(op.labels) > 1 else
                     "选项：按 1 选择 · × 取消 · K1 返回") if op else "",
             option_note=({"legacy": OPTION_LEGACY, "pending": OPTION_PENDING}.get(self.option_hid, "")) if op else "",
             alert=GD32_DFU_ALERT if self.gd32_dfu else "", alert_detail=GD32_DFU_DETAIL if self.gd32_dfu else "",

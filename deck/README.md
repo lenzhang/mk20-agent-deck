@@ -55,6 +55,7 @@ Document coordinates: col 1..5 left→right, row 1..4 top→bottom; logical key 
   these faces and ignores their key events (the firmware does not forward them; stray ones are dropped). A PTT
   press that is observed only drives the sea-green overlay.
 - **MODE (fb20)**: short press cycles Desktop → herdr → tmux (decided on release); long press ≥600 ms opens L4.
+  **On L4, long press MODE = SNAP** (1.8.1): a screenshot of the Mac screen onto the clipboard (see 「SNAP 截图」).
   The firmware forwards fb20 on L1/L4 while the keyboard agent is inactive (otherwise it is the e-stop).
 - **L4** (K2 short press toggles L1↔L4): DESK/HERD/TMUX switch mode and return to L1, ＋新会话 = new session in
   the current mode (cwd of the confirmed selection), 回 L1. S1..S5 are not on L4 (use L1).
@@ -231,6 +232,22 @@ deck 侧（`[tmux]`，见 `config.example.toml`）：窗格按命名（`ag-ccai-
 桌面 / herdr 不进入）并成功置前 → 第 1 行变成选项键（标签 / 权限固定「是 · 是，且不再问 · 否」/ 数字 1–5），
 第 2–3 行清空；固件 1.5.1 起按选项键由键盘直接给前台窗口发一次数字（`ui.hidKeys`，按住也只一个；按住说话时忽略并
 提示「先松开按住说话」），Mac 只显示「已选 k」；Esc、K1、点暗键、换页 / 换模式、30 s 无输入、状态改变即返回。
+
+**长按批准**（1.8.1，2026-10-29）：权限提示（「是 · 是，且不再问 · 否」）里 **「是」(S1) 和「是，且不再问」(S2) 要按住
+`[deck] approve_hold_s`（默认 1 s）才生效**：按住时键面一圈进度环，满一圈 Mac 用 `tmux send-keys -t <该会话窗格> -l <数字>`
+把数字直接打进**那个会话自己的窗格**（不经前台窗口），键闪绿 + 打勾，副屏「已批准：1 是」，并播一声
+`approve_sound`（默认 `Glass`，`""` = 静音，`afplay /System/Library/Sounds/<名>.aiff`）。不足时长就松开 = 只预览，
+副屏「未批准：需按住 1 秒」。**「否」(S3)、✗ Esc 仍是按下即生效**（键盘自己打字，和以前一样）。
+永远不会自动批准：松手、断线 / 唤醒重连（丢弃所有按键手势）、选项模式超时 / 退出、提示已变（会话不再等待审批、换了会话）、
+换页 / 换模式、按住说话中、窗格在回看（copy mode，先按 K1 回到最新）——这些都不发数字。`approve_hold_s = 0` 恢复旧行为
+（按下由键盘直接打数字）；非 tmux 模式没有选项模式，不受影响。
+
+**SNAP 截图**（1.8.1）：在 **L4 长按 MODE (fb20)**（L4 上 MODE 键副标「长按 截图」；L1 上长按 MODE 仍是进 L4）→
+Mac 运行 `/usr/sbin/screencapture -x -c`（静音，直接进剪贴板），完成后 MODE 键闪绿，副屏「已截图 · 已复制到剪贴板」，
+可直接 ⌘V 贴进对话。`[snap] save_dir = "~/Pictures/mk20"` 时另存 PNG（`mk20-snap-YYYYmmdd-HHMMSS.png`）再复制到剪贴板。
+需要 **屏幕录制权限**（macOS TCC，给运行 mk20deck 的 python3）：没有时副屏提示
+「截图需要屏幕录制权限：系统设置→隐私与安全性→屏幕录制，打开 python3 后重启 mk20deck」，mk20deck 只向系统申请一次
+（把 python3 列进设置），不绕过权限；打开后 `launchctl kickstart -k gui/$(id -u)/com.leo.mk20-agent-deck`。
 
 K1：**转 = 回看选中会话的对话历史**，**按 = 回到最新**（见下「K1 回看」）；长按仍进 L4。K1 不再轮选会话
 （2026-10-25 用户决定：选会话直接按键），effort 也不映射到 K1。

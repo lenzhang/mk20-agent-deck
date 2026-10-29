@@ -110,7 +110,7 @@ class TmuxAdapter(ModeAdapter):
             skill_new_thread="tmux 无新线程预填",
             send="投递语义未验证（P0 禁用）",
             stop="中断能力未按工具版本验证",
-            approve="P1：请在终端内处理",
+            approve=None,  # long-press approve: the digit goes to the session's own pane (answer())
             effort_set="此会话不支持",
             precise_state=None if self.hooked else "状态受限：tmux 无生命周期信号（未发现 hook 记录）",
             scroll=None,
@@ -274,3 +274,21 @@ class TmuxAdapter(ModeAdapter):
 
     def scroll_release(self, s: Session) -> bool:
         return self.scroll_bottom(s).ok
+
+    def answer(self, s: Session, digit: int) -> ActionResult:
+        """Type the choice digit into the session's pane (literal, no Enter: Claude/codex prompts pick on the digit).
+        Refused while the pane is in copy mode (the digit would be a copy-mode command, not an answer)."""
+        if s.sid.generation != self.generation:
+            return ActionResult(False, "tmux server 已重启，身份失效")
+        if not (isinstance(digit, int) and 1 <= digit <= 9):
+            return ActionResult(False, "无效选项")
+        pane = s.sid.native
+        r = self._tmux("display-message", "-p", "-t", pane, "#{pane_in_mode}")
+        if r.returncode != 0:
+            return ActionResult(False, "会话窗格不存在")
+        if r.stdout.strip() != "0":
+            return ActionResult(False, "窗格在回看中：先按 K1 回到最新")
+        r = self._tmux("send-keys", "-t", pane, "-l", str(digit))
+        if r.returncode != 0:
+            return ActionResult(False, "tmux 发送失败" + (f"：{r.stderr.strip()[:30]}" if r.stderr.strip() else ""))
+        return ActionResult(True, "")

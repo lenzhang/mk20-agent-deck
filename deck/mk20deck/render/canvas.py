@@ -36,11 +36,9 @@ class Renderer:
 
     def desired_fps(self, view: DeckView, t: float) -> float:
         """Global frame rate = max of per-key wishes, capped (shared budget)."""
-        if not self.animations:
-            return 0.0
         best = 0.0
-        for kv in view.keys:
-            best = max(best, key_fps(kv, self._age(kv, t), True))
+        for kv in view.keys:  # a long-press approve ring / flash animates even with animations off
+            best = max(best, key_fps(kv, self._age(kv, t), self.animations))
         return min(best, self.max_fps)
 
     def compose(self, view: DeckView, t: float, heartbeat_on: bool = True) -> Image.Image:

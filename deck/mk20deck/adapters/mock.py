@@ -60,6 +60,9 @@ class MockAdapter(ModeAdapter):
         res = self._act("bottom", s.sid.key(), self.caps.scroll)
         return res if not res.ok else (self.scroll_reply or res)
 
+    def answer(self, s: Session, digit: int) -> ActionResult:
+        return self._act("answer", f"{s.sid.key()}|{digit}", self.caps.approve)
+
     def scroll_release(self, s: Session) -> bool:
         """Like the real adapters: a pane-targeted mode (tmux) goes live again, a focus-first one (Desktop) not."""
         self.actions.append(("release", s.sid.key()))

@@ -12,6 +12,12 @@ heartbeat_s = 2.0
 backlight = 80                   # sent after every handshake (host mode starts at 0 = dark); false = leave alone
 web_url = "http://172.30.250.2:8780/"  # opened on the Mac by the 网页设置 key (device event ui.openSettings);
                                  # http/https, IP literal or localhost, no credentials - else this default
+approve_hold_s = 1.0             # option mode, permission prompt: hold 「是」/「是，且不再问」 this long (0..5 s);
+                                 # 0 = off (the keyboard types the digit on press, as before 1.8.1)
+approve_sound = "Glass"          # /System/Library/Sounds/<name>.aiff after an approve; "" = silent
+
+[snap]                           # L4: long press MODE = screenshot to the clipboard (needs Screen Recording)
+save_dir = ""                    # also keep a PNG here (e.g. "~/Pictures/mk20"); "" = clipboard only
 
 [web]
 arrange_port = 8781              # 会话安排 page (http://127.0.0.1:8781/, 127.0.0.1 only); 0 = off. Open it with

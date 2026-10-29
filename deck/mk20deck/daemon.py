@@ -151,6 +151,9 @@ class Daemon:
     # hw/gd32watch.Gd32DfuWatch (process-wide, its own thread; None = off): its confirmed ``stuck`` state becomes the
     # controller's GD32 DFU banner on every step (an attribute read, never the probe itself).
     gd32: object | None = None
+    # effects.Effects (None = drop them, e.g. the simulator): runs the controller's queued side effects (approve
+    # sound, SNAP screenshot) as child processes it polls every step; results go back via controller.effect_result.
+    effects: object | None = None
 
     # -------------------------------------------------------------- input
     def on_device_key(self, ev: P.KeyEvent) -> None:
@@ -525,6 +528,7 @@ class Daemon:
         self._drain_background()
         self._sync_gd32()  # a change bumps the version: a frame
         self.controller.tick()
+        self._run_effects()
         if self._sync_page(now):  # before the (possibly slow) poll: the keyboard switches at once ...
             force = True          # ... and gets the new page's full frame in this step (it shows a placeholder)
         if now >= self._next_poll:
@@ -566,9 +570,28 @@ class Daemon:
         if self.gd32 is not None and hasattr(self.controller, "set_gd32_dfu"):
             self.controller.set_gd32_dfu(getattr(self.gd32, "stuck", False))
 
+    def _run_effects(self) -> None:
+        queued = getattr(self.controller, "effects", None)
+        if queued:
+            items = list(queued)
+            queued.clear()
+            for e in items:
+                if self.effects is None:
+                    log.info("effect %s dropped (no effects runner)", e[0])
+                    continue
+                try:
+                    self.effects.run(e)
+                except Exception:  # noqa: BLE001 — a side effect never takes the device loop down
+                    log.exception("effect %s", e[0])
+        if self.effects is not None:
+            for kind, ok, msg in self.effects.poll():
+                self.controller.effect_result(kind, ok, msg)
+
     def next_wait(self) -> float:
         now = self.clock()
         waits = [self._next_poll - now, self._last_frame + self.heartbeat - now]
+        if self.effects is not None and self.effects.busy():
+            waits.append(0.1)  # a running screenshot: its result (toast + flash) as soon as it is done
         view_fps = self.renderer.desired_fps(self.controller.view(), now)
         if view_fps > 0:
             waits.append(self._last_frame + 1.0 / view_fps - now)

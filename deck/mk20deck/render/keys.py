@@ -32,11 +32,15 @@ MOVE_FPS = 4  # picked-up slot: marching dashed border (static dashes when anima
 MOVE_PINK = (244, 114, 182)  # distinct from every state colour
 OPTION_AMBER = (245, 158, 11)  # option mode choice keys (the needs_* amber)
 OPTION_INK = (24, 16, 4)
+HOLD_FPS = 8  # long-press approve progress ring / the flash after it (the global cap is 8 fps too)
+FLASH_BG = (34, 197, 94)
 BLANK_BG = (8, 9, 11)  # option mode: rows 1–3 beyond the choices
 
 
 def key_fps(kv: KeyView, age: float, animations: bool) -> float:
     """Desired fps for one key given time since its state began."""
+    if kv.hold or kv.flash:
+        return HOLD_FPS  # feedback, not decoration: also with animations off
     if not animations:
         return 0
     if kv.role == Role.PTT:
@@ -330,14 +334,38 @@ def render_option(kv: KeyView) -> Image.Image:
     num = str(kv.option)
     if not kv.label:
         d.text((S / 2, S / 2 - 4), num, font=font(76, bold=True), fill=OPTION_INK, anchor="mm")
+        _hold_ring(d, kv.hold)
         return img
-    d.text((S / 2, 38), num, font=font(54, bold=True), fill=OPTION_INK, anchor="mm")
+    sub = 1 if kv.sublabel else 0  # long-press approve: "长按 1 秒" under the label
+    d.text((S / 2, 38 - 6 * sub), num, font=font(54 - 6 * sub, bold=True), fill=OPTION_INK, anchor="mm")
     f = font(15, bold=True)
     lines = _wrap(d, kv.label, f, S - 14, 2)
-    y0 = 92 if len(lines) == 1 else 82
+    y0 = (92 if len(lines) == 1 else 82) - 8 * sub
     for i, line in enumerate(lines):
         d.text((S / 2, y0 + i * 20), line, font=f, fill=OPTION_INK, anchor="mm")
+    if sub:
+        d.text((S / 2, 114), fit(d, kv.sublabel, font(12), S - 20), font=font(12), fill=mix(OPTION_INK, OPTION_AMBER, 0.3),
+               anchor="mm")
+    _hold_ring(d, kv.hold)
     return img
+
+
+def _hold_ring(d: ImageDraw.ImageDraw, hold: float) -> None:
+    """Long-press approve progress: a ring along the key edge, clockwise from 12 o'clock (0 < hold <= 1)."""
+    if hold <= 0:
+        return
+    box = [6, 6, S - 7, S - 7]
+    d.arc(box, 0, 360, fill=mix(OPTION_AMBER, OPTION_INK, 0.25), width=7)
+    d.arc(box, -90, -90 + 360 * min(1.0, hold), fill=OPTION_INK, width=7)
+
+
+def _flash(img: Image.Image) -> Image.Image:
+    """The key just did its thing (approve answered / screenshot taken): green wash + a check mark."""
+    out = Image.blend(img.convert("RGB"), Image.new("RGB", img.size, FLASH_BG), 0.6)
+    d = ImageDraw.Draw(out)
+    w, h = out.size
+    d.line([(w * 0.28, h * 0.52), (w * 0.44, h * 0.68), (w * 0.74, h * 0.34)], fill=WHITE, width=10, joint="curve")
+    return out
 
 
 def render_blank(kv: KeyView) -> Image.Image:
@@ -346,6 +374,11 @@ def render_blank(kv: KeyView) -> Image.Image:
 
 
 def render_key(kv: KeyView, age: float, t: float, animations: bool = True) -> Image.Image:
+    img = _render_key(kv, age, t, animations)
+    return _flash(img) if kv.flash else img
+
+
+def _render_key(kv: KeyView, age: float, t: float, animations: bool = True) -> Image.Image:
     if kv.option:
         return render_option(kv)
     if kv.blank:

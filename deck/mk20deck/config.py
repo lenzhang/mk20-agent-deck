@@ -79,6 +79,20 @@ class DeckConfig:
     state_path: str = os.path.join(CONFIG_DIR, "state.json")
     web_url: str = DEFAULT_WEB_URL  # see parse_web_url
     arrange_port: int = DEFAULT_ARRANGE_PORT  # [web] arrange_port, see parse_port
+    # Long-press approve (option mode, permission prompts): hold 「是」 this long; 0 = off (typed on press).
+    approve_hold_s: float = 1.0
+    approve_sound: str = "Glass"  # /System/Library/Sounds/<name>.aiff after an approve; "" = silent
+    snap_dir: str = ""  # [snap] save_dir: also keep each screenshot as a PNG there ("" = clipboard only)
+
+
+def parse_sound(v: Any) -> str:
+    """A macOS system sound name (``Glass``, ``Ping`` …) or "" (off); anything else is off with a warning."""
+    if v in (None, False, ""):
+        return ""
+    if isinstance(v, str) and 0 < len(v) <= 32 and all(c.isalnum() or c in " _-" for c in v):
+        return v
+    log.warning("approve_sound %r ignored (a name from /System/Library/Sounds, or \"\")", v)
+    return ""
 
 
 def parse_web_url(v: Any) -> str:
@@ -149,6 +163,16 @@ def load_config(path: str | None = None) -> DeckConfig:
     cfg.backlight = parse_backlight(cfg.backlight)
     if "web_url" in deck:
         cfg.web_url = parse_web_url(deck["web_url"])
+    if "approve_hold_s" in deck:
+        try:
+            cfg.approve_hold_s = min(5.0, max(0.0, float(deck["approve_hold_s"])))
+        except (TypeError, ValueError):
+            log.warning("approve_hold_s %r ignored", deck["approve_hold_s"])
+    if "approve_sound" in deck:
+        cfg.approve_sound = parse_sound(deck["approve_sound"])
+    snap = d.get("snap", {})
+    if isinstance(snap.get("save_dir"), str):
+        cfg.snap_dir = os.path.expanduser(snap["save_dir"])
     web = d.get("web", {})
     if isinstance(web, dict) and "arrange_port" in web:
         cfg.arrange_port = parse_port(web["arrange_port"])

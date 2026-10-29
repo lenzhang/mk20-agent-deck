@@ -15,6 +15,7 @@ from .adapters.herdr import HerdrAdapter
 from .adapters.tmux import TmuxAdapter
 from .config import CONFIG_DIR, DeckConfig, load_config, load_state, save_state
 from .controller import Controller
+from .effects import Effects
 from .layout import DeviceLayout
 from .model import Mode
 
@@ -76,7 +77,7 @@ def cmd_run(args) -> int:
     try:
         Supervisor(ctl, find_ports, open_transport, default_renderer_factory(cfg), cfg,
                    power=PowerMonitor.default(), bg_adapters=build_adapters(cfg), calls=calls,
-                   arrange=web, gd32=gd32).run(stop)  # web: the keyboard's 会话安排 key mints its one-time link here
+                   arrange=web, gd32=gd32, effects=Effects.from_config(cfg)).run(stop)  # web: the keyboard's 会话安排 key mints its one-time link here
     finally:
         stop.set()  # also when the supervisor raised: the watch thread ends ...
         if gd32_thread is not None:
