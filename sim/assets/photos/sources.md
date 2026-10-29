@@ -12,3 +12,5 @@ Official Waveshare product photos (MK20 B, black). Used as simulator background 
 Spec pages: https://www.waveshare.com/mk20-b.htm · https://www.waveshare.com/wiki/MK20 ·
 https://spotpear.cn/shop/MK20-Mechanical-Keyboard-0.85inch-LCD-2.8inch-Secondary-Screen.html ·
 unboxing (real photo of box contents): https://www.fabienm.eu/wordpress/2025/11/14/deballage-du-mk20-de-waveshare/
+
+The JPEGs are not in git (Waveshare copyright). Run `sh sim/assets/photos/fetch.sh` to download them.

@@ -6,9 +6,9 @@ no PTZ moves, no settings changes.
 | Item | Value |
 |---|---|
 | Model | TP-Link TL-IPC44AW 全彩, fw 1.0.5 Build 260602 |
-| IP | 192.168.88.125 (found by ONVIF WS-Discovery, 2026-10-27) |
+| IP | `$MK20_CAM_IP` (find it with ONVIF WS-Discovery) |
 | Username | admin |
-| Password | REDACTED_CAM_PASSWORD (not published) |
+| Password | not stored in git: `$MK20_CAM_PASS` or `~/.config/mk20-cam/cred` (chmod 600); see `.env.example` |
 | ONVIF | http://192.168.88.125:2020/onvif/device_service (media: /onvif/service), WS-Security digest auth |
 | ONVIF profiles | profile_1 (main), profile_2 (sub) |
 | RTSP | rtsp://admin:<pw>@192.168.88.125:554/stream1 (2560x1440), /stream2 (640x360) |

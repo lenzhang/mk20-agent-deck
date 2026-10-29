@@ -19,3 +19,25 @@ deck/kbd/tests/ui_load
 deck/kbd/tests/onboard_test
 deck/kbd/tests/onboard_headless
 deck/kbd/tests/onboard_test_tsan
+
+# --- publish hygiene (GitHub) ---
+.env
+*.env.local
+.venv-sys/
+# firmware release tarballs and disk/boot images: attach to a GitHub Release, record sha256 in RELEASE.md
+*.tar
+*.tar.gz
+*.tar.xz
+*.img
+*.img.xz
+out/
+# camera snapshots and local media
+cam-*.jpg
+*.mp4
+*.mov
+# vendor material that is not redistributed (see reference/README.md, sim/assets/photos/sources.md)
+reference/OpenSourceLicenseDemo_V1.0/
+sim/assets/photos/*.jpg
+deck/kernel/boot-extract/
+# macOS AppleDouble
+._*
