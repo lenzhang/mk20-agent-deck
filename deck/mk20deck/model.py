@@ -122,6 +122,10 @@ class Capabilities:
     approve: str | None = "P1：请在 App 内处理"
     effort_set: str | None = "此会话不支持"
     precise_state: str | None = "状态受限"
+    # K1 scroll-back of the session's conversation (2026-10-25): None = supported.  ``scroll_focus``: the scroll acts
+    # on the App's frontmost window, so the deck brings the session forward before the first scroll.
+    scroll: str | None = "此模式不支持回看"
+    scroll_focus: bool = False
 
     def supported(self, action: str) -> bool:
         return getattr(self, action) is None

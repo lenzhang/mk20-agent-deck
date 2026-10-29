@@ -44,7 +44,7 @@ class HerdrAdapter(ModeAdapter):
         reason = "herdr 未联调"
         return Capabilities(focus=reason, new_session=reason, skill_current=reason, skill_new_thread=reason,
                             send=reason, stop=reason, approve="P1：请在 herdr 内处理", effort_set="此会话不支持",
-                            precise_state="状态受限：herdr 未联调")
+                            precise_state="状态受限：herdr 未联调", scroll=f"回看不可用：{reason}")
 
     def status_limited(self) -> str | None:
         return "状态受限：herdr 未联调（P0 stub）"

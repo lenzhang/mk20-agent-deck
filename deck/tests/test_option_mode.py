@@ -172,7 +172,9 @@ def test_desktop_and_unhooked_waiting_sessions_never_enter_option_mode():
     assert len([a for a in ads[Mode.DESKTOP].actions if a[0] == "focus"]) == 3  # each tap focused, no option keys
     c.on_knob(1, "down")
     clk.advance(0.1)
-    c.on_knob(1, "up")  # K1 press focuses the needs_* selection: still no option mode
+    c.on_knob(1, "up")  # K1 press (Desktop: focus, then back to the latest content): still no option mode
+    clk.advance(0.5)
+    c.tick()
     assert c.option is None and not any(k.option or k.blank for k in c.view().keys)
     # tmux pane in needs_input without a hook record behind the state: no option mode either
     c2, clk2, ads2 = make()
@@ -263,8 +265,10 @@ def test_k1_press_returns_without_focus(env):
     c, clk, ads = env
     enter(c, clk)
     n = len(focus_calls(ads))
-    c.on_knob(1, "cw")  # rotation: the selection stays on the session being answered
-    assert c.option is not None and c.mgr.selected_session().title == Q
+    c.on_knob(1, "ccw")  # rotation: no scroll-back (digits must reach the prompt, not tmux copy mode)
+    c.tick()
+    assert c.option is not None and c.mgr.selected_session().title == Q and c.toast[0] == "选项中不回看 · 按 K1 返回会话列表"
+    assert not any(a[0] == "scroll" for a in ads[Mode.TMUX].actions) and c.scrolling is None
     c.on_knob(1, "down")
     assert c.option is None and c.toast[0] == "回到会话列表"
     clk.advance(0.1)
@@ -353,7 +357,7 @@ def test_marked_press_after_exit_is_only_typed(env):
     assert c.option is None and c.toast[0] == "已发送数字 2" and len(focus_calls(ads)) == n and c.mgr.selected == sel
 
 
-def test_labels_arrive_later_and_k1_press_enters_too(env):
+def test_labels_arrive_later_and_a_tap_enters_again(env):
     c, clk, ads = env
     s = session(ads, UNK)
     enter(c, clk, UNK)
@@ -364,9 +368,12 @@ def test_labels_arrive_later_and_k1_press_enters_too(env):
     c.on_knob(1, "down")
     c.on_knob(1, "up")
     assert c.option is None
-    c.on_knob(1, "down")  # K1 press = focus the selection = same as a tap
+    c.on_knob(1, "down")  # K1 press = back to the latest content of the pane (no focus, no option mode)
     clk.advance(0.1)
     c.on_knob(1, "up")
+    c.tick()
+    assert c.option is None and ads[Mode.TMUX].actions[-1] == ("bottom", s.sid.key())
+    tap(c, clk, *where(c, UNK))  # a tap focuses and enters again
     assert c.option is not None and c.option.labels == ("A", "B")
 
 

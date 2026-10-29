@@ -29,6 +29,8 @@ mk20deck（Mac 程序）自己的行为，不影响设备：模板是 [config.ex
 - `[deck]`：默认模式、串口、亮度、帧率等；模式相关段 `[codex_desktop]`、`[tmux]`、`[herdr]`。
 - `[[skills]]`：旧版四个技能键的标签和提示词。1.5 键位（[docs/PRD-1.5-L1-LAYOUT.md](docs/PRD-1.5-L1-LAYOUT.md)）已去掉技能键，此段照常读入但不绑定任何键，只为旧配置兼容。
 - `[knobs]`：旋钮事件映射。
+- `[codex_desktop] scroll_*`：K1 回看在 Codex 桌面里用的 helper（一般不用改）。Codex 桌面回看需要一次
+  `python3 -m mk20deck scroll-setup`（只给小程序 `mk20deck-scroll` 授权「辅助功能」），见 [README.md](README.md)「K1 回看」。
 - `web_url`：“网页设置”键要打开的地址（默认就是上面的设备网页）。
 - `[web] arrange_port`：会话安排网页的端口（默认 8781，`0` = 关闭），见下。
 

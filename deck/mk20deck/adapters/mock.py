@@ -16,6 +16,7 @@ class MockAdapter(ModeAdapter):
         self.caps = caps or Capabilities(focus=None, new_session=None, skill_new_thread=None)
         self.limited = limited
         self.actions: list[tuple[str, str]] = []
+        self.scroll_reply: ActionResult | None = None  # tests: scripted answer of scroll() / scroll_bottom()
 
     def capabilities(self) -> Capabilities:
         return self.caps
@@ -50,3 +51,16 @@ class MockAdapter(ModeAdapter):
 
     def send(self, s: Session) -> ActionResult:
         return self._act("send", s.sid.key(), self.caps.send)
+
+    def scroll(self, s: Session, lines: int) -> ActionResult:
+        res = self._act("scroll", f"{s.sid.key()}|{lines}", self.caps.scroll)
+        return res if not res.ok else (self.scroll_reply or res)
+
+    def scroll_bottom(self, s: Session) -> ActionResult:
+        res = self._act("bottom", s.sid.key(), self.caps.scroll)
+        return res if not res.ok else (self.scroll_reply or res)
+
+    def scroll_release(self, s: Session) -> bool:
+        """Like the real adapters: a pane-targeted mode (tmux) goes live again, a focus-first one (Desktop) not."""
+        self.actions.append(("release", s.sid.key()))
+        return self.caps.scroll is None and not self.caps.scroll_focus

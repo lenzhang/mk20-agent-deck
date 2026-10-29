@@ -8,6 +8,9 @@ Sources (all read-only, never written):
   * app liveness (``pgrep``) → offline when the App is not running.
 Actions: ``open codex://threads/<id>`` (focus) and
 ``open codex://threads/new?path=&prompt=`` (new / skill prefill, never submits).
+K1 scroll-back (2026-10-25): the controller focuses the thread first, then this adapter runs the separately signed
+helper ``mk20deck-scroll`` (scrollhelper.py), which posts scroll-wheel events into the App's frontmost window; only
+that helper holds macOS Accessibility.  Missing / not yet allowed -> ``detail["setup"]`` and the scroll-setup hint.
 Not used: app-server, ipc.sock, control.sock, JS injection (PRD §2.2/§6.9).
 """
 from __future__ import annotations
@@ -22,6 +25,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
+from .. import scrollhelper
 from ..model import ActionResult, Capabilities, Mode, Session, SessionId, State, Tool
 from .base import BackendUnavailable, ModeAdapter, Runner, SubprocessRunner
 
@@ -118,6 +122,11 @@ class CodexDesktopConfig:
     max_prompt_chars: int = 2000
     max_url_len: int = 8000
     require_cwd_exists: bool = False
+    # K1 scroll-back (helper ``mk20deck-scroll``): the App to scroll, how the events reach it ("pid" = straight into
+    # the App, "hid" = at the HID tap inside its window), the helper path ("" = $MK20DECK_HOME/bin/mk20deck-scroll).
+    scroll_app: str = "com.openai.codex"
+    scroll_via: str = "pid"
+    scroll_helper: str = ""
     extra: dict = field(default_factory=dict)
 
 
@@ -149,6 +158,8 @@ class CodexDesktopAdapter(ModeAdapter):
             approve="请在 App 内处理（审批代答为 P1）",
             effort_set="此会话不支持",
             precise_state="状态受限：无待审批/实时错误信号（P1 hooks）",
+            scroll=None,
+            scroll_focus=True,  # the helper scrolls the App's frontmost window: the thread must be in front first
         )
 
     def status_limited(self) -> str | None:
@@ -371,3 +382,27 @@ class CodexDesktopAdapter(ModeAdapter):
         if res.ok:
             res.message = "已在新线程预填（未提交）"
         return res
+
+    # ------------------------------------------------------------------ K1 scroll-back
+    def _scroll_helper(self, args: list[str]) -> ActionResult:
+        helper = os.path.expanduser(self.cfg.scroll_helper) if self.cfg.scroll_helper else scrollhelper.default_path()
+        if not os.access(helper, os.X_OK):
+            return ActionResult(False, scrollhelper.SETUP_HINT, {"setup": "missing"})
+        via = self.cfg.scroll_via if self.cfg.scroll_via in ("pid", "hid") else "pid"
+        r = self.runner.run([helper, "--app", self.cfg.scroll_app, "--via", via, *args], timeout=3)
+        if r.returncode == scrollhelper.EXIT_OK:
+            return ActionResult(True, "")
+        if r.returncode == scrollhelper.EXIT_UNTRUSTED:
+            return ActionResult(False, scrollhelper.SETUP_HINT, {"setup": "untrusted"})
+        if r.returncode == scrollhelper.EXIT_NO_WINDOW:
+            return ActionResult(False, "回看：Codex 窗口不在屏幕上")
+        return ActionResult(False, f"回看失败（helper 退出码 {r.returncode}）")
+
+    def scroll(self, s: Session, lines: int) -> ActionResult:
+        lines = max(-1000, min(1000, int(lines)))
+        if not lines:
+            return ActionResult(True, "")
+        return self._scroll_helper(["--lines", str(lines)])
+
+    def scroll_bottom(self, s: Session) -> ActionResult:
+        return self._scroll_helper(["--bottom"])

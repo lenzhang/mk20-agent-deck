@@ -25,6 +25,10 @@ originators = ["Codex Desktop", "codex_work_desktop", ""]
 running_window_s = 600           # task_started without completion older than this -> unknown
 max_candidates = 24
 max_prompt_chars = 2000          # skill prefill: fail (never truncate) beyond this
+# K1 scroll-back in Codex Desktop goes through the helper `mk20deck scroll-setup` installs (only it has Accessibility)
+scroll_app = "com.openai.codex"  # bundle id (or name) of the App whose frontmost window is scrolled
+scroll_via = "pid"               # "pid" = straight into the App (cursor untouched); "hid" = system event tap
+scroll_helper = ""               # "" = $MK20DECK_HOME/bin/mk20deck-scroll
 
 [tmux]
 patterns = ["ag-ccai-*", "ag-codex-*", "ag-kimi-*"]

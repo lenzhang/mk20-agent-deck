@@ -39,4 +39,4 @@ def demo_sessions(mode: Mode = Mode.DESKTOP, tools=(Tool.CODEX,), n: int = N_DEF
 DESKTOP_CAPS = Capabilities(focus=None, new_session=None, skill_current="当前线程预填未验证",
                             skill_new_thread=None, send="需辅助功能确认 composer，P0 未启用",
                             stop="中断接口不可达（仅 AX），P0 禁用", approve="请在 App 内处理（审批代答为 P1）",
-                            effort_set="此会话不支持", precise_state="状态受限")
+                            effort_set="此会话不支持", precise_state="状态受限", scroll=None, scroll_focus=True)

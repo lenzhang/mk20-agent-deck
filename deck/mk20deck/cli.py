@@ -129,9 +129,9 @@ def cmd_arrange(args, opener=None) -> int:
 
 
 def cmd_shots(args) -> int:
-    from .sim import attention_shots, layout_shots, move_shots, option_shots, shots
-    fn = {"attention": attention_shots, "layout": layout_shots, "move": move_shots, "option": option_shots}.get(
-        getattr(args, "scenario", "default"), shots)
+    from .sim import attention_shots, layout_shots, move_shots, option_shots, scroll_shots, shots
+    fn = {"attention": attention_shots, "layout": layout_shots, "move": move_shots, "option": option_shots,
+          "scroll": scroll_shots}.get(getattr(args, "scenario", "default"), shots)
     made = fn(args.out, animations=not args.static)
     for n, cap in made:
         print(f"{os.path.join(args.out, n)}  {cap}")
@@ -352,6 +352,16 @@ def cmd_gd32_flash(args) -> int:
     return rc
 
 
+def cmd_scroll_setup(args) -> int:
+    """K1 scroll-back in Codex Desktop: build / sign the helper if needed and ask macOS for its Accessibility."""
+    from .scrollhelper import main_setup
+    if not args.helper:  # the daemon runs [codex_desktop] scroll_helper when set: install that one
+        cfg = load_config(args.config)
+        if cfg.codex.scroll_helper:
+            args.helper = os.path.expanduser(cfg.codex.scroll_helper)
+    return main_setup(args)
+
+
 def cmd_launchd(args) -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     tpl = os.path.join(here, "..", "packaging", "com.leo.mk20-agent-deck.plist.template")
@@ -376,7 +386,8 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("sim-shots", help="render simulator screenshots")
     s.add_argument("--out", default="artifacts")
     s.add_argument("--static", action="store_true")
-    s.add_argument("--scenario", choices=("default", "attention", "layout", "move", "option"), default="default")
+    s.add_argument("--scenario", choices=("default", "attention", "layout", "move", "option", "scroll"),
+                   default="default")
     s.set_defaults(fn=cmd_shots)
     pt = sub.add_parser("probe-tmux", help="read-only tmux discovery: pane ids, commands, hook-derived states")
     pt.add_argument("--json", action="store_true")
@@ -444,6 +455,12 @@ def main(argv: list[str] | None = None) -> int:
     gf.add_argument("--allow-unknown-image", action="store_true")
     gf.add_argument("--i-understand-this-reflashes-gd32", action="store_true")
     gf.set_defaults(fn=cmd_gd32_flash)
+    ss = sub.add_parser("scroll-setup", help="K1 scroll-back in Codex Desktop: build the mk20deck-scroll helper and ask "
+                                             "macOS for its Accessibility permission (only the helper gets it)")
+    ss.add_argument("--rebuild", action="store_true", help="compile + sign again even if up to date (needs a re-grant)")
+    ss.add_argument("--open-settings", action="store_true", help="also open 系统设置 → 隐私与安全性 → 辅助功能")
+    ss.add_argument("--helper", default=None, help="install path (default $MK20DECK_HOME/bin/mk20deck-scroll)")
+    ss.set_defaults(fn=cmd_scroll_setup)
     ld = sub.add_parser("launchd-plist", help="print the LaunchAgent plist for this install")
     ld.set_defaults(fn=cmd_launchd)
     a = p.parse_args(argv)

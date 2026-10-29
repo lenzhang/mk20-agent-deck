@@ -219,7 +219,7 @@ def test_any_key_or_knob_event_restarts_timeout(env):
     clk.advance(5.0)
     c.tick()
     assert c.moving is not None  # 10 s since pick-up, 5 s since the last input
-    c.on_knob(1, "cw")  # K1 rotation moves the selection, keeps the pick-up
+    c.on_knob(1, "ccw")  # K1 rotation (scroll-back of the selection) is input too and keeps the pick-up
     clk.advance(7.9)
     c.tick()
     assert c.moving is not None

@@ -27,6 +27,17 @@ firmware) nothing is sent and K1 short on L4 still opens the deck's own settings
 decides knob holds itself (1 s, on the device) and forwards K1/K2 only as synthetic taps (down + up): every forwarded
 knob down -> up is a short press however late we process the up, and knob holds never fire here (a loop stall
 > LONG_PRESS between the two edges must not flip the page).  Legacy firmware keeps the timing (hold = L4 / L1).
+
+K1 scroll-back (user decision 2026-10-25; K1 no longer walks the selection): rotating K1 scrolls the selected
+session's conversation history (ccw = older, cw = newer; SCROLL_LINES per detent, up to SCROLL_MAX_MULT times that
+when detents come fast), a K1 press returns it to the latest content.  Rotations are only summed here; tick() sends
+the sum (one adapter call per loop step).  tmux scrolls its own pane (copy mode); Codex Desktop brings the thread
+forward with the normal focus path first and lets the Accessibility helper scroll its window (scrollhelper.py).
+The sub-screen says 「回看中 · 按 K1 回到最新」 while scrolled back.  The state ends on a K1 press, another selection or
+mode, a slot tap, an observed PTT press, the session vanishing, or SCROLL_IDLE_S without K1 rotation (tmux: the
+pane leaves copy mode; Desktop: only the banner goes, the deck never pulls Codex forward by itself).  In option mode
+K1 rotation does nothing (digits must reach the prompt, not copy mode); a K1 press there still leaves option mode,
+and with a slot picked up it still cancels the move.
 """
 from __future__ import annotations
 
@@ -39,7 +50,7 @@ from typing import Callable
 from . import protocol as P
 from .adapters.base import BackendUnavailable, ModeAdapter
 from .config import DeckConfig
-from .model import (ATTENTION_STATES, MODE_CYCLE, PRIORITY, ActionResult, Mode, Session, State, Tool)
+from .model import (ATTENTION_STATES, MODE_CYCLE, PRIORITY, ActionResult, Mode, Session, SessionId, State, Tool)
 from .settings import SettingsPage
 from .slots import N_SLOTS, SLOT_COLS, SlotManager
 
@@ -72,8 +83,21 @@ PAGE_RESYNC = "键盘页面已重新同步到 L4 · 再按 K1 进入键盘设置
 GD32_DFU_ALERT = "按键控制器停在升级模式：请重新插拔键盘 USB 线"
 GD32_DFU_DETAIL = "按键和旋钮（含 K2 急停）现在都不起作用"
 GD32_DFU_WEB = "键盘的按键控制器（GD32）停在升级模式（Maple DFU）：按键和旋钮（含 K2 急停）都不起作用，请重新插拔键盘 USB 线"
-# K1 rotation order (PRD delta 2026-10-20): who needs me first, then the rest by slot order.
-K1_RANK = {State.NEEDS_APPROVAL: 0, State.NEEDS_INPUT: 1, State.ERROR: 2, State.DONE_UNREAD: 3}
+# K1 scroll-back (2026-10-25)
+SCROLL_LINES = 3            # lines per K1 detent ...
+SCROLL_FAST_S = 0.12        # ... detents closer than this in the same direction accelerate ...
+SCROLL_MAX_MULT = 5         # ... up to 5x (every second fast detent adds one step)
+SCROLL_IDLE_S = 120.0       # scroll-back ends after this long without K1 rotation
+SCROLL_FOCUS_SETTLE_S = 0.35  # Desktop: the thread was just brought forward; its first scroll waits this long
+SCROLL_SETUP_QUIET_S = 20.0   # after "helper missing / not allowed": no helper call, no new hint for this long
+SCROLL_NOTE_S = 8.0           # ... and the setup hint stays on the sub-screen this long
+SCROLL_HINT = "回看中 · 按 K1 回到最新"
+SCROLL_LIVE = "已回到最新"
+SCROLL_IDLE_LIVE = "回看 2 分钟无操作 · 已回到最新"
+SCROLL_LATEST = "已是最新"
+SCROLL_PTT = "按住说话中，暂不回看"
+SCROLL_OPTION = "选项中不回看 · 按 K1 返回会话列表"
+K1_NO_SESSION = "未选中会话 · 单击会话键选择"
 MODE_SHORT = {Mode.DESKTOP: "桌面", Mode.HERDR: "herdr", Mode.TMUX: "tmux"}
 
 
@@ -176,6 +200,8 @@ class SubView:
     moving: str = ""  # instruction line while a slot is picked up
     option: str = ""  # option mode instruction line ("选项：按 1–N 选择 · × 取消 · K1 返回")
     option_note: str = ""  # option mode: why digits may not work (legacy firmware / not accepted yet)
+    scrollback: str = ""  # K1 scroll-back banner (「回看中 · 按 K1 回到最新」) or the helper setup hint
+    scrollback_warn: bool = False  # the setup hint (another colour)
     alert: str = ""  # persistent hardware banner (GD32 stuck in its DFU bootloader); "" = none
     alert_detail: str = ""  # its second line
 
@@ -227,6 +253,22 @@ class _Option:
     kind: str  # "question" (AskUserQuestion labels) | "permission" | "digits" (unknown)
     last: float  # last key/knob input (OPTION_TIMEOUT)
     chosen: tuple[str, float] | None = None  # (what was typed, when): OPTION_CHOSEN_S grace
+
+
+@dataclass
+class _Scroll:
+    """K1 scroll-back of one session (2026-10-25)."""
+    key: str
+    mode: Mode
+    native: str   # sid.native / sid.generation: the pane can outlive our session list (hook record expired)
+    generation: str
+    last: float  # last K1 rotation (SCROLL_IDLE_S, acceleration)
+    ready: float  # nothing is sent before this (Desktop: the thread was just brought forward)
+    pending: int = 0  # lines not sent yet (> 0 = older)
+    bottom: bool = False  # K1 press: back to the latest content at the next send
+    active: bool = False  # something was scrolled: the banner shows, leaving puts the view back where possible
+    dir: int = 0
+    streak: int = 0  # consecutive fast detents in ``dir``
 
 
 def option_prompt(s: Session) -> bool:
@@ -286,6 +328,9 @@ class Controller:
         self.settings = settings or SettingsPage()
         self.rules_warning = ""  # slot-rules.json problem (set by webui.ArrangeService), shown on the sub-screen
         self.gd32_dfu = False  # the Mac sees the GD32 in its DFU bootloader (daemon, from hw/gd32watch): red banner
+        self.scrolling: _Scroll | None = None  # K1 scroll-back of the selected session
+        self.scroll_note: tuple[str, float] | None = None  # (setup hint, until)
+        self._scroll_quiet: dict[Mode, float] = {}  # mode -> clock until which K1 scroll does nothing (setup hint)
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -356,11 +401,17 @@ class Controller:
                    for pk, p in self.presses.items())
 
     def drop_gestures(self) -> None:
-        """Reconnect / wake: presses in flight, a picked-up slot and option mode are never replayed."""
+        """Reconnect / wake: presses in flight, a picked-up slot, option mode and unsent K1 scrolls are never
+        replayed (a scroll-back that already happened stays until K1 / its idle timeout)."""
         self.presses.clear()
         self._cancel_move()
         self._drop_option()
         self.option_hid = ""
+        sc = self.scrolling
+        if sc is not None:
+            sc.pending, sc.bottom = 0, False
+            if not sc.active:
+                self.scrolling = None
 
     def move_deadline(self) -> float | None:
         """Clock time at which the pick-up times out (the daemon wakes up for it)."""
@@ -513,6 +564,9 @@ class Controller:
         mgr.update(sessions)
         if sel_before and mgr.selected is None:
             self._cancel_target_presses()
+        sc = self.scrolling
+        if sc is not None and sc.mode == mode and mgr.selected != sc.key:
+            self._end_scroll()  # the scrolled session vanished
         mv = self.moving
         if mv is not None and mv.mode == mode and (mgr.entry(mv.src) is None or mgr.entry(mv.src).key != mv.key):
             self._drop_move()
@@ -621,10 +675,12 @@ class Controller:
             self._on_up(p.role, p, t)  # the press-time role owns the release (page may have changed)
         self._touch()
 
-    def on_knob(self, knob: int, kind: str, target: str | None = None) -> None:
+    def on_knob(self, knob: int, kind: str, target: str | None = None, t: float | None = None) -> None:
         """``target`` (daemon, ui.page firmware): for a K2 tap from the keyboard whose resulting page is known
         ("L1"/"L4"), go there instead of toggling — the keyboard already shows it (no pull-back if our page moved
-        meanwhile, e.g. a K2 on the keyboard while it was PROBING)."""
+        meanwhile, e.g. a K2 on the keyboard while it was PROBING).  ``t`` = the event time (the daemon passes
+        ``InputEvent.t``, when the keyboard sent it): a slow loop step (a background poll can take seconds) must
+        not make queued slow detents look fast for the scroll acceleration."""
         if self.page == "LS":
             if kind in ("cw", "ccw"):
                 self.settings.knob(knob, kind)
@@ -632,7 +688,7 @@ class Controller:
                 self.settings.knob(knob, "press")
             self._settings_after()
             return
-        t = self.clock()
+        t = self.clock() if t is None else t
         pk = ("knob", knob)
         if self.moving is not None:
             self.moving.last = t
@@ -643,7 +699,7 @@ class Controller:
             if knob == 1 and self._cancel_move():
                 p.cancelled = True  # K1 press = cancel the pick-up only (no focus, no L4 on hold)
             elif knob == 1 and self.option is not None:
-                p.cancelled = True  # K1 press = leave option mode only (no focus, no L4 on hold)
+                p.cancelled = True  # K1 press = leave option mode only (no scroll, no L4 on hold)
                 self._exit_option("回到会话列表")
         elif kind == "up":
             p = self.presses.pop(pk, None)
@@ -659,20 +715,14 @@ class Controller:
                         self.open_settings()  # legacy firmware only (SETTINGS.md): short K1 on L4 opens settings
                     return
                 if knob == 1:
-                    s = self.mgr.selected_session()  # K1 press = focus the selection (same as a slot tap)
-                    if s is None:
-                        self._say("未选中会话 · 转 K1 选择")
-                    elif self._focus(s) and option_prompt(s) and self.page == "L1":
-                        self._enter_option(s)
+                    self._k1_press(t)  # K1 press = back to the latest content of the selected session
                 else:
                     page = target if knob == 2 and target in P.PAGES else "L4" if self.page == "L1" else "L1"
                     if page != self.page:
                         self._goto(page, f"切到 {page}")
         elif kind in ("cw", "ccw"):
-            if knob == 1 and self.option is not None:
-                pass  # the selection stays on the session being answered
-            elif knob == 1:
-                self._k1_step(1 if kind == "cw" else -1)
+            if knob == 1:
+                self._k1_rotate(1 if kind == "ccw" else -1, t)  # ccw = older (up), cw = newer (down)
             else:
                 self.scroll = max(0, self.scroll + (1 if kind == "cw" else -1))
         self._touch()
@@ -683,6 +733,7 @@ class Controller:
         if self.moving is not None and t - self.moving.last >= MOVE_TIMEOUT:
             self._cancel_move()  # 8 s without key/knob input: nothing changes
         self._option_tick(t)
+        self._scroll_tick(t)
         for pk, p in list(self.presses.items()):
             if p.long_fired or p.cancelled or t - p.t0 < LONG_PRESS or (pk[0] == "knob" and self.device_pages):
                 continue  # knob holds: legacy firmware only (ui.page firmware sends taps; its up decides)
@@ -696,26 +747,146 @@ class Controller:
             self._on_long(p.role, p)
             self._touch()
 
-    def k1_order(self) -> list[int]:
-        """Slot indices K1 rotation walks: needs_approval > needs_input > error > done_unread, then slot order."""
-        mgr = self.mgr
-        live = [(i, s) for i in range(N_SLOTS) if (s := mgr.session_at(i)) is not None]
-        return [i for i, s in sorted(live, key=lambda t: (K1_RANK.get(t[1].state, len(K1_RANK)), t[0]))]
+    # ------------------------------------------------------------------ K1 scroll-back (2026-10-25)
+    def scroll_deadline(self) -> float | None:
+        """Clock time of the next scroll-back step (a queued send, the idle timeout); the daemon wakes up for it."""
+        sc = self.scrolling
+        if sc is None:
+            return None
+        return sc.ready if (sc.pending or sc.bottom) else sc.last + SCROLL_IDLE_S
 
-    def _k1_step(self, direction: int) -> None:
-        """K1 rotation: move the selection one step through ``k1_order`` (wraps).  Effort stays unsupported."""
-        order = self.k1_order()
-        mgr = self.mgr
-        if not order:
-            self._say("无会话可选")
+    def _k1_session(self) -> Session | None:
+        """The session K1 scrolls (the selection), or None after a toast saying why not."""
+        s = self.mgr.selected_session()
+        if s is None:
+            self._say(K1_NO_SESSION)
+            return None
+        cap = self.adapter.capabilities().scroll
+        if cap:
+            self._say(cap)
+            return None
+        if self.ptt_held:
+            self._say(SCROLL_PTT)
+            return None
+        return s
+
+    def _scroll_for(self, s: Session) -> _Scroll | None:
+        """The running scroll-back of ``s``; one of another session / mode ends first."""
+        sc = self.scrolling
+        if sc is not None and (sc.key != s.sid.key() or sc.mode != self.mode):
+            self._end_scroll()
+            sc = None
+        return sc
+
+    def _start_scroll(self, s: Session, t: float) -> _Scroll | None:
+        ready = t
+        if self.adapter.capabilities().scroll_focus:
+            # the helper scrolls the App's frontmost window: bring this thread forward first (normal focus path)
+            if not self._focus(s):
+                return None
+            ready = t + SCROLL_FOCUS_SETTLE_S
+        self.scrolling = _Scroll(s.sid.key(), self.mode, s.sid.native, s.sid.generation, last=t, ready=ready)
+        return self.scrolling
+
+    def _k1_rotate(self, direction: int, t: float) -> None:
+        """K1 rotation (+1 = older / ccw, -1 = newer / cw): queue lines for the selected session."""
+        if self.option is not None:
+            self._say(SCROLL_OPTION)  # the digit keys answer the prompt: never put its pane into copy mode
             return
-        cur = next((n for n, i in enumerate(order) if mgr.slots[i] and mgr.slots[i].key == mgr.selected), None)
-        nxt = (0 if direction > 0 else len(order) - 1) if cur is None else (cur + direction) % len(order)
-        prev = mgr.selected
-        mgr.select(order[nxt])
-        if mgr.selected != prev:
-            self._cancel_target_presses()
-            self.persist()
+        if t < self._scroll_quiet.get(self.mode, float("-inf")):
+            return  # the setup hint was just shown: nothing else happens for a while
+        s = self._k1_session()
+        if s is None:
+            return
+        sc = self._scroll_for(s)
+        if sc is None:
+            if direction < 0:
+                self._say(SCROLL_LATEST)  # nothing newer than the live view
+                return
+            sc = self._start_scroll(s, t)
+            if sc is None:
+                return
+        fast = sc.dir == direction and t - sc.last < SCROLL_FAST_S
+        sc.streak = sc.streak + 1 if fast else 0
+        sc.dir, sc.last = direction, t
+        sc.pending += direction * SCROLL_LINES * min(SCROLL_MAX_MULT, 1 + sc.streak // 2)
+        self._touch()
+
+    def _k1_press(self, t: float) -> None:
+        """K1 press: the selected session back to its latest content, out of any scroll-back."""
+        if t < self._scroll_quiet.get(self.mode, float("-inf")):
+            return
+        s = self._k1_session()
+        if s is None:
+            return
+        sc = self._scroll_for(s) or self._start_scroll(s, t)
+        if sc is None:
+            return
+        sc.pending, sc.bottom, sc.last = 0, True, t
+        self._touch()
+
+    def _scroll_tick(self, t: float) -> None:
+        """Send what K1 queued (summed over the loop step), or end an idle scroll-back."""
+        sc = self.scrolling
+        if sc is None:
+            return
+        s = self.managers[sc.mode].sessions.get(sc.key)
+        if sc.mode != self.mode or s is None:
+            self._end_scroll()
+            return
+        if (sc.pending or sc.bottom) and t < sc.ready:
+            return
+        ad = self.adapters[sc.mode]
+        if sc.bottom:
+            self.scrolling = None
+            self._touch()
+            res = ad.scroll_bottom(s)
+            if res.ok:
+                self._say(SCROLL_LIVE)
+            else:
+                self._scroll_failed(res, t)
+        elif sc.pending:
+            n, sc.pending = sc.pending, 0
+            res = ad.scroll(s, n)
+            self._touch()
+            if not res.ok:
+                self.scrolling = None
+                self._scroll_failed(res, t)
+                self._scroll_release(sc, s)  # an earlier scroll may have left the tmux pane in copy mode
+            elif res.detail.get("live"):  # tmux scrolled down out of copy mode by itself
+                self.scrolling = None
+                self._say(SCROLL_LIVE)
+            else:
+                sc.active = True
+        elif t - sc.last >= SCROLL_IDLE_S and self._end_scroll():
+            self._say(SCROLL_IDLE_LIVE)
+
+    def _scroll_failed(self, res: ActionResult, t: float) -> None:
+        if res.detail.get("setup"):  # helper missing / not allowed: the hint once, then quiet for a while
+            self._scroll_quiet[self.mode] = t + SCROLL_SETUP_QUIET_S
+            self.scroll_note = (res.message, t + SCROLL_NOTE_S)
+            self._touch()
+        else:
+            self._say(res.message)
+
+    def _end_scroll(self) -> bool:
+        """Leave the scroll-back: the adapter puts the view back where that touches nothing else (tmux: the pane
+        leaves copy mode; Desktop: nothing, the deck never pulls Codex forward by itself).  True = live again."""
+        sc, self.scrolling = self.scrolling, None
+        if sc is None:
+            return False
+        self._touch()
+        if not sc.active:
+            return False
+        return self._scroll_release(sc, self.managers[sc.mode].sessions.get(sc.key))
+
+    def _scroll_release(self, sc: _Scroll, s: Session | None) -> bool:
+        """The session is already gone (it left the poll / the hook record expired): the tmux pane may still sit in
+        copy mode, so release it anyway through a minimal Session built from the identity stored in ``_Scroll``
+        (stale generation / dead pane: the adapter refuses without touching anything)."""
+        if s is None:
+            s = Session(SessionId(sc.mode, sc.native, sc.generation), Tool.OTHER, "")
+        return bool(self.adapters[sc.mode].scroll_release(s))
 
     # ------------------------------------------------------------------ gestures
     def _on_down(self, kr: KeyRole, p: _Press, t: float) -> None:
@@ -723,6 +894,7 @@ class Controller:
         if r == Role.PTT:
             self.ptt_held = True
             self.ptt_observed = True
+            self._end_scroll()  # dictation must reach the live prompt (a tmux pane in copy mode would eat it)
             if PTT_UNAVAILABLE:
                 self._say(PTT_UNAVAILABLE)
             return
@@ -742,6 +914,7 @@ class Controller:
                 return
             if prev_sel != mgr.selected:
                 self._cancel_target_presses(exclude=p)
+                self._end_scroll()
                 self.persist()
             p.target = s.sid.key()
             return
@@ -769,6 +942,7 @@ class Controller:
         s = self.mgr.selected_session()
         if p.target is None or p.mode != self.mode or s is None or s.sid.key() != p.target:
             return  # empty / lost slot, or the target changed while the key was down
+        self._end_scroll()  # a tap = go to the session: its live view (tmux leaves copy mode)
         if self.adapter.capabilities().focus is not None:
             return  # select only; the sub-screen note explains why (no toast on every tap)
         # Option mode only after the window really came forward: the keyboard types into the frontmost one.
@@ -829,6 +1003,7 @@ class Controller:
     def switch_mode(self, m: Mode) -> None:
         pre = self._drop_move()  # a mode switch cancels a pick-up (nothing changes)
         self._drop_option()
+        self._end_scroll()
         for pk, p in self.presses.items():
             if p.role.role != Role.PTT:
                 p.cancelled = True  # G34: cancel pending long presses + old eligibility
@@ -932,6 +1107,15 @@ class Controller:
             pinned = sum(1 for e in mgr.slots if e and e.pinned)
             pin_info = f"钉扎 {pinned}/{N_SLOTS} · 长按拿起，点自己=钉扎/解除 · S1–S5 在 L1"
         note = f"单击只选中 · 置前不可用：{caps.focus.split('，')[0]}" if (ok and caps.focus) else None
+        sc = self.scrolling
+        scrollback, warn = "", False
+        if sc is not None and sc.active and sc.mode == self.mode and sc.key == mgr.selected:
+            scrollback = SCROLL_HINT
+        elif self.scroll_note is not None:
+            if t < self.scroll_note[1]:
+                scrollback, warn = self.scroll_note[0], True
+            else:
+                self.scroll_note = None
         if self.rules_warning:
             note = self.rules_warning + (f" · {note}" if note else "")
         sub = SubView(
@@ -948,5 +1132,6 @@ class Controller:
                     "选项：按 1 选择 · × 取消 · K1 返回") if op else "",
             option_note=({"legacy": OPTION_LEGACY, "pending": OPTION_PENDING}.get(self.option_hid, "")) if op else "",
             alert=GD32_DFU_ALERT if self.gd32_dfu else "", alert_detail=GD32_DFU_DETAIL if self.gd32_dfu else "",
+            scrollback=scrollback, scrollback_warn=warn,
         )
         return DeckView(keys, sub)

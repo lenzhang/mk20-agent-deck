@@ -145,11 +145,14 @@ def test_long_press_picks_up_and_tap_self_pins_without_focus(env):
 
 def test_tap_does_not_focus_when_target_changed_during_press(env):
     c, clk, ads, _ = env
-    c.on_key(3, 2, True)  # S8 (last in K1 order)
-    c.on_knob(1, "cw")  # K1 moves the selection (wraps to S1) while the key is down
+    c.on_key(3, 2, True)  # S8
+    c.on_key(1, 1, True)  # S1 pressed while S8 is still down: the selection moves to S1
     clk.advance(0.05)
     c.on_key(3, 2, False)
     assert c.mgr.selected == c.mgr.slots[0].key and focus_calls(ads) == []
+    c.on_key(1, 1, False)  # S1's own tap still focuses S1
+    assert focus_calls(ads) == [("focus", c.mgr.slots[0].key)]
+    ads[Mode.DESKTOP].actions.clear()
     c.on_key(2, 1, True)
     c.on_knob(2, "down")
     c.on_knob(2, "up")  # page toggle mid-press: the press-time role still owns the release
@@ -192,8 +195,9 @@ def test_focus_unsupported_tap_only_selects_with_note(env):
     v = c.view()
     assert v.sub.note == "单击只选中 · 置前不可用：未绑定终端 App"  # ... the sub-screen says why
     c.on_knob(1, "down")
-    c.on_knob(1, "up")  # an explicit K1 focus still explains
-    assert "未绑定终端 App" in c.log[-1]
+    c.on_knob(1, "up")  # K1 press = back to the latest content: tmux works on its own pane, no focus needed
+    c.tick()
+    assert ads[Mode.TMUX].actions == [("bottom", c.mgr.selected)] and c.log[-1] == "已回到最新"
     c.switch_mode(Mode.DESKTOP)
     assert c.view().sub.note is None
 
@@ -361,8 +365,7 @@ def test_fifteen_sessions_fill_every_slot():
     assert len(agents) == 15 and all(k.title for k in agents)
     assert len({k.state for k in agents}) >= 7  # mixed states
     assert sum(1 for k in agents if k.attention) == 1
-    order = c.k1_order()
-    assert len(order) == 15 and c.mgr.session_at(order[0]).state == State.NEEDS_APPROVAL
+    assert any(c.mgr.session_at(i).state == State.NEEDS_APPROVAL for i in range(N_SLOTS))
 
 
 def test_overflow_beyond_fifteen_and_switch_toast():
@@ -387,13 +390,14 @@ def test_layout_sim_shots(tmp_path):
     assert all((tmp_path / n).stat().st_size > 10_000 for n, _ in made)
 
 
-# ------------------------------------------------------------------ knobs (unchanged behaviour)
+# ------------------------------------------------------------------ knobs (K1 scroll-back: test_k1_scroll.py)
 def test_knobs(env):
     c, clk, ads, _ = env
     c.on_knob(1, "down")
     c.on_knob(1, "up")
-    assert "未选中" in c.log[-1] and ads[Mode.DESKTOP].actions == []
-    c.on_knob(1, "cw")
+    assert c.log[-1] == "未选中会话 · 单击会话键选择" and ads[Mode.DESKTOP].actions == []
+    c.on_knob(1, "ccw")
+    assert c.log[-1] == "未选中会话 · 单击会话键选择" and ads[Mode.DESKTOP].actions == []
     c.on_knob(2, "down")
     clk.advance(0.1)
     c.on_knob(2, "up")
@@ -430,64 +434,6 @@ def test_selected_disappears_clears_and_grays(env):
     assert "未选中" in c.log[-1]
 
 
-K1_FIRST = [State.NEEDS_APPROVAL, State.NEEDS_INPUT, State.ERROR, State.DONE_UNREAD]
-
-
-def test_k1_rotation_walks_attention_order_then_slots(env):
-    c, clk, ads, saved = env
-    order = c.k1_order()
-    states = [c.mgr.session_at(i).state for i in order]
-    assert states[:4] == K1_FIRST
-    rest = order[4:]
-    assert rest == sorted(rest) and len(order) == 8  # others by slot order
-    seen = []
-    for _ in range(9):
-        c.on_knob(1, "cw")
-        seen.append(c.mgr.selected)
-    keys = [c.mgr.slots[i].key for i in order]
-    assert seen == keys + keys[:1]  # wraps around
-    c.on_knob(1, "ccw")
-    assert c.mgr.selected == keys[-1]
-    assert saved and saved[-1]["modes"]["codex_desktop"]["selected"] == keys[-1]  # persisted like a key select
-    assert ads[Mode.DESKTOP].actions == []  # rotation never acts on the agent
-    assert not any("effort" in m or "此会话不支持" in m for m in c.log)
-
-
-def test_k1_order_follows_state_changes(env):
-    c, clk, ads, _ = env
-    c.on_knob(1, "cw")
-    first = c.mgr.selected_session()
-    assert first.state == State.NEEDS_APPROVAL
-    first.state = State.RUNNING  # handled in the App
-    c.refresh()
-    keys = [c.mgr.slots[i].key for i in c.k1_order()]
-    pos = keys.index(first.sid.key())
-    assert pos >= 3  # it left the attention block
-    c.on_knob(1, "ccw")  # one step back in the re-sorted ring
-    assert c.mgr.selected == keys[pos - 1]
-    c.mgr.selected = None
-    c.on_knob(1, "cw")
-    assert c.mgr.selected_session().state == State.NEEDS_INPUT  # now the most urgent one
-
-
-def test_k1_press_focuses_selected_and_clears_done(env):
-    c, clk, ads, _ = env
-    for _ in range(4):
-        c.on_knob(1, "cw")
-    s = c.mgr.selected_session()
-    assert s.state == State.DONE_UNREAD
-    c.on_knob(1, "down")
-    clk.advance(0.1)
-    c.on_knob(1, "up")
-    assert ads[Mode.DESKTOP].actions == [("focus", s.sid.key())]
-    assert s.state == State.IDLE and c.page == "L1"
-    c.on_key(1, 4, True)  # PTT held: never bring a window forward
-    c.on_knob(1, "down")
-    c.on_knob(1, "up")
-    assert "PTT" in c.log[-1] and len(ads[Mode.DESKTOP].actions) == 1
-    c.on_key(1, 4, False)
-
-
 def test_k1_long_press_still_l4_and_l4_press_settings(env):
     c, clk, ads, _ = env
     c.on_knob(1, "down")
@@ -500,11 +446,11 @@ def test_k1_long_press_still_l4_and_l4_press_settings(env):
     assert c.page == "LS"
 
 
-def test_k1_rotation_without_sessions(env):
+def test_k1_without_sessions(env):
     c, clk, ads, _ = env
     c.switch_mode(Mode.HERDR)  # herdr not installed → no sessions
-    c.on_knob(1, "cw")
-    assert c.log[-1] == "无会话可选" and c.mgr.selected is None
+    c.on_knob(1, "ccw")
+    assert c.log[-1] == "未选中会话 · 单击会话键选择" and c.mgr.selected is None and c.scrolling is None
 
 
 # ------------------------------------------------------------------ sub-screen text

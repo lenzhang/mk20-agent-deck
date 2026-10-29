@@ -280,9 +280,9 @@ class Daemon:
         else:
             target = self._k2_target(ev)
             if target is not None:
-                self.controller.on_knob(ev.a, str(ev.b), target=target)
+                self.controller.on_knob(ev.a, str(ev.b), target=target, t=ev.t)
             else:
-                self.controller.on_knob(ev.a, str(ev.b))
+                self.controller.on_knob(ev.a, str(ev.b), t=ev.t)
             if ev.a == 2 and ev.b == "up" and ev.rx is not None:
                 self._keyboard_k2_tap(ev.rx)
         if tr:
@@ -580,6 +580,9 @@ class Daemon:
             waits.append(deadline - now)
         deadline = getattr(self.controller, "option_deadline", lambda: None)()
         if deadline is not None:  # option mode: 30 s without input / 3 s after a choice
+            waits.append(deadline - now)
+        deadline = getattr(self.controller, "scroll_deadline", lambda: None)()
+        if deadline is not None:  # K1 scroll-back: a send after the Desktop focus settle / the 2 min idle end
             waits.append(deadline - now)
         hw = self._hid_wait(now)
         if hw is not None:  # ui.hidKeys refresh / retry
