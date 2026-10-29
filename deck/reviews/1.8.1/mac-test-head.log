@@ -1,0 +1,200 @@
+..............................................................sssssssss. [  4%]
+........................................................................ [  9%]
+........................................................................ [ 14%]
+........................................sssssssssssssssssssssssssssssss. [ 18%]
+.............................................................sssssssssss [ 23%]
+sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss.ssssssssss [ 28%]
+ssssssssssssssssssssssssssssss...s..ssssssssssssssssssssssssssssssssssss [ 32%]
+ssssssssssssssssssss.................................................... [ 37%]
+......s....sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 42%]
+..........................................................ssssssssssssss [ 47%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 51%]
+ss..s...........F...F............................................sssssss [ 56%]
+sssssssssssssssssssssssssssssssss.ssssssss.ss.sss..ss................... [ 61%]
+..sssssssssssssssssssss..ss....ssss.s....ssss.ss.ssss........ssssss..ss. [ 65%]
+sFFss...sss....sssssssssssssssss.sssssssssss...ssssssss................. [ 70%]
+........................................................................ [ 75%]
+........sssss........................................................... [ 80%]
+.......................ssssssss.ssssssssssssssssssss...ssssss..sssssssss [ 84%]
+ssssssss.sss....ssssss...ss..ssssssssssssssssssssss.........sssssssssss. [ 89%]
+........................................................................ [ 94%]
+........................................................................ [ 98%]
+.................                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_agent_backoff_and_healthy_reset _____________________
+
+dev = <test_mk20d_agent.HostDev object at 0x22cb7fb20>
+rel = PosixPath('/private/var/folders/hg/0z6qzhk10qx08yf_kzfbbls00000gn/T/pytest-of-leo/pytest-19/test_agent_backoff_and_healthy0/rel')
+agent = PosixPath('/private/var/folders/hg/0z6qzhk10qx08yf_kzfbbls00000gn/T/pytest-of-leo/pytest-19/test_agent_backoff_and_healthy0/root/run/mk20/kbd.sock')
+
+    def test_agent_backoff_and_healthy_reset(dev, rel, agent):
+        # Real loop and crash launches, virtual monotonic uptime and sleeps. No production timing knobs.
+        dev.helper("cut", '''import os,sys
+    from pathlib import Path
+    if sys.argv[-1]=='/proc/uptime':
+     m=Path(os.environ['MOCK_DIR']); f=m/'clock'; n=int(f.read_text()) if f.exists() else 0
+     # First 7 crashes are short; the 8th lasts exactly 60s, resetting the capped backoff.
+     c=m/'calls'; count=len(c.read_text().splitlines()) if c.exists() else 0
+     if count==8 and not (m/'healthy').exists(): n+=60; (m/'healthy').touch()
+     f.write_text(str(n)); print(n)
+    else: os.execv('/usr/bin/cut',['cut']+sys.argv[1:])
+    ''')
+        dev.helper("sleep", '''import os,sys,time
+    from pathlib import Path
+    m=Path(os.environ['MOCK_DIR']); f=m/'clock'; n=int(f.read_text()) if f.exists() else 0
+    f.write_text(str(n+int(float(sys.argv[1])))); time.sleep(0.01)
+    ''')
+        (dev.mock / "crash").touch()
+        p = dev.start(rel / "sbin/mk20d", "agent")
+        log = dev.p("tmp/mk20/agent.log")
+>       assert wait(lambda: log.exists() and log.read_text().count("retry in") >= 9, 25)
+E       assert False
+E        +  where False = wait(<function test_agent_backoff_and_healthy_reset.<locals>.<lambda> at 0x21f3cad30>, 25)
+
+tests/test_mk20d_agent.py:277: AssertionError
+__________________ test_agent_selftest_never_fails[crashing] ___________________
+
+dev = <test_mk20d_agent.HostDev object at 0x22cb9bbe0>
+rel = PosixPath('/private/var/folders/hg/0z6qzhk10qx08yf_kzfbbls00000gn/T/pytest-of-leo/pytest-19/test_agent_selftest_never_fail3/rel')
+g1 = PosixPath('/private/var/folders/hg/0z6qzhk10qx08yf_kzfbbls00000gn/T/pytest-of-leo/pytest-19/test_agent_selftest_never_fail3/root/sys/kernel/config/usb_gadget/g1')
+mode = 'crashing'
+
+    @pytest.mark.parametrize("mode", ["disabled", "missing", "stale", "crashing", "malformed"])
+    def test_agent_selftest_never_fails(dev, rel, g1, mode):
+        # Agent failures remain nonfatal even on probation.
+        dev.p("data/mk20/state").mkdir(parents=True, exist_ok=True)
+        dev.p("data/mk20/state/pending").write_text("9.9.9\n")
+        # Non-agent checks pass with developer kbd opt-out and no stock KD (K4).
+        # Agent failures must not affect rc, even when an unrelated check fails.
+        if mode != "disabled":
+            conf(dev, "FEATURE_AGENT=1\n")
+        status = dev.p("run/mk20/agent.status")
+        status.parent.mkdir(parents=True)
+        if mode in ("stale", "malformed"):
+            status.write_text('{"state":"idle"}' if mode == "stale" else '{bad')
+            if mode == "stale":
+                os.utime(status, (1, 1))
+        if mode == "crashing":
+            # uptime is host monotonic on Darwin, /proc uptime on Linux.
+            now = int(float(Path("/proc/uptime").read_text().split()[0])) if Path("/proc/uptime").exists() else int(time.monotonic())
+            dev.p("tmp/mk20/agent-crash.times").write_text(f"{now}\n" * 3)
+        for other_failure in (False, True):
+            if other_failure:
+                (dev.mock / "wdt").write_text("offline")
+            r = dev.run(rel / "sbin/mk20d", "selftest")
+            lines = [x for x in r.stdout.splitlines() if "agent" in x]
+            assert lines and all(x.startswith(("INFO agent", "WARN agent")) for x in lines)
+            assert "PASS kd=0 (developer kbd opt-out)" in r.stdout
+            assert r.returncode == int(other_failure), r.stdout
+            assert ("INFO agent disabled" in lines) == (mode == "disabled")
+            if mode == "crashing":
+>               assert any("crash loop" in x for x in lines)
+E               assert False
+E                +  where False = any(<generator object test_agent_selftest_never_fails.<locals>.<genexpr> at 0x21f28c740>)
+
+tests/test_mk20d_agent.py:315: AssertionError
+______ test_hook_interrupts_backoff_and_resets_next_delay[sh-restart-kbd] ______
+
+hook_shell = (PosixPath('/private/var/folders/hg/0z6qzhk10qx08yf_kzfbbls00000gn/T/pytest-of-leo/pytest-19/test_hook_interrupts_backoff_a0/root'), <function hook_shell.<locals>.run at 0x21f3e2dc0>)
+hook = 'restart-kbd'
+
+    @pytest.mark.parametrize("hook", ["restart-kbd", "exit-safe-mode"])
+    def test_hook_interrupts_backoff_and_resets_next_delay(hook_shell, hook):
+        root, _ = hook_shell
+>       result = run_supervisor_cutout(hook_shell, '''
+    kill() { return 1; }
+    wait() { return 7; }
+    kbd_hooks() {
+      if [ "$(kbd_total)" = 3 ] && [ ! -f "$TM/submitted" ]; then
+        touch "$MR/HOOK" "$TM/submitted"
+      fi
+      real_kbd_hooks
+      [ "$(kbd_total)" -ge 4 ] && touch "$KSTOP"
+    }
+    '''.replace('HOOK', hook))
+
+tests/test_mk20d_kbd.py:1233: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_mk20d_kbd.py:1227: in run_supervisor_cutout
+    return subprocess.run(run.shell + [str(script)], env=run.env, text=True, capture_output=True, timeout=10)
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py:507: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py:1134: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py:1980: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['sh', '/private/var/folders/hg/0z6qzhk10qx08yf...>
+endtime = 1292.273221616, orig_timeout = 10, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['sh', '/private/var/folders/hg/0z6qzhk10qx08yf_kzfbbls00000gn/T/pytest-of-leo/pytest-19/test_hook_interrupts_backoff_a0/supervisor-cutout.sh']' timed out after 10 seconds
+
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py:1178: TimeoutExpired
+____ test_hook_interrupts_backoff_and_resets_next_delay[sh-exit-safe-mode] _____
+
+hook_shell = (PosixPath('/private/var/folders/hg/0z6qzhk10qx08yf_kzfbbls00000gn/T/pytest-of-leo/pytest-19/test_hook_interrupts_backoff_a1/root'), <function hook_shell.<locals>.run at 0x21f3ca280>)
+hook = 'exit-safe-mode'
+
+    @pytest.mark.parametrize("hook", ["restart-kbd", "exit-safe-mode"])
+    def test_hook_interrupts_backoff_and_resets_next_delay(hook_shell, hook):
+        root, _ = hook_shell
+>       result = run_supervisor_cutout(hook_shell, '''
+    kill() { return 1; }
+    wait() { return 7; }
+    kbd_hooks() {
+      if [ "$(kbd_total)" = 3 ] && [ ! -f "$TM/submitted" ]; then
+        touch "$MR/HOOK" "$TM/submitted"
+      fi
+      real_kbd_hooks
+      [ "$(kbd_total)" -ge 4 ] && touch "$KSTOP"
+    }
+    '''.replace('HOOK', hook))
+
+tests/test_mk20d_kbd.py:1233: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_mk20d_kbd.py:1227: in run_supervisor_cutout
+    return subprocess.run(run.shell + [str(script)], env=run.env, text=True, capture_output=True, timeout=10)
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py:507: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py:1134: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py:1980: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['sh', '/private/var/folders/hg/0z6qzhk10qx08yf...>
+endtime = 1303.250853808, orig_timeout = 10, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['sh', '/private/var/folders/hg/0z6qzhk10qx08yf_kzfbbls00000gn/T/pytest-of-leo/pytest-19/test_hook_interrupts_backoff_a1/supervisor-cutout.sh']' timed out after 10 seconds
+
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py:1178: TimeoutExpired
+=========================== short test summary info ============================
+FAILED tests/test_mk20d_agent.py::test_agent_backoff_and_healthy_reset - asse...
+FAILED tests/test_mk20d_agent.py::test_agent_selftest_never_fails[crashing]
+FAILED tests/test_mk20d_kbd.py::test_hook_interrupts_backoff_and_resets_next_delay[sh-restart-kbd]
+FAILED tests/test_mk20d_kbd.py::test_hook_interrupts_backoff_and_resets_next_delay[sh-exit-safe-mode]
+4 failed, 922 passed, 603 skipped in 1532.05s (0:25:32)
+EXIT 1
