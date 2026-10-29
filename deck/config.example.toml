@@ -12,7 +12,7 @@ heartbeat_s = 2.0
 backlight = 80                   # sent after every handshake (host mode starts at 0 = dark); false = leave alone
 web_url = "http://172.30.250.2:8780/"  # opened on the Mac by the 网页设置 key (device event ui.openSettings);
                                  # http/https, IP literal or localhost, no credentials - else this default
-approve_hold_s = 1.0             # option mode, permission prompt: hold 「是」/「是，且不再问」 this long (0..5 s);
+approve_hold_s = 1.0             # option mode, permission prompt: hold then release 「是」/「是，且不再问」 after this time (0..5 s);
                                  # 0 = off (the keyboard types the digit on press, as before 1.8.1)
 approve_sound = "Glass"          # /System/Library/Sounds/<name>.aiff after an approve; "" = silent
 

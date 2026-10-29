@@ -1,6 +1,6 @@
 # MK20 Agent 增强固件 — 进展文档
 
-> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-29 16:45 SGT
+> 每有关键进展即更新。时间均为新加坡时间（SGT）。最后更新：2026-10-30 SGT
 
 ## 1. 当前状态
 
@@ -22,6 +22,8 @@
 rc2 固件包：Mac `~/worktrees/k4-rc2/mk20-fw-1.3.0.tar`，sha256 `49284d191afadab6c26644d30a2e870a46b06dc92a9b5c73bad0a4e9019e4f4f`。
 
 ## 2. 关键进展日志（新的在上）
+
+- **10-30 本地复审修复（未部署）**：`codex/review-fixes` 将长按批准改为“达到时长且收到对应抬起才提交”，丢失抬起事件只会失效；配置文件的坏类型 / 非法数值 / TOML 解析错误回退到安全默认值；SNAP 文件名改为每次唯一；Python 包版本元数据统一为 1.8.1。用户选择 Noto Sans SC Regular（OFL 1.1）替换 STHeiti，已重生成 `ui_font.c` 和 374 个 UI 金样图；补充字体许可证说明和 GitHub 主机测试工作流。主机 Python 测试 **929 passed / 603 skipped**，C UI 校验 **41415 checks passed**，改动尚未推送、打 tag 或部署到 iMac。
 
 - **10-29 16:45** **mk20deck 1.8.1 部署到 iMac（Mac 侧，固件不变 1.8.0）**。分支 feature/deck-1.8.1（自 feature/ncm-gadget 52ae248）：457ff15 合并 mac/1.7.1-gd32-notice、0a36ceb 合并 mac/1.7.1-k1-scroll（K1 维持 10-25 决定：旋转=滚动历史、按下=最新；GD32 键位未动）；f7d81e6 长按批准 + SNAP；eed2917 评审 r1 修复；928c06d 文档。① 长按批准：tmux 选项模式下的权限提示，键 1「是」/2「是，且不再问」须按住 [deck] approve_hold_s（默认 1.0 s，0–5），键上画进度环，成功绿色闪光+对勾+afplay（approve_sound 默认 Glass，空=静音），短按只提示「未批准：需按住 1 秒」；键 3「否」仍由键盘直接打字、立即拒绝；超时/断线/掉帧（tick 间隔 >0.5 s、帧 ack 超过 0.6 s）/期间有其它按键或旋钮 → 一律取消，绝不自动批准；批准前复核会话/选项/页面/窗格不在回看模式。残余风险：链路正常时固件丢失 key-up 无法在 Mac 侧检测（需固件心跳）。② SNAP：L4 页长按 MODE（子标签「长按 截图」）→ 后台线程 screencapture -x -c 到剪贴板（[snap] save_dir 可另存 PNG），MODE 键闪光+提示；缺屏幕录制权限时提示并只请求一次（用户需在 系统设置→隐私与安全性→屏幕录制 打开 python3 后重启 mk20deck）。③ 测试：Linux docker deck pytest 1524 passed/5 skipped（928c06d）；f7d81e6 全量 make test 1519 passed/5 skipped、agent 398、ui 41405、tools 83/1 skipped；Mac 922 passed/603 skipped/4 failed（已知计时：agent_backoff、selftest[crashing]、hook_interrupts_backoff×2）。④ 评审：gpt-6.1-sol 本账号不可用 → 改用 gpt-6-sol（多次 at capacity 重试）；r1 FAIL（批准未要求观测到完整按住；SNAP 阻塞主循环）→ 修复 → r2 PASS 无新发现。⑤ 部署：备份 ~/mk20-backup/pre-1.8.1-20261029/（含 ROLLBACK.sh，旧 5f3dccb）；~/mk20-deploy → 3e094c1，kickstart 后 16:42:58 已连接、心跳正常；相机 ~/mk20-backup/cam/cam-stream1-20261029-164413-mk20.jpg 显示 L1 正常。未做真机批准测试（需真实权限提示+人按键）。未打 tag。
 - **10-28 18:40** **v1.8.0 生产版**（用户批准）。① fix/deck-py39 以非快进合并进 feature/ncm-gadget（52ae248）；按 1.6.1 惯例从其新建 release/1.8.0，提交 5f3dccb 只改 RELEASE.md（新增「1.8.0: production」一节 + 更新日志行）；VERSION 本来就是 1.8.0。② 固件**未重建/未重装**：设备上的 mk20-fw-1.8.0.tar（MANIFEST version=1.8.0 build=rc1，sha256 294e15445d225e3eddc28758b60025a32b986f427d354c24ce2f3f2957b3ecc5，由 f957d74 构建）就是 soak 通过的包；f957d74→5f3dccb 之间固件载荷无改动（只有 Mac 侧代码、文档、评审）。③ Docker mk20-build:trixie `make test`（5f3dccb）全绿：tests 1432 passed/1 skipped，agent 398，ui 41405 项检查，tools 83 passed/1 skipped，sim 38，kbd/K4 通过，48.6 min。④ 附注 tag v1.8.0（tag 对象 8acd8ba → 5f3dccb）与 release/1.8.0、feature/ncm-gadget 已推 Gitea 并核对。⑤ `~/mk20-deploy` 切到 v1.8.0（与 4d12625 仅差 RELEASE.md，代码相同，未重启 LaunchAgent；16:47 以来一直连着）。release/1.8.0 未合并到 main（与 1.6.1 一致）。

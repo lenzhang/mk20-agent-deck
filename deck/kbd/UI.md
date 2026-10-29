@@ -584,14 +584,14 @@ uses the normative GLM Coding-first order. Run `python3 ../tools/gen-providers.p
 when editing the catalogue; `--check` is part of `make ui-test`.
 
 Fonts/icons are committed bitmap assets. ASCII uses DejaVu Sans Mono (license in
-`font-LICENSE-DejaVu.txt`); fixed CJK derives from the macOS bundled STHeiti Light
-font (proprietary macOS font license, not OFL). Full source hashes and rasterizer
-versions are recorded in `ui_font.c`. Icons and the visible unsupported-glyph marker
+`font-LICENSE-DejaVu.txt`); fixed CJK uses Noto Sans SC Regular under the SIL Open
+Font License 1.1 (license in `font-LICENSE-NotoSansSC.txt`). Full source hashes and
+rasterizer versions are recorded in `ui_font.c`. Icons and the visible unsupported-glyph marker
 are explicit original bitmaps. Regenerate on a host with the same source fonts and
 Pillow/FreeType versions (generation only, no runtime dependency):
 
 ```
-python3 ../tools/gen-ui-font.py --font '/System/Library/Fonts/STHeiti Light.ttc' \
+python3 ../tools/gen-ui-font.py --font /path/to/NotoSansSC-Regular.otf \
   --ascii-font /path/to/DejaVuSansMono.ttf
 ```
 
@@ -650,6 +650,6 @@ Changed-file inventory (8 modified, 309 new, including 287 golden assets):
 - `deck/mk20deck/{agentcfg.py,settings.py,catalogue.py,providers.json}` (the last is
   the relative package-resource symlink to the shared source).
 - `deck/kbd/{Makefile,ui.c,ui.h,ui_labels.inc,ui_font.c,ui_font.h,ui_font_render.c,
-  uicfg.c,uicfg.h,providers.inc,font-LICENSE-DejaVu.txt,UI.md}`.
+  uicfg.c,uicfg.h,providers.inc,font-LICENSE-DejaVu.txt,font-LICENSE-NotoSansSC.txt,UI.md}`.
 - `deck/kbd/tests/{ui_test.c,ui_headless.c,uicfg_cli.c,ui_load.c,ui_conformance.py,
   ui_golden.py}`, plus 286 `tests/golden/ui/*/*.ppm.gz` files and manifest.json.

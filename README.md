@@ -18,7 +18,7 @@ some engineering notes are in English.
 |---|---|
 | 会话状态上屏 | L1 页 15 个会话槽：运行中 / 待输入 / 待审批 / 完成未读 / 出错，来源是 Codex Desktop（只读 sqlite）、tmux 里的 Claude Code / codex（hooks 状态记录）、herdr |
 | 一键置前 | 单击会话键：Codex 线程 `codex://`、tmux 窗格 + 终端 App |
-| 长按批准（1.8.1） | 权限提示出现时，键 1「是」/ 键 2「是，且不再问」要**按住 1 秒**（键上画进度环，成功闪绿 + 提示音）；键 3「否」立即生效；超时、断线、按别的键都会取消，**绝不默认放行** |
+| 长按批准（1.8.1） | 权限提示出现时，键 1「是」/ 键 2「是，且不再问」要**按住 1 秒并松开**（键上画进度环，成功闪绿 + 提示音）；键 3「否」立即生效；超时、断线、按别的键都会取消，**绝不默认放行** |
 | SNAP（1.8.1） | L4 页长按 MODE：全屏截图进剪贴板（需要「屏幕录制」权限） |
 | K1 回看 | 左旋钮旋转 = 滚动选中会话的历史，按下 = 回到最新 |
 | 选项模式 | 待输入的会话里，数字键由键盘直接发 HID 按键 |
@@ -39,7 +39,7 @@ flowchart LR
     direction TB
     T["Allwinner T113-S3 · Linux<br/>mk20d 监管 · mk20-kbd · mk20-router<br/>mk20-agent · ttygs_tcp_bridge"]
     G["GD32 键盘 MCU<br/>(QMK/VIA, 按键 + 旋钮)"]
-    L["20 × 0.85&quot; 键屏 + 2.8&quot; 副屏 (SPI)"]
+    L["20 × 0.85 英寸键屏 + 2.8 英寸副屏 (SPI)"]
     T <-->|UART| G
     T --> L
   end
@@ -138,7 +138,7 @@ sh tools/mk20-install.sh out/mk20-fw-<v>.tar --reboot --wait   # 推到设备，
 本仓库自有代码采用 [MIT 许可证](LICENSE)，Copyright (c) 2026 wenjie zhang。
 
 第三方组件保留各自许可，完整清单见 [THIRD_PARTY.md](THIRD_PARTY.md)，主要包括：`deck/agent/vendor/mbedtls`（Apache-2.0）、
-`deck/agent/vendor/zlib`（zlib）、cJSON / stb（MIT）、CA 证书包（MPL-2.0）、DejaVu 字体（`deck/kbd/font-LICENSE-DejaVu.txt`）。
+`deck/agent/vendor/zlib`（zlib）、cJSON / stb（MIT）、CA 证书包（MPL-2.0）、DejaVu 字体（`deck/kbd/font-LICENSE-DejaVu.txt`）、Noto Sans SC 字体（`deck/kbd/font-LICENSE-NotoSansSC.txt`）。
 
 **GPL-2.0 部分**：`deck/firmware/release/lib/` 下的内核模块 `usb_f_ncm.ko`、`usb_f_ecm.ko` 以及 `deck/kernel/` 下的内核补丁属于 Linux 内核（5.4.61，Tina），
 按 GPL-2.0 分发，不适用 MIT。对应源码（含已打补丁的 `f_ncm.c`、`f_ecm.c`、内核配置和构建脚本）在 [`deck/kernel/gpl/`](deck/kernel/gpl/README.md)。

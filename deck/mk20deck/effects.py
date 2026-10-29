@@ -18,6 +18,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -151,21 +152,41 @@ class Effects:
             log.warning("snap: Screen Recording permission missing for %s", sys.executable)
             return False, SNAP_NEED_TCC
         png = ""
+
+        def discard_png() -> None:
+            if png:
+                try:
+                    os.unlink(png)
+                except OSError:
+                    pass
+
         if self.snap_dir:
             try:
                 os.makedirs(self.snap_dir, exist_ok=True)
             except OSError as e:
                 log.warning("snap dir %s: %s", self.snap_dir, e)
                 return False, f"{SNAP_FAILED}：保存目录不可用"
-            png = os.path.join(self.snap_dir, time.strftime("mk20-snap-%Y%m%d-%H%M%S.png"))
+            try:
+                fd, png = tempfile.mkstemp(prefix="mk20-snap-", suffix=".png", dir=self.snap_dir)
+                os.close(fd)
+            except OSError as e:
+                log.warning("snap file in %s: %s", self.snap_dir, e)
+                return False, f"{SNAP_FAILED}：保存目录不可用"
             argv = [SCREENCAPTURE, "-x", png]
         else:
             argv = [SCREENCAPTURE, "-x", "-c"]  # -x: no shutter sound; -c: straight to the clipboard
-        rc = self._wait(self._spawn(argv), "capture")
+        try:
+            rc = self._wait(self._spawn(argv), "capture")
+        except OSError as e:
+            discard_png()
+            log.warning("screencapture: %s", e)
+            return False, SNAP_FAILED
         if rc is None:
+            discard_png()
             return False, f"{SNAP_FAILED}：超时"
         if rc != 0:
             log.warning("screencapture rc=%s", rc)
+            discard_png()
             return False, SNAP_FAILED
         if png:
             rc = self._wait(self._spawn(self._clipboard_argv(png)), "clipboard")

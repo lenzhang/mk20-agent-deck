@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import math
 import os
 import tempfile
 
@@ -136,13 +137,71 @@ def parse_port(v: Any, default: int = DEFAULT_ARRANGE_PORT) -> int:
     return default
 
 
+def _table(value: Any, name: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    log.warning("config [%s] ignored (expected a table)", name)
+    return {}
+
+
+def _float(value: Any, default: float, name: str, *, minimum: float | None = None,
+           maximum: float | None = None) -> float:
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        n = float(value)
+        if not math.isfinite(n):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        log.warning("config %s %r ignored (using %s)", name, value, default)
+        return default
+    if minimum is not None and n < minimum:
+        log.warning("config %s %r clamped to %s", name, value, minimum)
+        n = minimum
+    if maximum is not None and n > maximum:
+        log.warning("config %s %r clamped to %s", name, value, maximum)
+        n = maximum
+    return n
+
+
+def _int(value: Any, default: int, name: str, *, minimum: int | None = None,
+         maximum: int | None = None) -> int:
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        log.warning("config %s %r ignored (using %s)", name, value, default)
+        return default
+    if minimum is not None and n < minimum:
+        log.warning("config %s %r clamped to %s", name, value, minimum)
+        n = minimum
+    if maximum is not None and n > maximum:
+        log.warning("config %s %r clamped to %s", name, value, maximum)
+        n = maximum
+    return n
+
+
+def _bool(value: Any, default: bool, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    log.warning("config %s %r ignored (using %s)", name, value, default)
+    return default
+
+
 def parse_backlight(v: Any) -> int | None:
     """``false``/``"off"``/``"none"``/negative -> None (don't touch); otherwise clamp to 0..100."""
     if v is None or v is False or (isinstance(v, str) and v.strip().lower() in ("off", "none", "false", "")):
         return None
     if v is True:
         return 80
-    n = int(v)
+    try:
+        n = int(v)
+    except (TypeError, ValueError, OverflowError):
+        log.warning("config backlight %r ignored (using 80)", v)
+        return 80
     return None if n < 0 else max(0, min(100, n))
 
 
@@ -151,34 +210,71 @@ def load_config(path: str | None = None) -> DeckConfig:
     path = path or os.path.join(CONFIG_DIR, "config.toml")
     if not os.path.exists(path):
         return cfg
-    with open(path, "rb") as f:
-        d = tomllib.load(f)
-    deck = d.get("deck", {})
+    try:
+        with open(path, "rb") as f:
+            d = tomllib.load(f)
+    except (OSError, ValueError) as e:
+        log.warning("config %s ignored: %s", path, e)
+        return cfg
+    if not isinstance(d, dict):
+        log.warning("config %s ignored (root is not a table)", path)
+        return cfg
+    deck = _table(d.get("deck"), "deck")
     if "default_mode" in deck:
-        cfg.default_mode = Mode(deck["default_mode"])
-    for k in ("port", "fw_coord_base", "max_fps", "animations", "jpeg_quality", "poll_interval_s",
-              "heartbeat_s", "ack_timeout_s", "preamble_flush", "backlight", "state_path"):
-        if k in deck:
-            setattr(cfg, k, deck[k])
-    cfg.backlight = parse_backlight(cfg.backlight)
+        try:
+            cfg.default_mode = Mode(deck["default_mode"])
+        except (TypeError, ValueError):
+            log.warning("config default_mode %r ignored (using %s)", deck["default_mode"], cfg.default_mode.value)
+    if "port" in deck:
+        if isinstance(deck["port"], str):
+            cfg.port = deck["port"]
+        else:
+            log.warning("config port %r ignored (using %s)", deck["port"], cfg.port)
+    if "fw_coord_base" in deck:
+        raw = deck["fw_coord_base"]
+        if raw in ("auto", None):
+            cfg.fw_coord_base = None
+        elif not isinstance(raw, bool) and raw in (0, 1):
+            cfg.fw_coord_base = raw
+        else:
+            log.warning("config fw_coord_base %r ignored (using auto)", raw)
+    if "max_fps" in deck:
+        cfg.max_fps = _float(deck["max_fps"], cfg.max_fps, "max_fps", minimum=0.0, maximum=8.0)
+    if "animations" in deck:
+        if isinstance(deck["animations"], bool):
+            cfg.animations = deck["animations"]
+        else:
+            log.warning("config animations %r ignored (using %s)", deck["animations"], cfg.animations)
+    if "jpeg_quality" in deck:
+        cfg.jpeg_quality = _int(deck["jpeg_quality"], cfg.jpeg_quality, "jpeg_quality", minimum=1, maximum=100)
+    if "poll_interval_s" in deck:
+        cfg.poll_interval_s = _float(deck["poll_interval_s"], cfg.poll_interval_s, "poll_interval_s", minimum=0.01)
+    if "heartbeat_s" in deck:
+        cfg.heartbeat_s = _float(deck["heartbeat_s"], cfg.heartbeat_s, "heartbeat_s", minimum=0.01)
+    if "ack_timeout_s" in deck:
+        cfg.ack_timeout_s = _float(deck["ack_timeout_s"], cfg.ack_timeout_s, "ack_timeout_s", minimum=0.01)
+    if "preamble_flush" in deck:
+        cfg.preamble_flush = _int(deck["preamble_flush"], cfg.preamble_flush, "preamble_flush", minimum=0)
+    if "state_path" in deck:
+        if isinstance(deck["state_path"], str):
+            cfg.state_path = deck["state_path"]
+        else:
+            log.warning("config state_path %r ignored (using %s)", deck["state_path"], cfg.state_path)
+    if "backlight" in deck:
+        cfg.backlight = parse_backlight(deck["backlight"])
     if "web_url" in deck:
         cfg.web_url = parse_web_url(deck["web_url"])
     if "approve_hold_s" in deck:
-        try:
-            cfg.approve_hold_s = min(5.0, max(0.0, float(deck["approve_hold_s"])))
-        except (TypeError, ValueError):
-            log.warning("approve_hold_s %r ignored", deck["approve_hold_s"])
+        cfg.approve_hold_s = _float(deck["approve_hold_s"], cfg.approve_hold_s, "approve_hold_s", minimum=0.0,
+                                    maximum=5.0)
     if "approve_sound" in deck:
         cfg.approve_sound = parse_sound(deck["approve_sound"])
-    snap = d.get("snap", {})
+    snap = _table(d.get("snap"), "snap")
     if isinstance(snap.get("save_dir"), str):
         cfg.snap_dir = os.path.expanduser(snap["save_dir"])
-    web = d.get("web", {})
-    if isinstance(web, dict) and "arrange_port" in web:
+    web = _table(d.get("web"), "web")
+    if "arrange_port" in web:
         cfg.arrange_port = parse_port(web["arrange_port"])
-    if cfg.fw_coord_base == "auto":
-        cfg.fw_coord_base = None
-    cfg.max_fps = min(float(cfg.max_fps), 8.0)  # PRD §7.4 hard ceiling
     cfg.state_path = os.path.expanduser(cfg.state_path)
     if "skills" in d:
         # PRD 1.5 L1 layout: no skill keys any more.  [[skills]] is still parsed (adapters keep
@@ -190,39 +286,58 @@ def load_config(path: str | None = None) -> DeckConfig:
             sk = []
         if len(sk) == 4:
             cfg.skills = sk
-    cx = d.get("codex_desktop", {})
+    cx = _table(d.get("codex_desktop"), "codex_desktop")
+    originators = cx.get("originators", DEFAULT_ORIGINATORS)
+    if not isinstance(originators, (list, tuple)):
+        log.warning("config codex_desktop.originators %r ignored", originators)
+        originators = DEFAULT_ORIGINATORS
     cfg.codex = CodexDesktopConfig(
-        codex_home=cx.get("codex_home", "~/.codex"),
-        originators=tuple(cx.get("originators", DEFAULT_ORIGINATORS)),
-        running_window_s=float(cx.get("running_window_s", 600)),
-        max_candidates=int(cx.get("max_candidates", 24)),
-        max_tail_threads=int(cx.get("max_tail_threads", 16)),
-        max_prompt_chars=int(cx.get("max_prompt_chars", 2000)),
-        max_url_len=int(cx.get("max_url_len", 8000)),
-        require_cwd_exists=bool(cx.get("require_cwd_exists", False)),
+        codex_home=cx.get("codex_home", "~/.codex") if isinstance(cx.get("codex_home", "~/.codex"), str) else "~/.codex",
+        originators=tuple(str(x) for x in originators),
+        running_window_s=_float(cx.get("running_window_s", 600), 600.0, "codex_desktop.running_window_s", minimum=0.1),
+        max_candidates=_int(cx.get("max_candidates", 24), 24, "codex_desktop.max_candidates", minimum=1),
+        max_tail_threads=_int(cx.get("max_tail_threads", 16), 16, "codex_desktop.max_tail_threads", minimum=1),
+        max_prompt_chars=_int(cx.get("max_prompt_chars", 2000), 2000, "codex_desktop.max_prompt_chars", minimum=1),
+        max_url_len=_int(cx.get("max_url_len", 8000), 8000, "codex_desktop.max_url_len", minimum=256),
+        require_cwd_exists=_bool(cx.get("require_cwd_exists", False), False, "codex_desktop.require_cwd_exists"),
         scroll_app=str(cx.get("scroll_app", "com.openai.codex")),
         scroll_via=str(cx.get("scroll_via", "pid")),
         scroll_helper=str(cx.get("scroll_helper", "")),
     )
-    tm = d.get("tmux", {})
+    tm = _table(d.get("tmux"), "tmux")
+    patterns = tm.get("patterns", DEFAULT_PATTERNS)
+    if not isinstance(patterns, (list, tuple)):
+        log.warning("config tmux.patterns %r ignored", patterns)
+        patterns = DEFAULT_PATTERNS
+    registered_panes = tm.get("registered_panes", ())
+    if not isinstance(registered_panes, (list, tuple)):
+        log.warning("config tmux.registered_panes %r ignored", registered_panes)
+        registered_panes = ()
+    agent_commands = tm.get("agent_commands", DEFAULT_AGENT_COMMANDS)
+    if not isinstance(agent_commands, (list, tuple)):
+        log.warning("config tmux.agent_commands %r ignored", agent_commands)
+        agent_commands = DEFAULT_AGENT_COMMANDS
     cfg.tmux = TmuxConfig(
-        binary=tm.get("binary", "tmux"),
-        patterns=tuple(tm.get("patterns", DEFAULT_PATTERNS)),
-        registered_panes=tuple(tm.get("registered_panes", ())),
-        terminal_app=tm.get("terminal_app", ""),
-        new_session_cmd=tm.get("new_session_cmd", ""),
-        agent_commands=tuple(str(c) for c in tm.get("agent_commands", DEFAULT_AGENT_COMMANDS)),
-        use_hooks=bool(tm.get("use_hooks", True)),
+        binary=str(tm.get("binary", "tmux")),
+        patterns=tuple(str(x) for x in patterns),
+        registered_panes=tuple(str(x) for x in registered_panes),
+        terminal_app=str(tm.get("terminal_app", "")),
+        new_session_cmd=str(tm.get("new_session_cmd", "")),
+        agent_commands=tuple(str(c) for c in agent_commands),
+        use_hooks=_bool(tm.get("use_hooks", True), True, "tmux.use_hooks"),
         state_dir=os.path.expanduser(str(tm.get("state_dir", ""))),
-        hook_max_age_s=float(tm.get("hook_max_age_s", 12 * 3600)),
-        running_stale_s=float(tm.get("running_stale_s", 900)),
+        hook_max_age_s=_float(tm.get("hook_max_age_s", 12 * 3600), 12 * 3600.0, "tmux.hook_max_age_s", minimum=0.1),
+        running_stale_s=_float(tm.get("running_stale_s", 900), 900.0, "tmux.running_stale_s", minimum=0.1),
     )
     if "background_poll_s" in deck:
-        cfg.background_poll_s = max(0.0, float(deck["background_poll_s"]))
-    cfg.herdr = HerdrConfig(binary=d.get("herdr", {}).get("binary", "herdr"))
-    if "knobs" in d:  # a [knobs] table replaces the measured defaults
-        cfg.knob_map = {str(k): str(v) for k, v in d["knobs"].items()}
-    cfg.keycode_map = {str(k).lower(): str(v) for k, v in d.get("keycodes", {}).items()}
+        cfg.background_poll_s = _float(deck["background_poll_s"], cfg.background_poll_s, "background_poll_s", minimum=0.0)
+    herdr = _table(d.get("herdr"), "herdr")
+    cfg.herdr = HerdrConfig(binary=str(herdr.get("binary", "herdr")))
+    knobs = _table(d.get("knobs"), "knobs")
+    if "knobs" in d:  # a [knobs] table replaces the measured defaults, including an explicit empty table
+        cfg.knob_map = {str(k): str(v) for k, v in knobs.items()}
+    keycodes = _table(d.get("keycodes"), "keycodes")
+    cfg.keycode_map = {str(k).lower(): str(v) for k, v in keycodes.items()}
     return cfg
 
 

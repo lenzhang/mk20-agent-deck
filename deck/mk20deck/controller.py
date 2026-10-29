@@ -100,17 +100,21 @@ SCROLL_OPTION = "选项中不回看 · 按 K1 返回会话列表"
 K1_NO_SESSION = "未选中会话 · 单击会话键选择"
 # Long-press approve (2026-10-29): in option mode a permission prompt's 「是」/「是，且不再问」 keys answer only after
 # being held ``approve_hold_s`` (DeckConfig, default 1 s; 0 = off: the keyboard types the digit on press as before).
-# The Mac then types the digit into the session's own pane (adapter.answer: tmux send-keys -t <pane>); a shorter press
-# only previews.  「否」, ✗ Esc and Return stay immediate (the keyboard types them).  Never on a timeout, a lost key-up
-# (reconnect / wake drop every press), a changed prompt, another page / mode or with the PTT held.
+# The Mac then types the digit into the session's own pane (adapter.answer: tmux send-keys -t <pane>) only after the
+# threshold has been observed and the matching key-up has arrived. Requiring the up edge is deliberate: the keyboard
+# has no held-key heartbeat, so a lost physical key-up must fail closed rather than turn a short press into approval.
+# 「否」, ✗ Esc and Return stay immediate (the keyboard types them). Never on a timeout, reconnect / wake, a changed
+# prompt, another page / mode or with the PTT held.
 APPROVE_HOLD_S = 1.0
 APPROVE_FLASH_S = 0.6  # the key flashes this long after the answer went out (and the Mac plays a short sound)
 APPROVE_STALE = "未批准：提示已变化"
 APPROVE_PTT = "按住说话中，未批准"
+APPROVE_READY = "已按住足够时间 · 松开批准"
 # There is no held-key heartbeat from the keyboard (firmware unchanged), so the hold must be *observed*: the loop must
 # see it continuously (the daemon wakes every LONG_PRESS/8 = 75 ms while it is pending; a larger gap = a stalled
-# loop, the key-up may be queued or lost), the keyboard must have acked a frame recently (link alive: it renders
-# the progress ring at 8 fps), and no other input may arrive during the hold.  Any doubt cancels; never approves.
+# loop), the keyboard must have acked a frame recently (link alive: it renders the progress ring at 8 fps), and no
+# other input may arrive during the hold. The final action waits for the physical key-up; a missing up therefore
+# fails closed. Any other doubt cancels; never approves.
 APPROVE_MAX_GAP_S = 0.5
 APPROVE_LINK_S = 0.6
 APPROVE_LATE = "未批准：响应延迟，请重新按住"
@@ -257,6 +261,7 @@ class _Press:
     cancelled: bool = False
     approve: int = 0  # option mode long-press approve: the digit this press answers once held (0 = not one)
     approve_done: bool = False  # answered, refused or released: never fires (again)
+    approve_ready: bool = False  # observed the threshold; waits for the matching key-up before answering
 
 
 @dataclass
@@ -502,7 +507,8 @@ class Controller:
 
     def hid_keys_wanted(self) -> dict[int, int]:
         """Logical fb -> digit the keyboard should type while option mode is shown ({} = none).  The long-press
-        approve keys are left out: the keyboard forwards them as plain key presses and the Mac answers after the hold."""
+        approve keys are left out: the keyboard forwards them as plain key presses and the Mac answers after the
+        observed hold and matching key-up."""
         op = self.option
         if op is None or self.page != "L1" or op.mode != self.mode:
             return {}
@@ -553,16 +559,23 @@ class Controller:
                 self._say(APPROVE_LATE)
                 self._touch()
                 continue
-            if t - p.t0 >= hold:
-                if self.link_ack is not None and t - self.link_ack > APPROVE_LINK_S:
-                    p.approve_done = True
-                    self._say(APPROVE_NO_LINK)
-                    self._touch()
-                    continue
-                self._fire_approve(pk, p, t)
+            if self.link_ack is not None and t - self.link_ack > APPROVE_LINK_S:
+                p.approve_done = True
+                self._say(APPROVE_NO_LINK)
+                self._touch()
+                continue
+            if t - p.t0 >= hold and not p.approve_ready:
+                p.approve_ready = True
+                self._say(APPROVE_READY)
+                self._touch()
 
     def _fire_approve(self, pk: tuple, p: _Press, t: float) -> None:
-        """The approve key was held long enough: type its digit into the session (only if nothing changed)."""
+        """The approve key was held and released: type its digit only if nothing changed."""
+        if self.link_ack is not None and t - self.link_ack > APPROVE_LINK_S:
+            p.approve_done = True
+            self._say(APPROVE_NO_LINK)
+            self._touch()
+            return
         p.approve_done = True
         self._touch()
         op = self.option
@@ -638,7 +651,7 @@ class Controller:
             return
         n = kr.index + 1
         if kr.index in self._approve_keys(op):
-            p.approve, p.target = n, op.key  # answered by _approve_tick once held; the release only previews
+            p.approve, p.target = n, op.key  # _approve_tick observes the hold; the matching release submits it
             if any(q is not p for q in self.presses.values()):
                 p.approve_done = True  # another key / knob is held too: a lone, observed hold only
                 self._say(APPROVE_OTHER)
@@ -799,8 +812,12 @@ class Controller:
             if p is None:
                 return
             if p.approve and not p.approve_done:
-                p.approve_done = True  # released before the hold: a preview only, nothing is typed
-                self._say(f"未批准：需按住 {self.approve_hold():g} 秒")
+                p.cancelled = True  # an approve release must never fall through to the normal agent tap path
+                if p.approve_ready and t - p.t0 >= self.approve_hold():
+                    self._fire_approve(pk, p, t)
+                else:
+                    p.approve_done = True  # released before the hold: a preview only, nothing is typed
+                    self._say(f"未批准：需按住 {self.approve_hold():g} 秒")
             self._on_up(p.role, p, t)  # the press-time role owns the release (page may have changed)
         self._touch()
 
@@ -1205,7 +1222,9 @@ class Controller:
                             kv.sublabel = f"长按 {hold_s:g} 秒"
                             p = self.presses.get(("key", col, row))
                             if p is not None and p.approve and not p.approve_done and hold_s > 0:
-                                kv.hold = max(0.001, min(1.0, (t - p.t0) / hold_s))
+                                kv.hold = 1.0 if p.approve_ready else max(0.001, min(1.0, (t - p.t0) / hold_s))
+                                if p.approve_ready:
+                                    kv.sublabel = "松开批准"
                     else:
                         kv.blank = True
                 elif kr.role == Role.AGENT:

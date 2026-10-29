@@ -1,7 +1,7 @@
 """1.8.1 (2026-10-29): long-press approve in option mode and SNAP (L4 MODE long press = screenshot to clipboard).
 
-Long-press approve: a permission prompt's 「是」/「是，且不再问」 answer only after being held approve_hold_s; the Mac
-types the digit into the session's own pane (adapter.answer).  A short press, a release, a timeout, a reconnect, a
+Long-press approve: a permission prompt's 「是」/「是，且不再问」 answer only after being held approve_hold_s and
+released; the Mac types the digit into the session's own pane (adapter.answer).  A short press, a timeout, a reconnect, a
 changed prompt, another page / mode or the PTT never approve.  「否」 stays keyboard-typed (immediate).
 """
 import dataclasses
@@ -13,7 +13,7 @@ from PIL import Image
 from mk20deck.adapters.base import RecordingRunner, RunResult
 from mk20deck.adapters.tmux import TmuxAdapter, TmuxConfig
 from mk20deck.config import DeckConfig, load_config, parse_sound
-from mk20deck.controller import (APPROVE_FLASH_S, APPROVE_PTT, APPROVE_STALE, BOTTOM_ROW, LONG_PRESS,
+from mk20deck.controller import (APPROVE_FLASH_S, APPROVE_PTT, APPROVE_READY, APPROVE_STALE, BOTTOM_ROW, LONG_PRESS,
                                  PERMISSION_LABELS, SNAP_BUSY, Controller, KeyView, Role, slot_pos)
 from mk20deck.daemon import Daemon
 from mk20deck import effects as E
@@ -103,7 +103,7 @@ def test_question_prompts_unchanged():
     assert c.option.kind == "question" and c.hid_keys_wanted() == {1: 1, 2: 2, 3: 3}
 
 
-def test_full_hold_approves_once_into_the_session_pane():
+def test_full_hold_approves_on_the_matching_release_into_the_session_pane():
     c, clk, ads = make()
     op = enter_perm(c, clk)
     key = op.key
@@ -112,6 +112,8 @@ def test_full_hold_approves_once_into_the_session_pane():
     for _ in range(6):
         clk.advance(0.1)
         c.tick()
+    assert answers(ads) == [] and APPROVE_READY in c.view().sub.toast
+    c.on_key(1, 1, False)
     assert len(answers(ads)) == 1 and answers(ads)[0][1].endswith("|1") and key.split(":", 2)[2] in answers(ads)[0][1]
     assert c.effects == [("sound", "approve")]
     v = c.view()
@@ -158,6 +160,18 @@ def test_late_key_up_after_a_stall_does_not_approve():
     assert answers(ads) == []
 
 
+def test_missing_key_up_fails_closed_until_it_arrives():
+    c, clk, ads = make()
+    enter_perm(c, clk)
+    c.on_key(1, 1, True)
+    for _ in range(11):
+        clk.advance(0.1)
+        c.tick()
+    assert answers(ads) == [] and APPROVE_READY in c.view().sub.toast
+    c.on_key(1, 1, False)
+    assert len(answers(ads)) == 1
+
+
 def test_reconnect_and_timeout_never_approve():
     c, clk, ads = make()
     enter_perm(c, clk)
@@ -185,6 +199,7 @@ def test_prompt_change_or_ptt_refuses():
     for _ in range(8):
         clk.advance(0.1)
         c.tick()
+    c.on_key(1, 1, False)
     assert answers(ads) == []
     c, clk, ads = make()
     enter_perm(c, clk)
@@ -193,6 +208,7 @@ def test_prompt_change_or_ptt_refuses():
     for _ in range(8):
         clk.advance(0.1)
         c.tick()
+    c.on_key(1, 1, False)
     assert answers(ads) == [] and APPROVE_PTT in c.view().sub.toast
 
 
@@ -204,6 +220,7 @@ def test_fire_rechecks_state():
     for _ in range(8):
         clk.advance(0.1)
         c.tick()
+    c.on_key(1, 1, False)
     assert answers(ads) == [] and APPROVE_STALE in c.view().sub.toast
 
 
@@ -214,6 +231,7 @@ def test_adapter_refusal_is_shown_not_flashed():
     from mk20deck.model import ActionResult
     ad.answer = lambda s, d: ActionResult(False, "窗格在回看中：先按 K1 回到最新")
     hold_key(c, clk, 1, 1, 1.1)
+    c.on_key(1, 1, False)
     v = c.view()
     assert "未批准：窗格在回看中" in v.sub.toast and not any(k.flash for k in v.keys) and c.effects == []
 
@@ -223,8 +241,11 @@ def test_long_press_pending_while_holding():
     enter_perm(c, clk)
     c.on_key(1, 1, True)
     assert c.long_press_pending()
-    clk.advance(1.1)
-    c.tick()
+    for _ in range(11):
+        clk.advance(0.1)
+        c.tick()
+    assert c.long_press_pending()
+    c.on_key(1, 1, False)
     assert not c.long_press_pending()
 
 
@@ -343,6 +364,16 @@ def test_effects_snap_to_file_then_clipboard(tmp_path):
     assert argv[:2] == ["/usr/sbin/screencapture", "-x"] and argv[2].startswith(str(tmp_path / "snaps"))
     assert clip[0] == "/usr/bin/osascript" and clip[-1] == argv[2] and "PNGf" in " ".join(clip)
     assert (tmp_path / "snaps").is_dir() and ef.poll() == [("snap", True, E.SNAP_OK)]
+
+
+def test_effects_snap_file_names_are_unique_within_one_second(tmp_path):
+    pop = FakePopen()
+    ef = fx(snap_dir=str(tmp_path / "snaps"), popen=pop)
+    ef.snap()
+    first = pop.procs[0].argv[2]
+    ef.snap()
+    second = pop.procs[2].argv[2]
+    assert first != second and first.endswith(".png") and second.endswith(".png")
 
 
 def test_effects_snap_needs_permission_asks_once():
@@ -464,6 +495,39 @@ def test_config_keys(tmp_path):
     assert parse_sound("Glass") == "Glass" and parse_sound("a/b") == ""
 
 
+def test_config_malformed_values_fall_back_without_startup_failure(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        """[deck]
+backlight = \"oops\"
+default_mode = \"not-a-mode\"
+max_fps = \"oops\"
+heartbeat_s = nan
+approve_hold_s = \"oops\"
+[snap]
+save_dir = 42
+[codex_desktop]
+running_window_s = \"oops\"
+max_candidates = []
+require_cwd_exists = \"false\"
+[tmux]
+hook_max_age_s = \"oops\"
+use_hooks = \"false\"
+"""
+    )
+    cfg = load_config(str(p))
+    assert cfg.backlight == 80 and cfg.default_mode is Mode.DESKTOP
+    assert cfg.max_fps == 8.0 and cfg.heartbeat_s == 2.0 and cfg.approve_hold_s == 1.0
+    assert cfg.snap_dir == "" and cfg.codex.running_window_s == 600.0
+    assert cfg.codex.max_candidates == 24 and not cfg.codex.require_cwd_exists
+    assert cfg.tmux.hook_max_age_s == 12 * 3600 and cfg.tmux.use_hooks
+    p.write_text("[knobs]\n")
+    assert load_config(str(p)).knob_map == {}
+    p.write_text("[deck\n")
+    cfg = load_config(str(p))
+    assert cfg.default_mode is Mode.DESKTOP and cfg.backlight == 80
+
+
 # ------------------------------------------------------------------ r1 BLOCKER: the hold must be observed
 def test_stall_without_key_up_never_approves():
     """A lost / queued key-up plus a stalled loop: the tick after the stall sees a gap and cancels."""
@@ -493,6 +557,7 @@ def test_stale_link_never_approves():
         clk.advance(0.1)
         c.note_link_ack()
         c.tick()
+    c.on_key(1, 1, False)
     assert len(answers(ads)) == 1
 
 
