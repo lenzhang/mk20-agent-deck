@@ -18,6 +18,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Callable
 
@@ -58,15 +59,20 @@ def screen_capture_access(request: bool = False) -> bool | None:
 
 
 class Effects:
+    """Runs on the daemon thread only as far as queueing: SNAP (permission probe, directory, screencapture, clipboard)
+    runs in a worker thread; the approve sound is one non-blocking Popen.  ``poll()`` hands back finished results."""
+
     def __init__(self, sound: str = "Glass", snap_dir: str = "", platform: str = sys.platform,
                  popen: Callable[..., Any] = subprocess.Popen, access: Callable[[bool], bool | None] | None = None,
-                 clock: Callable[[], float] = time.monotonic, exists: Callable[[str], bool] = os.path.exists):
+                 clock: Callable[[], float] = time.monotonic, exists: Callable[[str], bool] = os.path.exists,
+                 threaded: bool = True):
         self.sound, self.snap_dir, self.platform = sound, snap_dir, platform
-        self.popen, self.clock, self.exists = popen, clock, exists
+        self.popen, self.clock, self.exists, self.threaded = popen, clock, exists, threaded
         self.access = access or screen_capture_access
         self._asked = False  # CGRequestScreenCaptureAccess at most once per process
         self._sounds: list[Any] = []
-        self._snap: tuple[Any, float, str, str] | None = None  # (proc, started, stage, png path)
+        self._lock = threading.Lock()
+        self._running = False  # a SNAP job is in flight
         self._done: list[tuple[str, bool, str]] = []
 
     @classmethod
@@ -74,7 +80,8 @@ class Effects:
         return cls(sound=getattr(cfg, "approve_sound", "Glass"), snap_dir=getattr(cfg, "snap_dir", ""))
 
     def busy(self) -> bool:
-        return self._snap is not None or bool(self._done)
+        with self._lock:
+            return self._running or bool(self._done)
 
     def run(self, effect: tuple) -> None:
         if not effect:
@@ -85,16 +92,17 @@ class Effects:
             self.snap()
 
     def _spawn(self, argv: list[str]) -> Any:
-        return self.popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        return self.popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _result(self, ok: bool, msg: str) -> None:
+        with self._lock:
+            self._done.append(("snap", ok, msg))
 
     # ------------------------------------------------------------------ sound
     def play(self) -> None:
         if not self.sound or self.platform != "darwin":
             return
-        path = os.path.join(SOUND_DIR, self.sound + ".aiff")
-        if not self.exists(path):
-            log.warning("approve sound %s not found", path)
-            return
+        path = os.path.join(SOUND_DIR, self.sound + ".aiff")  # name validated by config.parse_sound
         try:
             self._sounds.append(self._spawn([AFPLAY, path]))
         except OSError as e:
@@ -102,35 +110,69 @@ class Effects:
 
     # ------------------------------------------------------------------ SNAP
     def snap(self) -> None:
-        if self._snap is not None:
-            self._done.append(("snap", False, SNAP_RUNNING))
-            return
+        with self._lock:
+            if self._running:
+                self._done.append(("snap", False, SNAP_RUNNING))
+                return
+            self._running = True
+        if self.threaded:
+            threading.Thread(target=self._snap_job, name="mk20-snap", daemon=True).start()
+        else:
+            self._snap_job()
+
+    def _snap_job(self) -> None:
+        try:
+            ok, msg = self._snap_work()
+        except Exception as e:  # noqa: BLE001 — the worker never dies silently
+            log.exception("snap")
+            ok, msg = False, f"{SNAP_FAILED}：{type(e).__name__}"
+        with self._lock:
+            self._running = False
+            self._done.append(("snap", ok, msg))
+
+    def _wait(self, proc: Any, what: str) -> int | None:
+        t0 = self.clock()
+        while True:
+            rc = proc.poll()
+            if rc is not None:
+                return rc
+            if self.clock() - t0 > SNAP_TIMEOUT_S:
+                proc.kill()
+                log.warning("snap %s timed out", what)
+                return None
+            time.sleep(0.05) if self.threaded else None
+
+    def _snap_work(self) -> tuple[bool, str]:
         if self.platform != "darwin":
-            self._done.append(("snap", False, SNAP_NOT_MAC))
-            return
+            return False, SNAP_NOT_MAC
         ok = self.access(not self._asked)
         if ok is False:
             self._asked = True
             log.warning("snap: Screen Recording permission missing for %s", sys.executable)
-            self._done.append(("snap", False, SNAP_NEED_TCC))
-            return
+            return False, SNAP_NEED_TCC
         png = ""
         if self.snap_dir:
             try:
                 os.makedirs(self.snap_dir, exist_ok=True)
             except OSError as e:
                 log.warning("snap dir %s: %s", self.snap_dir, e)
-                self._done.append(("snap", False, f"{SNAP_FAILED}：保存目录不可用"))
-                return
+                return False, f"{SNAP_FAILED}：保存目录不可用"
             png = os.path.join(self.snap_dir, time.strftime("mk20-snap-%Y%m%d-%H%M%S.png"))
             argv = [SCREENCAPTURE, "-x", png]
         else:
             argv = [SCREENCAPTURE, "-x", "-c"]  # -x: no shutter sound; -c: straight to the clipboard
-        try:
-            self._snap = (self._spawn(argv), self.clock(), "capture", png)
-        except OSError as e:
-            log.warning("screencapture: %s", e)
-            self._done.append(("snap", False, SNAP_FAILED))
+        rc = self._wait(self._spawn(argv), "capture")
+        if rc is None:
+            return False, f"{SNAP_FAILED}：超时"
+        if rc != 0:
+            log.warning("screencapture rc=%s", rc)
+            return False, SNAP_FAILED
+        if png:
+            rc = self._wait(self._spawn(self._clipboard_argv(png)), "clipboard")
+            if rc != 0:
+                return False, f"已存 {os.path.basename(png)}，复制到剪贴板失败"
+        log.info("snap ok%s", f" ({png})" if png else "")
+        return True, SNAP_OK
 
     def _clipboard_argv(self, png: str) -> list[str]:
         # the PNG file onto the clipboard as an image (path passed as an argument, never spliced into the script)
@@ -138,31 +180,8 @@ class Effects:
                 "set the clipboard to (read (POSIX file (item 1 of argv)) as «class PNGf»)", "-e", "end run", png]
 
     def poll(self) -> list[tuple[str, bool, str]]:
-        """Finished effects as (kind, ok, message); reaps sound players."""
+        """Finished effects as (kind, ok, message); reaps sound players.  Never blocks."""
         self._sounds = [p for p in self._sounds if p.poll() is None]
-        if self._snap is not None:
-            proc, t0, stage, png = self._snap
-            rc = proc.poll()
-            if rc is None:
-                if self.clock() - t0 > SNAP_TIMEOUT_S:
-                    proc.kill()
-                    self._snap = None
-                    self._done.append(("snap", False, f"{SNAP_FAILED}：超时"))
-            elif rc != 0:
-                self._snap = None
-                err = (proc.stderr.read() if proc.stderr else b"") or b""
-                log.warning("snap %s failed rc=%s %s", stage, rc, err[:200])
-                self._done.append(("snap", False, SNAP_FAILED if stage == "capture" else
-                                   f"已存 {os.path.basename(png)}，复制到剪贴板失败"))
-            elif stage == "capture" and png:
-                try:
-                    self._snap = (self._spawn(self._clipboard_argv(png)), self.clock(), "clipboard", png)
-                except OSError:
-                    self._snap = None
-                    self._done.append(("snap", False, f"已存 {os.path.basename(png)}，复制到剪贴板失败"))
-            else:
-                self._snap = None
-                log.info("snap ok%s", f" ({png})" if png else "")
-                self._done.append(("snap", True, SNAP_OK))
-        out, self._done = self._done, []
+        with self._lock:
+            out, self._done = self._done, []
         return out

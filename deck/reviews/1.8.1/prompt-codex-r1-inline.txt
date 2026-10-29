@@ -1,0 +1,1173 @@
+You are reviewing a change in the mk20-agent-deck repo (Python Mac host "mk20deck" for an MK20 macro keyboard with key screens). READ-ONLY review: do not modify files, do not run anything that touches devices, serial ports, adb, network, tmux servers or screencapture. You may read files and run `git diff`/`git log`. Do NOT run tests: the full suites already ran (Mac: 917 passed, 4 known pre-existing timing failures in device shell tests; new tests/test_approve_snap.py 22 passed). Be fast: review the inlined diff, open other files only to confirm a finding.
+
+Diff under review: `git diff 0a36ceb..HEAD` (branch feature/deck-1.8.1, Mac-only, no firmware change). Context: README.md "选项模式"/"长按批准"/"SNAP 截图", docs/PRD-1.5-L1-LAYOUT.md §3.2.
+
+Features:
+1. Long-press approve: in option mode for a permission prompt (labels 是 / 是，且不再问 / 否), keys fb1/fb2 are removed from the keyboard's ui.hidKeys map so they arrive as normal key events; the controller starts a hold, renders a progress ring, and after approve_hold_s (default 1.0, 0=old behaviour) calls adapter.answer(session, digit) (tmux: refuse on generation mismatch / pane_in_mode!=0, then `send-keys -t <pane> -l <digit>`), flashes the key, queues an approve sound. Short press = no approve. 否 stays keyboard-typed.
+2. SNAP: on page L4, MODE (fb20) long press queues ("snap",); daemon runs effects.Effects: CGPreflightScreenCaptureAccess (ask CGRequestScreenCaptureAccess once), `/usr/sbin/screencapture -x -c` (or to [snap] save_dir then osascript PNGf to clipboard), polled Popen, 10 s timeout; result -> controller.effect_result toast + MODE key flash.
+
+HARD SAFETY REQUIREMENTS (blockers if violated):
+- A timeout, disconnect/reconnect/wake, a lost key-up, a loop stall, leaving option mode, a changed prompt/session/page/mode, or PTT held must NEVER produce an approve. Exactly one answer per hold. A short tap must never approve.
+- No double input (keyboard HID digit AND Mac send-keys for the same press).
+- Side effects must never block or crash the device loop; no shell injection (argv only).
+- Screen Recording permission must not be worked around.
+- Python 3.9 compatible (macOS system python; `from __future__ import annotations` is used).
+
+Output (markdown): verdict line "VERDICT: PASS" or "VERDICT: FAIL"; then findings numbered with severity BLOCKER / MAJOR / MINOR / NIT, file:line, and a concrete fix. Keep it concise. Mention anything in the hard-safety list you verified explicitly.
+
+To save time the full code diff is inlined below; read other files only where you need context to confirm a finding.
+```diff
+diff --git a/deck/mk20deck/adapters/base.py b/deck/mk20deck/adapters/base.py
+index bee0aed..9189846 100644
+--- a/deck/mk20deck/adapters/base.py
++++ b/deck/mk20deck/adapters/base.py
+@@ -104,6 +104,11 @@ class ModeAdapter:
+         """K1 press: back to the latest content, out of any scroll-back state."""
+         return ActionResult(False, self.capabilities().scroll or "此模式不支持回看")
+ 
++    def answer(self, s: Session, digit: int) -> ActionResult:
++        """Long-press approve (2026-10-29): type the choice ``digit`` into ``s`` itself (not the frontmost window).
++        Only offered when ``capabilities().approve`` is None."""
++        return ActionResult(False, self.capabilities().approve or "此模式不支持代答")
++
+     def scroll_release(self, s: Session) -> bool:
+         """The deck stops scrolling ``s`` (another session / mode, idle timeout): leave the scroll-back state if that
+         touches nothing else (tmux: only that pane).  True when the view is back at the latest content."""
+diff --git a/deck/mk20deck/adapters/mock.py b/deck/mk20deck/adapters/mock.py
+index 7aabcd3..5ad564f 100644
+--- a/deck/mk20deck/adapters/mock.py
++++ b/deck/mk20deck/adapters/mock.py
+@@ -60,6 +60,9 @@ class MockAdapter(ModeAdapter):
+         res = self._act("bottom", s.sid.key(), self.caps.scroll)
+         return res if not res.ok else (self.scroll_reply or res)
+ 
++    def answer(self, s: Session, digit: int) -> ActionResult:
++        return self._act("answer", f"{s.sid.key()}|{digit}", self.caps.approve)
++
+     def scroll_release(self, s: Session) -> bool:
+         """Like the real adapters: a pane-targeted mode (tmux) goes live again, a focus-first one (Desktop) not."""
+         self.actions.append(("release", s.sid.key()))
+diff --git a/deck/mk20deck/adapters/tmux.py b/deck/mk20deck/adapters/tmux.py
+index 6ddde52..08b8660 100644
+--- a/deck/mk20deck/adapters/tmux.py
++++ b/deck/mk20deck/adapters/tmux.py
+@@ -110,7 +110,7 @@ class TmuxAdapter(ModeAdapter):
+             skill_new_thread="tmux 无新线程预填",
+             send="投递语义未验证（P0 禁用）",
+             stop="中断能力未按工具版本验证",
+-            approve="P1：请在终端内处理",
++            approve=None,  # long-press approve: the digit goes to the session's own pane (answer())
+             effort_set="此会话不支持",
+             precise_state=None if self.hooked else "状态受限：tmux 无生命周期信号（未发现 hook 记录）",
+             scroll=None,
+@@ -274,3 +274,21 @@ class TmuxAdapter(ModeAdapter):
+ 
+     def scroll_release(self, s: Session) -> bool:
+         return self.scroll_bottom(s).ok
++
++    def answer(self, s: Session, digit: int) -> ActionResult:
++        """Type the choice digit into the session's pane (literal, no Enter: Claude/codex prompts pick on the digit).
++        Refused while the pane is in copy mode (the digit would be a copy-mode command, not an answer)."""
++        if s.sid.generation != self.generation:
++            return ActionResult(False, "tmux server 已重启，身份失效")
++        if not (isinstance(digit, int) and 1 <= digit <= 9):
++            return ActionResult(False, "无效选项")
++        pane = s.sid.native
++        r = self._tmux("display-message", "-p", "-t", pane, "#{pane_in_mode}")
++        if r.returncode != 0:
++            return ActionResult(False, "会话窗格不存在")
++        if r.stdout.strip() != "0":
++            return ActionResult(False, "窗格在回看中：先按 K1 回到最新")
++        r = self._tmux("send-keys", "-t", pane, "-l", str(digit))
++        if r.returncode != 0:
++            return ActionResult(False, "tmux 发送失败" + (f"：{r.stderr.strip()[:30]}" if r.stderr.strip() else ""))
++        return ActionResult(True, "")
+diff --git a/deck/mk20deck/cli.py b/deck/mk20deck/cli.py
+index 3d2ebe6..f720132 100644
+--- a/deck/mk20deck/cli.py
++++ b/deck/mk20deck/cli.py
+@@ -15,6 +15,7 @@ from .adapters.herdr import HerdrAdapter
+ from .adapters.tmux import TmuxAdapter
+ from .config import CONFIG_DIR, DeckConfig, load_config, load_state, save_state
+ from .controller import Controller
++from .effects import Effects
+ from .layout import DeviceLayout
+ from .model import Mode
+ 
+@@ -76,7 +77,7 @@ def cmd_run(args) -> int:
+     try:
+         Supervisor(ctl, find_ports, open_transport, default_renderer_factory(cfg), cfg,
+                    power=PowerMonitor.default(), bg_adapters=build_adapters(cfg), calls=calls,
+-                   arrange=web, gd32=gd32).run(stop)  # web: the keyboard's 会话安排 key mints its one-time link here
++                   arrange=web, gd32=gd32, effects=Effects.from_config(cfg)).run(stop)  # web: the keyboard's 会话安排 key mints its one-time link here
+     finally:
+         stop.set()  # also when the supervisor raised: the watch thread ends ...
+         if gd32_thread is not None:
+diff --git a/deck/mk20deck/config.py b/deck/mk20deck/config.py
+index 5bdd0c5..9350f6f 100644
+--- a/deck/mk20deck/config.py
++++ b/deck/mk20deck/config.py
+@@ -79,6 +79,20 @@ class DeckConfig:
+     state_path: str = os.path.join(CONFIG_DIR, "state.json")
+     web_url: str = DEFAULT_WEB_URL  # see parse_web_url
+     arrange_port: int = DEFAULT_ARRANGE_PORT  # [web] arrange_port, see parse_port
++    # Long-press approve (option mode, permission prompts): hold 「是」 this long; 0 = off (typed on press).
++    approve_hold_s: float = 1.0
++    approve_sound: str = "Glass"  # /System/Library/Sounds/<name>.aiff after an approve; "" = silent
++    snap_dir: str = ""  # [snap] save_dir: also keep each screenshot as a PNG there ("" = clipboard only)
++
++
++def parse_sound(v: Any) -> str:
++    """A macOS system sound name (``Glass``, ``Ping`` …) or "" (off); anything else is off with a warning."""
++    if v in (None, False, ""):
++        return ""
++    if isinstance(v, str) and 0 < len(v) <= 32 and all(c.isalnum() or c in " _-" for c in v):
++        return v
++    log.warning("approve_sound %r ignored (a name from /System/Library/Sounds, or \"\")", v)
++    return ""
+ 
+ 
+ def parse_web_url(v: Any) -> str:
+@@ -149,6 +163,16 @@ def load_config(path: str | None = None) -> DeckConfig:
+     cfg.backlight = parse_backlight(cfg.backlight)
+     if "web_url" in deck:
+         cfg.web_url = parse_web_url(deck["web_url"])
++    if "approve_hold_s" in deck:
++        try:
++            cfg.approve_hold_s = min(5.0, max(0.0, float(deck["approve_hold_s"])))
++        except (TypeError, ValueError):
++            log.warning("approve_hold_s %r ignored", deck["approve_hold_s"])
++    if "approve_sound" in deck:
++        cfg.approve_sound = parse_sound(deck["approve_sound"])
++    snap = d.get("snap", {})
++    if isinstance(snap.get("save_dir"), str):
++        cfg.snap_dir = os.path.expanduser(snap["save_dir"])
+     web = d.get("web", {})
+     if isinstance(web, dict) and "arrange_port" in web:
+         cfg.arrange_port = parse_port(web["arrange_port"])
+diff --git a/deck/mk20deck/controller.py b/deck/mk20deck/controller.py
+index 826ffab..93ddbbf 100644
+--- a/deck/mk20deck/controller.py
++++ b/deck/mk20deck/controller.py
+@@ -98,6 +98,19 @@ SCROLL_LATEST = "已是最新"
+ SCROLL_PTT = "按住说话中，暂不回看"
+ SCROLL_OPTION = "选项中不回看 · 按 K1 返回会话列表"
+ K1_NO_SESSION = "未选中会话 · 单击会话键选择"
++# Long-press approve (2026-10-29): in option mode a permission prompt's 「是」/「是，且不再问」 keys answer only after
++# being held ``approve_hold_s`` (DeckConfig, default 1 s; 0 = off: the keyboard types the digit on press as before).
++# The Mac then types the digit into the session's own pane (adapter.answer: tmux send-keys -t <pane>); a shorter press
++# only previews.  「否」, ✗ Esc and Return stay immediate (the keyboard types them).  Never on a timeout, a lost key-up
++# (reconnect / wake drop every press), a changed prompt, another page / mode or with the PTT held.
++APPROVE_HOLD_S = 1.0
++APPROVE_FLASH_S = 0.6  # the key flashes this long after the answer went out (and the Mac plays a short sound)
++APPROVE_STALE = "未批准：提示已变化"
++APPROVE_PTT = "按住说话中，未批准"
++# SNAP (2026-10-29): long press of the MODE key (fb20) while L4 is shown = screenshot of the Mac screen to the
++# clipboard (macOS screencapture; the daemon runs it, see effects.py).  On L1 the long press still opens L4.
++SNAP_FLASH_S = 0.6
++SNAP_BUSY = "截图中…"
+ MODE_SHORT = {Mode.DESKTOP: "桌面", Mode.HERDR: "herdr", Mode.TMUX: "tmux"}
+ 
+ 
+@@ -174,6 +187,8 @@ class KeyView:
+     attention: bool = False
+     badge_alert: bool = False  # badge is an attention count (other modes)
+     moving: bool = False  # this slot is picked up (pick-up-and-place gesture)
++    hold: float = 0.0  # long-press approve in progress: 0..1 of approve_hold_s (progress ring on the key)
++    flash: bool = False  # just answered / screenshot taken: the key flashes for a moment
+     option: int = 0  # option mode: this key answers choice N (1-based); label = the option text ("" = digit only)
+     blank: bool = False  # option mode: rows 1–3 beyond the choices (dark; a press leaves option mode)
+ 
+@@ -231,6 +246,8 @@ class _Press:
+     target: str | None = None
+     long_fired: bool = False
+     cancelled: bool = False
++    approve: int = 0  # option mode long-press approve: the digit this press answers once held (0 = not one)
++    approve_done: bool = False  # answered, refused or released: never fires (again)
+ 
+ 
+ @dataclass
+@@ -331,6 +348,9 @@ class Controller:
+         self.scrolling: _Scroll | None = None  # K1 scroll-back of the selected session
+         self.scroll_note: tuple[str, float] | None = None  # (setup hint, until)
+         self._scroll_quiet: dict[Mode, float] = {}  # mode -> clock until which K1 scroll does nothing (setup hint)
++        self.flash: dict[tuple[int, int], float] = {}  # (col, row) -> clock until which that key flashes
++        # Side effects the daemon runs off the controller (I/O-free here): ("sound", "approve"), ("snap",).
++        self.effects: list[tuple] = []
+ 
+     # ------------------------------------------------------------------ helpers
+     @property
+@@ -396,9 +416,10 @@ class Controller:
+         self._touch()
+ 
+     def long_press_pending(self) -> bool:
+-        """A press that can still reach LONG_PRESS (the daemon wakes up for it); knob presses only on legacy firmware."""
+-        return any(not (p.long_fired or p.cancelled) and (pk[0] != "knob" or not self.device_pages)
+-                   for pk, p in self.presses.items())
++        """A press that can still reach LONG_PRESS (the daemon wakes up for it); knob presses only on legacy firmware.
++        A long-press approve in progress counts too (its threshold and the progress ring)."""
++        return any((not (p.long_fired or p.cancelled) and (pk[0] != "knob" or not self.device_pages))
++                   or (p.approve and not p.approve_done) for pk, p in self.presses.items())
+ 
+     def drop_gestures(self) -> None:
+         """Reconnect / wake: presses in flight, a picked-up slot, option mode and unsent K1 scrolls are never
+@@ -450,6 +471,9 @@ class Controller:
+         if self.option is None:
+             return False
+         self.option = None
++        for p in self.presses.values():
++            if p.approve:
++                p.approve_done = True  # leaving option mode never lets a held approve key fire later
+         self._touch()
+         return True
+ 
+@@ -466,11 +490,60 @@ class Controller:
+         return min(d, op.chosen[1] + OPTION_CHOSEN_S) if op.chosen else d
+ 
+     def hid_keys_wanted(self) -> dict[int, int]:
+-        """Logical fb -> digit the keyboard should type while option mode is shown ({} = none)."""
++        """Logical fb -> digit the keyboard should type while option mode is shown ({} = none).  The long-press
++        approve keys are left out: the keyboard forwards them as plain key presses and the Mac answers after the hold."""
+         op = self.option
+         if op is None or self.page != "L1" or op.mode != self.mode:
+             return {}
+-        return {i + 1: i + 1 for i in range(len(op.labels))}  # row 1: fb1..fbN = S1..SN
++        hold = self._approve_keys(op)
++        return {i + 1: i + 1 for i in range(len(op.labels)) if i not in hold}  # row 1: fb1..fbN = S1..SN
++
++    # ------------------------------------------------------------------ long-press approve (2026-10-29)
++    def approve_hold(self) -> float:
++        try:
++            return max(0.0, float(getattr(self.cfg, "approve_hold_s", APPROVE_HOLD_S)))
++        except (TypeError, ValueError):
++            return APPROVE_HOLD_S
++
++    def _approve_keys(self, op: "_Option") -> frozenset:
++        """Slot indices (row 1) of the option keys that approve only after a hold: 「是」 and 「是，且不再问」 of a
++        permission prompt, when the hold is on and the mode's adapter can type the digit into the session itself."""
++        if op.kind != "permission" or self.approve_hold() <= 0:
++            return frozenset()
++        if self.adapters[op.mode].capabilities().approve is not None:
++            return frozenset()  # e.g. Desktop / herdr (no option mode anyway): the keyboard types as before
++        return frozenset(i for i, lab in enumerate(op.labels[:2]) if lab in PERMISSION_LABELS[:2])
++
++    def _approve_tick(self, t: float) -> None:
++        hold = self.approve_hold()
++        for pk, p in list(self.presses.items()):
++            if p.approve and not p.approve_done and t - p.t0 >= hold:
++                self._fire_approve(pk, p, t)
++
++    def _fire_approve(self, pk: tuple, p: _Press, t: float) -> None:
++        """The approve key was held long enough: type its digit into the session (only if nothing changed)."""
++        p.approve_done = True
++        self._touch()
++        op = self.option
++        s = self.managers[op.mode].sessions.get(op.key) if op is not None else None
++        if (op is None or s is None or op.key != p.target or op.mode != p.mode or op.mode != self.mode
++                or self.page != "L1" or not option_prompt(s) or option_labels(s)[1] != "permission"
++                or (p.approve - 1) not in self._approve_keys(op)):
++            self._say(APPROVE_STALE)
++            return
++        if self.ptt_held:
++            self._say(APPROVE_PTT)
++            return
++        res = self.adapters[op.mode].answer(s, p.approve)
++        self.action_count += 1
++        log.info("approve %s digit %d: ok=%s %s", op.key, p.approve, res.ok, res.message)
++        if not res.ok:
++            self._say(f"未批准：{res.message}", 3.0)
++            return
++        op.chosen, op.last = (str(p.approve), t), t
++        self.flash[(pk[1], pk[2])] = t + APPROVE_FLASH_S
++        self.effects.append(("sound", "approve"))
++        self._say(f"已批准：{p.approve} {op.labels[p.approve - 1]}")
+ 
+     def set_option_hid(self, status: str) -> None:
+         if status != self.option_hid:
+@@ -523,6 +596,11 @@ class Controller:
+             self._exit_option("回到会话列表")
+             return
+         n = kr.index + 1
++        if kr.index in self._approve_keys(op):
++            p.approve, p.target = n, op.key  # answered by _approve_tick once held; the release only previews
++            hold = self.approve_hold()
++            self._say(f"按住 {hold:g} 秒批准「{op.labels[kr.index]}」· 松开取消", hold + 1.0)
++            return
+         self._say(OPTION_LEGACY if self.option_hid == "legacy" else f"数字键未生效，请在 Mac 上按 {n}")
+ 
+     # ------------------------------------------------------------------ backend
+@@ -672,6 +750,9 @@ class Controller:
+             p = self.presses.pop(pk, None)
+             if p is None:
+                 return
++            if p.approve and not p.approve_done:
++                p.approve_done = True  # released before the hold: a preview only, nothing is typed
++                self._say(f"未批准：需按住 {self.approve_hold():g} 秒")
+             self._on_up(p.role, p, t)  # the press-time role owns the release (page may have changed)
+         self._touch()
+ 
+@@ -733,6 +814,7 @@ class Controller:
+         if self.moving is not None and t - self.moving.last >= MOVE_TIMEOUT:
+             self._cancel_move()  # 8 s without key/knob input: nothing changes
+         self._option_tick(t)
++        self._approve_tick(t)
+         self._scroll_tick(t)
+         for pk, p in list(self.presses.items()):
+             if p.long_fired or p.cancelled or t - p.t0 < LONG_PRESS or (pk[0] == "knob" and self.device_pages):
+@@ -956,7 +1038,23 @@ class Controller:
+             if p.mode == self.mode:
+                 self._pick_up(kr.index)
+         elif r == Role.MODE:
+-            self._goto("L4", "L4 模式页：点选模式")
++            if self.page == "L4":
++                self._snap()  # SNAP: long press of the mode key on L4 (on L1 it opens L4)
++            else:
++                self._goto("L4", "L4 模式页：点选模式")
++
++    # ------------------------------------------------------------------ SNAP (2026-10-29)
++    def _snap(self) -> None:
++        self.effects.append(("snap",))
++        self._say(SNAP_BUSY, 10.0)
++
++    def effect_result(self, kind: str, ok: bool, message: str) -> None:
++        """Daemon: a side effect finished (``kind`` = "snap"); feedback on the keyboard."""
++        if kind == "snap":
++            if ok:
++                col, row = BOTTOM_ROW.index(Role.MODE) + 1, 4  # the MODE key (fb20)
++                self.flash[(col, row)] = self.clock() + SNAP_FLASH_S
++            self._say(message, TOAST_S if ok else 5.0)
+ 
+     def _cancel_target_presses(self, exclude: "_Press | None" = None) -> None:
+         for p in self.presses.values():
+@@ -1042,6 +1140,11 @@ class Controller:
+         mv = self.moving if (self.moving is not None and self.moving.mode == self.mode) else None
+         op = self.option if (self.option is not None and self.option.mode == self.mode and self.page == "L1") else None
+         attention: tuple[int, int, str] | None = None  # (priority, -updated, key) best
++        approve_keys = self._approve_keys(op) if op is not None else frozenset()
++        hold_s = self.approve_hold()
++        for k in [k for k, until in self.flash.items() if until <= t]:
++            del self.flash[k]
++            self._touch()  # the frame without the flash is due
+         for row in range(1, 5):
+             for col in range(1, 6):
+                 kr = role_at(self.page, col, row)
+@@ -1049,6 +1152,11 @@ class Controller:
+                 if op is not None and kr.role == Role.AGENT:
+                     if kr.index < len(op.labels):  # the choice keys (row 1); the session list is cleared
+                         kv.option, kv.label = kr.index + 1, op.labels[kr.index]
++                        if kr.index in approve_keys:
++                            kv.sublabel = f"长按 {hold_s:g} 秒"
++                            p = self.presses.get(("key", col, row))
++                            if p is not None and p.approve and not p.approve_done and hold_s > 0:
++                                kv.hold = max(0.001, min(1.0, (t - p.t0) / hold_s))
+                     else:
+                         kv.blank = True
+                 elif kr.role == Role.AGENT:
+@@ -1078,6 +1186,8 @@ class Controller:
+                     kv.label, kv.disabled = "新会话", caps.new_session
+                 elif kr.role == Role.MODE:
+                     kv.label, kv.mode = self.mode.key_label, self.mode
++                    if self.page == "L4":
++                        kv.sublabel = "长按 截图"
+                     total = sum(n for _, n in others)
+                     if total:
+                         kv.badge, kv.badge_alert = str(total), True
+@@ -1091,6 +1201,7 @@ class Controller:
+                         kv.badge, kv.badge_alert = str(n), True
+                 elif kr.role == Role.BACK_L1:
+                     kv.label = "回 L1"
++                kv.flash = self.flash.get((col, row), float("-inf")) > t
+                 keys.append(kv)
+         if attention:
+             c, r = map(int, attention[2].split(","))
+@@ -1128,7 +1239,9 @@ class Controller:
+             other_modes=(" · ".join(f"{MODE_SHORT[m]} {n}" for m, n in others) + " 待处理") if others else "",
+             moving=f"移动『{_short(mv.title)}』：点目标键放下 · 点自己=切换钉住 · K1 取消" if mv else "",
+             # "×" not "✗": the Mac CJK fonts (PingFang / STHeiti) have no U+2717 glyph
+-            option=(f"选项：按 1–{len(op.labels)} 选择 · × 取消 · K1 返回" if len(op.labels) > 1 else
++            option=(f"选项：长按 {'/'.join(str(i + 1) for i in sorted(approve_keys))} 批准 · 按 "
++                    f"{len(op.labels)} 拒绝 · × 取消 · K1 返回" if approve_keys and len(op.labels) > len(approve_keys)
++                    else f"选项：按 1–{len(op.labels)} 选择 · × 取消 · K1 返回" if len(op.labels) > 1 else
+                     "选项：按 1 选择 · × 取消 · K1 返回") if op else "",
+             option_note=({"legacy": OPTION_LEGACY, "pending": OPTION_PENDING}.get(self.option_hid, "")) if op else "",
+             alert=GD32_DFU_ALERT if self.gd32_dfu else "", alert_detail=GD32_DFU_DETAIL if self.gd32_dfu else "",
+diff --git a/deck/mk20deck/daemon.py b/deck/mk20deck/daemon.py
+index 1d858e7..ebbd7db 100644
+--- a/deck/mk20deck/daemon.py
++++ b/deck/mk20deck/daemon.py
+@@ -151,6 +151,9 @@ class Daemon:
+     # hw/gd32watch.Gd32DfuWatch (process-wide, its own thread; None = off): its confirmed ``stuck`` state becomes the
+     # controller's GD32 DFU banner on every step (an attribute read, never the probe itself).
+     gd32: object | None = None
++    # effects.Effects (None = drop them, e.g. the simulator): runs the controller's queued side effects (approve
++    # sound, SNAP screenshot) as child processes it polls every step; results go back via controller.effect_result.
++    effects: object | None = None
+ 
+     # -------------------------------------------------------------- input
+     def on_device_key(self, ev: P.KeyEvent) -> None:
+@@ -525,6 +528,7 @@ class Daemon:
+         self._drain_background()
+         self._sync_gd32()  # a change bumps the version: a frame
+         self.controller.tick()
++        self._run_effects()
+         if self._sync_page(now):  # before the (possibly slow) poll: the keyboard switches at once ...
+             force = True          # ... and gets the new page's full frame in this step (it shows a placeholder)
+         if now >= self._next_poll:
+@@ -566,9 +570,28 @@ class Daemon:
+         if self.gd32 is not None and hasattr(self.controller, "set_gd32_dfu"):
+             self.controller.set_gd32_dfu(getattr(self.gd32, "stuck", False))
+ 
++    def _run_effects(self) -> None:
++        queued = getattr(self.controller, "effects", None)
++        if queued:
++            items = list(queued)
++            queued.clear()
++            for e in items:
++                if self.effects is None:
++                    log.info("effect %s dropped (no effects runner)", e[0])
++                    continue
++                try:
++                    self.effects.run(e)
++                except Exception:  # noqa: BLE001 — a side effect never takes the device loop down
++                    log.exception("effect %s", e[0])
++        if self.effects is not None:
++            for kind, ok, msg in self.effects.poll():
++                self.controller.effect_result(kind, ok, msg)
++
+     def next_wait(self) -> float:
+         now = self.clock()
+         waits = [self._next_poll - now, self._last_frame + self.heartbeat - now]
++        if self.effects is not None and self.effects.busy():
++            waits.append(0.1)  # a running screenshot: its result (toast + flash) as soon as it is done
+         view_fps = self.renderer.desired_fps(self.controller.view(), now)
+         if view_fps > 0:
+             waits.append(self._last_frame + 1.0 / view_fps - now)
+diff --git a/deck/mk20deck/effects.py b/deck/mk20deck/effects.py
+new file mode 100644
+index 0000000..e163998
+--- /dev/null
++++ b/deck/mk20deck/effects.py
+@@ -0,0 +1,168 @@
++"""Side effects the controller asks for (2026-10-29): the approve sound and SNAP (screenshot to the clipboard).
++
++The controller stays I/O-free: it queues ``("sound", "approve")`` / ``("snap",)`` in ``Controller.effects``; the
++daemon hands them to :class:`Effects` and polls it every step (child processes never block the device loop) and
++reports finished screenshots back with ``Controller.effect_result``.
++
++SNAP uses macOS ``/usr/sbin/screencapture``.  Capturing other apps' windows needs the Screen Recording permission
++(TCC) for the process that runs mk20deck (the LaunchAgent's python3).  Without it screencapture still "succeeds" but
++only shows the desktop, so the permission is checked first (CoreGraphics ``CGPreflightScreenCaptureAccess``); when
++it is missing the deck asks the system once (``CGRequestScreenCaptureAccess``: adds python3 to the list) and says
++what the user has to switch on.  Nothing here works around the permission.
++"""
++
++from __future__ import annotations
++
++import ctypes
++import logging
++import os
++import subprocess
++import sys
++import time
++from typing import Any, Callable
++
++log = logging.getLogger(__name__)
++
++SCREENCAPTURE = "/usr/sbin/screencapture"
++AFPLAY = "/usr/bin/afplay"
++OSASCRIPT = "/usr/bin/osascript"
++SOUND_DIR = "/System/Library/Sounds"
++CG = "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
++SNAP_TIMEOUT_S = 10.0
++
++SNAP_OK = "已截图 · 已复制到剪贴板"
++SNAP_NEED_TCC = "截图需要屏幕录制权限：系统设置→隐私与安全性→屏幕录制，打开 python3 后重启 mk20deck"
++SNAP_NOT_MAC = "截图仅支持 macOS"
++SNAP_FAILED = "截图失败"
++SNAP_RUNNING = "上一张截图还没完成"
++
++
++def screen_capture_access(request: bool = False) -> bool | None:
++    """True/False = Screen Recording allowed for this process; None = unknown (no CoreGraphics / old macOS).
++    ``request``: when not allowed, ask the system once (it lists the app in the settings; no blocking dialog)."""
++    try:
++        cg = ctypes.cdll.LoadLibrary(CG)
++        pre = cg.CGPreflightScreenCaptureAccess
++    except (OSError, AttributeError):
++        return None
++    pre.restype = ctypes.c_bool
++    ok = bool(pre())
++    if not ok and request:
++        try:
++            req = cg.CGRequestScreenCaptureAccess
++            req.restype = ctypes.c_bool
++            req()
++        except AttributeError:
++            pass
++    return ok
++
++
++class Effects:
++    def __init__(self, sound: str = "Glass", snap_dir: str = "", platform: str = sys.platform,
++                 popen: Callable[..., Any] = subprocess.Popen, access: Callable[[bool], bool | None] | None = None,
++                 clock: Callable[[], float] = time.monotonic, exists: Callable[[str], bool] = os.path.exists):
++        self.sound, self.snap_dir, self.platform = sound, snap_dir, platform
++        self.popen, self.clock, self.exists = popen, clock, exists
++        self.access = access or screen_capture_access
++        self._asked = False  # CGRequestScreenCaptureAccess at most once per process
++        self._sounds: list[Any] = []
++        self._snap: tuple[Any, float, str, str] | None = None  # (proc, started, stage, png path)
++        self._done: list[tuple[str, bool, str]] = []
++
++    @classmethod
++    def from_config(cls, cfg: Any) -> "Effects":
++        return cls(sound=getattr(cfg, "approve_sound", "Glass"), snap_dir=getattr(cfg, "snap_dir", ""))
++
++    def busy(self) -> bool:
++        return self._snap is not None or bool(self._done)
++
++    def run(self, effect: tuple) -> None:
++        if not effect:
++            return
++        if effect[0] == "sound":
++            self.play()
++        elif effect[0] == "snap":
++            self.snap()
++
++    def _spawn(self, argv: list[str]) -> Any:
++        return self.popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
++
++    # ------------------------------------------------------------------ sound
++    def play(self) -> None:
++        if not self.sound or self.platform != "darwin":
++            return
++        path = os.path.join(SOUND_DIR, self.sound + ".aiff")
++        if not self.exists(path):
++            log.warning("approve sound %s not found", path)
++            return
++        try:
++            self._sounds.append(self._spawn([AFPLAY, path]))
++        except OSError as e:
++            log.warning("afplay: %s", e)
++
++    # ------------------------------------------------------------------ SNAP
++    def snap(self) -> None:
++        if self._snap is not None:
++            self._done.append(("snap", False, SNAP_RUNNING))
++            return
++        if self.platform != "darwin":
++            self._done.append(("snap", False, SNAP_NOT_MAC))
++            return
++        ok = self.access(not self._asked)
++        if ok is False:
++            self._asked = True
++            log.warning("snap: Screen Recording permission missing for %s", sys.executable)
++            self._done.append(("snap", False, SNAP_NEED_TCC))
++            return
++        png = ""
++        if self.snap_dir:
++            try:
++                os.makedirs(self.snap_dir, exist_ok=True)
++            except OSError as e:
++                log.warning("snap dir %s: %s", self.snap_dir, e)
++                self._done.append(("snap", False, f"{SNAP_FAILED}：保存目录不可用"))
++                return
++            png = os.path.join(self.snap_dir, time.strftime("mk20-snap-%Y%m%d-%H%M%S.png"))
++            argv = [SCREENCAPTURE, "-x", png]
++        else:
++            argv = [SCREENCAPTURE, "-x", "-c"]  # -x: no shutter sound; -c: straight to the clipboard
++        try:
++            self._snap = (self._spawn(argv), self.clock(), "capture", png)
++        except OSError as e:
++            log.warning("screencapture: %s", e)
++            self._done.append(("snap", False, SNAP_FAILED))
++
++    def _clipboard_argv(self, png: str) -> list[str]:
++        # the PNG file onto the clipboard as an image (path passed as an argument, never spliced into the script)
++        return [OSASCRIPT, "-e", "on run argv", "-e",
++                "set the clipboard to (read (POSIX file (item 1 of argv)) as «class PNGf»)", "-e", "end run", png]
++
++    def poll(self) -> list[tuple[str, bool, str]]:
++        """Finished effects as (kind, ok, message); reaps sound players."""
++        self._sounds = [p for p in self._sounds if p.poll() is None]
++        if self._snap is not None:
++            proc, t0, stage, png = self._snap
++            rc = proc.poll()
++            if rc is None:
++                if self.clock() - t0 > SNAP_TIMEOUT_S:
++                    proc.kill()
++                    self._snap = None
++                    self._done.append(("snap", False, f"{SNAP_FAILED}：超时"))
++            elif rc != 0:
++                self._snap = None
++                err = (proc.stderr.read() if proc.stderr else b"") or b""
++                log.warning("snap %s failed rc=%s %s", stage, rc, err[:200])
++                self._done.append(("snap", False, SNAP_FAILED if stage == "capture" else
++                                   f"已存 {os.path.basename(png)}，复制到剪贴板失败"))
++            elif stage == "capture" and png:
++                try:
++                    self._snap = (self._spawn(self._clipboard_argv(png)), self.clock(), "clipboard", png)
++                except OSError:
++                    self._snap = None
++                    self._done.append(("snap", False, f"已存 {os.path.basename(png)}，复制到剪贴板失败"))
++            else:
++                self._snap = None
++                log.info("snap ok%s", f" ({png})" if png else "")
++                self._done.append(("snap", True, SNAP_OK))
++        out, self._done = self._done, []
++        return out
+diff --git a/deck/mk20deck/render/canvas.py b/deck/mk20deck/render/canvas.py
+index 28ef051..5a58b9b 100644
+--- a/deck/mk20deck/render/canvas.py
++++ b/deck/mk20deck/render/canvas.py
+@@ -36,11 +36,9 @@ class Renderer:
+ 
+     def desired_fps(self, view: DeckView, t: float) -> float:
+         """Global frame rate = max of per-key wishes, capped (shared budget)."""
+-        if not self.animations:
+-            return 0.0
+         best = 0.0
+-        for kv in view.keys:
+-            best = max(best, key_fps(kv, self._age(kv, t), True))
++        for kv in view.keys:  # a long-press approve ring / flash animates even with animations off
++            best = max(best, key_fps(kv, self._age(kv, t), self.animations))
+         return min(best, self.max_fps)
+ 
+     def compose(self, view: DeckView, t: float, heartbeat_on: bool = True) -> Image.Image:
+diff --git a/deck/mk20deck/render/keys.py b/deck/mk20deck/render/keys.py
+index 99f0c85..4734ff2 100644
+--- a/deck/mk20deck/render/keys.py
++++ b/deck/mk20deck/render/keys.py
+@@ -32,11 +32,15 @@ MOVE_FPS = 4  # picked-up slot: marching dashed border (static dashes when anima
+ MOVE_PINK = (244, 114, 182)  # distinct from every state colour
+ OPTION_AMBER = (245, 158, 11)  # option mode choice keys (the needs_* amber)
+ OPTION_INK = (24, 16, 4)
++HOLD_FPS = 8  # long-press approve progress ring / the flash after it (the global cap is 8 fps too)
++FLASH_BG = (34, 197, 94)
+ BLANK_BG = (8, 9, 11)  # option mode: rows 1–3 beyond the choices
+ 
+ 
+ def key_fps(kv: KeyView, age: float, animations: bool) -> float:
+     """Desired fps for one key given time since its state began."""
++    if kv.hold or kv.flash:
++        return HOLD_FPS  # feedback, not decoration: also with animations off
+     if not animations:
+         return 0
+     if kv.role == Role.PTT:
+@@ -330,22 +334,51 @@ def render_option(kv: KeyView) -> Image.Image:
+     num = str(kv.option)
+     if not kv.label:
+         d.text((S / 2, S / 2 - 4), num, font=font(76, bold=True), fill=OPTION_INK, anchor="mm")
++        _hold_ring(d, kv.hold)
+         return img
+-    d.text((S / 2, 38), num, font=font(54, bold=True), fill=OPTION_INK, anchor="mm")
++    sub = 1 if kv.sublabel else 0  # long-press approve: "长按 1 秒" under the label
++    d.text((S / 2, 38 - 6 * sub), num, font=font(54 - 6 * sub, bold=True), fill=OPTION_INK, anchor="mm")
+     f = font(15, bold=True)
+     lines = _wrap(d, kv.label, f, S - 14, 2)
+-    y0 = 92 if len(lines) == 1 else 82
++    y0 = (92 if len(lines) == 1 else 82) - 8 * sub
+     for i, line in enumerate(lines):
+         d.text((S / 2, y0 + i * 20), line, font=f, fill=OPTION_INK, anchor="mm")
++    if sub:
++        d.text((S / 2, 114), fit(d, kv.sublabel, font(12), S - 20), font=font(12), fill=mix(OPTION_INK, OPTION_AMBER, 0.3),
++               anchor="mm")
++    _hold_ring(d, kv.hold)
+     return img
+ 
+ 
++def _hold_ring(d: ImageDraw.ImageDraw, hold: float) -> None:
++    """Long-press approve progress: a ring along the key edge, clockwise from 12 o'clock (0 < hold <= 1)."""
++    if hold <= 0:
++        return
++    box = [6, 6, S - 7, S - 7]
++    d.arc(box, 0, 360, fill=mix(OPTION_AMBER, OPTION_INK, 0.25), width=7)
++    d.arc(box, -90, -90 + 360 * min(1.0, hold), fill=OPTION_INK, width=7)
++
++
++def _flash(img: Image.Image) -> Image.Image:
++    """The key just did its thing (approve answered / screenshot taken): green wash + a check mark."""
++    out = Image.blend(img.convert("RGB"), Image.new("RGB", img.size, FLASH_BG), 0.6)
++    d = ImageDraw.Draw(out)
++    w, h = out.size
++    d.line([(w * 0.28, h * 0.52), (w * 0.44, h * 0.68), (w * 0.74, h * 0.34)], fill=WHITE, width=10, joint="curve")
++    return out
++
++
+ def render_blank(kv: KeyView) -> Image.Image:
+     """Option mode: rows 1–3 beyond the choices are dark (a press there leaves option mode)."""
+     return Image.new("RGB", (S, S), BLANK_BG)
+ 
+ 
+ def render_key(kv: KeyView, age: float, t: float, animations: bool = True) -> Image.Image:
++    img = _render_key(kv, age, t, animations)
++    return _flash(img) if kv.flash else img
++
++
++def _render_key(kv: KeyView, age: float, t: float, animations: bool = True) -> Image.Image:
+     if kv.option:
+         return render_option(kv)
+     if kv.blank:
+diff --git a/deck/mk20deck/supervisor.py b/deck/mk20deck/supervisor.py
+index 7cf26b3..d3561cb 100644
+--- a/deck/mk20deck/supervisor.py
++++ b/deck/mk20deck/supervisor.py
+@@ -46,6 +46,7 @@ class Supervisor:
+     calls: object | None = None  # webui.LoopCalls: arrange-page changes, run on this thread (also while unplugged)
+     arrange: object | None = None  # webui.ArrangeServer for the keyboard's 会话安排 key (ui.openArrange); None = off
+     gd32: object | None = None  # hw/gd32watch.Gd32DfuWatch (started by cmd_run, outlives every connection)
++    effects: object | None = None  # effects.Effects: approve sound / SNAP (process-wide, outlives every connection)
+     # While it cannot (re)connect: one line with the elapsed time at least this often (2026-10-23 incident: after the
+     # last "未找到 MK20 CDC 端口" the log stayed silent for 50 min while the keyboard's bridge was stuck).
+     down_note_s: float = 600.0
+@@ -133,7 +134,8 @@ class Supervisor:
+                        web_url=getattr(cfg, "web_url", DEFAULT_WEB_URL),
+                        bg_poll_s=getattr(cfg, "background_poll_s", 10.0), bg_adapters=self.bg_adapters,
+                        calls=self.calls, arrange=self.arrange,
+-                       arrange_port=getattr(cfg, "arrange_port", DEFAULT_ARRANGE_PORT), gd32=self.gd32)
++                       arrange_port=getattr(cfg, "arrange_port", DEFAULT_ARRANGE_PORT), gd32=self.gd32,
++                       effects=self.effects)
+             link = DeviceLink(tr, on_key=d.on_device_key, ack_timeout=cfg.ack_timeout_s,
+                               preamble_flush=cfg.preamble_flush, on_event=d.on_device_event)
+             d.link = link
+diff --git a/deck/tests/test_approve_snap.py b/deck/tests/test_approve_snap.py
+new file mode 100644
+index 0000000..3ddddfb
+--- /dev/null
++++ b/deck/tests/test_approve_snap.py
+@@ -0,0 +1,434 @@
++"""1.8.1 (2026-10-29): long-press approve in option mode and SNAP (L4 MODE long press = screenshot to clipboard).
++
++Long-press approve: a permission prompt's 「是」/「是，且不再问」 answer only after being held approve_hold_s; the Mac
++types the digit into the session's own pane (adapter.answer).  A short press, a release, a timeout, a reconnect, a
++changed prompt, another page / mode or the PTT never approve.  「否」 stays keyboard-typed (immediate).
++"""
++import dataclasses
++import subprocess
++
++import pytest
++from PIL import Image
++
++from mk20deck.adapters.base import RecordingRunner, RunResult
++from mk20deck.adapters.tmux import TmuxAdapter, TmuxConfig
++from mk20deck.config import DeckConfig, load_config, parse_sound
++from mk20deck.controller import (APPROVE_FLASH_S, APPROVE_PTT, APPROVE_STALE, BOTTOM_ROW, LONG_PRESS,
++                                 PERMISSION_LABELS, SNAP_BUSY, Controller, KeyView, Role, slot_pos)
++from mk20deck.daemon import Daemon
++from mk20deck import effects as E
++from mk20deck.layout import DeviceLayout
++from mk20deck.model import Mode, Session, SessionId, State, Tool
++from mk20deck.render.canvas import Renderer
++from mk20deck.render.keys import OPTION_AMBER, key_fps, render_key
++from mk20deck.sim import FakeClock, option_adapters
++from mk20deck.slots import N_SLOTS
++
++PERM, Q = "推送发布", "数据库选型"
++MODE_COL = BOTTOM_ROW.index(Role.MODE) + 1
++
++
++def approve_adapters():
++    ads = option_adapters()
++    ads[Mode.TMUX].caps = dataclasses.replace(ads[Mode.TMUX].caps, approve=None)  # like the real tmux adapter
++    return ads
++
++
++def make(hold=1.0, ads=None):
++    clk = FakeClock()
++    ads = ads or approve_adapters()
++    c = Controller(DeckConfig(approve_hold_s=hold), ads, {"mode": "tmux"}, clock=clk, wall=lambda: 1.0, sim=True)
++    c.refresh()
++    return c, clk, ads
++
++
++def where(c, title):
++    for i in range(N_SLOTS):
++        s = c.mgr.session_at(i)
++        if s is not None and s.title == title:
++            return slot_pos(i)
++    raise LookupError(title)
++
++
++def tap(c, clk, col, row, hold=0.05):
++    c.on_key(col, row, True)
++    clk.advance(hold)
++    c.tick()
++    c.on_key(col, row, False)
++
++
++def enter_perm(c, clk):
++    tap(c, clk, *where(c, PERM))
++    assert c.option is not None and c.option.kind == "permission"
++    return c.option
++
++
++def answers(ads):
++    return [a for a in ads[Mode.TMUX].actions if a[0] == "answer"]
++
++
++def hold_key(c, clk, col, row, secs, step=0.1):
++    c.on_key(col, row, True)
++    t = 0.0
++    while t < secs - 1e-9:
++        clk.advance(step)
++        t += step
++        c.tick()
++
++
++# ------------------------------------------------------------------ controller
++def test_permission_hold_keys_are_not_keyboard_typed():
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    assert c.hid_keys_wanted() == {3: 3}  # 「否」 still typed by the keyboard on press
++    v = c.view()
++    k1, k2, k3 = (next(k for k in v.keys if (k.col, k.row) == (i, 1)) for i in (1, 2, 3))
++    assert (k1.label, k2.label, k3.label) == PERMISSION_LABELS
++    assert k1.sublabel == k2.sublabel == "长按 1 秒" and not k3.sublabel
++    assert v.sub.option == "选项：长按 1/2 批准 · 按 3 拒绝 · × 取消 · K1 返回"
++
++
++def test_hold_off_or_unsupported_adapter_keeps_old_behaviour():
++    c, clk, ads = make(hold=0)
++    enter_perm(c, clk)
++    assert c.hid_keys_wanted() == {1: 1, 2: 2, 3: 3}
++    c, clk, ads = make(ads=option_adapters())  # approve capability missing: the keyboard types as before
++    enter_perm(c, clk)
++    assert c.hid_keys_wanted() == {1: 1, 2: 2, 3: 3}
++
++
++def test_question_prompts_unchanged():
++    c, clk, ads = make()
++    tap(c, clk, *where(c, Q))
++    assert c.option.kind == "question" and c.hid_keys_wanted() == {1: 1, 2: 2, 3: 3}
++
++
++def test_full_hold_approves_once_into_the_session_pane():
++    c, clk, ads = make()
++    op = enter_perm(c, clk)
++    key = op.key
++    hold_key(c, clk, 1, 1, 0.5)
++    assert answers(ads) == [] and 0.4 < next(k for k in c.view().keys if (k.col, k.row) == (1, 1)).hold < 0.6
++    for _ in range(6):
++        clk.advance(0.1)
++        c.tick()
++    assert len(answers(ads)) == 1 and answers(ads)[0][1].endswith("|1") and key.split(":", 2)[2] in answers(ads)[0][1]
++    assert c.effects == [("sound", "approve")]
++    v = c.view()
++    k = next(k for k in v.keys if (k.col, k.row) == (1, 1))
++    assert k.flash and k.hold == 0 and "已批准：1 是" in v.sub.toast
++    for _ in range(20):  # still held: never a second answer
++        clk.advance(0.1)
++        c.tick()
++    c.on_key(1, 1, False)
++    assert len(answers(ads)) == 1
++    clk.advance(APPROVE_FLASH_S)
++    assert not any(k.flash for k in c.view().keys)
++
++
++def test_second_key_answers_two():
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    hold_key(c, clk, 2, 1, 1.1)
++    c.on_key(2, 1, False)
++    assert [a[1].rsplit("|", 1)[1] for a in answers(ads)] == ["2"]
++
++
++def test_short_press_never_approves():
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    hold_key(c, clk, 1, 1, 0.9)
++    c.on_key(1, 1, False)
++    assert "未批准：需按住 1 秒" in c.view().sub.toast
++    for _ in range(30):
++        clk.advance(0.1)
++        c.tick()
++    assert answers(ads) == [] and c.effects == []
++    assert c.option is not None  # still answering: try again
++
++
++def test_late_key_up_after_a_stall_does_not_approve():
++    """Daemon order is events -> tick: a release that arrives together with a long stall is handled first."""
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    c.on_key(1, 1, True)
++    clk.advance(5.0)  # the loop stalled; the up event is already queued
++    c.on_key(1, 1, False)
++    c.tick()
++    assert answers(ads) == []
++
++
++def test_reconnect_and_timeout_never_approve():
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    hold_key(c, clk, 1, 1, 0.5)
++    c.drop_gestures()  # reconnect / wake
++    for _ in range(20):
++        clk.advance(0.1)
++        c.tick()
++    assert answers(ads) == [] and c.option is None
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    c.on_key(1, 1, True)
++    clk.advance(60.0)  # option-mode idle timeout passes while the key is "held" with no ticks
++    c.tick()
++    assert answers(ads) == [] and c.option is None
++
++
++def test_prompt_change_or_ptt_refuses():
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    hold_key(c, clk, 1, 1, 0.5)
++    s = next(s for s in ads[Mode.TMUX].sessions if s.title == PERM)
++    s.state = State.RUNNING  # answered in the terminal meanwhile
++    c.refresh()
++    for _ in range(8):
++        clk.advance(0.1)
++        c.tick()
++    assert answers(ads) == []
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    hold_key(c, clk, 1, 1, 0.5)
++    c.ptt_held = True
++    for _ in range(8):
++        clk.advance(0.1)
++        c.tick()
++    assert answers(ads) == [] and APPROVE_PTT in c.view().sub.toast
++
++
++def test_fire_rechecks_state():
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    hold_key(c, clk, 1, 1, 0.5)
++    c.presses[("key", 1, 1)].target = "tmux:other:x"  # the press was for another session's prompt
++    for _ in range(8):
++        clk.advance(0.1)
++        c.tick()
++    assert answers(ads) == [] and APPROVE_STALE in c.view().sub.toast
++
++
++def test_adapter_refusal_is_shown_not_flashed():
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    ad = ads[Mode.TMUX]
++    from mk20deck.model import ActionResult
++    ad.answer = lambda s, d: ActionResult(False, "窗格在回看中：先按 K1 回到最新")
++    hold_key(c, clk, 1, 1, 1.1)
++    v = c.view()
++    assert "未批准：窗格在回看中" in v.sub.toast and not any(k.flash for k in v.keys) and c.effects == []
++
++
++def test_long_press_pending_while_holding():
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    c.on_key(1, 1, True)
++    assert c.long_press_pending()
++    clk.advance(1.1)
++    c.tick()
++    assert not c.long_press_pending()
++
++
++# ------------------------------------------------------------------ render
++def test_render_ring_and_flash():
++    kv = KeyView(1, 1, Role.AGENT, label="是", option=1, sublabel="长按 1 秒")
++    plain = render_key(kv, 0, 0, animations=False)
++    kv.hold = 0.5
++    ring = render_key(kv, 0, 0, animations=False)
++    assert plain.tobytes() != ring.tobytes() and ring.size == (128, 128)
++    assert key_fps(kv, 0, False) == 8
++    kv.hold, kv.flash = 0.0, True
++    fl = render_key(kv, 0, 0, animations=False)
++    assert fl.getpixel((10, 64)) != plain.getpixel((10, 64)) and key_fps(kv, 0, False) == 8
++    r = Renderer(DeviceLayout.default(), animations=False)
++    c, clk, ads = make()
++    enter_perm(c, clk)
++    c.on_key(1, 1, True)
++    clk.advance(0.3)
++    c.tick()
++    assert r.desired_fps(c.view(), clk()) == 8
++
++
++# ------------------------------------------------------------------ SNAP
++def to_l4(c, clk):
++    c.on_key(MODE_COL, 4, True)
++    clk.advance(LONG_PRESS + 0.05)
++    c.tick()
++    c.on_key(MODE_COL, 4, False)
++    assert c.page == "L4"
++
++
++def test_snap_on_l4_mode_long_press():
++    c, clk, ads = make()
++    to_l4(c, clk)
++    assert c.effects == []
++    mode = next(k for k in c.view().keys if (k.col, k.row) == (MODE_COL, 4))
++    assert mode.sublabel == "长按 截图"
++    c.on_key(MODE_COL, 4, True)
++    clk.advance(LONG_PRESS + 0.05)
++    c.tick()
++    c.on_key(MODE_COL, 4, False)
++    assert c.effects == [("snap",)] and c.page == "L4" and SNAP_BUSY in c.view().sub.toast
++    c.effect_result("snap", True, E.SNAP_OK)
++    v = c.view()
++    assert next(k for k in v.keys if (k.col, k.row) == (MODE_COL, 4)).flash and E.SNAP_OK in v.sub.toast
++    c.effect_result("snap", False, E.SNAP_NEED_TCC)
++    assert E.SNAP_NEED_TCC in c.view().sub.toast
++
++
++def test_mode_short_press_on_l4_does_not_snap():
++    c, clk, ads = make()
++    to_l4(c, clk)
++    tap(c, clk, MODE_COL, 4)
++    assert c.effects == []
++
++
++class FakeProc:
++    def __init__(self, argv, rc=0):
++        self.argv, self.rc, self.killed = argv, rc, False
++        self.stderr = None
++        self.done = False
++
++    def poll(self):
++        return self.rc if self.done else None
++
++    def kill(self):
++        self.killed = True
++
++
++class FakePopen:
++    def __init__(self, rc=0):
++        self.procs, self.rc = [], rc
++
++    def __call__(self, argv, **kw):
++        p = FakeProc(argv, self.rc)
++        self.procs.append(p)
++        return p
++
++
++def test_effects_snap_clipboard_and_sound():
++    pop, clk = FakePopen(), FakeClock()
++    ef = E.Effects(sound="Glass", platform="darwin", popen=pop, access=lambda req: True, clock=clk,
++                   exists=lambda p: True)
++    ef.run(("snap",))
++    assert pop.procs[0].argv == ["/usr/sbin/screencapture", "-x", "-c"] and ef.busy() and ef.poll() == []
++    pop.procs[0].done = True
++    assert ef.poll() == [("snap", True, E.SNAP_OK)] and not ef.busy()
++    ef.run(("sound", "approve"))
++    assert pop.procs[1].argv == ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"]
++    ef2 = E.Effects(sound="", platform="darwin", popen=pop, access=lambda req: True)
++    ef2.play()
++    assert len(pop.procs) == 2
++
++
++def test_effects_snap_to_file_then_clipboard(tmp_path):
++    pop, clk = FakePopen(), FakeClock()
++    ef = E.Effects(snap_dir=str(tmp_path / "snaps"), platform="darwin", popen=pop, access=lambda req: True, clock=clk)
++    ef.snap()
++    argv = pop.procs[0].argv
++    assert argv[:2] == ["/usr/sbin/screencapture", "-x"] and argv[2].startswith(str(tmp_path / "snaps"))
++    pop.procs[0].done = True
++    assert ef.poll() == []
++    clip = pop.procs[1].argv
++    assert clip[0] == "/usr/bin/osascript" and clip[-1] == argv[2] and "PNGf" in " ".join(clip)
++    pop.procs[1].done = True
++    assert ef.poll() == [("snap", True, E.SNAP_OK)]
++
++
++def test_effects_snap_needs_permission_asks_once():
++    asked, pop = [], FakePopen()
++    ef = E.Effects(platform="darwin", popen=pop, access=lambda req: asked.append(req) or False)
++    ef.snap()
++    ef.snap()
++    assert pop.procs == [] and asked == [True, False]
++    assert ef.poll() == [("snap", False, E.SNAP_NEED_TCC)] * 2
++
++
++def test_effects_snap_not_mac_timeout_failure():
++    pop, clk = FakePopen(), FakeClock()
++    ef = E.Effects(platform="linux", popen=pop, access=lambda req: True, clock=clk)
++    ef.snap()
++    assert ef.poll() == [("snap", False, E.SNAP_NOT_MAC)] and pop.procs == []
++    ef = E.Effects(platform="darwin", popen=pop, access=lambda req: True, clock=clk)
++    ef.snap()
++    ef.snap()  # second while running
++    assert ef.poll() == [("snap", False, E.SNAP_RUNNING)]
++    clk.advance(E.SNAP_TIMEOUT_S + 1)
++    assert ef.poll() == [("snap", False, E.SNAP_FAILED + "：超时")] and pop.procs[0].killed
++    pop.rc = 1
++    ef.snap()
++    pop.procs[-1].done = True
++    assert ef.poll() == [("snap", False, E.SNAP_FAILED)]
++
++
++def test_daemon_runs_queued_effects_and_reports_back():
++    c, clk, ads = make()
++    ran = []
++
++    class FX:
++        def run(self, e):
++            ran.append(e)
++
++        def poll(self):
++            return [("snap", True, E.SNAP_OK)] if ran else []
++
++        def busy(self):
++            return False
++
++    d = Daemon(c, Renderer(DeviceLayout.default(), animations=False), None, clock=clk, bg_poll_s=0, effects=FX())
++    to_l4(c, clk)
++    c.on_key(MODE_COL, 4, True)
++    clk.advance(LONG_PRESS + 0.05)
++    d.step()
++    assert ran == [("snap",)] and c.effects == [] and E.SNAP_OK in c.view().sub.toast
++    d2 = Daemon(c, Renderer(DeviceLayout.default(), animations=False), None, clock=clk, bg_poll_s=0)
++    c.effects.append(("snap",))
++    d2.step()  # no runner: dropped, never raises
++    assert c.effects == []
++
++
++# ------------------------------------------------------------------ tmux adapter answer: exact argv
++GEN = "4242-1700000000"
++
++
++def tmux_ad(responses=None):
++    r = RecordingRunner(responses or {}, binaries={"tmux"})
++    ad = TmuxAdapter(TmuxConfig(), runner=r)
++    ad.generation = GEN
++    return ad, r
++
++
++def pane(native="%3", gen=GEN):
++    return Session(SessionId(Mode.TMUX, native, gen), Tool.CCAI, "x")
++
++
++def test_tmux_answer_argv_and_refusals():
++    ad, r = tmux_ad({("tmux", "display-message"): RunResult(0, "0\n", "")})
++    assert ad.capabilities().approve is None
++    assert ad.answer(pane(), 1).ok
++    assert r.calls == [["tmux", "display-message", "-p", "-t", "%3", "#{pane_in_mode}"],
++                       ["tmux", "send-keys", "-t", "%3", "-l", "1"]]
++    ad, r = tmux_ad({("tmux", "display-message"): RunResult(0, "1\n", "")})
++    res = ad.answer(pane(), 2)
++    assert not res.ok and "回看" in res.message and not any("send-keys" in c for c in r.calls)
++    ad, r = tmux_ad()
++    assert not ad.answer(pane(gen="old"), 1).ok and r.calls == []
++    assert not ad.answer(pane(), 0).ok and not ad.answer(pane(), "1; rm").ok and r.calls == []
++    ad, r = tmux_ad({("tmux", "display-message"): RunResult(1, "", "can't find pane")})
++    assert not ad.answer(pane(), 1).ok and len(r.calls) == 1
++
++
++# ------------------------------------------------------------------ config
++def test_config_keys(tmp_path):
++    p = tmp_path / "config.toml"
++    p.write_text('[deck]\napprove_hold_s = 2.5\napprove_sound = "Ping"\n[snap]\nsave_dir = "~/Pictures/mk20"\n')
++    cfg = load_config(str(p))
++    assert (cfg.approve_hold_s, cfg.approve_sound) == (2.5, "Ping") and cfg.snap_dir.endswith("/Pictures/mk20")
++    p.write_text('[deck]\napprove_hold_s = 99\napprove_sound = "../../etc/x"\n')
++    cfg = load_config(str(p))
++    assert (cfg.approve_hold_s, cfg.approve_sound, cfg.snap_dir) == (5.0, "", "")
++    p.write_text('[deck]\napprove_hold_s = -1\napprove_sound = false\n')
++    cfg = load_config(str(p))
++    assert (cfg.approve_hold_s, cfg.approve_sound) == (0.0, "")
++    d = DeckConfig()
++    assert (d.approve_hold_s, d.approve_sound, d.snap_dir) == (1.0, "Glass", "")
++    assert parse_sound("Glass") == "Glass" and parse_sound("a/b") == ""
+```

@@ -283,60 +283,71 @@ def test_mode_short_press_on_l4_does_not_snap():
 
 
 class FakeProc:
-    def __init__(self, argv, rc=0):
-        self.argv, self.rc, self.killed = argv, rc, False
-        self.stderr = None
-        self.done = False
+    def __init__(self, argv, rc=0, polls=1):
+        self.argv, self.rc, self.killed, self.polls = argv, rc, False, polls
 
     def poll(self):
-        return self.rc if self.done else None
+        if self.polls is None:  # never finishes
+            return None
+        self.polls -= 1
+        return self.rc if self.polls < 0 else None
 
     def kill(self):
         self.killed = True
 
 
 class FakePopen:
-    def __init__(self, rc=0):
-        self.procs, self.rc = [], rc
+    def __init__(self, rc=0, polls=1):
+        self.procs, self.rc, self.polls = [], rc, polls
 
     def __call__(self, argv, **kw):
-        p = FakeProc(argv, self.rc)
+        p = FakeProc(argv, self.rc, self.polls)
         self.procs.append(p)
         return p
 
 
+class TickClock:
+    """Every read advances 1 s (drives the worker's timeout without sleeping)."""
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        self.t += 1.0
+        return self.t
+
+
+def fx(**kw):
+    kw.setdefault("platform", "darwin")
+    kw.setdefault("access", lambda req: True)
+    return E.Effects(threaded=False, **kw)
+
+
 def test_effects_snap_clipboard_and_sound():
-    pop, clk = FakePopen(), FakeClock()
-    ef = E.Effects(sound="Glass", platform="darwin", popen=pop, access=lambda req: True, clock=clk,
-                   exists=lambda p: True)
+    pop = FakePopen()
+    ef = fx(sound="Glass", popen=pop)
     ef.run(("snap",))
-    assert pop.procs[0].argv == ["/usr/sbin/screencapture", "-x", "-c"] and ef.busy() and ef.poll() == []
-    pop.procs[0].done = True
-    assert ef.poll() == [("snap", True, E.SNAP_OK)] and not ef.busy()
+    assert pop.procs[0].argv == ["/usr/sbin/screencapture", "-x", "-c"]
+    assert ef.busy() and ef.poll() == [("snap", True, E.SNAP_OK)] and not ef.busy()
     ef.run(("sound", "approve"))
     assert pop.procs[1].argv == ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"]
-    ef2 = E.Effects(sound="", platform="darwin", popen=pop, access=lambda req: True)
-    ef2.play()
+    fx(sound="", popen=pop).play()
+    fx(sound="Glass", popen=pop, platform="linux").play()
     assert len(pop.procs) == 2
 
 
 def test_effects_snap_to_file_then_clipboard(tmp_path):
-    pop, clk = FakePopen(), FakeClock()
-    ef = E.Effects(snap_dir=str(tmp_path / "snaps"), platform="darwin", popen=pop, access=lambda req: True, clock=clk)
+    pop = FakePopen()
+    ef = fx(snap_dir=str(tmp_path / "snaps"), popen=pop)
     ef.snap()
-    argv = pop.procs[0].argv
+    argv, clip = pop.procs[0].argv, pop.procs[1].argv
     assert argv[:2] == ["/usr/sbin/screencapture", "-x"] and argv[2].startswith(str(tmp_path / "snaps"))
-    pop.procs[0].done = True
-    assert ef.poll() == []
-    clip = pop.procs[1].argv
     assert clip[0] == "/usr/bin/osascript" and clip[-1] == argv[2] and "PNGf" in " ".join(clip)
-    pop.procs[1].done = True
-    assert ef.poll() == [("snap", True, E.SNAP_OK)]
+    assert (tmp_path / "snaps").is_dir() and ef.poll() == [("snap", True, E.SNAP_OK)]
 
 
 def test_effects_snap_needs_permission_asks_once():
     asked, pop = [], FakePopen()
-    ef = E.Effects(platform="darwin", popen=pop, access=lambda req: asked.append(req) or False)
+    ef = fx(popen=pop, access=lambda req: asked.append(req) or False)
     ef.snap()
     ef.snap()
     assert pop.procs == [] and asked == [True, False]
@@ -344,20 +355,39 @@ def test_effects_snap_needs_permission_asks_once():
 
 
 def test_effects_snap_not_mac_timeout_failure():
-    pop, clk = FakePopen(), FakeClock()
-    ef = E.Effects(platform="linux", popen=pop, access=lambda req: True, clock=clk)
+    pop = FakePopen()
+    ef = fx(platform="linux", popen=pop)
     ef.snap()
     assert ef.poll() == [("snap", False, E.SNAP_NOT_MAC)] and pop.procs == []
-    ef = E.Effects(platform="darwin", popen=pop, access=lambda req: True, clock=clk)
+    pop = FakePopen(polls=None)
+    ef = fx(popen=pop, clock=TickClock())
     ef.snap()
+    assert ef.poll() == [("snap", False, E.SNAP_FAILED + "：超时")] and pop.procs[0].killed
+    ef = fx(popen=FakePopen(rc=1))
+    ef.snap()
+    assert ef.poll() == [("snap", False, E.SNAP_FAILED)]
+
+
+def test_effects_snap_runs_off_the_loop_thread():
+    import threading
+    gate, seen = threading.Event(), []
+
+    def access(req):
+        seen.append(threading.current_thread().name)
+        gate.wait(5)  # a slow TCC probe must not block snap() / poll()
+        return False
+    ef = E.Effects(platform="darwin", access=access, popen=FakePopen())
+    ef.snap()
+    assert ef.busy() and ef.poll() == []
     ef.snap()  # second while running
     assert ef.poll() == [("snap", False, E.SNAP_RUNNING)]
-    clk.advance(E.SNAP_TIMEOUT_S + 1)
-    assert ef.poll() == [("snap", False, E.SNAP_FAILED + "：超时")] and pop.procs[0].killed
-    pop.rc = 1
-    ef.snap()
-    pop.procs[-1].done = True
-    assert ef.poll() == [("snap", False, E.SNAP_FAILED)]
+    gate.set()
+    for _ in range(100):
+        out = ef.poll()
+        if out:
+            break
+        threading.Event().wait(0.02)
+    assert out == [("snap", False, E.SNAP_NEED_TCC)] and seen == ["mk20-snap"] and not ef.busy()
 
 
 def test_daemon_runs_queued_effects_and_reports_back():
@@ -432,3 +462,66 @@ def test_config_keys(tmp_path):
     d = DeckConfig()
     assert (d.approve_hold_s, d.approve_sound, d.snap_dir) == (1.0, "Glass", "")
     assert parse_sound("Glass") == "Glass" and parse_sound("a/b") == ""
+
+
+# ------------------------------------------------------------------ r1 BLOCKER: the hold must be observed
+def test_stall_without_key_up_never_approves():
+    """A lost / queued key-up plus a stalled loop: the tick after the stall sees a gap and cancels."""
+    c, clk, ads = make()
+    enter_perm(c, clk)
+    c.on_key(1, 1, True)
+    clk.advance(0.1)
+    c.tick()
+    clk.advance(1.5)  # stall: no tick watched the hold
+    c.tick()
+    for _ in range(10):
+        clk.advance(0.1)
+        c.tick()
+    assert answers(ads) == []
+
+
+def test_stale_link_never_approves():
+    c, clk, ads = make()
+    enter_perm(c, clk)
+    c.note_link_ack()
+    hold_key(c, clk, 1, 1, 1.1)  # no frame acked during the hold
+    assert answers(ads) == [] and "未批准：键盘连接无响应" in c.view().sub.toast
+    c, clk, ads = make()
+    enter_perm(c, clk)
+    c.on_key(1, 1, True)
+    for _ in range(11):
+        clk.advance(0.1)
+        c.note_link_ack()
+        c.tick()
+    assert len(answers(ads)) == 1
+
+
+def test_other_input_during_hold_cancels():
+    c, clk, ads = make()
+    enter_perm(c, clk)
+    hold_key(c, clk, 1, 1, 0.5)
+    c.on_key(2, 1, True)  # another key
+    for _ in range(10):
+        clk.advance(0.1)
+        c.tick()
+    assert answers(ads) == []
+    c, clk, ads = make()
+    enter_perm(c, clk)
+    hold_key(c, clk, 1, 1, 0.5)
+    c.on_knob(2, "cw")
+    for _ in range(10):
+        clk.advance(0.1)
+        c.tick()
+    assert answers(ads) == []
+
+
+def test_daemon_marks_link_ack_on_frames():
+    c, clk, ads = make()
+
+    class Link:
+        def show_jpeg(self, jpeg):
+            return True
+    d = Daemon(c, Renderer(DeviceLayout.default(), animations=False), Link(), clock=clk, bg_poll_s=0)
+    assert c.link_ack is None
+    d.step(force=True)
+    assert c.link_ack == clk()

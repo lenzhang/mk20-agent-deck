@@ -1,0 +1,16 @@
+You are reviewing a change in the mk20-agent-deck repo (Python Mac host "mk20deck" for an MK20 macro keyboard with key screens). READ-ONLY review: do not modify files, do not run anything that touches devices, serial ports, adb, network, tmux servers or screencapture. You may read files and run `git diff`/`git log`/`python3 -m pytest deck/tests/test_approve_snap.py deck/tests/test_option_mode.py -q -p no:cacheprovider` (pure, no I/O).
+
+Diff under review: `git diff 0a36ceb..HEAD` (branch feature/deck-1.8.1, Mac-only, no firmware change). Context: README.md "选项模式"/"长按批准"/"SNAP 截图", docs/PRD-1.5-L1-LAYOUT.md §3.2.
+
+Features:
+1. Long-press approve: in option mode for a permission prompt (labels 是 / 是，且不再问 / 否), keys fb1/fb2 are removed from the keyboard's ui.hidKeys map so they arrive as normal key events; the controller starts a hold, renders a progress ring, and after approve_hold_s (default 1.0, 0=old behaviour) calls adapter.answer(session, digit) (tmux: refuse on generation mismatch / pane_in_mode!=0, then `send-keys -t <pane> -l <digit>`), flashes the key, queues an approve sound. Short press = no approve. 否 stays keyboard-typed.
+2. SNAP: on page L4, MODE (fb20) long press queues ("snap",); daemon runs effects.Effects: CGPreflightScreenCaptureAccess (ask CGRequestScreenCaptureAccess once), `/usr/sbin/screencapture -x -c` (or to [snap] save_dir then osascript PNGf to clipboard), polled Popen, 10 s timeout; result -> controller.effect_result toast + MODE key flash.
+
+HARD SAFETY REQUIREMENTS (blockers if violated):
+- A timeout, disconnect/reconnect/wake, a lost key-up, a loop stall, leaving option mode, a changed prompt/session/page/mode, or PTT held must NEVER produce an approve. Exactly one answer per hold. A short tap must never approve.
+- No double input (keyboard HID digit AND Mac send-keys for the same press).
+- Side effects must never block or crash the device loop; no shell injection (argv only).
+- Screen Recording permission must not be worked around.
+- Python 3.9 compatible (macOS system python; `from __future__ import annotations` is used).
+
+Output (markdown): verdict line "VERDICT: PASS" or "VERDICT: FAIL"; then findings numbered with severity BLOCKER / MAJOR / MINOR / NIT, file:line, and a concrete fix. Keep it concise. Mention anything in the hard-safety list you verified explicitly.

@@ -553,6 +553,8 @@ class Daemon:
         ok = True
         if self.link is not None:
             ok = self.link.show_jpeg(jpeg)
+            if ok and hasattr(self.controller, "note_link_ack"):
+                self.controller.note_link_ack()  # long-press approve: only fires while the keyboard is answering
             if ok and self._pending_t is not None:
                 self.event_to_ack.add(self.clock() - self._pending_t)
         if self.sink:

@@ -107,6 +107,15 @@ APPROVE_HOLD_S = 1.0
 APPROVE_FLASH_S = 0.6  # the key flashes this long after the answer went out (and the Mac plays a short sound)
 APPROVE_STALE = "未批准：提示已变化"
 APPROVE_PTT = "按住说话中，未批准"
+# There is no held-key heartbeat from the keyboard (firmware unchanged), so the hold must be *observed*: the loop must
+# see it continuously (the daemon wakes every LONG_PRESS/8 = 75 ms while it is pending; a larger gap = a stalled
+# loop, the key-up may be queued or lost), the keyboard must have acked a frame recently (link alive: it renders
+# the progress ring at 8 fps), and no other input may arrive during the hold.  Any doubt cancels; never approves.
+APPROVE_MAX_GAP_S = 0.5
+APPROVE_LINK_S = 0.6
+APPROVE_LATE = "未批准：响应延迟，请重新按住"
+APPROVE_NO_LINK = "未批准：键盘连接无响应"
+APPROVE_OTHER = "未批准：按住期间有其他输入"
 # SNAP (2026-10-29): long press of the MODE key (fb20) while L4 is shown = screenshot of the Mac screen to the
 # clipboard (macOS screencapture; the daemon runs it, see effects.py).  On L1 the long press still opens L4.
 SNAP_FLASH_S = 0.6
@@ -351,6 +360,8 @@ class Controller:
         self.flash: dict[tuple[int, int], float] = {}  # (col, row) -> clock until which that key flashes
         # Side effects the daemon runs off the controller (I/O-free here): ("sound", "approve"), ("snap",).
         self.effects: list[tuple] = []
+        self._approve_seen: float | None = None  # clock of the last tick (long-press approve continuity)
+        self.link_ack: float | None = None  # daemon: clock of the keyboard's last frame ack (None = no link: sim)
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -514,10 +525,40 @@ class Controller:
             return frozenset()  # e.g. Desktop / herdr (no option mode anyway): the keyboard types as before
         return frozenset(i for i, lab in enumerate(op.labels[:2]) if lab in PERMISSION_LABELS[:2])
 
+    def note_link_ack(self) -> None:
+        """Daemon: the keyboard acknowledged a frame (the link is alive)."""
+        self.link_ack = self.clock()
+
+    def _approve_pending(self) -> bool:
+        return any(p.approve and not p.approve_done for p in self.presses.values())
+
+    def _approve_cancel(self, msg: str) -> None:
+        hit = False
+        for p in self.presses.values():
+            if p.approve and not p.approve_done:
+                p.approve_done = hit = True
+        if hit:
+            log.info("approve cancelled: %s", msg)
+            self._say(msg)
+            self._touch()
+
     def _approve_tick(self, t: float) -> None:
+        prev, self._approve_seen = self._approve_seen, t
         hold = self.approve_hold()
         for pk, p in list(self.presses.items()):
-            if p.approve and not p.approve_done and t - p.t0 >= hold:
+            if not p.approve or p.approve_done:
+                continue
+            if t - max(p.t0, prev if prev is not None else p.t0) > APPROVE_MAX_GAP_S:
+                p.approve_done = True  # the loop did not watch the hold (stall): never fire from a stale press
+                self._say(APPROVE_LATE)
+                self._touch()
+                continue
+            if t - p.t0 >= hold:
+                if self.link_ack is not None and t - self.link_ack > APPROVE_LINK_S:
+                    p.approve_done = True
+                    self._say(APPROVE_NO_LINK)
+                    self._touch()
+                    continue
                 self._fire_approve(pk, p, t)
 
     def _fire_approve(self, pk: tuple, p: _Press, t: float) -> None:
@@ -598,6 +639,10 @@ class Controller:
         n = kr.index + 1
         if kr.index in self._approve_keys(op):
             p.approve, p.target = n, op.key  # answered by _approve_tick once held; the release only previews
+            if any(q is not p for q in self.presses.values()):
+                p.approve_done = True  # another key / knob is held too: a lone, observed hold only
+                self._say(APPROVE_OTHER)
+                return
             hold = self.approve_hold()
             self._say(f"按住 {hold:g} 秒批准「{op.labels[kr.index]}」· 松开取消", hold + 1.0)
             return
@@ -708,6 +753,9 @@ class Controller:
     def on_key(self, col: int, row: int, pressed: bool, hid: int | None = None, ignored: str = "") -> None:
         """1-based doc coordinates.  ``hid``: the keyboard typed this press itself (option mode);
         ``ignored="ptt"``: the keyboard ignored this digit press because the Mac PTT is held."""
+        if self._approve_pending() and any(p.approve and not p.approve_done and k != ("key", col, row)
+                                           for k, p in self.presses.items()):
+            self._approve_cancel(APPROVE_OTHER)  # anything else during a long-press approve cancels it
         if self.page == "LS":
             if pressed:
                 self.settings.key(col, row)
@@ -762,6 +810,7 @@ class Controller:
         meanwhile, e.g. a K2 on the keyboard while it was PROBING).  ``t`` = the event time (the daemon passes
         ``InputEvent.t``, when the keyboard sent it): a slow loop step (a background poll can take seconds) must
         not make queued slow detents look fast for the scroll acceleration."""
+        self._approve_cancel(APPROVE_OTHER)
         if self.page == "LS":
             if kind in ("cw", "ccw"):
                 self.settings.knob(knob, kind)
