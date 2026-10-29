@@ -27,6 +27,15 @@ some engineering notes are in English.
 
 键盘的实际键面、页面切换、选项选择、长按批准、移动钉扎和 K1 回看流程见[键盘交互图解](docs/keyboard-interaction.md)。图像由仓库里的模拟器按当前控制器逻辑生成，便于在没有设备时理解每个按键的作用。
 
+## 模拟器示意
+
+下面两张图直接来自仓库模拟器：左图是 L1 的会话键面，右图是长按批准达到时长后等待抬起的状态。完整的 L4、选项、移动、钉扎和回看图序列见[键盘交互图解](docs/keyboard-interaction.md)。
+
+<div>
+<img src="docs/images/keyboard-sim/layout/l1v2-01-L1-15-sessions-selected.png" width="360" alt="模拟器 L1 会话键面">
+<img src="docs/images/keyboard-sim/approve/approve-03-ready.png" width="360" alt="模拟器长按批准等待抬起">
+</div>
+
 ## 架构
 
 ```mermaid
