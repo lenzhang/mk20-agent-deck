@@ -135,7 +135,12 @@ sh tools/mk20-install.sh out/mk20-fw-<v>.tar --reboot --wait   # 推到设备，
 
 ## 许可
 
-**暂未选择开源许可证**：在作者决定之前，本仓库代码保留所有权利（All rights reserved），仅限受邀协作者使用。
-第三方代码保留各自许可：`deck/agent/vendor/mbedtls`（Apache-2.0）、`deck/agent/vendor/zlib`（zlib）、
-`deck/kbd/vendor/stb_image.h`（MIT / Public Domain）、DejaVu 字体（`deck/kbd/font-LICENSE-DejaVu.txt`）、
-CA 证书包（MPL-2.0）、`deck/kernel` 下的内核补丁（GPL-2.0）。Waveshare 的产品照片与示例代码不随仓库分发。
+本仓库自有代码采用 [MIT 许可证](LICENSE)，Copyright (c) 2026 wenjie zhang。
+
+第三方组件保留各自许可，完整清单见 [THIRD_PARTY.md](THIRD_PARTY.md)，主要包括：`deck/agent/vendor/mbedtls`（Apache-2.0）、
+`deck/agent/vendor/zlib`（zlib）、cJSON / stb（MIT）、CA 证书包（MPL-2.0）、DejaVu 字体（`deck/kbd/font-LICENSE-DejaVu.txt`）。
+
+**GPL-2.0 部分**：`deck/firmware/release/lib/` 下的内核模块 `usb_f_ncm.ko`、`usb_f_ecm.ko` 以及 `deck/kernel/` 下的内核补丁属于 Linux 内核（5.4.61，Tina），
+按 GPL-2.0 分发，不适用 MIT。对应源码（含已打补丁的 `f_ncm.c`、`f_ecm.c`、内核配置和构建脚本）在 [`deck/kernel/gpl/`](deck/kernel/gpl/README.md)。
+
+`deck/firmware/release/bin/` 中的预编译程序静态链接了 GNU C Library（LGPL-2.1+），说明见 THIRD_PARTY.md。设备厂商的原始固件、示例代码与产品照片不随仓库分发。
