@@ -9,5 +9,6 @@
 - 2026-10-29 codex r2 PASS（928c06d，README 守卫 + 残余风险）
 - 2026-10-29 16:02 进行中：HEAD 复测 docker deck pytest + Mac 全量（日志 deck/reviews/1.8.1/*-head.log）；备份已建 ~/mk20-backup/pre-1.8.1-20261029（ROLLBACK.sh，旧部署 5f3dccb）
 - 下一步：测试过 → git -C ~/mk20-deploy checkout --detach <HEAD> → kickstart → 验证 已连接 tcp://172.30.250.2:17890 → 摄像头快照；失败跑 ROLLBACK.sh
-- 2026-10-29 16:35 Mac 全量 @928c06d：922 passed / 603 skipped / 4 failed（均为已知计时：agent_backoff、selftest[crashing]、hook_interrupts_backoff×2）
-- 2026-10-29 17:20 Linux docker deck pytest @928c06d：1524 passed / 5 skipped；开始部署
+- 2026-10-29 16:28 Mac 全量 @928c06d：922 passed / 603 skipped / 4 failed（均为已知计时：agent_backoff、selftest[crashing]、hook_interrupts_backoff×2）
+- 2026-10-29 16:41 Linux docker deck pytest @928c06d：1524 passed / 5 skipped；开始部署
+- 2026-10-29 16:42 部署 ~/mk20-deploy → 3e094c1，kickstart 后 16:42:58 已连接 tcp://172.30.250.2:17890（heartbeat 正常）；摄像头快照 ~/mk20-backup/cam/cam-stream1-20261029-164413-mk20.jpg 画面正常 L1；回滚 ~/mk20-backup/pre-1.8.1-20261029/ROLLBACK.sh；未打 tag

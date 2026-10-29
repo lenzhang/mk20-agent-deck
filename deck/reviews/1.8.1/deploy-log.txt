@@ -1,0 +1,6 @@
+2026-10-29 16:42:56,368 INFO mk20deck.link: ui liveness: 71541 heartbeats accepted, 0 rejected, 0 timeouts, 0 re-hellos
+2026-10-29 16:42:57,557 INFO mk20deck.webui: 会话安排网页：http://127.0.0.1:8781/（用 mk20deck arrange 打开）
+2026-10-29 16:42:58,190 INFO mk20deck.link: ui.hello ok: heartbeat_ms=1000 generation=0 hid_generation=0 page=L1 capabilities=['ui.page', 'ui.heartbeat', 'ui.hidKeys'], heartbeat every 1.20 s
+2026-10-29 16:42:58,191 INFO mk20deck.supervisor: 已连接 tcp://172.30.250.2:17890 画布 640x656
+2026-10-29 16:42:58,197 INFO mk20deck.supervisor: 背光 80
+2026-10-29 16:42:59,396 INFO mk20deck.link: ui.heartbeat accepted (first)
