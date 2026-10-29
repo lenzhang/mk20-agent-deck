@@ -3,6 +3,13 @@
 Goal: production-grade replacement firmware for the Waveshare MK20 keyboard (Allwinner T113, Tina 5.4.61,
 BusyBox 1.27.2), stability first; Mac daemon `mk20deck` drives the L1 agent page. Live status: PROGRESS.md (main).
 
+## Update 2026-10-29 16:45 SGT — mk20deck 1.8.1 deployed (Mac side only, not tagged)
+- Branch feature/deck-1.8.1 (from feature/ncm-gadget 52ae248): merges gd32-notice (457ff15) + k1-scroll (0a36ceb); long-press approve +
+  SNAP (f7d81e6), review r1 fixes (eed2917), docs/evidence up to 6165e82; branch RESUME.md lists milestones. Reviews/tests: deck/reviews/1.8.1/.
+- `~/mk20-deploy` detached at **3e094c1**; LaunchAgent restarted 16:42 SGT, reconnected. Rollback: `~/mk20-backup/pre-1.8.1-20261029/ROLLBACK.sh` (→ 5f3dccb).
+- User action: grant Screen Recording to /usr/bin/python3 (System Settings → Privacy & Security → Screen Recording), then restart the agent, for SNAP.
+- Next: user hand-tests long-press approve on a real permission prompt; decide on a 1.8.1 tag (not tagged).
+
 ## Update 2026-10-28 18:41 SGT — v1.8.0 production tagged
 - `v1.8.0` (annotated, tag object 8acd8ba) → release/1.8.0 **5f3dccb** = feature/ncm-gadget 52ae248 (no-ff merge of fix/deck-py39) +
   RELEASE.md production section. Firmware = installed `mk20-fw-1.8.0.tar` build rc1, sha256 294e1544…ecc5 (not rebuilt; payload
